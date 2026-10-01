@@ -14,6 +14,20 @@ spec.loader.exec_module(trace)
 
 
 class MemoryTraceTests(unittest.TestCase):
+    def test_flattened_chromium_process_title(self):
+        title = ('/usr/lib/chromium/chromium --type=gpu-process '
+                 '--enable-logging=stderr --user-agent=Mozilla/5.0 (Macintosh; Intel)')
+        self.assertEqual(trace.process_roles([title, '']),
+                         (['--type=gpu-process'], 'flattened-process-title'))
+        self.assertEqual(trace.process_roles([
+            '/proc/self/exe --type=utility --utility-sub-type=media.mojom.VideoDecoderFactory', '']),
+            (['--type=utility', '--utility-sub-type=media.mojom.VideoDecoderFactory'],
+             'flattened-process-title'))
+        # Do not interpret text inside an intact argument as a process role.
+        self.assertEqual(trace.process_roles([
+            '/usr/bin/chromium', '--user-agent=Example --type=gpu-process', '']),
+            ([], 'argv'))
+
     def test_stat_comm_parentheses_and_spaces(self):
         self.assertEqual(trace.identity('42 (chrome (GPU)) S ' +
                                        ' '.join(['0'] * 18 + ['12345', '99'])), 12345)
@@ -54,6 +68,12 @@ class MemoryTraceTests(unittest.TestCase):
             (base / 'exe').symlink_to('/usr/lib/chromium/chromium')
             self.assertEqual(trace.snapshot_process(42, False)['executable'],
                              '/usr/lib/chromium/chromium')
+            (base / 'cmdline').write_text(
+                '/proc/self/exe --type=gpu-process --use-angle=gles\0')
+            (base / 'exe').unlink()
+            result = trace.snapshot_process(42, False)
+            self.assertEqual(result['role'], ['--type=gpu-process'])
+            self.assertEqual(result['role_source'], 'flattened-process-title')
 
     def test_pid_reuse_rejected(self):
         from unittest.mock import patch

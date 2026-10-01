@@ -10,6 +10,7 @@ import collections
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
@@ -63,9 +64,22 @@ def cgroup_memory(pid):
     return {'error': 'no unified memory cgroup'}
 
 
+def process_roles(argv):
+    arguments = [arg for arg in argv if arg]
+    if len(arguments) == 1 and any(c.isspace() for c in arguments[0]):
+        # Chromium rewrites its process title into one space-separated argv0.
+        # Original argument boundaries cannot be recovered. Label this parsing
+        # explicitly; do not apply it to intact argv (e.g. a user-agent value).
+        return (re.findall(r'(?:^|\s)(--(?:type|utility-sub-type)=[\w.:-]+)(?=\s|$)',
+                           arguments[0]), 'flattened-process-title')
+    return ([arg for arg in arguments
+             if arg.startswith(('--type=', '--utility-sub-type='))], 'argv')
+
+
 def snapshot_process(pid, detailed):
     base = PROC / str(pid)
     argv = read(base / 'cmdline').split('\0')
+    roles, role_source = process_roles(argv)
     try:
         executable = os.readlink(base / 'exe')
     except OSError:
@@ -74,13 +88,13 @@ def snapshot_process(pid, detailed):
     # Zygote children may use /proc/self/exe as argv[0]. Record their actual
     # executable, with an explicit GPU-role fallback if exe access is denied.
     if not (any(token in name for name in names for token in ('chrome', 'chromium'))
-            or '--type=gpu-process' in argv):
+            or '--type=gpu-process' in roles):
         return None
     start = identity(read(base / 'stat'))
     status = fields(read(base / 'status'))
     data = dict(pid=pid, start_ticks=start, executable=executable or argv[0],
                 argv0=argv[0],
-                role=[x for x in argv if x.startswith(('--type=', '--utility-sub-type='))],
+                role=roles, role_source=role_source,
                 status_kib={k: v for k, v in status.items()
                             if k.startswith(('Vm', 'Rss'))},
                 threads=status.get('Threads'), ppid=status.get('PPid'),
