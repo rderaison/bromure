@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+SCRIPT = Path(__file__).with_name('guest-memory-trace.py')
+spec = importlib.util.spec_from_file_location('trace', SCRIPT)
+trace = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(trace)
+
+
+class MemoryTraceTests(unittest.TestCase):
+    def test_stat_comm_parentheses_and_spaces(self):
+        self.assertEqual(trace.identity('42 (chrome (GPU)) S ' +
+                                       ' '.join(['0'] * 18 + ['12345', '99'])), 12345)
+        with self.assertRaises(ValueError):
+            trace.identity('ERROR: process disappeared')
+
+    def test_proc_identity_memory_and_fd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            original = trace.PROC
+            self.addCleanup(setattr, trace, 'PROC', original)
+            trace.PROC = Path(temp)
+            base = trace.PROC / '42'
+            base.mkdir()
+            files = dict(cmdline='/usr/bin/chromium\0--type=gpu-process\0',
+                         stat='42 (chromium) S ' + ' '.join(['0'] * 18 + ['123']),
+                         status='VmRSS: 1234 kB\nRssShmem: 456 kB\nThreads: 7\nPPid: 1',
+                         oom_score='400', oom_score_adj='300',
+                         smaps_rollup='Pss: 789 kB\nPrivate_Dirty: 123 kB',
+                         limits='Max open files 1024 4096 files', cgroup='')
+            for name, value in files.items():
+                (base / name).write_text(value)
+            (base / 'fd').mkdir()
+            (base / 'fd/3').symlink_to('/dev/dri/renderD129')
+            (base / 'fd/4').symlink_to('/memfd:example (deleted)')
+            result = trace.snapshot_process(42, True)
+            self.assertEqual(result['start_ticks'], 123)
+            self.assertEqual(result['role'], ['--type=gpu-process'])
+            self.assertEqual(result['status_kib']['RssShmem'], 456)
+            self.assertEqual(result['smaps_rollup_kib']['Pss'], 789)
+            self.assertEqual(result['fd_types'], {'drm': 1, 'memfd': 1})
+            self.assertIn('error', result['cgroup_memory'])
+            (base / 'cmdline').write_text('/bin/unrelated\0')
+            self.assertIsNone(trace.snapshot_process(42, True))
+
+    def test_pid_reuse_rejected(self):
+        from unittest.mock import patch
+        original = trace.read
+        reads = 0
+
+        def read(path, limit=131072):
+            nonlocal reads
+            if Path(path).name == 'cmdline':
+                return '/usr/bin/chromium\0'
+            if Path(path).name == 'stat':
+                reads += 1
+                return '42 (chromium) S ' + ' '.join(['0'] * 18 + [str(reads)])
+            return original(path, limit)
+
+        with patch.object(trace, 'read', read):
+            with self.assertRaisesRegex(ValueError, 'PID reused'):
+                trace.snapshot_process(99999999, False)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires Linux /proc')
+    def test_bounded_live_smoke(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), '--seconds', '1',
+                                 '--interval', '.25'], capture_output=True,
+                                text=True, timeout=8, check=True)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(rows[0]['kind'], 'ready')
+        self.assertEqual(rows[-1]['reason'], 'deadline')
+        self.assertTrue(any(row['kind'] == 'sample' and
+                            'MemAvailable' in row['meminfo_kib'] for row in rows))
+        self.assertTrue(any(row['kind'].startswith('kernel') for row in rows))
+
+
+if __name__ == '__main__':
+    unittest.main()
