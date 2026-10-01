@@ -4,6 +4,7 @@ import json
 import socket
 import struct
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,35 @@ agent = load_script("pointer-agent")
 
 
 class PointerAgentTests(unittest.TestCase):
+    def receive_stream(self, pointer, stream):
+        # Read while writing: Darwin's socketpair buffer need not hold the
+        # backlog. Deliberately use a small buffer on every platform.
+        sender, receiver = socket.socketpair()
+        errors = []
+        with sender, receiver:
+            sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            sender.settimeout(5)
+            receiver.settimeout(5)
+
+            def send():
+                try:
+                    sender.sendall(stream)
+                    sender.shutdown(socket.SHUT_WR)
+                except OSError as error:
+                    errors.append(error)
+                finally:
+                    sender.close()
+
+            writer = threading.Thread(target=send, daemon=True)
+            writer.start()
+            try:
+                agent.handle_connection(receiver, pointer)
+            finally:
+                receiver.close()
+                writer.join(timeout=6)
+            self.assertFalse(writer.is_alive(), "Pointer test writer did not stop")
+            self.assertEqual(errors, [], "Pointer test sender failed")
+
     def events(self, chunks):
         # A socketpair exercises the stream reader; a file replaces /dev/uinput.
         with tempfile.TemporaryFile() as output:
@@ -104,11 +134,7 @@ class PointerAgentTests(unittest.TestCase):
                 # Use the same uinput device across two independent streams.
                 # Every possible incomplete prefix must die with the old one.
                 for stream in (pressed + replay[:split], replay + released):
-                    sender, receiver = socket.socketpair()
-                    with sender, receiver:
-                        sender.sendall(stream)
-                        sender.shutdown(socket.SHUT_WR)
-                        agent.handle_connection(receiver, pointer)
+                    self.receive_stream(pointer, stream)
                     self.assertEqual(pointer.buttons, 0)
                 output.seek(0)
                 events = [event[2:] for event in agent.EVENT.iter_unpack(output.read())]
@@ -129,11 +155,7 @@ class PointerAgentTests(unittest.TestCase):
         with tempfile.TemporaryFile() as output:
             pointer = agent.Pointer(output.fileno())
             for stream in (backlog + b'{"x":', b'{"x":1,"y":1,"buttons":0}\n'):
-                sender, receiver = socket.socketpair()
-                with sender, receiver:
-                    sender.sendall(stream)
-                    sender.shutdown(socket.SHUT_WR)
-                    agent.handle_connection(receiver, pointer)
+                self.receive_stream(pointer, stream)
                 self.assertEqual(pointer.buttons, 0)
             output.seek(0)
             events = [event[2:] for event in agent.EVENT.iter_unpack(output.read())]
