@@ -4277,6 +4277,23 @@ public final class ProfileStore {
                 }
             }
         }
+        // Claude with its account features: the OAuth stand-in the proxy
+        // turns into the real login (see ClaudeStandIn). Written in both
+        // modes; with the mode off, taken back — only when it's ours.
+        let claudeCredsURL = home.appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent(".credentials.json")
+        if let creds = tokenPlan?.claudeOAuthStandIn {
+            try? fm.createDirectory(at: claudeCredsURL.deletingLastPathComponent(),
+                                    withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            try? creds.write(to: claudeCredsURL, options: .atomic)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                  ofItemAtPath: claudeCredsURL.path)
+        } else if !seedMode, let data = try? Data(contentsOf: claudeCredsURL),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["_bromureManaged"] as? Bool == true {
+            try? fm.removeItem(at: claudeCredsURL)
+        }
         do {
             // The reporter script the hooks call (idempotent overwrite).
             // Written in BOTH modes — it's a plain managed file, no merge.
@@ -4515,7 +4532,7 @@ public final class ProfileStore {
         ".git-credentials", ".kube/config", ".config/doctl/config.yaml",
         ".aws/config", ".docker/config.json", ".config/gh/hosts.yml",
         ".config/glab-cli/config.yml", ".codex/auth.json", ".grok/auth.json",
-        ".kimi-code/credentials/kimi-code.json",
+        ".kimi-code/credentials/kimi-code.json", ".claude/.credentials.json",
     ]
     /// Relpaths chmod 755 (scripts).
     private static let seed755: Set<String> = [".bromure/agent-status.sh"]
@@ -4631,6 +4648,10 @@ public final class ProfileStore {
         }
         if !present.contains(".docker/config.json") {
             cleanupLines.append("j\t-\t.docker/config.json\t_bromureManaged")
+        }
+        // Claude's OAuth stand-in, when account features are off again.
+        if !present.contains(".claude/.credentials.json") {
+            cleanupLines.append("j\t-\t.claude/.credentials.json\t_bromureManaged")
         }
 
         let manifest = (dirLines.sorted() + fileLines.sorted() + cleanupLines)

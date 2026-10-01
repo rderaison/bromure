@@ -15,7 +15,7 @@ case "$TARGET" in
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE="$SOURCE_DIR/Bromure.sdef"
         ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
-        ICON_COMPOSER=""
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/Bromure.icon"
         DMG_NAME="Bromure.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
         ;;

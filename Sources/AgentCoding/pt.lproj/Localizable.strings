@@ -3208,3 +3208,6 @@
 "Describe your environment" = "Descreva seu ambiente";
 "What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "O que as verificações de segurança dos seus agentes devem saber do seu mundo: sua organização, seus servidores e para que servem, os repositórios e domínios em que você confia, o que é seguro alterar. Um fato por linha. O modo automático do Claude usa isso para distinguir o trabalho rotineiro de ações arriscadas.";
 "Variables" = "Variáveis";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "Confiar nesta pasta?";

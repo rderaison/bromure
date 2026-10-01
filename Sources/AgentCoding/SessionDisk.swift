@@ -555,7 +555,11 @@ public final class SessionDisk {
         // swaps it for a live subscription OAuth Bearer token held on the host.
         // Only present when a subscription credential is registered (see
         // makeTokenPlan); otherwise the guest logs in interactively as before.
-        if let bogus = tokenPlan?.claudeSubscriptionBogusKey, profile.claudeGatewayBaseURL == nil {
+        // With account features on, Claude signs in with the OAuth stand-in
+        // (`~/.claude/.credentials.json`) instead — and an ANTHROPIC_API_KEY
+        // in the environment would win over it.
+        if let bogus = tokenPlan?.claudeSubscriptionBogusKey, profile.claudeGatewayBaseURL == nil,
+           tokenPlan?.claudeOAuthStandIn == nil {
             lines.append("export ANTHROPIC_API_KEY=\(shellQuote(bogus))")
         }
         // Claude on Anthropic itself (API key or subscription): the model(s)
@@ -1939,6 +1943,12 @@ public final class SessionDisk {
             "[mcp_servers.delegation]",
             "command = \"python3\"",
             "args = [\(tomlQuote(delegationMCPShimGuestPath))]",
+            // Codex starts MCP servers with a filtered environment: without
+            // these the shim can't name its tmux window, the host can't tell
+            // which session is calling, and every call is refused ("no
+            // Bromure session identity"). TMUX too: `tmux display-message`
+            // finds its server through it.
+            "env_vars = [\"TMUX\", \"TMUX_PANE\"]",
             // Agent-to-agent traffic never waits on an approval prompt.
             "default_tools_approval_mode = \"approve\"",
             "",

@@ -64,7 +64,14 @@ struct SettingsView: View {
 
     var state: AppState?
 
-    @State private var selectedCategory: AppSettingsCategory = .general
+    @State private var selectedCategory: AppSettingsCategory
+
+    /// `initialPane` is a pane's English name ("Hardware", "Managed
+    /// Profile", …); unknown names open General.
+    init(state: AppState?, initialPane: String? = nil) {
+        self.state = state
+        _selectedCategory = State(initialValue: initialPane.flatMap(AppSettingsCategory.init(rawValue:)) ?? .general)
+    }
     @State private var showResetConfirm = false
     @State private var showRebuildConfirm = false
     @State private var pendingKeyboard: String?
@@ -953,7 +960,7 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Storage Location").font(.headline)
-                Text(VMConfig.defaultStorageDirectory.path)
+                Text((VMConfig.defaultStorageDirectory.path as NSString).abbreviatingWithTildeInPath)
                     .font(.callout.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

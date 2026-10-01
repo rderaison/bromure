@@ -101,6 +101,10 @@ public struct SessionTokenPlan: Sendable {
     /// via the store's bogus-key registry and injects a live OAuth Bearer token
     /// pulled from the host store instead of doing a static fake→real swap.
     public var claudeSubscriptionBogusKey: String?
+    /// Claude on the host-kept subscription WITH its account features: the
+    /// stand-in `~/.claude/.credentials.json` (see `ClaudeStandIn`) to write
+    /// instead of exporting `claudeSubscriptionBogusKey`. Nil = API-key mode.
+    public var claudeOAuthStandIn: Data?
 
     public init(entries: [Entry] = [], claudeSubscriptionBogusKey: String? = nil) {
         self.entries = entries

@@ -1,0 +1,42 @@
+---
+title: "General"
+description: "The General pane of the Settings window: which profile opens the links you click in other apps."
+order: 8.1
+---
+
+# General
+
+The **General** pane ("App-wide preferences") holds one setting: which profile opens web links that you click outside Bromure, in Mail, Messages, Slack, a PDF, or any other app. It only matters when Bromure is your default web browser.
+
+<p align="center">
+  <img src="../images/settings-general.en.jpg" width="600" alt="The Settings window on its General pane (the sidebar lists General, Hardware, Input, Display, Network, Automation, Managed Profile and Storage): Default Profile for Links set to Ask Every Time" />
+</p>
+
+## Settings
+
+| Setting | Description |
+|---|---|
+| **Default Profile for Links** | "When Bromure is your default browser, links clicked in other apps open with this profile. Choose “Ask Every Time” to pick a profile on each click." The menu lists **Ask Every Time** followed by every profile. Default: **Ask Every Time**. |
+
+## How a link is routed
+
+When another app hands Bromure an `http` or `https` link:
+
+- **With a default profile chosen**, the link goes straight to that profile. If a window of that profile is already open, the link opens in it; otherwise Bromure opens a new window of that profile on the link.
+- **With Ask Every Time**, Bromure shows **Choose where to open this link** whenever there is more than one possible destination. The menu lists your profiles and, under **Other browsers**, the other web browsers installed on your Mac, so you can send a link you don't want to open in a VM to Safari or another browser. Click **Open**, or **Cancel** to drop the link.
+- **With a single profile and no other browser installed**, there is nothing to choose: the link opens in the active window, or in a new window of that profile.
+
+If the profile you picked as default is later deleted, Bromure falls back to the **Ask Every Time** behavior. If Bromure is still setting up or rebuilding its image when a link arrives, the link is kept and opened once the image is ready.
+
+To make Bromure your default browser, use **System Settings › Desktop & Dock › Default web browser**.
+
+## Preferences key
+
+| Setting | Key | Type | Default |
+|---|---|---|---|
+| **Default Profile for Links** | `links.defaultProfileID` | String (a profile UUID; empty means Ask Every Time) | empty |
+
+## Related chapters
+
+- [Profiles](../06-profiles.mdx) — links from other apps, the chooser, and sending a link to another profile.
+- [App Settings](index.mdx) — all panes at a glance.

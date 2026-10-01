@@ -1,0 +1,482 @@
+---
+title: "Automation"
+description: "Controlling Bromure from other programs: the HTTP automation API and its routes, the Chrome DevTools Protocol proxy for Puppeteer and Playwright, the MCP server and every tool it offers, AppleScript commands with the profile and app setting keys, and the bromure command-line tool."
+order: 14
+---
+
+# Automation
+
+Bromure can be driven by other programs as well as by you. Test suites can open a disposable browser, run a scenario and throw it away; an AI assistant can research the web from an isolated VM instead of your own browser; a script can create profiles or change settings for a whole team. This chapter is the reference for every way in:
+
+| Surface | What it is for | Needs |
+|---|---|---|
+| [HTTP API](#the-http-api) | Open, list and close browser windows; read their recorded traffic. | **Enable Automation** on. |
+| [CDP proxy](#the-cdp-proxy) | Drive a window with the Chrome DevTools Protocol, from Puppeteer, Playwright or any CDP client. | **Enable Automation** on. |
+| [MCP server](#the-mcp-server) | Let AI tools such as Claude Code browse through Bromure. | **Enable Automation** on. |
+| [AppleScript](#applescript) | Manage profiles and settings, toggle a window's VPN or recording. | Nothing; always available. |
+| [Command-line tool](#command-line-tool) | Enrollment, image setup, and running the MCP server. | Nothing. |
+
+It is written for developers and administrators. You should be comfortable with a terminal and with JSON.
+
+## Before you start
+
+Two switches decide what automation can do:
+
+1. **The automation server.** Turn on **Enable Automation** in **Bromure › Settings… › Automation** (see [Automation settings](08-app-settings/automation.mdx)). It listens on `127.0.0.1:9222` by default. The HTTP API, the CDP proxy and the MCP server all go through it.
+2. **Each profile's permission.** Only profiles with **Allow Automation** on (in their **Advanced** settings, see [Advanced](07-profile-settings/advanced.mdx)) are listed by the API and can be opened through it. The built-in **Private Browsing** profile has it on; profiles you create have it off until you turn it on.
+
+> **Warning:** The automation server has no authentication. Any program that can connect to its port can open windows in automation-enabled profiles, run JavaScript in them and read their pages. While the server is on, every open window exposes CDP through it, including windows you opened yourself in profiles that don't allow automation: **Allow Automation** controls which profiles tools can list and open, not which open windows they can reach. Keep the bind address at `127.0.0.1`, and turn the server off when you don't need it.
+
+Windows opened through the API are ordinary Bromure windows: they appear on screen, follow the profile's settings, and are destroyed when closed. Automation also keeps them awake: a window paused by [Energy Mode](08-app-settings/hardware.mdx#energy-mode) resumes as soon as a tool connects to it.
+
+## The HTTP API
+
+The API speaks JSON over plain HTTP on the configured port. Every response is a JSON object with `Content-Type: application/json` and `Access-Control-Allow-Origin: *`; the connection closes after each response. Errors come back as `{"error": "message"}` with a 4xx or 5xx status. Request bodies are JSON.
+
+In the API, a **session** is one browser window and its VM. Session IDs are UUIDs.
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/health` | Check that the server is running. |
+| `GET` | `/profiles` | List the profiles that allow automation. |
+| `GET` | `/sessions` | List open windows. |
+| `POST` | `/sessions` | Open a window. |
+| `GET` | `/sessions/<id>` | Describe one window. |
+| `DELETE` | `/sessions/<id>` | Close a window. |
+| `GET` | `/sessions/<id>/trace` | Read a window's recorded HTTP requests. |
+| any | `/cdp/<id>/…` | The CDP proxy (see [below](#the-cdp-proxy)). |
+
+Any other route returns `404` with `{"error": "Not found"}`.
+
+### GET /health
+
+```bash
+curl http://127.0.0.1:9222/health
+```
+
+```json
+{
+  "service" : "bromure-automation",
+  "status" : "ok"
+}
+```
+
+### GET /profiles
+
+Lists the profiles with **Allow Automation** on. `color` is omitted for a profile without a color.
+
+```bash
+curl http://127.0.0.1:9222/profiles
+```
+
+```json
+{
+  "profiles" : [
+    {
+      "color" : "blue",
+      "id" : "3F2A9C1E-5B7D-4E61-9A0B-2C8D4E6F1A37",
+      "isPersistent" : true,
+      "name" : "Work"
+    },
+    {
+      "id" : "8D1B4F02-7C3E-4A95-B6E2-0F9A1C5D3E84",
+      "isPersistent" : false,
+      "name" : "Private Browsing"
+    }
+  ]
+}
+```
+
+### POST /sessions
+
+Opens a new window. The body names the profile, either by name (`profile`, case-insensitive) or by ID (`profileId`):
+
+| Field | Type | Description |
+|---|---|---|
+| `profile` | string | Profile name. Required unless `profileId` is given. |
+| `profileId` | string | Profile UUID. Takes precedence over `profile`. |
+| `url` | string | Page to open instead of the profile's home page. Optional. |
+| `restore` | boolean | For a persistent profile, reopen the tabs from its previous session. Default: `false`. |
+
+```bash
+curl -X POST http://127.0.0.1:9222/sessions \
+     -d '{"profile": "Work", "url": "https://bromure.io/hello"}'
+```
+
+On success the status is `201 Created`:
+
+```json
+{
+  "id" : "C0A7E1D2-94B3-4F8A-8E6C-51D07B2A9F13",
+  "profileId" : "3F2A9C1E-5B7D-4E61-9A0B-2C8D4E6F1A37",
+  "profileName" : "Work",
+  "webSocketDebuggerUrl" : "ws://127.0.0.1:9222/cdp/C0A7E1D2-94B3-4F8A-8E6C-51D07B2A9F13/devtools/browser/6b1e0f4c-2d9a-4c55-9e3b-8f71a0d2c6e4"
+}
+```
+
+`webSocketDebuggerUrl` is the browser-level CDP endpoint, already routed through the proxy, when the browser in the VM is ready at once (the usual case, since Bromure keeps a VM pre-booted). If it isn't ready yet, the URL stops at `/cdp/<id>`; see [Finding the WebSocket endpoint](#finding-the-websocket-endpoint).
+
+Things to know:
+
+- **Persistent profiles have one window.** If the profile already has an open window, Bromure returns that window instead of opening another, and navigates it to `url` if you gave one.
+- **Failures** return `400` with `{"error": "Missing 'profile' or 'profileId' field"}` when neither field is present, and `500` with `{"error": "Failed to create session"}` when the profile doesn't exist, doesn't allow automation, or Bromure isn't ready to open windows (for example during setup).
+
+### GET /sessions and GET /sessions/:id
+
+`GET /sessions` lists the open windows that can be driven over CDP, and `GET /sessions/<id>` returns one of them (or `404` with `{"error": "Session not found"}`):
+
+```bash
+curl http://127.0.0.1:9222/sessions
+```
+
+```json
+{
+  "sessions" : [
+    {
+      "id" : "C0A7E1D2-94B3-4F8A-8E6C-51D07B2A9F13",
+      "profileId" : "3F2A9C1E-5B7D-4E61-9A0B-2C8D4E6F1A37",
+      "profileName" : "Work",
+      "webSocketDebuggerUrl" : "ws://127.0.0.1:9222/cdp/C0A7E1D2-94B3-4F8A-8E6C-51D07B2A9F13"
+    }
+  ]
+}
+```
+
+Here `webSocketDebuggerUrl` is the base of the window's CDP proxy, without the browser endpoint.
+
+### DELETE /sessions/:id
+
+Closes the window and destroys its VM immediately, without the usual close confirmation or save-recording prompt.
+
+```bash
+curl -X DELETE http://127.0.0.1:9222/sessions/C0A7E1D2-94B3-4F8A-8E6C-51D07B2A9F13
+```
+
+```json
+{
+  "status" : "closed"
+}
+```
+
+An unknown ID returns `404` with `{"error": "Session not found"}`.
+
+### GET /sessions/:id/trace
+
+Returns the HTTP requests the window has recorded, oldest first. Recording must be on for the profile (**Session Recording** in its [Advanced](07-profile-settings/advanced.mdx) settings); otherwise the list is empty. How much each event contains depends on the recording level. See [Session Recording](11-session-recording.mdx).
+
+Optional query parameters narrow the result; combine them freely:
+
+| Parameter | Matches |
+|---|---|
+| `hostname` | Events whose host name is exactly this value (`www.example.com` does not match `example.com`). |
+| `method` | HTTP method, such as `GET` or `POST`. |
+| `status` | A status class: `2xx`, `3xx`, `4xx` or `5xx`. |
+| `url` | Events whose URL contains this text. |
+| `body` | Events whose request or response body contains this text. |
+| `timeFrom`, `timeTo` | Seconds since the first recorded event. |
+| `tabId` | One browser tab, by its numeric ID. |
+
+```bash
+curl "http://127.0.0.1:9222/sessions/C0A7E1D2-94B3-4F8A-8E6C-51D07B2A9F13/trace?method=POST&status=2xx"
+```
+
+```json
+{
+  "count" : 1,
+  "events" : [
+    {
+      "documentUrl" : "https://bromure.io/hello",
+      "duration" : 142.5,
+      "hostname" : "bromure.io",
+      "id" : "4821.37",
+      "method" : "POST",
+      "mimeType" : "application/json",
+      "statusCode" : 200,
+      "timestamp" : 1790000123.418,
+      "url" : "https://bromure.io/api/v1/subscribe"
+    }
+  ]
+}
+```
+
+Each event has `id`, `timestamp` (seconds), `method` and `url`, and, when known, `hostname`, `statusCode`, `duration` (milliseconds), `mimeType`, `documentUrl` (the page that made the request), `navType`, and `error`. At the higher recording levels it also carries `requestHeaders`, `responseHeaders`, `postData`, `formFields` (a list of `name`, `type`, `value`), and `responseBody`, cut to its first 10,000 characters.
+
+## The CDP proxy
+
+Every window's Chromium exposes the Chrome DevTools Protocol inside its VM. The automation server makes it reachable from your Mac under `/cdp/<session-id>/`: whatever follows that prefix is forwarded to the browser's DevTools endpoint, HTTP requests and WebSocket connections alike. For example:
+
+| Request | Reaches the browser's |
+|---|---|
+| `GET /cdp/<id>/json/version` | `/json/version`: browser version and its WebSocket URL. |
+| `GET /cdp/<id>/json/list` | `/json/list`: open tabs and their WebSocket URLs. |
+| `WS /cdp/<id>/devtools/browser/<guid>` | Browser-level CDP session. |
+| `WS /cdp/<id>/devtools/page/<target-id>` | CDP session for one tab. |
+
+Traffic goes from your Mac to the VM over a virtual socket, not over the network, so the browser's DevTools port is never exposed on any network interface.
+
+### Finding the WebSocket endpoint
+
+The simplest endpoint is the `webSocketDebuggerUrl` returned by `POST /sessions`. If it ends at `/cdp/<id>` because the browser wasn't ready yet, ask the browser:
+
+```bash
+curl http://127.0.0.1:9222/cdp/C0A7E1D2-94B3-4F8A-8E6C-51D07B2A9F13/json/version
+```
+
+URLs that Chromium returns point at `ws://127.0.0.1:9222/devtools/…`, without the `/cdp/<id>` prefix. Insert the prefix, and use your own port if you changed it: `ws://127.0.0.1:9222/devtools/browser/<guid>` becomes `ws://127.0.0.1:9222/cdp/<id>/devtools/browser/<guid>`.
+
+The proxy waits up to 10 seconds for the browser to accept a connection, then answers `502 Bad Gateway`. A WebSocket with no traffic in either direction for 2 minutes is closed; clients that keep a connection open between commands should reconnect when that happens.
+
+### Puppeteer
+
+```javascript
+import puppeteer from "puppeteer-core";
+
+const api = "http://127.0.0.1:9222";
+const res = await fetch(`${api}/sessions`, {
+  method: "POST",
+  body: JSON.stringify({ profile: "Private Browsing" }),
+});
+const session = await res.json();
+
+const browser = await puppeteer.connect({
+  browserWSEndpoint: session.webSocketDebuggerUrl,
+});
+const [page] = await browser.pages();
+await page.goto("https://bromure.io/hello");
+console.log(await page.title());
+
+browser.disconnect();
+await fetch(`${api}/sessions/${session.id}`, { method: "DELETE" });
+```
+
+Use `disconnect()`, not `close()`, and close the window with the API: the VM is destroyed either way, but `DELETE` does it cleanly.
+
+### Playwright
+
+```javascript
+import { chromium } from "playwright";
+
+const browser = await chromium.connectOverCDP(session.webSocketDebuggerUrl);
+const page = browser.contexts()[0].pages()[0];
+await page.goto("https://bromure.io/hello");
+```
+
+## The MCP server
+
+Bromure includes a [Model Context Protocol](16-glossary.mdx) server so AI tools can browse through isolated Bromure windows. It runs as a subcommand of the Bromure executable, speaks MCP over standard input and output, and calls the HTTP API and the CDP proxy for you. It needs the automation server on.
+
+### Setting it up
+
+**Settings › Automation** shows a ready-to-copy configuration with the right path to the executable. For tools that read an `.mcp.json` file:
+
+```json
+{
+  "mcpServers": {
+    "bromure": {
+      "command": "/Applications/Bromure.app/Contents/MacOS/bromure",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+With Claude Code you can add it from the terminal instead:
+
+```bash
+claude mcp add bromure -- /Applications/Bromure.app/Contents/MacOS/bromure mcp
+```
+
+The subcommand accepts:
+
+| Option | Description |
+|---|---|
+| `--api-url URL` | The automation server to use. Default: `http://127.0.0.1:9222`. Use a numeric IP address, and change it if you changed **API Port**. |
+| `--debug` | Adds development tools (see [below](#development-tools)). |
+
+The server identifies itself as `bromure`. The Bromure app must be running.
+
+### How the tools work
+
+- **Sessions.** `bromure_open_session` returns a session ID right away. The other tools take that `sessionId`; they connect to the window on first use, waiting up to 30 seconds for the browser to be ready, and then reuse the connection. Page tools act on the window's first tab.
+- **Profiles.** Tools that take a `profile` accept its exact name. If you leave it out and exactly one profile allows automation, that profile is used; otherwise the tool fails with the list of available profile names, so the assistant can choose.
+- **One-shot tools.** `bromure_search` and `bromure_get_page` open their own window, wait 5 seconds for the page to load, read it, and close the window again.
+
+### Session tools
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `bromure_list_profiles` | none | Lists the profiles that allow automation, as JSON. |
+| `bromure_list_sessions` | none | Lists open windows with their IDs, profiles and CDP endpoints. |
+| `bromure_open_session` | `profile` (string), `url` (string) | Opens a window and returns its session ID. |
+| `bromure_close_session` | `sessionId` (string, required) | Closes the window and destroys its VM. |
+
+### Page tools
+
+All take `sessionId` (string, required).
+
+| Tool | Other parameters | What it does |
+|---|---|---|
+| `bromure_navigate` | `url` (string, required) | Opens the URL, waits for the page to load (up to 15 seconds), and returns the final URL and page title. |
+| `bromure_screenshot` | `fullPage` (boolean), `selector` (string), `outputPath` (string), `viewport` (object), `dismissBanners` (boolean) | Takes a PNG screenshot and returns it as an image. `fullPage` captures the whole scrollable page; `selector` captures one element (and overrides `fullPage`). `outputPath` saves the file on your Mac instead (absolute or `~/` path; folders are created) and returns a confirmation. `viewport`, such as `{"width": 1920, "height": 1080}`, resizes the page first and stays in effect for the window until changed; `{"width": 0, "height": 0}` restores the normal size. `dismissBanners` first tries to click away a cookie or consent banner. |
+| `bromure_click` | `selector` (string, required) | Clicks the first element matching the CSS selector. |
+| `bromure_type` | `selector` (string, required), `text` (string, required), `clear` (boolean), `pressEnter` (boolean) | Focuses the element and types the text key by key. `clear` empties the field first; `pressEnter` presses Return at the end. |
+| `bromure_evaluate` | `expression` (string, required) | Runs JavaScript in the page and returns the result. Promises are awaited. |
+| `bromure_get_content` | `selector` (string, default `body`), `format` (`text` or `html`, default `text`) | Returns the text or HTML of the page or an element, up to 100,000 characters. |
+| `bromure_get_links` | `selector` (string) | Returns the links on the page, or inside the element, as a JSON list of `text` and `href`. |
+| `bromure_wait_for` | `selector` (string, required), `timeout` (number, milliseconds, default `10000`) | Waits until an element matching the selector exists. |
+
+### One-shot tools
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `bromure_search` | `query` (string, required), `profile` (string) | Searches Google in a new window and returns the text of the results (up to 8,000 characters). |
+| `bromure_get_page` | `url` (string, required), `profile` (string), `selector` (string, default `body`) | Loads the URL in a new window and returns its text, up to 100,000 characters. |
+
+### Recording tools
+
+These read the window's session recording, so recording must be on for the profile.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `bromure_get_trace` | `sessionId` (required), `hostname`, `method`, `status` (`2xx`…`5xx`), `urlPattern`, `bodyContent`, `timeFrom`, `timeTo`, `tabId`, `limit` (default `100`), `format` (`summary` or `full`, default `summary`) | Returns recorded requests matching the filters, which work like the [trace route](#get-sessionsidtrace)'s. `limit` keeps the most recent events. `summary` gives one line per request (time, method, status, host, duration, URL); `full` returns the events as JSON. |
+| `bromure_trace_hostnames` | `sessionId` (required) | Lists every host name contacted, with its number of requests, busiest first. |
+| `bromure_trace_summary` | `sessionId` (required) | Summarizes the recording: total requests, number of hosts, requests per method and per status class, and the ten pages with the most requests. |
+| `bromure_clear_trace` | `sessionId` (required) | Acknowledges the request. In version 5.0.0 it does not delete recorded events; use **Clear** in the Session Recording window instead. |
+
+### Development tools
+
+Adding `--debug` exposes further tools for inspecting the VM and the app (shell commands, file access, process and network diagnostics, app state). They depend on debug routes that Bromure only serves when it was started with a development environment variable, so they fail in normal use. They exist for developing Bromure itself.
+
+## AppleScript
+
+Bromure has a scripting dictionary (open it in Script Editor with **File › Open Dictionary…**). It works whether or not the automation server is on. It has no object model: everything is a command addressed to the application.
+
+```applescript
+tell application "Bromure"
+    set profileID to create profile "Research" persistent true color "teal" home page "https://bromure.io/hello"
+    set profile setting "Research" key "allowAutomation" to value "true"
+    set profile setting "Research" key "blockMalware" to value "true"
+    get profile setting "Research" key "homePage"
+end tell
+```
+
+### Commands
+
+| Command | Description |
+|---|---|
+| `create profile "name" [persistent bool] [color text] [home page text] [comments text]` | Creates a profile and returns its UUID. `persistent` defaults to `false`. `color` is one of `blue`, `red`, `green`, `orange`, `purple`, `pink`, `teal`, `gray`. |
+| `delete profile "name-or-uuid"` | Deletes a profile and its saved data, without asking. |
+| `list profiles` | Returns all profiles as a JSON array (`id`, `name`, `persistent`, and `color` and `comments` when set). |
+| `get profile setting "profile" key "key"` | Returns a profile setting as text. |
+| `set profile setting "profile" key "key" to value "value"` | Changes a profile setting. |
+| `get app setting "key"` | Returns an app setting as text. |
+| `set app setting "key" to value "value"` | Changes an app setting. |
+| `get app state` | Returns JSON with `phase` (such as `ready`), `poolReady`, `sessionCount`, `sessions` (each with its `id`), and `profiles` (each with `id` and `name`). |
+| `open profile settings "profile" [category "name"]` | Opens the profile's settings window, optionally on one category: `general`, `performance`, `media`, `fileTransfer`, `hostIsolation`, `network`, `privacy`, `extensions`, `vpnAds`, `enterprise`, `advanced`. |
+| `toggle warp "session-id"` | Connects or disconnects the window's VPN, whichever kind the profile uses, like the VPN button in the title bar. |
+| `toggle trace "session-id"` | Starts or pauses the window's session recording, like the record button. It has no effect when recording is enforced by your organization. |
+| `get trace "session-id"` | Returns the window's recording as JSON, or `[]` if it isn't recording. |
+| `quit` | Quits Bromure without asking for confirmation, even with windows open. |
+
+Profiles are found by name (case-insensitive) or UUID; an unknown profile or session raises an error such as "Profile not found: Research". Session IDs are the `id` values from `get app state`. Changes made with `set profile setting` apply to windows opened afterwards.
+
+### Profile setting keys
+
+Values are text. Booleans accept `true`, `1` or `yes` for on; anything else is off. Numbers are integers.
+
+| Area | Keys |
+|---|---|
+| Identity | `name`, `color` (a color name or `none`), `comments` |
+| General | `homePage`, `browser` (`chromium`, `chrome`), `persistent`, `locale` (a locale code, or `system`) |
+| Performance | `gpu`, `webgl`, `zeroCopy`, `smoothScrolling` |
+| Media | `audio`, `audioVolume` (0–100), `webcam`, `microphone`, `webcamDeviceID`, `microphoneDeviceID`, `speakerDeviceID` |
+| File transfer | `canUpload`, `canDownload`, `virusTotalEnabled`, `virusTotalAPIKey`, `blockThreats`, `blockUnscannable` |
+| Host isolation | `clipboard`, `matchKeyboardLayout` |
+| Network isolation | `networkInterface` (empty for the app default, `nat`, or an interface such as `en0`), `isolateFromLAN`, `restrictPorts`, `allowedPorts` (such as `80,443,8000-9000`) |
+| Privacy & Safety | `blockMalware`, `phishingWarning`, `linkSender`, `userAgent` |
+| VPN & Ads | `vpnMode` (`none`, `cloudflareWarp`, `wireGuard`, `ikev2`, `openVPN`), `warp` (`true` selects WARP, `false` selects no VPN), `warpAutoConnect`, `wireGuardConfig`, `wireGuardAutoConnect`, `openvpnConfig`, `openvpnUsername`, `openvpnAutoConnect`, `adBlocking` |
+| IKEv2 | `ikev2Server`, `ikev2RemoteID`, `ikev2AuthMethod` (`eap`, `certificate`, `psk`), `ikev2Username`, `ikev2UseDNS`, `ikev2AutoConnect`, `ikev2ProxyHost`, `ikev2ProxyPort`, `ikev2ProxyUsername`, `ikev2ProxyPassword` |
+| Enterprise | `chromeEnrollmentToken`, `proxyHost`, `proxyPort`, `proxyUsername`, `proxyPassword` |
+| Advanced | `allowAutomation`, `traceLevel` (`0` Disabled, `1` Basic, `2` Headers, `3` Full), `traceAutoStart`, `encryptOnDisk` |
+
+A few keys can only be set, not read. They store secrets in the Keychain or manage lists:
+
+| Key | Value |
+|---|---|
+| `ikev2Secret` | The IKEv2 account password. |
+| `ikev2PSKSecret` | The IKEv2 pre-shared key. |
+| `openvpnSecret` | The OpenVPN password. |
+| `addRootCA` | A PEM-encoded certificate to add to the profile's root certificates. |
+| `clearRootCAs` | Any value; removes all the profile's root certificates. |
+
+> **Note:** Scripts bypass the checks the settings window makes. Setting `encryptOnDisk` or `browser` on a profile that already has saved data, for example, doesn't convert that data. Prefer the settings window for such changes.
+
+### App setting keys
+
+| Key | Setting | Values |
+|---|---|---|
+| `vm.memoryGB` | [Memory](08-app-settings/hardware.mdx) | Integer, GB (`0` for automatic sizing) |
+| `vm.cpuCount` | [CPU Cores](08-app-settings/hardware.mdx) | Integer (`0` = Automatic) |
+| `vm.keyboardLayout` | [Keyboard Layout](08-app-settings/input.mdx) | XKB layout name, such as `us` or `fr` |
+| `vm.naturalScrolling` | [Natural Scrolling](08-app-settings/input.mdx) | Boolean |
+| `vm.swapCmdCtrl` | [Use Command as Control](08-app-settings/input.mdx) | Boolean |
+| `vm.displayScale` | [Scale Factor](08-app-settings/display.mdx) | `1` or `2` |
+| `vm.appearance` | [Appearance](08-app-settings/display.mdx) | `system`, `light`, `dark` |
+| `vm.networkMode` | [Connection Mode](08-app-settings/network.mdx) | `nat`, `bridged` |
+| `vm.bridgedInterface` | [Network Interface](08-app-settings/network.mdx) | Interface name, such as `en0` |
+| `vm.dnsServers` | [DNS Servers](08-app-settings/network.mdx) | Comma-separated IPv4 addresses |
+| `phishingAnalysis.serverURL` | [Phishing Analysis Server](08-app-settings/network.mdx) | URL |
+| `automation.enabled` | [Enable Automation](08-app-settings/automation.mdx) | Boolean; starts or stops the server at once |
+| `automation.port` | [API Port](08-app-settings/automation.mdx) | Integer |
+| `automation.bindAddress` | [Bind Address](08-app-settings/automation.mdx) | `127.0.0.1` or `0.0.0.0` |
+
+Changing `vm.memoryGB`, `vm.cpuCount`, `vm.networkMode`, `vm.bridgedInterface` or `vm.dnsServers` replaces the pre-warmed VM. If windows are open, Bromure asks **Restart sessions?** ("Hardware settings have changed. Restart all browser sessions to apply them?") with **Restart All** and **Later**. `vm.keyboardLayout` and `vm.naturalScrolling` take effect at the next image rebuild (**File › Recreate Base Image…**).
+
+## Command-line tool
+
+The Bromure executable is also a command-line tool. It is inside the app bundle:
+
+```bash
+/Applications/Bromure.app/Contents/MacOS/bromure --help
+```
+
+Run without a subcommand, it opens Bromure. Each subcommand has its own `--help`. Standard macOS arguments starting with `-Apple` are accepted and passed through, so `bromure -AppleLanguages "(fr)"` opens Bromure in French.
+
+### Everyday commands
+
+| Command | What it does |
+|---|---|
+| `bromure` or `bromure launch` | Opens the Bromure app, like double-clicking it. Requires macOS 14 or later. |
+| `bromure mcp [--api-url URL] [--debug]` | Runs the MCP server on standard input and output. See [The MCP server](#the-mcp-server). |
+| `bromure enroll <code> [--server URL] [--device-name NAME]` | Enrolls this Mac with an organization. See [Enterprise](13-enterprise.mdx#from-the-command-line). |
+| `bromure unenroll [--install ID] [--org SLUG] [--all]` | Removes one enrollment, or all of them with `--all`. |
+| `bromure list-enrollments` | Lists the enrollments on this Mac. |
+
+### Image and test commands
+
+| Command | What it does |
+|---|---|
+| `bromure init [--os linux\|macOS] [--disk-size GB] [--storage-dir PATH] [--build-local]` | Installs the base image from the terminal, with progress in the terminal: downloads the prebuilt image and falls back to building it locally (about 10 minutes) if the download fails. `--build-local` skips the download. `--disk-size` defaults to 5 GB for Linux. `--os macOS` creates a macOS guest image instead, for development. |
+| `bromure setup [--storage-dir PATH]` | Boots a macOS guest image in a window to finish its setup (after `init --os macOS`). |
+| `bromure run [--os linux\|macOS] [--cpus N] [--memory GB] [--width PX] [--height PX] [--no-audio] [--storage-dir PATH]` | Checks that a base image exists, then opens Bromure. Defaults: 2 GB, 1920 × 1080. |
+| `bromure test [--scenario defaults\|privacy\|proxy\|media\|all] [--timeout SECONDS] [--storage-dir PATH]` | Runs Bromure's integration tests in VMs and reports passes and failures. Defaults: `all`, 120 seconds. |
+
+`--storage-dir` points a command at a storage folder other than `~/Library/Application Support/Bromure`.
+
+### Image publishing commands
+
+These are used to build and verify the images published on `dl.bromure.io`. You don't need them to use Bromure.
+
+| Command | What it does |
+|---|---|
+| `bromure init-foss-image --output DIR` | Builds the redistributable image and its boot files into `DIR`. |
+| `bromure verify-image --disk PATH --kernel PATH --initrd PATH [--timeout SECONDS]` | Boots an image copy and waits for it to reach a login prompt (default timeout 300 seconds). |
+| `bromure verify-browsers --dir DIR [--browser-timeout SECONDS] [--skip-postinstall] [--browsers chromium chrome]` | Installs Google Chrome on a copy of an image, then checks that Chromium and Chrome both start (default 180 seconds each). |
+| `bromure build-provisioner --output DIR` | Builds the tools used to customize images. Hidden from `--help`. |
+
+## Related chapters
+
+- [Automation settings](08-app-settings/automation.mdx) — turning the server on, port and bind address.
+- [Advanced](07-profile-settings/advanced.mdx) — **Allow Automation** and session recording per profile.
+- [Session Recording](11-session-recording.mdx) — what recordings contain.
+- [Enterprise](13-enterprise.mdx) — enrollment and managed profiles.

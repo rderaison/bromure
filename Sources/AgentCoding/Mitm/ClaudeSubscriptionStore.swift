@@ -18,6 +18,68 @@ import Foundation
 /// owns the network refresh; this type owns at-rest storage + the in-memory
 /// cache, and the bogus-key registry the proxy consults.
 
+/// A Claude login as the machine sees it when the workspace runs Claude on
+/// the host-kept subscription with its full account features (remote
+/// control, artifacts … which Claude Code turns off in API-key mode): an
+/// OAuth pair shaped like the real one in `~/.claude/.credentials.json`,
+/// with a far-future expiry and Bromure's mark, in place of the bogus
+/// `ANTHROPIC_API_KEY`. The proxy swaps the access token for the real one on
+/// Anthropic's hosts and answers a refresh sent with the stand-in itself —
+/// so the real credential still never enters the machine. Stable per
+/// workspace (Claude's tokens are opaque; nothing to carry over from them),
+/// recognised by its mark, not an in-memory registry a restart empties.
+public enum ClaudeStandIn {
+    public struct Tokens: Equatable { public let access, refresh: String }
+
+    /// The switch (Preferences, later): off, Claude runs in API-key mode on
+    /// the subscription, as before.
+    public static let enabledDefaultsKey = "claude.accountFeatures"
+    public static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledDefaultsKey) }
+
+    static let accessPrefix = "sk-ant-oat01-brmCLA-"
+    static let refreshPrefix = "sk-ant-ort01-brmCLA-"
+    /// The scopes a Claude Code login carries.
+    static let scopes = ["user:inference", "user:profile", "user:sessions:claude_code",
+                         "user:mcp_servers", "user:file_upload"]
+
+    public static func mint(profileID: UUID) -> Tokens {
+        let salt = Data("bromure-claude-oauth-stand-in".utf8)
+        return Tokens(
+            access: SessionTokenPlan.deriveFake(prefix: accessPrefix,
+                                                real: "claude-oauth-access:\(profileID.uuidString)",
+                                                salt: salt, targetLength: 108),
+            refresh: SessionTokenPlan.deriveFake(prefix: refreshPrefix,
+                                                 real: "claude-oauth-refresh:\(profileID.uuidString)",
+                                                 salt: salt, targetLength: 108))
+    }
+
+    public static func isAccess(_ token: String) -> Bool { token.hasPrefix(accessPrefix) }
+    public static func isRefresh(_ token: String) -> Bool { token.hasPrefix(refreshPrefix) }
+
+    /// `~/.claude/.credentials.json` for the machine. `_bromureManaged` marks
+    /// the file as the host's, so turning the mode off can take it back
+    /// without touching a login the user made themselves.
+    public static func credentialsJSON(_ t: Tokens) -> Data {
+        let farFuture = Int64(Date().addingTimeInterval(10 * 365 * 24 * 3600).timeIntervalSince1970 * 1000)
+        let doc: [String: Any] = [
+            "_bromureManaged": true,
+            "claudeAiOauth": [
+                "accessToken": t.access,
+                "refreshToken": t.refresh,
+                "expiresAt": farFuture,
+                "scopes": scopes,
+            ] as [String: Any],
+        ]
+        return (try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+    }
+
+    /// What Claude Code hears back from a refresh it sent with the stand-in.
+    public static func refreshAnswer(_ t: Tokens) -> [String: Any] {
+        ["access_token": t.access, "refresh_token": t.refresh, "token_type": "Bearer",
+         "expires_in": 10 * 365 * 24 * 3600, "scope": scopes.joined(separator: " ")]
+    }
+}
+
 /// One Claude subscription credential as persisted on disk.
 public struct ClaudeSubscriptionRecord: Codable, Sendable, Equatable {
     public var accessToken: String      // sk-ant-oat01-…
