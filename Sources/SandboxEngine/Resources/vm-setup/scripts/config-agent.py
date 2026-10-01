@@ -362,10 +362,41 @@ def resolve_user_agent(cfg):
     )
 
 
+def graphics_backend(cfg):
+    """Resolve the host-selected device backend, preserving legacy defaults.
+
+    A request for VirGL does not prove acceleration: the host must configure
+    the device before boot and verify the renderer separately. Profile GPU
+    policy takes precedence over device selection.
+    """
+    if cfg.get("graphicsBackend") == "virgl" and not cfg.get("disableGPU"):
+        return "virgl"
+    return "software"
+
+
+def virgl_video_device():
+    """Select the render node whose negotiated virtio features include VirGL."""
+    import glob
+    if not os.path.isfile("/opt/bromure/mesa-virgl/graphics-build.txt"):
+        return None
+    for node in sorted(glob.glob("/sys/class/drm/renderD*")):
+        for features in [node + "/device/features"] + glob.glob(node + "/device/virtio*/features"):
+            try:
+                with open(features) as stream:
+                    bits = stream.read().strip()
+                # Linux virtio sysfs prints features in bit-index order.
+                if len(bits) >= 32 and bits[0] == "1":
+                    return "/dev/dri/" + os.path.basename(node)
+            except OSError:
+                continue
+    return None
+
+
 def write_chrome_env(cfg):
     """Build and write the chrome-env file."""
     env_file = "/tmp/bromure/chrome-env"
     lines = []
+    backend = graphics_backend(cfg)
 
     extra_flags = []
     enable_features = []
@@ -373,6 +404,14 @@ def write_chrome_env(cfg):
     # grayscale AA; disabling here matches that path and avoids the slight
     # chromatic fringing/blur that subpixel rendering produces on this display.
     disable_features = ["LcdText"]
+    if backend == "virgl":
+        device = virgl_video_device()
+        if device:
+            enable_features.extend(["AcceleratedVideoDecoder", "AcceleratedVideoDecodeLinuxGL", "VaapiIgnoreDriverChecks"])
+            disable_features.extend(["UseOutOfProcessVideoDecoding", "PreferV4L2VideoAcceleration", "ResolutionBasedDecoderPriority"])
+            extra_flags.append("--hardware-video-device-path=" + device)
+            extra_flags.append("--render-node-override=" + device)
+
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
@@ -407,8 +446,10 @@ def write_chrome_env(cfg):
     if cfg.get("disableGPU"):
         extra_flags.append("--disable-gpu")
     else:
-        # GPU acceleration enabled — add GL/rasterization flags
-        if cfg.get("gpuAccel"):
+        # The selected VirGL device needs the GL path even if an older
+        # caller omits the preference flag. With the software backend these
+        # same flags still use llvmpipe, as they did before.
+        if cfg.get("gpuAccel") or backend == "virgl":
             extra_flags.append("--use-gl=angle")
             extra_flags.append("--use-angle=gl")
             extra_flags.append("--ignore-gpu-blocklist")
@@ -424,7 +465,14 @@ def write_chrome_env(cfg):
     # switches. Developer knob for perf A/B testing without an image
     # rebuild per experiment.
     if cfg.get("extraChromeFlags"):
-        extra_flags.append(str(cfg["extraChromeFlags"]))
+        developer_flags = str(cfg["extraChromeFlags"])
+        def merge_features(match):
+            target = enable_features if match.group(1) == "enable" else disable_features
+            target.extend(name for name in match.group(2).split(",") if name)
+            return ""
+        developer_flags = re.sub(r"--(enable|disable)-features=([^\s]+)", merge_features, developer_flags)
+        if developer_flags.strip():
+            extra_flags.append(developer_flags.strip())
 
     extensions = []
     if cfg.get("phishingGuard"):
@@ -615,6 +663,10 @@ def write_chrome_env(cfg):
         raw = raw.strip()
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.,:/+=-]*$", raw):
             lines.append(f"export {raw}")
+
+    # Device selection is authoritative, including disableGPU above. Do not
+    # let the generic environment passthrough accidentally override it.
+    lines.append(f"GRAPHICS_BACKEND={backend}")
 
     # MTU clamp for the primary NIC. Sourced from the host's
     # `vm.mtu` UserDefaults entry (default 1280). Applied in xinitrc

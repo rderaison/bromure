@@ -1,0 +1,92 @@
+2026-10-01 09:48:58.475 bromure[12294:4647546] [GPU budget] resources=56 GPU=60080128 staging=38375424 peakGPU=75825152 peakStaging=39620608
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+2026-10-01 09:49:08.476 bromure[12294:4647624] [GPU budget] resources=68 GPU=98610368 staging=60624896 peakGPU=98806976 peakStaging=60665856
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://slashdot.org/\",\"title\":\"Slashdot: News for nerds, stuff that matters, & software\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[{\"time\":0,\"ready\":0,\"paused\":true,\"width\":0,\"height\":0,\"quality\":{\"total\":0,\"dropped\":0}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[{\"time\":0,\"ready\":0,\"paused\":true,\"width\":0,\"height\":0,\"quality\":{\"total\":0,\"dropped\":0}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[{\"time\":0,\"ready\":0,\"paused\":true,\"width\":0,\"height\":0,\"quality\":{\"total\":0,\"dropped\":0}}],\"scroll\":0}"}}
+[GPU browser] Resize step 1: 1060x598 points frames=154
+[GPU browser] Resize step 2: 1160x656 points frames=154
+[GPU browser] Resize step 3: 1260x715 points frames=159
+[GPU browser] Resize step 4: 1360x773 points frames=159
+[GPU browser] Resize step 5: 1460x831 points frames=163
+[GPU browser] Resize step 6: 1560x890 points frames=164
+[GPU browser] Resize step 7: 1660x948 points frames=164
+[GPU browser] Resize step 8: 1760x1007 points frames=164
+[GPU browser] Resize step 9: 1860x1065 points frames=171
+[GPU browser] Resize step 10: 1960x1123 points frames=175
+[GPU browser] Resize step 11: 2060x1182 points frames=175
+[GPU browser] Resize step 12: 2160x1240 points frames=176
+[GPU browser] Resize step 13: 2260x1298 points frames=176
+[GPU browser] Resize step 14: 2360x1357 points frames=176
+[GPU browser] Resize step 15: 2460x1415 points frames=183
+[GPU browser] Resize step 16: 2560x1474 points frames=188
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+2026-10-01 09:49:18.478 bromure[12294:4647546] [GPU budget] resources=245 GPU=772399904 staging=404471808 peakGPU=804558560 peakStaging=481398784
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.apple.com/\",\"title\":\"Apple\",\"ready\":\"complete\",\"video\":[],\"scroll\":500}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+2026-10-01 09:49:28.480 bromure[12294:4648165] [GPU budget] resources=156 GPU=390028416 staging=191184896 peakGPU=804558560 peakStaging=481398784
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+2026-10-01 09:49:38.481 bromure[12294:4648165] [GPU budget] resources=86 GPU=340477952 staging=223612928 peakGPU=804558560 peakStaging=481398784
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"loading\",\"video\":[{\"time\":0,\"ready\":0,\"paused\":false,\"width\":0,\"height\":0,\"quality\":{\"total\":0,\"dropped\":0}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":0.715535,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":22,\"dropped\":2}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":2.499245,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":66,\"dropped\":5}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":3.477872,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":90,\"dropped\":13}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":4.607051,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":119,\"dropped\":17}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":5.610177,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":145,\"dropped\":17}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":7.426643,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":189,\"dropped\":22}}],\"scroll\":0}"}}
+2026-10-01 09:49:48.482 bromure[12294:4647546] [GPU budget] resources=263 GPU=487559760 staging=238858240 peakGPU=931404704 peakStaging=481398784
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":8.428485,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":214,\"dropped\":22}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":9.430385,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":239,\"dropped\":22}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":10.432404,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":264,\"dropped\":22}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":11.433322,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":289,\"dropped\":22}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.youtube.com/watch?v=e7VveWeRwUU&list=RDe7VveWeRwUU&start_radio=1\",\"title\":\"R\u00dcF\u00dcS DU SOL - Alive (Official Music Video) - YouTube\",\"ready\":\"complete\",\"video\":[{\"time\":12.435038,\"ready\":4,\"paused\":false,\"width\":1920,\"height\":1080,\"quality\":{\"total\":314,\"dropped\":22}}],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+2026-10-01 09:49:58.482 bromure[12294:4648167] [GPU budget] resources=119 GPU=394303488 staging=191377408 peakGPU=931404704 peakStaging=481398784
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_SAMPLE {"result": {"type": "string", "value": "{\"url\":\"https://www.google.com/\",\"title\":\"Google\",\"ready\":\"complete\",\"video\":[],\"scroll\":0}"}}
+BROMURE_SITE_BATTERY_DONE
+[?2004hroot@bromure:~# 2026-10-01 09:50:08.484 bromure[12294:4647626] [GPU budget] resources=102 GPU=365930496 staging=190337024 peakGPU=931404704 peakStaging=481398784
+2026-10-01 09:50:18.485 bromure[12294:4647624] [GPU budget] resources=94 GPU=336504832 staging=190275584 peakGPU=931404704 peakStaging=481398784
+2026-10-01 09:50:28.486 bromure[12294:4647624] [GPU budget] resources=91 GPU=336308224 staging=190263296 peakGPU=931404704 peakStaging=481398784
+2026-10-01 09:50:38.487 bromure[12294:4647546] [GPU budget] resources=91 GPU=336308224 staging=190263296 peakGPU=931404704 peakStaging=481398784
+2026-10-01 09:50:48.490 bromure[12294:4648165] [GPU budget] resources=91 GPU=336308224 staging=190263296 peakGPU=931404704 peakStaging=481398784
+2026-10-01 09:50:58.493 bromure[12294:4647624] [GPU budget] resources=87 GPU=327788544 staging=190246912 peakGPU=931404704 peakStaging=481398784
+2026-10-01 09:51:08.495 bromure[12294:4648165] [GPU budget] resources=87 GPU=327788544 staging=190246912 peakGPU=931404704 peakStaging=481398784
+[GPU browser] Frames delivered: 1413

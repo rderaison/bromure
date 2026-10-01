@@ -309,6 +309,8 @@ PLIST
     fi
 fi
 
+bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$SIGN_ID"
+
 # Code sign with entitlements.
 # Virtualization.framework requires com.apple.security.virtualization.
 # Set CODESIGN_IDENTITY for Developer ID signing (required for iCloud,

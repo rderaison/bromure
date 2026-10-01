@@ -55,6 +55,7 @@ struct SettingsView: View {
     @AppStorage("vm.networkMode") private var networkMode = "nat"
     @AppStorage("vm.bridgedInterface") private var bridgedInterface = ""
     @AppStorage("vm.extraKernelOptions") private var extraKernelOptions = VMConfig.defaultExtraKernelOptions
+    @AppStorage(MetalRendererPreference.defaultsKey) private var metalRendererEnabled = true
     @AppStorage("vm.energyMode") private var energyMode = EnergyMode.default.rawValue
     @AppStorage("phishingAnalysis.serverURL") private var phishingServerURL = PhishingAnalysisBridge.defaultServerBaseURL.absoluteString
     @AppStorage("automation.enabled") private var automationEnabled = false
@@ -445,6 +446,19 @@ struct SettingsView: View {
     private var hardwareView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("Hardware", subtitle: "Resources allocated to each browser session")
+
+            settingToggle("Use Metal Renderer",
+                description: MetalRendererPreference.isSupported
+                    ? "Accelerates graphics and supported video playback. Applies to new browser windows; requires a rebuilt image."
+                    : "Requires macOS 27 or later. Software rendering remains available.",
+                isOn: Binding(get: { MetalRendererPreference.isSupported && metalRendererEnabled },
+                              set: { enabled in
+                                  if let state { state.setMetalRendererEnabled(enabled) }
+                                  else { metalRendererEnabled = enabled }
+                              }))
+                .disabled(!MetalRendererPreference.isSupported)
+
+            settingsDivider
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Memory").font(.headline)

@@ -42,6 +42,7 @@ esac
 #   DEVELOPER_ID   - signing identity, e.g. "Developer ID Application: Your Name (TEAM_ID)"
 #   APPLE_ID       - your Apple ID email for notarization
 #   TEAM_ID        - your Apple Developer team ID
+#   NOTARY_PROFILE - saved notarytool Keychain profile (preferred)
 #   APP_PASSWORD   - app-specific password for notarization
 #                    (generate at https://appleid.apple.com > Sign-In and Security > App-Specific Passwords)
 #
@@ -52,10 +53,11 @@ esac
 #   APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 #   ./package.sh [bromure|bromure-ac]
 
-DEVELOPER_ID="${DEVELOPER_ID:-}"
+DEVELOPER_ID="${DEVELOPER_ID:-${CODESIGN_IDENTITY:-}}"
 APPLE_ID="${APPLE_ID:-}"
 TEAM_ID="${TEAM_ID:-}"
 APP_PASSWORD="${APP_PASSWORD:-}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
 # --- Validation ---
 if [ -z "$DEVELOPER_ID" ]; then
@@ -73,13 +75,25 @@ if [ -z "$DEVELOPER_ID" ]; then
     exit 1
 fi
 
-if [ -z "$APPLE_ID" ] || [ -z "$TEAM_ID" ] || [ -z "$APP_PASSWORD" ]; then
+if [ -n "$NOTARY_PROFILE" ]; then
+    NOTARIZE=true
+elif [ -z "$APPLE_ID" ] || [ -z "$TEAM_ID" ] || [ -z "$APP_PASSWORD" ]; then
     echo "WARNING: APPLE_ID, TEAM_ID, or APP_PASSWORD not set — will skip notarization."
     echo "         The app will be signed but may trigger Gatekeeper warnings on other Macs."
     NOTARIZE=false
 else
     NOTARIZE=true
 fi
+
+notarize_artifact() {
+    local artifact="$1"
+    if [ -n "$NOTARY_PROFILE" ]; then
+        xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" --wait
+    else
+        xcrun notarytool submit "$artifact" --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" --password "$APP_PASSWORD" --wait
+    fi
+}
 
 # --- Build ---
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
@@ -301,6 +315,8 @@ if [ -d "$FRAMEWORKS_DIR" ]; then
     done
 fi
 
+bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$DEVELOPER_ID"
+
 # Finally sign the outer app with entitlements.
 codesign --force --options runtime \
     --entitlements "$ENTITLEMENTS" \
@@ -320,11 +336,7 @@ if [ "$NOTARIZE" = true ]; then
     ditto -c -k --keepParent "$APP_BUNDLE" "$NOTARIZE_ZIP"
 
     echo "Submitting to Apple (this may take a few minutes)..."
-    xcrun notarytool submit "$NOTARIZE_ZIP" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$APP_PASSWORD" \
-        --wait
+    notarize_artifact "$NOTARIZE_ZIP"
 
     rm -f "$NOTARIZE_ZIP"
 
@@ -398,8 +410,12 @@ MOUNT_DIR=$(echo "$ATTACH_OUTPUT" | grep "/Volumes/$APP_NAME" | awk -F'\t' '{pri
 # Wait for Finder to register the volume
 sleep 2
 
-# Use AppleScript to set icon size, positions, and background
-osascript <<APPLESCRIPT
+# Write Finder settings directly for automation without Apple Events, or use
+# Finder on an interactive desktop. Both paths use the same release layout.
+if [[ -n ${BROMURE_DMG_LAYOUT_PYTHON:-} ]]; then
+    "$BROMURE_DMG_LAYOUT_PYTHON" "$SCRIPT_DIR/tools/dmg-layout.py" "$MOUNT_DIR" "$APP_NAME"
+elif [[ ${BROMURE_DMG_FINDER_LAYOUT:-1} == 1 ]]; then
+if ! osascript <<APPLESCRIPT
 tell application "Finder"
     tell disk "$APP_NAME"
         open
@@ -421,6 +437,10 @@ tell application "Finder"
     end tell
 end tell
 APPLESCRIPT
+then
+    echo "WARNING: Finder layout failed; continuing with the installable DMG."
+fi
+fi
 
 # Ensure .background and .DS_Store are hidden
 SetFile -a V "$MOUNT_DIR/.background" 2>/dev/null || true
@@ -455,11 +475,7 @@ codesign --force --sign "$DEVELOPER_ID" "$DMG_PATH"
 # Notarize the DMG too
 if [ "$NOTARIZE" = true ]; then
     echo "Notarizing DMG..."
-    xcrun notarytool submit "$DMG_PATH" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$APP_PASSWORD" \
-        --wait
+    notarize_artifact "$DMG_PATH"
 
     xcrun stapler staple "$DMG_PATH"
 fi

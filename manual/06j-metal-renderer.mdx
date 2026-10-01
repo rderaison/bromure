@@ -1,0 +1,43 @@
+---
+title: "Metal Acceleration in Bromure Web"
+description: "Enable Metal graphics in the standalone Bromure web browser, select it per profile, check the active renderer, and understand host and image compatibility."
+order: 6.95
+---
+
+# Metal Acceleration in Bromure Web
+
+The standalone **Bromure web browser** can accelerate its Linux browser VMs with the Mac's GPU through Metal. This page describes that app's settings; the Agentic Coding embedded browser has its own [Browser settings](07-settings/browser.mdx).
+
+Metal accelerates browser graphics, including compositing and supported WebGL workloads. Each accelerated VM has its own renderer worker, so several browser windows can use acceleration at once. The guest remains a Linux VM, and the mouse cursor is presented by macOS using the guest's cursor images.
+
+## Requirements and defaults
+
+Metal requires **Apple Silicon, macOS 27 or later, and a compatible browser image**. Both the app-wide and profile choices default to enabled, including profiles saved before the profile option existed. A previously saved app-wide off choice remains off.
+
+On **macOS 26 and earlier**, the Metal controls are greyed out. A browser image without the required graphics capability information uses the legacy graphics path. Updating an image does not force older applications or unsupported hosts to use Metal.
+
+## Enable or disable Metal
+
+In the standalone Bromure app:
+
+1. Open **Settings → Hardware** and enable **Use Metal Renderer**. This is the app-wide master setting.
+2. Open the profile editor, select **Performance**, and enable **GPU Acceleration** and **Metal Renderer** for the profile.
+3. Open a new browser window for that profile. Renderer changes apply to new windows; an already running VM keeps its renderer.
+
+The profile's **Metal Renderer** switch is also greyed out while **GPU Acceleration** is off. Turning Metal off for one profile selects the legacy graphics path for its new windows while other profiles can continue using Metal. **WebGL** remains a separate profile option: enable it when a site requires 3D graphics.
+
+## Check which renderer is active
+
+An accelerated window shows the **Metal logo** in its browser chrome. Its **GPU** menu reports **Metal** as the active renderer. A window using the legacy path has no Metal badge. Enabling the setting expresses a preference; the active-window indicator confirms whether the required host and image support were available when that VM started.
+
+## Video playback and limits
+
+The Metal path supports hardware decoding of **H.264** through the Mac's VideoToolbox framework. Codec selection still matters: a site serving AV1 can use software decoding. Graphics acceleration does not mean every video format is decoded in hardware.
+
+This graphics device does not expose general GPU compute to Linux. It does not make CUDA, Metal compute, or local LLM inference available inside a browser VM. Agentic Coding's [on-device models](13-models.mdx#on-device-models) run separately on the Mac.
+
+## If Metal does not appear
+
+Check the macOS version, both Metal settings, and **GPU Acceleration** in the profile. Install the compatible browser image supplied with the GPU-capable build, then open a fresh window. An older window will not change renderer when you toggle a setting.
+
+If a site has a graphics or video problem, turn **Metal Renderer** off for that profile and compare in a new window. Include the macOS version, app build, image version, page URL, and whether the Metal logo appeared when reporting the problem.

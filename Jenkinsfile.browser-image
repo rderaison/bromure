@@ -154,6 +154,14 @@ pipeline {
             }
         }
 
+        // setup.sh builds the pinned guest graphics/video stack and fails its
+        // headless loadability gate. Check exported metadata before publishing.
+        stage('Verify graphics contract') {
+            steps {
+                sh 'python3 scripts/check-browser-image-contract.py image-staging/image'
+            }
+        }
+
         stage('Verify boot') {
             steps {
                 // bromure verify-image on an APFS clone: the disk must

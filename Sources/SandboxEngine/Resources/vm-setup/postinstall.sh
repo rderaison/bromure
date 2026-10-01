@@ -263,6 +263,24 @@ fi
 rm -f /mnt/etc/apt/apt.conf.d/99-bromure-proxy
 rm -rf /mnt/tmp/bromure-postinstall
 
+# Optional host output share: new apps import the baked graphics contract only
+# after a headless loadability check. Old images/applications keep software GL.
+# This never installs GPU libraries into a legacy image or changes its version.
+mkdir -p /tmp/graphics-output
+if mount -t virtiofs out /tmp/graphics-output 2>/dev/null; then
+    marker=/mnt/etc/bromure/graphics-capabilities.json
+    if [ -f "$marker" ] && [ "$(wc -c < "$marker")" -le 8192 ] && \
+       [ -f /mnt/usr/local/bin/graphics-prerequisites.py ] && \
+       chroot /mnt python3 /usr/local/bin/graphics-prerequisites.py --require-ready > /tmp/graphics-prerequisites.json 2>&1; then
+        cp "$marker" /tmp/graphics-output/graphics-capabilities.json
+        log "validated graphics capability marker exported"
+    else
+        log "software graphics retained (no validated graphics contract)"
+    fi
+    sync
+    umount /tmp/graphics-output || fail "cannot unmount graphics output share"
+fi
+
 log "unmounting target"
 
 # A step may leave a daemon running inside the chroot — newer warp-cli

@@ -64,6 +64,7 @@ verify_browsers() {
     cp -c "$KERNEL"   "$dir/vmlinuz"
     cp -c "$INITRD"   "$dir/initrd"
     if [ -f "$IMAGE_DIR/image-version" ]; then cp "$IMAGE_DIR/image-version" "$dir/image-version"; fi
+    if [ -f "$IMAGE_DIR/graphics-capabilities.json" ]; then cp "$IMAGE_DIR/graphics-capabilities.json" "$dir/graphics-capabilities.json"; fi
     # The provisioner gate: with the pair present the postinstall boots it,
     # exactly like a client install — a broken provisioner fails here.
     local prov=""

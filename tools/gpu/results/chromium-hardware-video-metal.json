@@ -1,0 +1,92 @@
+{
+  "baseline_resize": {
+    "playback": [
+      {
+        "renderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)",
+        "decoder": "VaapiVideoDecoder",
+        "platformDecoder": true,
+        "playback": {
+          "frames": 252,
+          "error": null,
+          "width": 1280,
+          "height": 720,
+          "readyState": 4,
+          "pixel": [
+            254,
+            0,
+            0,
+            255
+          ]
+        }
+      }
+    ],
+    "passed": true
+  },
+  "main_high": {
+    "playback": [
+      {
+        "renderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)",
+        "decoder": "VaapiVideoDecoder",
+        "platformDecoder": true,
+        "playback": {
+          "frames": 250,
+          "error": null,
+          "width": 1280,
+          "height": 720,
+          "readyState": 4,
+          "pixel": [
+            251,
+            0,
+            0,
+            255
+          ]
+        }
+      },
+      {
+        "renderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)",
+        "decoder": "VaapiVideoDecoder",
+        "platformDecoder": true,
+        "playback": {
+          "frames": 250,
+          "error": null,
+          "width": 1280,
+          "height": 720,
+          "readyState": 4,
+          "pixel": [
+            251,
+            0,
+            0,
+            255
+          ]
+        }
+      }
+    ],
+    "passed": true
+  },
+  "vp9_fallback": {
+    "playback": [
+      {
+        "renderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)",
+        "decoder": "VpxVideoDecoder",
+        "platformDecoder": false,
+        "playback": {
+          "frames": 250,
+          "error": null,
+          "width": 1280,
+          "height": 720,
+          "readyState": 4,
+          "pixel": [
+            251,
+            0,
+            0,
+            255
+          ]
+        }
+      }
+    ],
+    "passed": true
+  },
+  "host": "Apple M5 Pro, macOS 27.0.1; signed hardened sandboxed renderer; hardware-only VideoToolbox sessions",
+  "coverage": "H.264 baseline, Main with B frames, High with scaling matrices; VP9 software fallback; native chrome and live window resize; WebGL2 antialiasing",
+  "limits": "H.264 progressive 8-bit 4:2:0 only, no zero-copy Chromium video claim, no throughput benchmark"
+}
