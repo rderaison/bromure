@@ -295,12 +295,15 @@ int run_renderer_worker(int output_fd)
                 scanout_x = x; scanout_y = y;
                 scanout_width = width; scanout_height = height;
             }
-            if (id == scanout_resource) {
+            // SET_SCANOUT binds the framebuffer; RESOURCE_FLUSH publishes its contents.
+            // Publishing on SET exposes the modesetting buffer before guest repaint.
+            if (type == 0x104 && id == scanout_resource) {
                 if (++fence_token == 0) ++fence_token;
                 if (!wait_for_gpu(fence_token, 0)) return 1;
                 if (info.native_type != VIRGL_NATIVE_HANDLE_METAL_TEXTURE || !info.native_handle ||
                     !renderer_capture_surface_region(info.native_handle, scanout_x, scanout_y,
                                                      scanout_width, scanout_height)) { result = 0x1200; break; }
+
             }
             result = 0x1100; break;
         }

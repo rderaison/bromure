@@ -14,6 +14,9 @@
 
 static pthread_mutex_t surface_lock = PTHREAD_MUTEX_INITIALIZER;
 static IOSurfaceRef pending_surface;
+// Capture requests are serialized by the renderer worker. Keep one queue per device
+// instead of allocating a queue for every exported frame.
+static id<MTLCommandQueue> capture_queue;
 
 IOSurfaceRef renderer_take_surface(void)
 {
@@ -44,7 +47,9 @@ int renderer_capture_surface_region(void *native_texture, uint32_t x, uint32_t y
         descriptor.storageMode = MTLStorageModeShared;
         descriptor.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> destination = [source.device newTextureWithDescriptor:descriptor iosurface:surface plane:0];
-        id<MTLCommandBuffer> command = [[source.device newCommandQueue] commandBuffer];
+        if (!capture_queue || capture_queue.device != source.device)
+            capture_queue = [source.device newCommandQueue];
+        id<MTLCommandBuffer> command = [capture_queue commandBuffer];
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
         if (!destination || !command || !blit) { CFRelease(surface); return 0; }
         [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)

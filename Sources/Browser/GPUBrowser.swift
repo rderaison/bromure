@@ -24,6 +24,8 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var cursorCheck = false
     @Flag(name: .long) var menuCheck = false
     @Flag(name: .long) var inputCheck = false
+    @Flag(name: .long) var frameTrace = false
+    @Flag(name: .long, help: "Check a profile opt-out against a Metal-prewarmed pool.") var profileMetalOffCheck = false
     @Flag(name: .long, help: "Verify postinstall imports the validated guest graphics marker in the selected test image.")
     var postinstallCheck = false
     @Flag(name: .long, help: "Benchmark Apple’s built-in Virtio graphics device without the custom VirGL renderer.")
@@ -49,6 +51,7 @@ struct GPUBrowser: ParsableCommand {
         setbuf(stdout, nil)
         var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         arguments["vm.displayScale"] = displayScale
+        if frameTrace { arguments["vm.traceGPUFrames"] = true }
         if let chromeFlags { arguments["vm.extraChromeFlags"] = chromeFlags }
         UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         guard #available(macOS 27.0, *) else { throw ValidationError("Requires macOS 27") }
@@ -82,11 +85,26 @@ struct GPUBrowser: ParsableCommand {
         if nativeChrome { config.nativeChromeInset = VMConfig.defaultNativeChromeInset(forDisplayScale: VMConfig.resolvedDisplayScale()) }
         let pool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), experimentalGPU: !appleVirtioGPU)
         try await pool.warmUp()
+        if profileMetalOffCheck {
+            let legacy = try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8))
+            guard legacy.enableMetalRenderer && legacy.toVMConfig().enableMetalRenderer else {
+                throw ValidationError("Legacy profile did not default to Metal")
+            }
+            var disabled = legacy
+            disabled.enableMetalRenderer = false
+            let restored = try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(disabled))
+            guard !restored.toVMConfig().enableMetalRenderer else {
+                throw ValidationError("Profile Metal opt-out did not persist")
+            }
+            config.enableMetalRenderer = false
+        }
+        let expectsLegacy = appleVirtioGPU || profileMetalOffCheck
         guard let warm = await pool.claim(config: config),
-              appleVirtioGPU ? warm.graphicsSession == nil : warm.graphicsSession?.backendName == "virgl" else {
+              expectsLegacy ? warm.graphicsSession == nil : warm.graphicsSession?.backendName == "virgl" else {
             await pool.shutdown()
             throw ValidationError("VM did not select the experimental GPU")
         }
+        if profileMetalOffCheck { print("BROMURE_PROFILE_METAL_OFF_PASS") }
         warm.serialWaiter.observer = { text in print(text, terminator: "") }
         if interactive {
             let serial = warm.serialInput.fileHandleForWriting
@@ -100,12 +118,13 @@ struct GPUBrowser: ParsableCommand {
         let session = BrowserSession(warmVM: warm, config: config)
         if saveUpdatedImage != nil { warm.vm.delegate = nil }
         session.show()
+        if frameTrace { print("[GPU browser] Test window id: \(session.window.windowNumber)") }
         var additional: [(VMPool, VMPool.WarmVM, BrowserSession)] = []
         for _ in 1..<simultaneousVMs {
             let extraPool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), experimentalGPU: !appleVirtioGPU)
             try await extraPool.warmUp()
             guard let extra = await extraPool.claim(config: config),
-                  appleVirtioGPU ? extra.graphicsSession == nil : extra.graphicsSession?.backendName == "virgl" else {
+                  expectsLegacy ? extra.graphicsSession == nil : extra.graphicsSession?.backendName == "virgl" else {
                 await extraPool.shutdown(); throw ValidationError("Additional VM did not select the GPU")
             }
             let extraSession = BrowserSession(warmVM: extra, config: config)
@@ -183,7 +202,7 @@ struct GPUBrowser: ParsableCommand {
             delegate.setupMenu()
             let item = NSApp.mainMenu?.items.last
             let toggle = item?.submenu?.items.first(where: { $0.title == "Use Metal Renderer" })
-            menuOK = item?.title == (appleVirtioGPU ? "Software" : "Metal") && toggle?.isEnabled == MetalRendererPreference.isSupported
+            menuOK = item?.title == (expectsLegacy ? "Software" : "Metal") && toggle?.isEnabled == MetalRendererPreference.isSupported
             print("[GPU browser] Menu renderer: \(item?.title ?? "missing"), Metal option enabled: \(toggle?.isEnabled ?? false)")
         } else { menuOK = true }
         let frames = warm.graphicsSession?.deliveredFrameCount ?? 0
@@ -202,7 +221,7 @@ struct GPUBrowser: ParsableCommand {
         for (index, (extraPool, extra, extraSession)) in additional.enumerated() {
             let extraFrames = extra.graphicsSession?.deliveredFrameCount ?? 0
             print("[GPU browser] VM \(index + 2) backend=\(extra.graphicsSession?.backendName ?? "apple") frames=\(extraFrames)")
-            additionalOK = additionalOK && (appleVirtioGPU || extraFrames > 0)
+            additionalOK = additionalOK && (expectsLegacy || extraFrames > 0)
             await extraPool.retire(extra); await extraPool.shutdown()
             withExtendedLifetime(extraSession) {}
         }
@@ -242,6 +261,6 @@ struct GPUBrowser: ParsableCommand {
         await pool.retire(warm)
         await pool.shutdown()
         withExtendedLifetime(session) {}
-        guard appleVirtioGPU || frames > 0, accepted, additionalOK, cursorOK, menuOK else { throw ValidationError("Browser GPU acceptance failed") }
+        guard expectsLegacy || frames > 0, accepted, additionalOK, cursorOK, menuOK else { throw ValidationError("Browser GPU acceptance failed") }
     }
 }

@@ -565,6 +565,18 @@ struct ProfileSettingsView: View {
             settingsDivider
 
             settingToggle(
+                "Metal Renderer",
+                description: MetalRendererPreference.isSupported
+                    ? "Accelerates this profile with Metal. Applies to new windows when Metal is also enabled in the app settings."
+                    : "Requires macOS 27 or later.",
+                isOn: $draft.settings.enableMetalRenderer
+            )
+            .disabled(!MetalRendererPreference.isSupported || !draft.settings.enableGPU)
+            .opacity(MetalRendererPreference.isSupported && draft.settings.enableGPU ? 1 : 0.5)
+
+            settingsDivider
+
+            settingToggle(
                 "WebGL",
                 description: "Lets websites display 3D graphics and interactive content. Required by some games, maps, and data visualizations.",
                 isOn: $draft.settings.enableWebGL

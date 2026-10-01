@@ -14,10 +14,19 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private var inFlight = 0
     private var redrawPending = false
     public var guestDisplayScale: Double = 1
+    public var hiddenTopRows = 0
     public var displaySizeChanged: ((Int, Int) -> Void)?
     private var resizeTask: DispatchWorkItem?
+    private var clearedResizeTask: DispatchWorkItem?
+    private var acceptingClearedResize = false
+    private var clearedResizeSurface: IOSurface?
     private var pendingDisplaySize: (Int, Int)?
+    private var lastDisplaySize: (Int, Int)?
+    private var resizeHandoffUntil: Double = 0
     public private(set) var presentedFrameCount = 0
+    public var currentFrameSize: NSSize? {
+        texture.map { NSSize(width: $0.width, height: $0.height) }
+    }
 
     public init(gpuFrame frame: NSRect) throws {
         guard let gpu = MTLCreateSystemDefaultDevice(), let commands = gpu.makeCommandQueue() else {
@@ -73,6 +82,10 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
                   pixelsHigh: cursor.height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                   isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: cursor.width * 4, bitsPerPixel: 32),
               let data = bitmap.bitmapData else { return }
+        if UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
+            let transparent = stride(from: 3, to: cursor.rgba.count, by: 4).filter { cursor.rgba[$0] == 0 }.count
+            print("[GPU cursor] size=\(cursor.width)x\(cursor.height) transparent=\(transparent) corner=\(Array(cursor.rgba.prefix(4)))")
+        }
         cursor.rgba.copyBytes(to: data, count: cursor.rgba.count)
         let scale = max(guestDisplayScale, 1)
         let image = NSImage(size: NSSize(width: Double(cursor.width) / scale, height: Double(cursor.height) / scale))
@@ -93,6 +106,31 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
               IOSurfaceGetAllocSize(surface) <= 268435456, IOSurfaceGetPlaneCount(surface) == 0 else {
             throw Self.failure("Invalid GPU display surface")
         }
+        // Xorg clears its new front buffer before modesetting, then repaints it.
+        // Keep the preceding painted frame through that short handoff. A bounded
+        // fallback still displays a genuinely black new screen without another flush.
+        if !acceptingClearedResize, let previous = texture,
+           (previous.width != width || previous.height != height ||
+            ProcessInfo.processInfo.systemUptime < resizeHandoffUntil),
+           Self.isIncompleteResize(surface, excludingTopRows: hiddenTopRows) {
+            if UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") { print("[GPU handoff] hold t=\(ProcessInfo.processInfo.systemUptime) size=\(width)x\(height)") }
+            clearedResizeSurface = surface
+            if clearedResizeTask == nil {
+                let task = DispatchWorkItem { [weak self] in
+                    guard let self, let pending = self.clearedResizeSurface else { return }
+                    if UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") { print("[GPU handoff] expire t=\(ProcessInfo.processInfo.systemUptime) size=\(IOSurfaceGetWidth(pending))x\(IOSurfaceGetHeight(pending))") }
+                    self.acceptingClearedResize = true
+                    defer { self.acceptingClearedResize = false }
+                    try? self.present(pending)
+                }
+                clearedResizeTask = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: task)
+            }
+            return
+        }
+        clearedResizeTask?.cancel()
+        clearedResizeTask = nil
+        clearedResizeSurface = nil
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.storageMode = .shared
@@ -101,6 +139,16 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
             throw Self.failure("Cannot import GPU display surface")
         }
         self.texture = texture
+        if UserDefaults.standard.bool(forKey: "vm.traceGPUFrames"),
+           IOSurfaceLock(surface, .readOnly, nil) == 0 {
+            do {
+                let base = IOSurfaceGetBaseAddress(surface)
+                let row = IOSurfaceGetBytesPerRow(surface)
+                let pixel = base.advanced(by: (height / 2) * row + (width / 2) * 4).assumingMemoryBound(to: UInt8.self)
+                print("[GPU frame] t=\(ProcessInfo.processInfo.systemUptime) size=\(width)x\(height) center=\(pixel[0]),\(pixel[1]),\(pixel[2]),\(pixel[3])")
+            }
+            IOSurfaceUnlock(surface, .readOnly, nil)
+        }
         needsDisplay = true
     }
 
@@ -114,7 +162,50 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         return (Double((point.x - left) / max(width, 1)), Double(1 - (point.y - bottom) / max(height, 1)))
     }
 
-    public func discardFrame() { texture = nil; needsDisplay = true }
+    private static func isIncompleteResize(_ surface: IOSurface, excludingTopRows: Int) -> Bool {
+        guard IOSurfaceLock(surface, .readOnly, nil) == 0 else { return false }
+        defer { IOSurfaceUnlock(surface, .readOnly, nil) }
+        let width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface)
+        let base = IOSurfaceGetBaseAddress(surface), row = IOSurfaceGetBytesPerRow(surface)
+        // During modesetting, Xorg may repaint some UI before the page.
+        // Detect either >=1% exact-zero pixels (unpainted holes) or >=90%
+        // black RGB, ignoring XRGB padding. Counts are conservative block bounds,
+        // rather than point samples. The resize-only deadline remains 150ms.
+        let mask = SIMD16<UInt32>(repeating: 0x00ffffff)
+        let zero = SIMD16<UInt32>(repeating: 0)
+        let vectorWidth = width - width % 16
+        let firstRow = min(max(excludingTopRows, 0), height - 1)
+        let pixelsInRegion = width * (height - firstRow)
+        let coloredLimit = pixelsInRegion / 10
+        let unpaintedLimit = max(1, pixelsInRegion / 100)
+        var coloredBound = 0, unpaintedBound = 0
+        for y in firstRow..<height {
+            let pixels = base.advanced(by: y * row)
+            for x in stride(from: 0, to: vectorWidth, by: 16) {
+                let values = pixels.advanced(by: x * 4).loadUnaligned(as: SIMD16<UInt32>.self)
+                if values == zero {
+                    unpaintedBound += 16
+                    if unpaintedBound >= unpaintedLimit { return true }
+                }
+                if (values & mask) != zero { coloredBound += 16 }
+            }
+            let tail = pixels.assumingMemoryBound(to: UInt32.self)
+            for x in vectorWidth..<width {
+                if tail[x] == 0 {
+                    unpaintedBound += 1
+                    if unpaintedBound >= unpaintedLimit { return true }
+                }
+                if tail[x] & 0x00ffffff != 0 { coloredBound += 1 }
+            }
+        }
+        return coloredBound <= coloredLimit
+    }
+
+    public func discardFrame() {
+        clearedResizeTask?.cancel(); clearedResizeTask = nil; clearedResizeSurface = nil
+        resizeHandoffUntil = 0
+        texture = nil; needsDisplay = true
+    }
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         guard size.width.isFinite, size.height.isFinite else { return }
@@ -130,6 +221,11 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private func scheduleDisplayResize() {
         let width = Int(min(max(bounds.width * guestDisplayScale, 64), 8192))
         let height = Int(min(max(bounds.height * guestDisplayScale, 64), 8192))
+        if let last = lastDisplaySize, last.0 == width, last.1 == height { return }
+        lastDisplaySize = (width, height)
+        // Xorg can clear the old framebuffer before binding the new dimensions.
+        // Scope the handoff to trusted host resize activity as well as new frames.
+        resizeHandoffUntil = ProcessInfo.processInfo.systemUptime + 0.15
         pendingDisplaySize = (width, height)
         guard resizeTask == nil else { return }
         let task = DispatchWorkItem { [weak self] in

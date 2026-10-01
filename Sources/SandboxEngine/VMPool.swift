@@ -65,6 +65,7 @@ public final class VMPool {
         public var networkReady: Bool { networkDiagnosisBox.value == .ok }
         /// Network mode the VM was booted/swapped to: "nat" or an interface name for bridged.
         public var bootedNetworkMode: String = "nat"
+        public var requestedMetalRenderer = false
         public var graphicsSession: (any HostGraphicsSession)? = nil
     }
 
@@ -179,7 +180,8 @@ public final class VMPool {
     /// Boot a fresh VM with the specified network mode.
     /// - Parameter bridgedInterface: Interface name for bridged mode, or nil for NAT.
     /// - Returns: A booted WarmVM ready for claim.
-    private func bootVM(bridgedInterface: String?) async throws -> WarmVM {
+    private func bootVM(bridgedInterface: String?, requestedConfig: VMConfig? = nil) async throws -> WarmVM {
+        let config = requestedConfig ?? self.config
         let imageOK = requireImageVersion
             ? imageManager.baseImageExists       // files + version stamp
             : imageManager.hasBootFiles          // files only (reused image)
@@ -258,8 +260,9 @@ public final class VMPool {
         )
 
         var graphicsSession: (any HostGraphicsSession)?
-        if experimentalGPU, config.enableGPU, imageManager.supportsExperimentalVirgl,
-           #available(macOS 27.0, *) {
+        let requestedMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
+            imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
+        if requestedMetal, #available(macOS 27.0, *) {
             do {
                 let session = try await MacOS27GPUSession.create(
                     width: config.displayWidth, height: config.displayHeight + config.nativeChromeInset)
@@ -325,6 +328,7 @@ public final class VMPool {
             macAddress: mac,
             networkDiagnosisBox: diagnosisBox,
             bootedNetworkMode: bootedNetworkMode,
+            requestedMetalRenderer: requestedMetal,
             graphicsSession: graphicsSession
         )
     }
@@ -369,7 +373,7 @@ public final class VMPool {
             try? await warmUp()
         }
 
-        // Check if the profile needs a different network mode than the pool VM.
+        // Check whether the profile needs different networking or rendering than the pool VM.
         // If so, boot a dedicated VM with the right network from the start.
         // The pool VM is left for other profiles that match the global setting.
         let profileNetwork: String
@@ -387,10 +391,14 @@ public final class VMPool {
             profileBridgedIface = nil  // will use pool VM as-is
         }
 
-        if let warm = warmVM, profileNetwork != warm.bootedNetworkMode {
-            print("[VMPool] claim: profile needs \(profileNetwork) but pool has \(warm.bootedNetworkMode) — booting dedicated VM")
+        let profileWantsMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
+            imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
+        if let warm = warmVM,
+           profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer {
+            print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
             do {
-                let dedicated = try await bootVM(bridgedInterface: profileBridgedIface)
+                let dedicated = try await bootVM(bridgedInterface: profileBridgedIface,
+                                                 requestedConfig: config)
                 warmingMAC = nil
                 deflateBalloon(vm: dedicated.vm)
                 var warm = dedicated

@@ -2469,6 +2469,7 @@ final class BrowserSession {
            let gpuView = try? HostGPUFrameView(gpuFrame: vmView.bounds) {
             gpuView.autoresizingMask = [.width, .height]
             gpuView.guestDisplayScale = Double(VMConfig.resolvedDisplayScale())
+            gpuView.hiddenTopRows = config.nativeChromeInset
             gpuView.displaySizeChanged = { [weak graphics] width, height in
                 graphics?.resizeDisplay(width: width, height: height)
             }

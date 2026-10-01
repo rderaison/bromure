@@ -284,10 +284,14 @@ final class RendererCommandProcessor {
             image.append(bytes)
         }
         guard image.count == size else { throw failure("Short cursor backing") }
-        // virtio BGRA -> AppKit RGBA; XRGB cursors are opaque.
+        if UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
+            let zeroAlpha = stride(from: 3, to: image.count, by: 4).filter { image[$0] == 0 }.count
+            print("[GPU cursor backing] format=\(info.format) zeroAlpha=\(zeroAlpha) corner=\(Array(image.prefix(4)))")
+        }
+        // Linux allocates dumb BOs as XRGB, then wraps the same BO as ARGB for cursors.
+        // Preserve its alpha: scanout padding rules do not apply to cursor sprites.
         for i in stride(from: 0, to: image.count, by: 4) {
             let blue = image[i]; image[i] = image[i + 2]; image[i + 2] = blue
-            if info.format == 2 { image[i + 3] = 255 }
         }
         return (image, info.width, info.height)
     }
