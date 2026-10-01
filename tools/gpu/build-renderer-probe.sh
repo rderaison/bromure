@@ -17,6 +17,13 @@ if [[ $(xcrun --sdk macosx --show-sdk-version) != 27.* ]]; then
     echo 'macOS SDK 27 required' >&2; exit 1
 fi
 
+if ! xcrun --sdk macosx metal --version >/dev/null 2>&1; then
+    echo 'Metal Toolchain is missing or cannot run with the selected Xcode.' >&2
+    echo 'Run as the Jenkins build user: xcodebuild -downloadComponent MetalToolchain' >&2
+    echo 'Then verify: xcrun --sdk macosx metal --version' >&2
+    exit 1
+fi
+
 checkout() {
     local directory=$1 repository=$2 revision=$3
     if [[ ! -d "$directory/.git" ]]; then
