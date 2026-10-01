@@ -3211,3 +3211,15 @@
 
 /* Chat: an agent's folder-trust dialog */
 "Trust this folder?" = "Diesem Ordner vertrauen?";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ von %@";
+"%@ · downloaded" = "%@ · heruntergeladen";
+"%@ · sent by the agent" = "%@ · vom Agenten gesendet";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "Die Datei auf der Maschine konnte nicht gelesen werden – ist sie noch vorhanden und läuft die Maschine?";
+"Couldn't write the file here." = "Die Datei konnte hier nicht geschrieben werden.";
+"Downloaded" = "Heruntergeladen";
+"Save As…" = "Sichern unter …";
+"Save or Share" = "Sichern oder teilen";
+"Saved to %@" = "Gesichert in %@";
+"Sent by the agent" = "Vom Agenten gesendet";

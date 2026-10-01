@@ -3214,3 +3214,15 @@
 
 /* Chat: an agent's folder-trust dialog */
 "Trust this folder?" = "信任此檔案夾？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · 已下載";
+"%@ · sent by the agent" = "%@ · 由代理程式傳送";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "無法讀取機器上的檔案——檔案是否仍在，機器是否正在執行？";
+"Couldn't write the file here." = "無法在此處寫入檔案。";
+"Downloaded" = "已下載";
+"Save As…" = "儲存為…";
+"Save or Share" = "儲存或分享";
+"Saved to %@" = "已儲存到 %@";
+"Sent by the agent" = "由代理程式傳送";
