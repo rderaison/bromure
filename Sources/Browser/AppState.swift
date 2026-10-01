@@ -420,7 +420,17 @@ final class AppState: @unchecked Sendable {
             "Install", comment: "Consent button of the new-postinstall-steps prompt"))
         alert.addButton(withTitle: NSLocalizedString(
             "Not Now", comment: "Decline button of the new-postinstall-steps prompt"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // A synchronous modal loop prevents the pool's MainActor startup task
+        // from resuming. Keep optional maintenance from blocking browser boot.
+        let response: NSApplication.ModalResponse
+        if let parent = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+            response = await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: parent) { continuation.resume(returning: $0) }
+            }
+        } else {
+            response = alert.runModal()
+        }
+        guard response == .alertFirstButtonReturn else { return }
 
         phase = .initializing(status: "Installing packages...", progress: nil)
         do {

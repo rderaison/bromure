@@ -182,6 +182,21 @@ class WorkerTests(unittest.TestCase):
                         struct.pack("<I", 24) + bytes(12)):
             self.assertEqual(self.exchange([], trailing=payload, expected_exit=1), [])
 
+    def test_display_resize_preserves_live_resources(self):
+        replies = self.exchange([
+            command(0xffff0020, struct.pack("<II", 64, 64)),
+            command(0x101, struct.pack("<4I", 9, 1, 64, 64)),
+            command(0xffff0020, struct.pack("<II", 128, 96)),
+            command(0x100),
+            command(0x104, struct.pack("<6I", 0, 0, 64, 64, 9, 0)),
+            command(0xffff0020, struct.pack("<II", 8192, 8192)),
+            command(0x100),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies],
+                         [0x1100, 0x1100, 0x1100, 0x1101, 0x1100, 0x1205, 0x1101])
+        self.assertEqual(struct.unpack_from("<III", replies[3], 32), (128, 96, 1))
+        self.assertEqual(struct.unpack_from("<III", replies[6], 32), (128, 96, 1))
+
     def test_display_scanout_and_flush(self):
         replies = self.exchange([
             command(0xffff0020, struct.pack("<II", 64, 64)), command(0x100),

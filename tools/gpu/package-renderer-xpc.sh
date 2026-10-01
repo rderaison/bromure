@@ -3,11 +3,11 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "$0")" && pwd)
 build_root="${1:-/private/tmp/bromure-gpu}"
 prefix="$build_root/prefix"
-angle="${BROMURE_ANGLE_SOURCE:-$build_root/angle-src}"
-virgl="${BROMURE_VIRGL_SOURCE:-$build_root/virgl-src}"
+angle="${BROMURE_ANGLE_SOURCE:-$build_root/sources/angle}"
+virgl="${BROMURE_VIRGL_SOURCE:-$build_root/sources/virgl}"
 output=$(mktemp -d "$build_root/renderer-xpc.XXXXXX")
 app="$output/BromureRendererXPCProbe.app"
-service="$app/Contents/XPCServices/io.bromure.renderer.xpc"
+service="$app/Contents/XPCServices/io.bromure.gpu.renderer.xpc"
 mkdir -p "$app/Contents/MacOS" "$service/Contents/MacOS" "$service/Contents/Frameworks"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>
@@ -19,7 +19,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 PLIST
 cat > "$service/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>io.bromure.renderer</string>
+<key>CFBundleIdentifier</key><string>io.bromure.gpu.renderer</string>
 <key>CFBundleExecutable</key><string>renderer</string>
 <key>CFBundlePackageType</key><string>XPC!</string>
 <key>LSMinimumSystemVersion</key><string>27.0</string>

@@ -6,6 +6,14 @@ case "${GRAPHICS_BACKEND:-software}" in
     virgl)
         # A stale inherited software override must not mask the selected GPU.
         unset LIBGL_ALWAYS_SOFTWARE
+        if [ -f /opt/bromure/mesa-virgl/graphics-build.txt ]; then
+            LIBGL_DRIVERS_PATH=/opt/bromure/mesa-virgl/lib/dri
+            LIBVA_DRIVERS_PATH=$LIBGL_DRIVERS_PATH
+            LIBVA_DRIVER_NAME=virtio_gpu
+            # Chromium-only libva RGB facade; its dependency is real libva.
+            LD_LIBRARY_PATH=/opt/bromure/chromium-vaapi:/opt/bromure/mesa-virgl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            export LIBGL_DRIVERS_PATH LIBVA_DRIVERS_PATH LIBVA_DRIVER_NAME LD_LIBRARY_PATH
+        fi
         ;;
     *)
         GRAPHICS_BACKEND=software

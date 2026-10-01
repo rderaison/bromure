@@ -1,6 +1,8 @@
 {
   "configVersion": 1,
   "graphicsBackends": ["software", "virgl"],
-  "videoDecodeBackends": ["software"],
+  "videoDecodeBackends": ["software", "virgl-videotoolbox-h264"],
+  "mesaVersion": "25.2.8",
+  "chromiumVaapiRgbABI": 1,
   "diagnosticCommand": "/usr/local/bin/graphics-diagnostics.py"
 }

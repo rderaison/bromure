@@ -309,18 +309,7 @@ PLIST
     fi
 fi
 
-# The optional macOS 27 renderer stays in its own sandboxed executable.
-# Main app deployment remains macOS 14; absence preserves legacy graphics.
-if [ -n "${BROMURE_RENDERER_XPC:-}" ]; then
-    if [ ! -x "$BROMURE_RENDERER_XPC/Contents/MacOS/renderer" ]; then
-        echo "BROMURE_RENDERER_XPC must point to a built renderer XPC bundle" >&2
-        exit 1
-    fi
-    codesign --verify --deep --strict "$BROMURE_RENDERER_XPC"
-    mkdir -p "$CONTENTS/XPCServices"
-    cp -R "$BROMURE_RENDERER_XPC" "$CONTENTS/XPCServices/io.bromure.renderer.xpc"
-    echo "Bundled experimental sandboxed GPU renderer."
-fi
+bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$SIGN_ID"
 
 # Code sign with entitlements.
 # Virtualization.framework requires com.apple.security.virtualization.

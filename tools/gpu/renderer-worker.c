@@ -349,11 +349,10 @@ int run_renderer_worker(int output_fd)
             result = renderer_capture_surface(info.native_handle) ? 0x1100 : 0x1200;
             break;
         }
-        case 0xffff0020: { // Host-only initial display geometry.
+        case 0xffff0020: { // Host-only display geometry; guest control allowlist excludes this.
             if (length != 32 || flags || context) break;
             uint32_t width = load32(request + 24), height = load32(request + 28);
-            if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > 16777216) break;
-            if (total_resource_bytes) break;
+            if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > 33554432) break;
             display_width = width; display_height = height; result = 0x1100;
             break;
         }

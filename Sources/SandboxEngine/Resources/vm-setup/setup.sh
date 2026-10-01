@@ -314,6 +314,7 @@ retry apt-get install -y -q --no-install-recommends \
     openbox xdotool \
     spice-vdagent \
     libgl1-mesa-dri libegl1 libgles2 mesa-utils \
+    mesa-va-drivers libva2 libva-drm2 libva-x11-2 vainfo \
     fonts-dejavu-core fonts-freefont-ttf fonts-liberation fonts-noto-color-emoji \
     adwaita-icon-theme \
     pipewire pipewire-pulse wireplumber pulseaudio-utils alsa-utils \
@@ -752,6 +753,14 @@ install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh
 install_config   scripts/graphics-env.sh /mnt/usr/local/bin/graphics-env.sh 644
 install_config   scripts/graphics-diagnostics.py /mnt/usr/local/bin/graphics-diagnostics.py 755
 mkdir -p /mnt/etc/bromure
+mkdir -p /mnt/opt/bromure/graphics-sources
+for asset in "$SCRIPT_DIR"/gpu/*; do
+    cp "$asset" /mnt/opt/bromure/graphics-sources/ || exit 1
+done
+if ! chroot /mnt sh /opt/bromure/graphics-sources/build-guest-graphics.sh; then
+    echo 'ERROR: guest VirGL/video graphics build failed'
+    exit 1
+fi
 install_config   configs/graphics-capabilities.json /mnt/etc/bromure/graphics-capabilities.json 644
 install_config   scripts/apply-config.sh   /mnt/usr/local/bin/apply-config.sh 755
 install_config   scripts/install-mtls.sh   /mnt/usr/local/bin/install-mtls.sh 755

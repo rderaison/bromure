@@ -7,6 +7,7 @@ public protocol HostGraphicsSession: AnyObject {
     var backendName: String { get }
     var deliveredFrameCount: Int { get }
     func observeFrames(_ observer: @escaping (IOSurface?) -> Void)
+    func resizeDisplay(width: Int, height: Int)
     func stop()
 }
 
@@ -22,6 +23,8 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
     private var generation = 0
     private var paused = false
     private var stopped = false
+    private var device: VZCustomVirtioDevice?
+    private var displaySize: (Int, Int) = (0, 0)
     private var processor: RendererCommandProcessor?
     // Only accessed on processingQueue, including surface callbacks.
     private var processingGeneration = 0
@@ -51,6 +54,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         }
         configuration = VZCustomVirtioDeviceConfiguration()
         super.init()
+        displaySize = (width, height)
         ownsRenderer = true
         configuration.deviceID = 16
         configuration.pciClassID = 3
@@ -100,6 +104,33 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         }
     }
 
+    public func resizeDisplay(width: Int, height: Int) {
+        guard width >= 64, height >= 64, width <= 8192, height <= 8192,
+              width * height <= 33554432 else { return }
+        self.deviceQueue.async { [weak self] in
+            guard let self, !self.stopped, let device = self.device,
+                  self.displaySize.0 != width || self.displaySize.1 != height else { return }
+            self.displaySize = (width, height)
+            let epoch = self.generation
+            self.processingQueue.async { [self] in
+                do {
+                    try self.processor?.setDisplay(width: UInt32(width), height: UInt32(height))
+                    self.deviceQueue.async { [self] in
+                        guard !self.stopped, self.generation == epoch else { return }
+                        // VIRTIO_GPU_EVENT_DISPLAY; the guest re-reads display info.
+                        let data = Data([1,0,0,0, 0,0,0,0, 1,0,0,0, 2,0,0,0])
+                        device.update(VZVirtioDeviceSpecificConfiguration(configurationData: data)) { error in
+                            if let error { print("[GPU] Display resize failed: \(error)") }
+                        }
+                    }
+                } catch {
+                    self.state.lock(); let active = !self.stopped && self.generation == epoch; self.state.unlock()
+                    if active { print("[GPU] Display resize failed: \(error)") }
+                }
+            }
+        }
+    }
+
     public func stop() {
         deviceQueue.async { [self] in terminate() }
     }
@@ -109,6 +140,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         state.lock(); stopped = true; generation += 1; paused = false; state.broadcast(); state.unlock()
         pending.removeAll(); completions.removeAll(); pendingBytes = 0
         latestFrame = nil; observer?(nil)
+        device = nil
         client.stop()
         processingQueue.async { [self] in processor?.stop(); processor = nil }
         if ownsRenderer {
@@ -122,6 +154,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
 
     public func customVirtioConfiguration(_ configuration: VZCustomVirtioDeviceConfiguration,
                                           didCreateDevice device: VZCustomVirtioDevice) {
+        self.device = device
         device.delegate = self
     }
 
@@ -164,7 +197,8 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
                         }
                     } catch {
                         response = Self.errorReply(snapshot)
-                        print("[GPU] Request failed: \(error)")
+                        state.lock(); let active = !stopped && generation == epoch; state.unlock()
+                        if active { print("[GPU] Request failed: \(error)") }
                     }
                     deviceQueue.async { [self] in
                         guard !stopped, generation == epoch, pending[token] != nil else { return }

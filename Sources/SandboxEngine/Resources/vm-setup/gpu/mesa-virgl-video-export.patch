@@ -1,0 +1,30 @@
+diff --git a/src/gallium/drivers/virgl/virgl_video.c b/src/gallium/drivers/virgl/virgl_video.c
+--- a/src/gallium/drivers/virgl/virgl_video.c
++++ b/src/gallium/drivers/virgl/virgl_video.c
+@@ -1105,6 +1105,14 @@
+     struct virgl_context *vctx = virgl_context(vcdc->base.context);
+     struct virgl_video_buffer *vbuf = virgl_video_buffer(target);
+ 
++    /* Decode writes are outside normal Gallium draws. Invalidate CPU shadows
++     * and include each output plane in the submission's GEM dependencies. */
++    struct virgl_screen *vs = virgl_screen(vctx->base.screen);
++    for (unsigned i = 0; i < vbuf->num_planes; ++i) {
++        struct virgl_resource *r = virgl_resource(vbuf->plane_views[i]->texture);
++        virgl_resource_dirty(r, 0);
++        vs->vws->emit_res(vs->vws, vctx->cbuf, r->hw_res, false);
++    }
+     virgl_encode_end_frame(vctx, vcdc, vbuf);
+     virgl_flush_eq(vctx, vctx, NULL);
+ 
+@@ -1289,7 +1297,10 @@
+     if (!vbuf)
+         return NULL;
+ 
+-    vbuf->buf = vl_video_buffer_create(ctx, tmpl);
++    /* Exported planes need full GEM backing for DMA-BUF bounds checks. */
++    struct pipe_video_buffer exported = *tmpl;
++    exported.bind |= PIPE_BIND_SHARED;
++    vbuf->buf = vl_video_buffer_create(ctx, &exported);
+     if (!vbuf->buf) {
+         free(vbuf);
+         return NULL;

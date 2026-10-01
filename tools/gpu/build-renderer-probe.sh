@@ -58,13 +58,18 @@ git -C "$angle" diff --cached --quiet
 git -C "$angle" -c core.abbrev=8 diff -- Source/ThirdParty/ANGLE/src/common/system_utils.cpp | cmp - "$script_dir/angle-dylib.patch"
 git -C "$angle" diff --quiet -- . ':!Source/ThirdParty/ANGLE/src/common/system_utils.cpp'
 
-if ! git -C "$virgl" apply --reverse --check "$script_dir/virgl-gles-msaa.patch" 2>/dev/null; then
-    git -C "$virgl" apply --check "$script_dir/virgl-gles-msaa.patch"
-    git -C "$virgl" apply "$script_dir/virgl-gles-msaa.patch"
+if ! git -C "$virgl" apply --reverse --check "$script_dir/virgl-metal-browser.patch" 2>/dev/null; then
+    git -C "$virgl" apply --check "$script_dir/virgl-metal-browser.patch"
+    git -C "$virgl" apply "$script_dir/virgl-metal-browser.patch"
 fi
 git -C "$virgl" diff --cached --quiet
-git -C "$virgl" -c core.abbrev=8 diff -- src/vrend/vrend_formats.c src/vrend/vrend_renderer.c src/vrend/vrend_renderer.h | cmp - "$script_dir/virgl-gles-msaa.patch"
-git -C "$virgl" diff --quiet -- . ':!src/vrend/vrend_formats.c' ':!src/vrend/vrend_renderer.c' ':!src/vrend/vrend_renderer.h'
+git -C "$virgl" -c core.abbrev=8 diff -- meson.build src/meson.build src/vrend/vrend_decode.c src/vrend/virgl_video.h src/vrend/vrend_video.c src/vrend/vrend_formats.c src/vrend/vrend_renderer.c src/vrend/vrend_renderer.h src/vrend/vrend_shader.c | cmp - "$script_dir/virgl-metal-browser.patch"
+git -C "$virgl" diff --quiet -- . ':!src/vrend/vrend_formats.c' ':!src/vrend/vrend_renderer.c' ':!src/vrend/vrend_renderer.h' ':!meson.build' ':!src/meson.build' ':!src/vrend/virgl_video.h' ':!src/vrend/vrend_video.c' ':!src/vrend/vrend_decode.c' ':!src/vrend/vrend_shader.c'
+
+if [[ ! -f "$virgl/src/vrend/virgl_video_videotoolbox.m" ]]; then
+    cp "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_video_videotoolbox.m"
+fi
+cmp "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_video_videotoolbox.m"
 
 if [[ ! -x "$tool_env/bin/python3" ]]; then xcrun python3 -m venv "$tool_env"; fi
 if ! "$tool_env/bin/python3" -c 'import pkg_resources; pkg_resources.require(["meson==1.11.2", "ninja==1.13.2", "Mako==1.3.12", "MarkupSafe==3.0.3", "packaging==26.3", "PyYAML==6.0.3"])' 2>/dev/null; then
@@ -110,7 +115,7 @@ export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
 include_angle="-I$angle/Source/ThirdParty/ANGLE/include"
 build_meson epoxy "$epoxy" -Dtests=false -Dglx=no -Degl=yes "-Dc_args=$include_angle"
 build_meson virgl "$virgl" -Dplatforms=egl -Dtests=false -Dvtest=false \
-    -Dvenus=false -Dneptune=false -Dvideo=false "-Dc_args=$include_angle"
+    -Dvenus=false -Dneptune=false -Dvideo=true "-Dc_args=$include_angle"
 
 # Preserve upstream notices alongside probe dependencies.
 mkdir -p "$prefix/licenses"

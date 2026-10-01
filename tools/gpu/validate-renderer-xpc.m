@@ -16,7 +16,7 @@ int main(void)
 {
     @autoreleasepool {
         if (@available(macOS 27.0, *)) {} else { puts("SKIP: macOS 27 required"); return 0; }
-        NSXPCConnection *connection = [[NSXPCConnection alloc] initWithServiceName:@"io.bromure.renderer"];
+        NSXPCConnection *connection = [[NSXPCConnection alloc] initWithServiceName:@"io.bromure.gpu.renderer"];
         connection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(BromureRendererService)];
         [connection resume];
         uint32_t create[18] = {4, 0, 0x74736574};

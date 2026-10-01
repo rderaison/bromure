@@ -10,6 +10,9 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private let pipeline: MTLRenderPipelineState
     private var texture: MTLTexture?
     private var inFlight = 0
+    public var guestDisplayScale: Double = 1
+    public var displaySizeChanged: ((Int, Int) -> Void)?
+    private var resizeTask: DispatchWorkItem?
     public private(set) var presentedFrameCount = 0
 
     public init(gpuFrame frame: NSRect) throws {
@@ -71,7 +74,15 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
 
     public func discardFrame() { texture = nil; needsDisplay = true }
 
-    public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        guard size.width.isFinite, size.height.isFinite else { return }
+        resizeTask?.cancel()
+        let width = Int(min(max(view.bounds.width * guestDisplayScale, 64), 8192))
+        let height = Int(min(max(view.bounds.height * guestDisplayScale, 64), 8192))
+        let task = DispatchWorkItem { [weak self] in self?.displaySizeChanged?(width, height) }
+        resizeTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: task)
+    }
 
     public func draw(in view: MTKView) {
         guard inFlight < 3, let pass = currentRenderPassDescriptor, let drawable = currentDrawable,

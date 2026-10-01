@@ -2352,6 +2352,10 @@ final class BrowserSession {
         if let graphics = warmVM.graphicsSession,
            let gpuView = try? HostGPUFrameView(gpuFrame: vmView.bounds) {
             gpuView.autoresizingMask = [.width, .height]
+            gpuView.guestDisplayScale = Double(VMConfig.resolvedDisplayScale())
+            gpuView.displaySizeChanged = { [weak graphics] width, height in
+                graphics?.resizeDisplay(width: width, height: height)
+            }
             vmView.addSubview(gpuView)
             graphics.observeFrames { [weak gpuView] surface in
                 DispatchQueue.main.async {

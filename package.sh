@@ -301,6 +301,8 @@ if [ -d "$FRAMEWORKS_DIR" ]; then
     done
 fi
 
+bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$DEVELOPER_ID"
+
 # Finally sign the outer app with entitlements.
 codesign --force --options runtime \
     --entitlements "$ENTITLEMENTS" \

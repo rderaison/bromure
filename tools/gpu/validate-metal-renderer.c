@@ -1,6 +1,7 @@
 // Trusted standalone dependency probe. No guest commands or app integration.
 #include <epoxy/egl.h>
 #include <epoxy/gl.h>
+#define VIRGL_RENDERER_UNSTABLE_APIS 1
 #include <virglrenderer.h>
 #include <virgl_hw.h>
 #include <stdio.h>
@@ -121,7 +122,7 @@ int renderer_probe_main(int argc, char **argv)
         .create_gl_context = create_context, .destroy_gl_context = destroy_context,
         .make_current = make_current, .get_egl_display = get_display,
     };
-    require(virgl_renderer_init(&r, VIRGL_RENDERER_USE_GLES | VIRGL_RENDERER_NATIVE_SHARE_TEXTURE, &callbacks) == 0,
+    require(virgl_renderer_init(&r, VIRGL_RENDERER_USE_GLES | VIRGL_RENDERER_NATIVE_SHARE_TEXTURE | VIRGL_RENDERER_USE_VIDEO, &callbacks) == 0,
             "initialize VirGL with external Metal EGL display");
     for (uint32_t set = 1; set <= 2; ++set) {
         uint32_t version = 0, size = 0;

@@ -116,6 +116,28 @@ class GuestGraphicsConfigTests(unittest.TestCase):
         self.assertEqual(shell_environment("GRAPHICS_BACKEND=venus\nEXTRA_FLAGS=''\n")[:2],
                          ("software", "1"))
 
+    def test_hardware_movie_flags_and_developer_features_are_merged(self):
+        with patch.object(config, "virgl_video_device", return_value="/dev/dri/renderD129"):
+            _, _, flags = shell_environment(chrome_env({
+                "graphicsBackend": "virgl",
+                "extraChromeFlags": "--disable-features=TestDisabled --enable-features=TestEnabled",
+            }))
+        enabled = [f for f in flags if f.startswith("--enable-features=")]
+        disabled = [f for f in flags if f.startswith("--disable-features=")]
+        self.assertEqual(len(enabled), 1)
+        self.assertEqual(len(disabled), 1)
+        self.assertIn("AcceleratedVideoDecodeLinuxGL", enabled[0])
+        self.assertIn("TestEnabled", enabled[0])
+        self.assertIn("TestDisabled", disabled[0])
+        self.assertIn("LcdText", disabled[0])
+        self.assertIn("PreferV4L2VideoAcceleration", disabled[0])
+        self.assertIn("--hardware-video-device-path=/dev/dri/renderD129", flags)
+
+    def test_software_policy_does_not_enable_hardware_movie_bridge(self):
+        with patch.object(config, "virgl_video_device", return_value="/dev/dri/renderD129"):
+            _, _, flags = shell_environment(chrome_env({"graphicsBackend": "virgl", "disableGPU": True}))
+        self.assertFalse(any("AcceleratedVideoDecodeLinuxGL" in flag for flag in flags))
+
 
 class GraphicsDiagnosticsTests(unittest.TestCase):
     def test_only_successful_virgl_probe_counts(self):
@@ -153,11 +175,12 @@ class GraphicsDiagnosticsTests(unittest.TestCase):
                                                    {"GRAPHICS_BACKEND": "virgl"})
             self.assertEqual(env["GRAPHICS_BACKEND"], "software")
 
-    def test_capability_marker_does_not_advertise_hardware_video(self):
+    def test_capability_marker_describes_installed_h264_bridge(self):
         data = json.loads((VM_SETUP / "configs/graphics-capabilities.json").read_text())
         self.assertEqual(data["configVersion"], 1)
         self.assertEqual(data["graphicsBackends"], ["software", "virgl"])
-        self.assertEqual(data["videoDecodeBackends"], ["software"])
+        self.assertEqual(data["videoDecodeBackends"], ["software", "virgl-videotoolbox-h264"])
+        self.assertEqual(data["chromiumVaapiRgbABI"], 1)
 
 
 if __name__ == "__main__":

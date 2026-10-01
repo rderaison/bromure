@@ -23,11 +23,11 @@ public final class MacOS27RendererClient {
     private var stopped = false
 
     public init(bundle: Bundle = .main) throws {
-        let service = bundle.bundleURL.appendingPathComponent("Contents/XPCServices/io.bromure.renderer.xpc")
+        let service = bundle.bundleURL.appendingPathComponent("Contents/XPCServices/io.bromure.gpu.renderer.xpc")
         guard FileManager.default.fileExists(atPath: service.path) else {
             throw Self.failure("Embedded GPU renderer is missing")
         }
-        connection = NSXPCConnection(serviceName: "io.bromure.renderer")
+        connection = NSXPCConnection(serviceName: "io.bromure.gpu.renderer")
         connection.remoteObjectInterface = NSXPCInterface(with: RendererServiceProtocol.self)
         connection.invalidationHandler = { [weak self] in self?.stop() }
         connection.interruptionHandler = { [weak self] in self?.stop() }
