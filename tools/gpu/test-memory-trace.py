@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +15,26 @@ spec.loader.exec_module(trace)
 
 
 class MemoryTraceTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('BROMURE_MEMORY_TRACE_REPLAY'),
+                         'optional captured fixed-run JSONL replay')
+    def test_captured_fixed_run_replay(self):
+        # The captured file stays outside git (contains process arguments).
+        # Run with BROMURE_MEMORY_TRACE_REPLAY=/path/bromure-fixed-memory.jsonl.
+        rows = [json.loads(line) for line in
+                Path(os.environ['BROMURE_MEMORY_TRACE_REPLAY']).read_text().splitlines()]
+        samples = [row for row in rows if row['kind'] == 'sample']
+        recovered = []
+        for sample in samples:
+            gpu = [p for p in sample['processes'] if '--type=gpu-process' in
+                   trace.process_roles([p.get('argv0', p['executable'])])[0]]
+            self.assertEqual(len(gpu), 1)
+            recovered.extend(gpu)
+        self.assertEqual(len(recovered), 961)
+        self.assertEqual({(p['pid'], p['start_ticks']) for p in recovered}, {(816, 292)})
+        self.assertEqual(max(p['fd_count'] for p in recovered), 166)
+        self.assertEqual(max(p['fd_types'].get('sync_file', 0) for p in recovered
+                             if 'fd_types' in p), 45)
+
     def test_flattened_chromium_process_title(self):
         title = ('/usr/lib/chromium/chromium --type=gpu-process '
                  '--enable-logging=stderr --user-agent=Mozilla/5.0 (Macintosh; Intel)')
