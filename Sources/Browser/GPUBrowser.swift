@@ -17,6 +17,8 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var interactive = false
     @Flag(name: .long) var nativeChrome = false
     @Flag(name: .long) var resizeCheck = false
+    @Flag(name: .long, help: "Benchmark Apple’s built-in Virtio graphics device without the custom VirGL renderer.")
+    var appleVirtioGPU = false
     @Option(name: .long) var checkTimeout: Int = 30
     @Option(name: .long) var url: String = "chrome://gpu"
 
@@ -55,9 +57,10 @@ struct GPUBrowser: ParsableCommand {
         config.enableWebGL = true
         config.nativeChrome = nativeChrome
         if nativeChrome { config.nativeChromeInset = VMConfig.defaultNativeChromeInset(forDisplayScale: VMConfig.resolvedDisplayScale()) }
-        let pool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), experimentalGPU: true)
+        let pool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), experimentalGPU: !appleVirtioGPU)
         try await pool.warmUp()
-        guard let warm = await pool.claim(config: config), warm.graphicsSession?.backendName == "virgl" else {
+        guard let warm = await pool.claim(config: config),
+              appleVirtioGPU ? warm.graphicsSession == nil : warm.graphicsSession?.backendName == "virgl" else {
             await pool.shutdown()
             throw ValidationError("VM did not select the experimental GPU")
         }
@@ -145,6 +148,6 @@ struct GPUBrowser: ParsableCommand {
         await pool.retire(warm)
         await pool.shutdown()
         withExtendedLifetime(session) {}
-        guard frames > 0, accepted else { throw ValidationError("Browser GPU acceptance failed") }
+        guard appleVirtioGPU || frames > 0, accepted else { throw ValidationError("Browser GPU acceptance failed") }
     }
 }

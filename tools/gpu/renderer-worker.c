@@ -12,7 +12,7 @@
 #include <time.h>
 #include <sys/uio.h>
 
-enum { MAX_FRAME = 65536, MAX_CONTEXTS = 32 };
+enum { MAX_FRAME = 65536, MAX_REQUEST = 1048576, MAX_CONTEXTS = 32 };
 enum { MAX_RESOURCES = 256 };
 extern int probe_shared_texture(void *native_texture);
 extern int renderer_capture_surface(void *native_texture);
@@ -69,7 +69,9 @@ int run_renderer_worker(int output_fd)
     struct iovec backing[MAX_RESOURCES] = {0};
     uint64_t total_backing = 0;
     uint32_t display_width = 0, display_height = 0, scanout_resource = 0;
-    _Alignas(8) uint8_t request[MAX_FRAME], response[MAX_FRAME];
+    // One ordered worker per process; keep the bounded submission buffer off the stack.
+    _Alignas(8) static uint8_t request[MAX_REQUEST];
+    _Alignas(8) uint8_t response[MAX_FRAME];
     uint8_t prefix[4];
     for (;;) {
         int got = read_exact(STDIN_FILENO, prefix, 4);
@@ -80,10 +82,11 @@ int run_renderer_worker(int output_fd)
         }
         if (got < 0) return 1;
         uint32_t length = load32(prefix);
-        if (length < 24 || length > MAX_FRAME || read_exact(STDIN_FILENO, request, length) != 1) return 1;
+        if (length < 24 || length > MAX_REQUEST || read_exact(STDIN_FILENO, request, length) != 1) return 1;
         uint32_t type = load32(request), flags = load32(request + 4), context = load32(request + 16);
         uint32_t result = 0x1205, response_length = 24;
         memset(response, 0, sizeof(response));
+        if (length > MAX_FRAME && type != 0x207) goto reply;
         // No multiple timelines/context-init feature is advertised.
         if (flags & ~1u) goto reply;
         store32(response + 4, flags);

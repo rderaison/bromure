@@ -162,7 +162,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         guard !stopped else { return }
         while let element = queue.nextElement() {
             let count = element.readBuffersAvailableByteCount
-            guard queue.queueIndex == 0, count >= 24, count <= 65536,
+            guard queue.queueIndex == 0, count >= 24, count <= 1048576,
                   pending.count < 256, pendingBytes <= 16777216 - count else {
                 element.returnToQueue(); continue
             }

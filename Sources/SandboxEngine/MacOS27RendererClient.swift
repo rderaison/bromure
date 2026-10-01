@@ -41,7 +41,7 @@ public final class MacOS27RendererClient {
     public func execute(_ command: Data, completion: @escaping (Result<Reply, Error>) -> Void) {
         let snapshot = Data(command)
         queue.async { [self] in
-            guard !stopped, snapshot.count >= 24, snapshot.count <= 65536,
+            guard !stopped, snapshot.count >= 24, snapshot.count <= (Self.word(snapshot, 0) == 0x207 ? 1048576 : 65536),
                   pending.count < 256, pendingBytes <= 16777216 - snapshot.count else {
                 completion(.failure(Self.failure("Renderer request budget exceeded or renderer stopped")))
                 return

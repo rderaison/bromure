@@ -123,7 +123,7 @@ final class RendererCommandProcessor {
                  readGuest: (UInt64, Int) throws -> Data,
                  writeGuest: (UInt64, Data) throws -> Void) throws -> Data {
         // Explicit allowlist: host-only reset is never reachable from a guest.
-        guard snapshot.count >= 24, snapshot.count <= 65536,
+        guard snapshot.count >= 24, snapshot.count <= (get32(snapshot, at: 0) == 0x207 ? 1048576 : 65536),
               [UInt32(0x100), 0x101, 0x102, 0x103, 0x104, 0x105, 0x106, 0x107, 0x108, 0x109, 0x200, 0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207].contains(get32(snapshot, at: 0)) else {
             throw failure("Unsupported control command")
         }
@@ -264,7 +264,7 @@ final class RendererCommandProcessor {
 
     private func request(_ command: Data) throws -> Data {
         if let transport { return try transport(command) }
-        guard process.isRunning, command.count <= 65536 else { throw failure("Renderer unavailable") }
+        guard process.isRunning, command.count <= (get32(command, at: 0) == 0x207 ? 1048576 : 65536) else { throw failure("Renderer unavailable") }
         var frame = Data(repeating: 0, count: 4)
         put32(UInt32(command.count), at: 0, into: &frame)
         frame.append(command)

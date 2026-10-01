@@ -177,8 +177,18 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies], [0x1100] * 11)
         self.assertEqual(replies[-1][24:], payload)
 
+    def test_large_3d_submission_and_non_submission_limit(self):
+        create = command(0x200, struct.pack("<II64s", 4, 0, b"large"), context=7)
+        # Real valid VirGL NOP stream spanning the former 64-KiB ceiling.
+        stream = bytes(80000)
+        submit = command(0x207, struct.pack("<II", len(stream), 0) + stream, context=7)
+        invalid_size = command(0x207, struct.pack("<II", len(stream) - 4, 0) + stream, context=7)
+        replies = self.exchange([create, submit, invalid_size, command(0x100, bytes(80000))])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies],
+                         [0x1100, 0x1100, 0x1205, 0x1205])
+
     def test_truncated_and_oversize_frames(self):
-        for payload in (b"\x18", struct.pack("<I", 23), struct.pack("<I", 65537),
+        for payload in (b"\x18", struct.pack("<I", 23), struct.pack("<I", 1048577),
                         struct.pack("<I", 24) + bytes(12)):
             self.assertEqual(self.exchange([], trailing=payload, expected_exit=1), [])
 

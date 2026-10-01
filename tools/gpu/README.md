@@ -96,3 +96,9 @@ The ordinary desktop scanout uses native Metal textures, IOSurfaces and GPU blit
 
 Earlier image-403 inventories and feasibility reports under `results/` describe
 the original image, not the rebuilt installation.
+
+## Performance comparison
+
+[Five-trial comparison against Apple VZ Virtio and native macOS](benchmarks/README.md)
+includes identical WebGL2 workloads, actual renderer/device inventory and raw samples.
+3D submissions accept up to 1 MiB; other messages and all replies remain at 64 KiB.

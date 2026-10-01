@@ -64,7 +64,9 @@ static int transfer(int fd, uint8_t *bytes, size_t count, int writing, double de
 - (void)processCommand:(NSData *)command
                  reply:(void (^)(NSData *, IOSurface *, NSError *))reply
 {
-    if (command.length < 24 || command.length > 65536) {
+    uint32_t kind = 0;
+    if (command.length >= 24) memcpy(&kind, command.bytes, sizeof(kind));
+    if (command.length < 24 || command.length > (kind == 0x207 ? 1048576u : 65536u)) {
         reply(nil, nil, [NSError errorWithDomain:@"BromureRenderer" code:1 userInfo:nil]);
         return;
     }
