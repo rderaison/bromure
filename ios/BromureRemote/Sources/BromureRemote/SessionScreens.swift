@@ -407,14 +407,16 @@ struct MobileNewSessionScreen: View {
                     let id = await controller.startSession(
                         profileID: req.profileID, tool: req.tool, cwd: req.cwd,
                         cloneURL: req.cloneURL, message: req.openingMessage,
-                        attachments: req.attachments, room: room)
+                        attachments: req.attachments, room: room,
+                        instructions: req.instructions)
                     starting = false
                     if let id { onStarted(id) } else { failed = true }
                 }
             },
             onCancel: onCancel,
             onNewMachine: { workspaceEdit = .new },
-            listFolders: { await controller.listSessionFolders(profileID: $0, path: $1) })
+            listFolders: { await controller.listSessionFolders(profileID: $0, path: $1) },
+            instructionStore: controller.supportsInstructions ? controller.instructionStore : nil)
         .disabled(starting)
         .overlay {
             if starting {

@@ -798,3 +798,9 @@
 "Copy the console output" = "Konsolenausgabe kopieren";
 "Hide Details" = "Details ausblenden";
 "Show Details" = "Details einblenden";
+
+/* Open New Windows With */
+"Open New Windows With" = "Neue Fenster \U00F6ffnen mit";
+"The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "Das Profil, das Bromure \U00F6ffnet, wenn Sie die App starten, auf ihr Dock-Symbol klicken oder \U2318N dr\U00FCcken, w\U00E4hrend kein Browserfenster im Vordergrund ist. \U201EZuletzt verwendetes Profil\U201C w\U00E4hlt das zuletzt benutzte. Sie k\U00F6nnen dies auch im Profilmen\U00FC jedes Fensters festlegen.";
+"Last Used Profile" = "Zuletzt verwendetes Profil";
+"Open New Windows with \U201C%@\U201D" = "Neue Fenster mit \U201E%@\U201C \U00F6ffnen";

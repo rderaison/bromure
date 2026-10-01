@@ -86,6 +86,7 @@ An empty field opens a blank page.
 Click the profile chip to open its menu:
 
 - **Every profile**, each with a colored dot. The window's own profile is shown with a checkmark. A persistent profile that already has an open window reads **Work (open)**; choosing it brings that window to the front instead of opening a second one. Choosing any other profile opens a new window for it.
+- **Open New Windows with “*name*”** — make this window's profile the one Bromure opens on launch, on a Dock click, and on ⌘N with no window in front. Checked while it is; choose it again to go back to the last-used profile. Same setting as [Settings › General › Open New Windows With](08-app-settings/general.mdx#open-new-windows-with).
 - **New Profile…** — create a profile. See [Profiles](06-profiles.mdx#creating-a-profile).
 - **Edit “*name*”…** — open this window's profile in the profile settings window. For a managed profile the item reads **View “*name*” Settings…** and opens the settings read-only.
 - **Delete “*name*”…** — delete this window's profile. Dimmed for managed profiles. A profile can't be deleted while its window is open, so from the chip this item explains that you need to close the window first.
@@ -155,7 +156,7 @@ The menu bar has the Bromure (app) menu followed by **File**, **Edit**, **Bookma
 
 | Item | Shortcut | What it does |
 |---|---|---|
-| **New Window** | ⌘N | Opens another window of the front window's profile. With no window in front, uses the profile you used most recently. For a persistent profile that already has a window, brings that window forward instead. |
+| **New Window** | ⌘N | Opens another window of the front window's profile. With no window in front, uses the profile chosen under **Settings › General › Open New Windows With** (by default, the one you used most recently). For a persistent profile that already has a window, brings that window forward instead. |
 | **New Private Window** | ⇧⌘N | Opens a window of the built-in **Private Browsing** profile (or, if you deleted it, the first profile that doesn't retain data). |
 | **New Window With Profile** ▸ | | Lists every profile with its color dot as **New *name* Window**, or **Show *name* Window** for a persistent profile that already has a window. |
 | **New Profile…** | | Creates a profile. See [Profiles](06-profiles.mdx#creating-a-profile). |
@@ -304,7 +305,7 @@ When you quit with windows open, Bromure asks:
 
 Quitting closes every window without the per-window **Save session recording?** prompt, so save any recording you want to keep before you quit.
 
-Closing the last window doesn't quit Bromure. Click its Dock icon to open a window of the profile you used most recently.
+Closing the last window doesn't quit Bromure. Click its Dock icon to open a window of your [startup profile](08-app-settings/general.mdx#open-new-windows-with) — by default, the one you used most recently.
 
 ## Related chapters
 

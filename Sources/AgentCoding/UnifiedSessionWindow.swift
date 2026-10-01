@@ -1860,7 +1860,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 delegate?.agentSessionStore.setNickname(id, nick)
             },
             recentStarts: NewSessionView.RecentStart.from(delegate.agentSessionStore.sessions,
-                                                          profiles: delegate.profiles))
+                                                          profiles: delegate.profiles),
+            instructionStore: delegate.instructionPresetStore)
         showSessionOverlay(view)
         if let room, let name = delegate.agentRoomStore.room(room)?.name {
             showRoomBanner(name)

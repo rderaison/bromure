@@ -3223,3 +3223,21 @@
 "Save or Share" = "保存または共有";
 "Saved to %@" = "%@ に保存しました";
 "Sent by the agent" = "エージェントが送信";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "指示を追加";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "この指示で開始したセッションでは、エージェントのシステムプロンプトに追加されます。エージェントがどんな役割で、どう作業すべきかを記述してください（「あなたは…です」）。";
+"Careful reviewer" = "慎重なレビュアー";
+"Delete these instructions" = "この指示を削除";
+"Edit instructions…" = "指示を編集…";
+"Instructions" = "指示";
+"Instructions added to the agent's system prompt (“You are a…”)" = "エージェントのシステムプロンプトに追加される指示（「あなたは…です」）";
+"Instructions without a name or text are not kept." = "名前またはテキストのない指示は保存されません。";
+"New instructions" = "新しい指示";
+"No instructions" = "指示なし";
+"No instructions yet. Add some with +." = "まだ指示がありません。+ で追加してください。";
+"Teacher" = "先生";
+"The agent as it comes" = "そのままのエージェント";
+"Untitled" = "無題";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "あなたはリリース前に変更をレビューする几帳面なシニアエンジニアです。まずバグ、エッジケース、セキュリティ上の問題を探し、理由を説明し、大きな書き直しよりも小さくて十分にテストされた変更を優先してください。";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "あなたは辛抱強い先生です。作業しながら、何をなぜしているのかを平易な言葉で説明し、各ステップからユーザーが学べることを示してください。";

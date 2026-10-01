@@ -326,10 +326,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Launch flow
 
-    /// The profile a fresh window opens in when no window is key: the
-    /// most recently used one (``ProfileManager/allProfiles`` sorts by
-    /// last use), falling back to the ephemeral default.
+    /// The profile a fresh window opens in when no window is key: the one
+    /// chosen under "Open New Windows With" if it still exists, otherwise
+    /// the most recently used one (``ProfileManager/allProfiles`` sorts by
+    /// last use).
     @MainActor private func startupProfile() -> Profile? {
+        if let id = state.launchProfileID,
+           let p = state.profileManager.profile(withID: id) { return p }
         if let id = state.selectedProfileID,
            let p = state.profileManager.profile(withID: id) { return p }
         return state.profileManager.allProfiles.first
@@ -2966,6 +2969,7 @@ final class BrowserSession {
                 // All actions resolve through the app delegate.
                 if let profile {
                     tabModel.profileName = profile.name
+                    tabModel.profileID = profile.id
                     tabModel.profileColor = profile.color
                     let delegate = { NSApp.delegate as? GUIAppDelegate }
                     tabModel.profileIsManaged = delegate()?.state.profileManager.isManaged(profile.id) ?? false
