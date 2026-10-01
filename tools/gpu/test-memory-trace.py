@@ -74,6 +74,32 @@ class MemoryTraceTests(unittest.TestCase):
                 trace.snapshot_process(99999999, False)
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'requires Linux /proc')
+    def test_live_gpu_role_with_proc_self_exe_argv0(self):
+        # Exercise full enumeration/JSON output, not just the selection helper.
+        # A non-Chromium executable ensures the exact GPU role is sufficient.
+        child = subprocess.Popen(['/proc/self/exe', '-c',
+                                  'import time; time.sleep(15)',
+                                  '--type=gpu-process'], executable=sys.executable)
+        try:
+            result = subprocess.run([sys.executable, str(SCRIPT), '--seconds', '1',
+                                     '--interval', '.25'], capture_output=True,
+                                    text=True, timeout=8, check=True)
+            rows = [json.loads(line) for line in result.stdout.splitlines()]
+            samples = [r for r in rows if r['kind'] == 'sample']
+            self.assertTrue(samples)
+            for sample in samples:
+                records = [p for p in sample['processes'] if p['pid'] == child.pid]
+                self.assertEqual(len(records), 1, sample['errors'])
+                self.assertEqual(records[0]['argv0'], '/proc/self/exe')
+                self.assertEqual(records[0]['role'], ['--type=gpu-process'])
+                self.assertGreaterEqual(records[0]['fd_count'], 3)
+            self.assertIn('fd_types', next(p for p in samples[0]['processes']
+                                          if p['pid'] == child.pid))
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires Linux /proc')
     def test_bounded_live_smoke(self):
         result = subprocess.run([sys.executable, str(SCRIPT), '--seconds', '1',
                                  '--interval', '.25'], capture_output=True,
