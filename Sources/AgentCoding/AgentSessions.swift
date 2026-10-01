@@ -31,6 +31,8 @@ struct AgentSessionRequest {
     var role: String? = nil
     /// The room the new session joins (nil = none).
     var roomID: UUID? = nil
+    /// Added to the agent's system prompt (nil = none).
+    var instructions: String? = nil
 }
 
 /// A worktree session's branch, as the last check read it.
@@ -304,6 +306,9 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// The room it belongs to (Rooms: a named set of sessions with a
     /// Switchboard of its own). nil = not in a room.
     var roomID: UUID?
+    /// Added to the agent's system prompt on every launch, resumes
+    /// included (picked on the New session screen). nil = none.
+    var instructions: String?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,

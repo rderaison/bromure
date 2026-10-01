@@ -1989,6 +1989,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         AgentSessionEngine(store: agentSessionStore, delegate: self)
     /// Rooms: named sets of sessions, each with a Switchboard of its own.
     let agentRoomStore = AgentRoomStore()
+    /// Instructions a new session can add to its agent's system prompt.
+    let instructionPresetStore = InstructionPresetStore()
     /// Delegations between sessions: one agent handing work to another.
     let delegationStore = DelegationStore()
     private(set) lazy var delegationEngine: DelegationEngine = {
@@ -4583,6 +4585,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.agentRoomStore.rooms.compactMap(Self.codableToDict) ?? []
             }
         }
+        server.onListInstructionPresets = { [weak self] in
+            MainActor.assumeIsolated {
+                InstructionPresetStore.wire(self?.instructionPresetStore.presets ?? [])
+            }
+        }
+        server.onSetInstructionPresets = { [weak self] list in
+            MainActor.assumeIsolated {
+                self?.instructionPresetStore.replace(InstructionPresetStore.fromWire(list))
+            }
+        }
         server.onAgentRoomCommand = { [weak self] id, action, body in
             MainActor.assumeIsolated {
                 self?.roomCommand(id, action, body) ?? ["error": "no app"]
@@ -4620,7 +4632,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
                         openingMessage: body["message"] as? String,
-                        attachments: attachments, roomID: room), remotely: true)
+                        attachments: attachments, roomID: room,
+                        instructions: body["instructions"] as? String), remotely: true)
                     return ["ok": true, "id": sid.uuidString]
                 case (nil, "switchboard"):
                     // The Switchboard, started (or woken) for a client that
@@ -11232,19 +11245,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let spec = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"], !spec.isEmpty
         else { return }
         FatClientLog.log("autoOpen: spec=\(spec)")
-        let hosts = RemoteHostStore.shared.hosts
-        FatClientLog.log("autoOpen: \(hosts.count) configured host(s): \(hosts.map(\.name))")
-        let targets: [RemoteHost]
-        if spec == "all" {
-            targets = hosts
-        } else if let id = UUID(uuidString: spec) {
-            targets = hosts.filter { $0.id == id }
-        } else {
-            targets = hosts.filter { $0.name == spec || $0.address == spec }
-        }
-        for h in targets { openRemoteHost(h) }
-    }
-
         // "peer:<name>": one of this account's servers, reached through
         // bromure.io (direct or relayed) the way the connect window dials it.
         if spec.hasPrefix("peer:") {
@@ -11265,6 +11265,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             return
         }
+        let hosts = RemoteHostStore.shared.hosts
+        FatClientLog.log("autoOpen: \(hosts.count) configured host(s): \(hosts.map(\.name))")
+        let targets: [RemoteHost]
+        if spec == "all" {
+            targets = hosts
+        } else if let id = UUID(uuidString: spec) {
+            targets = hosts.filter { $0.id == id }
+        } else {
+            targets = hosts.filter { $0.name == spec || $0.address == spec }
+        }
+        for h in targets { openRemoteHost(h) }
+    }
+
     func saveAutomation(_ automation: ScheduledAutomation) {
         scheduledAutomationStore.upsert(automation)
         scheduledAutomationEngine.tick()

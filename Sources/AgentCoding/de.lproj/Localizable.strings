@@ -3223,3 +3223,21 @@
 "Save or Share" = "Sichern oder teilen";
 "Saved to %@" = "Gesichert in %@";
 "Sent by the agent" = "Vom Agenten gesendet";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "Anweisungen hinzufügen";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "Werden dem Systemprompt des Agenten hinzugefügt, wenn eine Sitzung damit startet. Beschreiben Sie, wer der Agent sein und wie er arbeiten soll – „Du bist ein …“.";
+"Careful reviewer" = "Gründlicher Reviewer";
+"Delete these instructions" = "Diese Anweisungen löschen";
+"Edit instructions…" = "Anweisungen bearbeiten …";
+"Instructions" = "Anweisungen";
+"Instructions added to the agent's system prompt (“You are a…”)" = "Anweisungen, die dem Systemprompt des Agenten hinzugefügt werden („Du bist ein …“)";
+"Instructions without a name or text are not kept." = "Anweisungen ohne Namen oder Text werden nicht behalten.";
+"New instructions" = "Neue Anweisungen";
+"No instructions" = "Keine Anweisungen";
+"No instructions yet. Add some with +." = "Noch keine Anweisungen. Fügen Sie welche mit + hinzu.";
+"Teacher" = "Lehrer";
+"The agent as it comes" = "Der Agent, wie er ist";
+"Untitled" = "Ohne Titel";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "Du bist ein gewissenhafter Senior-Entwickler, der Änderungen vor dem Release prüft. Suche zuerst nach Fehlern, Randfällen und Sicherheitsproblemen, erkläre deine Überlegungen und bevorzuge kleine, gut getestete Änderungen gegenüber großen Umbauten.";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "Du bist ein geduldiger Lehrer. Erkläre unterwegs in einfacher Sprache, was du tust und warum, und zeige, was der Benutzer aus jedem Schritt lernen kann.";

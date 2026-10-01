@@ -1231,6 +1231,9 @@ struct NewSessionView: View {
     let assignNickname: ((UUID, String) -> Void)?
     /// The last few agent + machine + folder combinations, one click each.
     let recentStarts: [RecentStart]
+    /// Instructions to add to the agent's system prompt (nil: a server too
+    /// old to apply them — no chip).
+    let instructionStore: InstructionPresetStore?
 
     struct RecentStart: Hashable {
         let profileID: UUID
@@ -1271,6 +1274,8 @@ struct NewSessionView: View {
     @State private var repoURL: String = ""
     @State private var derivedFolder: String?
     @State private var message = ""
+    /// The instructions picked for this session (nil: none).
+    @State private var instructionsID: UUID?
     /// The greeting, one of a rotation: picked when the screen comes up
     /// and kept while it's on show. Each is its own key, so every
     /// language phrases it in its own way.
@@ -1357,8 +1362,10 @@ struct NewSessionView: View {
          readyTools: ((Profile) -> Set<Profile.Tool>)? = nil,
          peerMentions: ((UUID) -> [PeerMention])? = nil,
          assignNickname: ((UUID, String) -> Void)? = nil,
-         recentStarts: [RecentStart] = []) {
+         recentStarts: [RecentStart] = [],
+         instructionStore: InstructionPresetStore? = nil) {
         self.recentStarts = recentStarts
+        self.instructionStore = instructionStore
         self.profiles = profiles
         self.runningIDs = runningIDs
         self.recentFolders = recentFolders
@@ -1448,7 +1455,8 @@ struct NewSessionView: View {
         onStart(AgentSessionRequest(
             profileID: profileID, tool: tool, cwd: effectiveFolder,
             cloneURL: place == .repository ? repoURL.trimmingCharacters(in: .whitespaces) : nil,
-            openingMessage: message, attachments: attachments))
+            openingMessage: message, attachments: attachments,
+            instructions: instructionStore?.preset(instructionsID)?.text))
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -1676,6 +1684,10 @@ struct NewSessionView: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .popover(isPresented: $wherePopover, arrowEdge: .bottom) { whereEditor.platformCompactPopover() }
+
+                if let instructionStore {
+                    InstructionsChip(store: instructionStore, selection: $instructionsID)
+                }
                 }
 
                 Spacer(minLength: 8)
@@ -2607,6 +2619,104 @@ private struct ChipStrip<Content: View>: View {
 
 /// A choice riding along the composer's bottom edge: what it is now, a
 /// chevron, a popover to change it.
+/// The instructions added to the agent's system prompt: none, one of the
+/// presets, or the editor to manage them.
+private struct InstructionsChip: View {
+    @ObservedObject var store: InstructionPresetStore
+    @Binding var selection: UUID?
+    @State private var popover = false
+    @State private var editing = false
+
+    private var picked: InstructionPreset? { store.preset(selection) }
+
+    var body: some View {
+        ComposerChip(help: NSLocalizedString("Instructions added to the agent's system prompt (“You are a…”)", comment: "new session chip"),
+                     action: { popover.toggle() }) {
+            Image(systemName: "person.text.rectangle")
+                .font(.system(size: 11))
+                .foregroundStyle(picked == nil ? .secondary : Color.accentColor)
+            Text(picked?.name ?? NSLocalizedString("No instructions", comment: "new session instructions chip"))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 160)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .popover(isPresented: $popover, arrowEdge: .bottom) { list.platformCompactPopover() }
+        .sheet(isPresented: $editing) {
+            InstructionPresetEditor(store: store, initial: selection) { editing = false }
+        }
+        // A preset deleted (here or on another device) can't stay picked.
+        .onChange(of: store.presets) { _, list in
+            if let s = selection, !list.contains(where: { $0.id == s }) { selection = nil }
+        }
+    }
+
+    private var list: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                row(title: NSLocalizedString("No instructions", comment: "new session instructions chip"),
+                    detail: NSLocalizedString("The agent as it comes", comment: "new session instructions"),
+                    selected: picked == nil) { selection = nil }
+                ForEach(store.presets) { p in
+                    row(title: p.name, detail: p.text, selected: p.id == selection) { selection = p.id }
+                }
+                Divider().padding(.vertical, 4)
+                Button {
+                    popover = false
+                    editing = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 13))
+                            .frame(width: 22)
+                        Text(NSLocalizedString("Edit instructions…", comment: "new session instructions"))
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(6)
+        }
+        .frame(width: 320)
+        .frame(maxHeight: 420)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func row(title: String, detail: String, selected: Bool, pick: @escaping () -> Void) -> some View {
+        Button {
+            pick()
+            popover = false
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                if selected {
+                    Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(selected ? Color.accentColor.opacity(0.14) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct ComposerChip<Content: View>: View {
     let help: String
     let action: () -> Void

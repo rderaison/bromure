@@ -3225,3 +3225,21 @@
 "Save or Share" = "Guardar o compartir";
 "Saved to %@" = "Guardado en %@";
 "Sent by the agent" = "Enviado por el agente";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "Añadir instrucciones";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "Se añaden al prompt del sistema del agente cuando una sesión empieza con ellas. Describe quién debe ser el agente y cómo debe trabajar: «Eres un…».";
+"Careful reviewer" = "Revisor meticuloso";
+"Delete these instructions" = "Eliminar estas instrucciones";
+"Edit instructions…" = "Editar instrucciones…";
+"Instructions" = "Instrucciones";
+"Instructions added to the agent's system prompt (“You are a…”)" = "Instrucciones añadidas al prompt del sistema del agente («Eres un…»)";
+"Instructions without a name or text are not kept." = "Las instrucciones sin nombre o sin texto no se guardan.";
+"New instructions" = "Nuevas instrucciones";
+"No instructions" = "Sin instrucciones";
+"No instructions yet. Add some with +." = "Aún no hay instrucciones. Añade algunas con +.";
+"Teacher" = "Profesor";
+"The agent as it comes" = "El agente tal cual";
+"Untitled" = "Sin título";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "Eres un ingeniero sénior meticuloso que revisa los cambios antes de publicarlos. Busca primero errores, casos límite y problemas de seguridad, explica tu razonamiento y prefiere cambios pequeños y bien probados a grandes reescrituras.";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "Eres un profesor paciente. Explica lo que haces y por qué sobre la marcha, con palabras sencillas, y señala lo que el usuario puede aprender de cada paso.";
