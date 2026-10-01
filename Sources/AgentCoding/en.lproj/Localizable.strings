@@ -3246,3 +3246,15 @@
 
 /* Chat: an agent's folder-trust dialog */
 "Trust this folder?" = "Trust this folder?";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ of %@";
+"%@ · downloaded" = "%@ · downloaded";
+"%@ · sent by the agent" = "%@ · sent by the agent";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "Couldn't read the file on the machine — is it still there, and is the machine running?";
+"Couldn't write the file here." = "Couldn't write the file here.";
+"Downloaded" = "Downloaded";
+"Save As…" = "Save As…";
+"Save or Share" = "Save or Share";
+"Saved to %@" = "Saved to %@";
+"Sent by the agent" = "Sent by the agent";

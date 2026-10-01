@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bromure "display" MCP server (stdio): show the user a picture, a video or a
-chart in the chat.
+chart in the chat — or hand them a file to download.
 
 Nothing is sent anywhere from here. The chat renders these tool calls from the
 agent's own transcript — the call's arguments are all it needs — as inline
@@ -20,13 +20,17 @@ VIDEO_EXT = {".mp4", ".m4v", ".mov"}
 MAX_IMAGE = 25 * 1024 * 1024
 MAX_VIDEO = 500 * 1024 * 1024
 MAX_SPEC = 2 * 1024 * 1024
+MAX_SEND = 16 * 1024 * 1024 * 1024
 
 INSTRUCTIONS = (
     "Show the user something visual, right in the Bromure chat: show_media for an "
     "image or a video file on this machine, show_chart for an interactive data chart "
     "(a Vega-Lite spec). The user sees it inline and can pop it out into its own "
     "window. Use it whenever a picture says it better than text: a screenshot, a "
-    "rendered result, a plot of numbers you computed."
+    "rendered result, a plot of numbers you computed. send_file hands the user a file "
+    "to download to their own computer (a build, a report, an archive, a dataset) — "
+    "the way to give them something they asked for, since they can't reach this "
+    "machine's disk."
 )
 
 TOOLS = [
@@ -69,6 +73,25 @@ TOOLS = [
                 "caption": {"type": "string", "description": "Optional text shown under it."},
             },
             "required": ["spec"],
+        },
+    },
+    {
+        "name": "send_file",
+        "description": (
+            "Send the user a file to download: it appears in the chat as a download card, "
+            "and they save it on their own computer (they can't browse this machine's disk). "
+            "Use it to deliver something they asked for — a build, a report, an export, an "
+            "archive. `path` must be an ABSOLUTE path to a regular file on this machine, up "
+            "to 16 GB; for a folder, make an archive first (tar/zip) and send that. `note` "
+            "is an optional line shown with it (what it is, how to use it)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path of the file to send."},
+                "note": {"type": "string", "description": "Optional: what it is, shown with the download."},
+            },
+            "required": ["path"],
         },
     },
 ]
@@ -129,7 +152,39 @@ def check_chart(args):
     return None
 
 
+def check_send(args):
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return "`path` is required."
+    if not os.path.isabs(path):
+        return "`path` must be absolute (e.g. %s)." % os.path.abspath(path)
+    if os.path.isdir(path):
+        return "That's a folder: archive it first (e.g. tar czf /tmp/x.tgz -C %s .) and send the archive." % path
+    if not os.path.isfile(path):
+        return "No such file: %s" % path
+    if not os.access(path, os.R_OK):
+        return "Can't read %s." % path
+    size = os.path.getsize(path)
+    if size > MAX_SEND:
+        return "The file is %d GB; the limit is 16 GB." % (size // (1024 ** 3))
+    return None, size
+
+
+def human(n):
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "bytes" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
 def call(name, args):
+    if name == "send_file":
+        r = check_send(args)
+        if isinstance(r, str):
+            return r, True
+        _, size = r
+        return ("Offered to the user in the chat as a download: %s (%s). They save it on "
+                "their own computer from there." % (os.path.basename(args["path"]), human(size))), False
     if name == "show_media":
         r = check_media(args)
         if isinstance(r, str):

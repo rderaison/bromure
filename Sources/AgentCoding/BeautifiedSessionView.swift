@@ -1075,6 +1075,34 @@ final class BeautifiedSessionModel: ObservableObject {
         rebuild()
         setWorking(provider.isWorking() || seedHolds())
         reconcileQueued()
+        if !background { await backfillContinuity() }
+    }
+
+    /// A first read is a byte window from the file's end — 1.5 MB over a
+    /// fat-client tunnel, which a couple of tool-heavy turns fill — so a
+    /// new or re-read conversation could open on its last exchange alone,
+    /// everything before it behind "Load earlier conversation". Keep the
+    /// last few prompts in view: fetch earlier history until it holds
+    /// `continuityPrompts` of the user's, or `continuityBytes`.
+    private func backfillContinuity() async {
+        for _ in 0..<8 {
+            guard canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
+                  held.data.count < Self.continuityBytes,
+                  Self.userPrompts(in: parsedItems) < Self.continuityPrompts
+            else { return }
+            await loadEarlier()
+            guard let now = buffers[path], now.base < held.base else { return }   // no progress
+        }
+    }
+    nonisolated static let continuityPrompts = 5
+    /// 12 MB (scaled down with `BROMURE_TRANSCRIPT_HISTORY_BYTES`, so the E2E
+    /// "load earlier" checks still find something to load).
+    nonisolated static let continuityBytes = initialHistoryBytes / 2
+    nonisolated static func userPrompts(in items: [TranscriptItem]) -> Int {
+        items.reduce(0) { n, item in
+            if case .userText = item.kind { return n + 1 }
+            return n
+        }
     }
 
     /// Bank one read into the per-file history: append when it continues
@@ -1235,6 +1263,11 @@ final class BeautifiedSessionModel: ObservableObject {
         // happens to carry a needle is the conversation, not a banner. The
         // transcript holds the same words in that case.
         if let f = newFailure, transcriptEchoes(f.detail) { newFailure = nil }
+        // A failed sign-in means the model can't answer at all: once it has
+        // answered since the latest prompt, any auth wording on screen is
+        // something it printed or ran (a grep through this very detector
+        // raised the card), not the agent's state.
+        if newFailure?.kind == .auth, SessionFailure.modelAnswered(since: parsedItems) { newFailure = nil }
         guard newPrompt != prompt || newFailure != failure else { return }
         let wasLogin = prompt?.kind == .login
         withAnimation(.easeOut(duration: 0.2)) {
@@ -2808,6 +2841,23 @@ struct SessionFailure: Equatable {
 
     static func detect(inScreen screen: String) -> SessionFailure? {
         detect(tail: terminalTail(screen))
+    }
+
+    /// Whether the model has answered since the user's latest prompt — a
+    /// call, a thought, or text that isn't itself an auth error (Claude logs
+    /// "API Error: 401 …" as an assistant message).
+    static func modelAnswered(since items: [TranscriptItem]) -> Bool {
+        for item in items.reversed() {
+            switch item.kind {
+            case .userText: return false
+            case .toolUse, .thinking, .question, .todo: return true
+            case .assistantText(let t):
+                let low = t.lowercased()
+                if !authNeedles.contains(where: { low.contains($0) }) { return true }
+            default: continue
+            }
+        }
+        return false
     }
 
     /// Scan a pre-split terminal tail (shared with `TerminalScan`, which splits
