@@ -3211,3 +3211,15 @@
 
 /* Chat: an agent's folder-trust dialog */
 "Trust this folder?" = "このフォルダを信頼しますか？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · ダウンロード済み";
+"%@ · sent by the agent" = "%@ · エージェントが送信";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "マシン上のファイルを読み込めませんでした。ファイルがまだ存在し、マシンが起動しているか確認してください。";
+"Couldn't write the file here." = "ここにファイルを書き込めませんでした。";
+"Downloaded" = "ダウンロード済み";
+"Save As…" = "別名で保存…";
+"Save or Share" = "保存または共有";
+"Saved to %@" = "%@ に保存しました";
+"Sent by the agent" = "エージェントが送信";

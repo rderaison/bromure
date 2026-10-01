@@ -358,4 +358,18 @@ struct SessionFailureTests {
         #expect(p?.authURL?.hasPrefix("https://claude.com/cai/oauth/authorize?code=true") == true)
         #expect(p?.authURL?.hasSuffix("state=bA6KkQ") == true)
     }
+
+    @Test("An auth banner can't be the state once the model answered the latest prompt")
+    func authGateOnModelAnswer() {
+        func item(_ k: TranscriptItem.Kind) -> TranscriptItem { TranscriptItem(id: 0, kind: k, timestamp: nil) }
+        let prompt = item(.userText("grep the sign-in detector"))
+        // Nothing after the prompt, or only Claude's logged API error: not answered.
+        #expect(!SessionFailure.modelAnswered(since: [prompt]))
+        #expect(!SessionFailure.modelAnswered(since: [prompt, item(.assistantText("API Error: 401 · Please run /login"))]))
+        // A tool call (whose output mentions "not logged in") proves the model is signed in.
+        #expect(SessionFailure.modelAnswered(since: [prompt, item(.toolUse(name: "Bash", summary: "grep", detail: "{}")),
+                                                     item(.toolResult(tool: "Bash", content: "not logged in", isError: false))]))
+        // An answer from an earlier turn doesn't count for the new prompt.
+        #expect(!SessionFailure.modelAnswered(since: [item(.assistantText("Done.")), prompt]))
+    }
 }
