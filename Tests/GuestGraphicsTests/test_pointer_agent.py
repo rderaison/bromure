@@ -4,8 +4,9 @@ import json
 import socket
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from test_guest_graphics import load_script
 
@@ -107,14 +108,19 @@ class PointerAgentTests(unittest.TestCase):
 
     def test_only_host_cid_can_inject(self):
         clients, connections = [], []
-        for cid, mask in ((3, 2), (agent.socket.VMADDR_CID_HOST, 1)):
+        for cid, mask in ((3, 2), (2, 1)):
             client, connection = socket.socketpair()
             client.sendall(json.dumps({"x": 0, "y": 0, "buttons": mask}).encode() + b'\n')
             client.shutdown(socket.SHUT_WR)
             clients.append(client)
             connections.append((connection, (cid, 1234)))
-        with tempfile.TemporaryFile() as output, patch.object(agent.socket, "socket") as socket_type:
-            server = socket_type.return_value.__enter__.return_value
+        # Model the Linux-only vsock interface explicitly. Darwin can run this
+        # socketpair/event-packing test without exporting Linux socket constants.
+        linux_socket = SimpleNamespace(AF_VSOCK=40, SOCK_STREAM=1,
+                                       VMADDR_CID_ANY=0xFFFFFFFF, VMADDR_CID_HOST=2,
+                                       socket=MagicMock())
+        with tempfile.TemporaryFile() as output, patch.object(agent, "socket", linux_socket):
+            server = linux_socket.socket.return_value.__enter__.return_value
             server.accept.side_effect = [*connections, KeyboardInterrupt()]
             try:
                 with self.assertRaises(KeyboardInterrupt):
