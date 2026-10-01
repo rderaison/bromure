@@ -1075,6 +1075,34 @@ final class BeautifiedSessionModel: ObservableObject {
         rebuild()
         setWorking(provider.isWorking() || seedHolds())
         reconcileQueued()
+        if !background { await backfillContinuity() }
+    }
+
+    /// A first read is a byte window from the file's end — 1.5 MB over a
+    /// fat-client tunnel, which a couple of tool-heavy turns fill — so a
+    /// new or re-read conversation could open on its last exchange alone,
+    /// everything before it behind "Load earlier conversation". Keep the
+    /// last few prompts in view: fetch earlier history until it holds
+    /// `continuityPrompts` of the user's, or `continuityBytes`.
+    private func backfillContinuity() async {
+        for _ in 0..<8 {
+            guard canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
+                  held.data.count < Self.continuityBytes,
+                  Self.userPrompts(in: parsedItems) < Self.continuityPrompts
+            else { return }
+            await loadEarlier()
+            guard let now = buffers[path], now.base < held.base else { return }   // no progress
+        }
+    }
+    nonisolated static let continuityPrompts = 5
+    /// 12 MB (scaled down with `BROMURE_TRANSCRIPT_HISTORY_BYTES`, so the E2E
+    /// "load earlier" checks still find something to load).
+    nonisolated static let continuityBytes = initialHistoryBytes / 2
+    nonisolated static func userPrompts(in items: [TranscriptItem]) -> Int {
+        items.reduce(0) { n, item in
+            if case .userText = item.kind { return n + 1 }
+            return n
+        }
     }
 
     /// Bank one read into the per-file history: append when it continues
