@@ -2,7 +2,15 @@
 # Cursor size and display scale are set after chrome-env is loaded (runtime, not build-time)
 export XCURSOR_THEME=Adwaita
 
-/usr/local/bin/resize-watcher.sh &
+_SHARED_WINDOWS=0
+_SHARED_MAXIMIZE=--start-maximized
+if grep -Eq '(^|[[:space:]])bromure\.shared_windows=' /proc/cmdline; then
+    /usr/local/bin/shared_windows.py prepare-wm || exit 1
+    _SHARED_WINDOWS=1
+    _SHARED_MAXIMIZE=
+else
+    /usr/local/bin/resize-watcher.sh &
+fi
 openbox &
 
 # XDG_RUNTIME_DIR is required by PipeWire and other session services.
@@ -127,7 +135,9 @@ fi
 # CDP LAN forwarder: lets the workspace VM drive CDP over VM↔VM TCP (host stays
 # out of the loop → no main-queue wedge). No-ops unless CDP_LAN_ACCESS=1.
 [ "$AUTOMATION" = "1" ] && [ "$CDP_LAN_ACCESS" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-lan-forwarder.py &
-[ "$NATIVE_CHROME" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/tab-agent.py &
+if [ "$NATIVE_CHROME" = "1" ] || [ "$_SHARED_WINDOWS" = "1" ]; then
+    /usr/local/bin/resilient-launch.sh /usr/local/bin/tab-agent.py &
+fi
 # Native tabs: swap in the Openbox config that grabs browser-chrome chords
 # (⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘]) and bounces them to the host via bromure-hostkey ->
 # tab-agent. Legacy full-Chromium mode keeps the keyless rc.xml so those
@@ -166,7 +176,7 @@ LANG_FLAG=
 # and the host clips off the top rows. Chromium itself runs completely
 # unmodified — same launch flags, same maximize behaviour, same window
 # manager rules. tab-agent + the native titlebar handle the visible UI.
-CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --no-default-browser-check --disable-pings --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
+CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --no-default-browser-check --disable-pings $_SHARED_MAXIMIZE --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
 
 # VPN splash: when a VPN is configured to connect at startup, the tunnel
 # takes a few seconds to establish. Loading the user's URL in that window

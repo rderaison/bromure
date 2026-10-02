@@ -89,6 +89,7 @@ _ALLOW_PRINTING = os.environ.get("ALLOW_PRINTING") == "1"
 # else stops a malformed id from sliding into header injection or path
 # traversal if a future bug ever lets one through unvalidated.
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9-]+$")
+_shared = None  # Explicit shared_windows boot only; one agent per profile VM.
 
 
 def _is_safe_id(s):
@@ -957,7 +958,15 @@ def handle_cmd(msg, targets_by_id, link):
         except Exception as e:
             log(f"close_active: list targets failed: {e}")
             return
-        active_id = active_target_id(fresh)
+        if _shared is not None:
+            wid = msg['windowId']
+            fresh = [t for t in fresh if _shared.target_windows.get(t['id']) == wid]
+            visible = {t['id']: tab_state(t['webSocketDebuggerUrl'])[0]
+                       for t in fresh if t.get('webSocketDebuggerUrl')}
+            from shared_windows import active_by_window
+            active_id = active_by_window({wid: fresh}, visible, _shared.active).get(wid)
+        else:
+            active_id = active_target_id(fresh)
         if active_id and _is_safe_id(active_id):
             cdp_simple_post(f"/json/close/{active_id}")
             if _get_active() == active_id:
@@ -1036,7 +1045,7 @@ def handle_cmd(msg, targets_by_id, link):
         # page (and any y=0 dropdown / hover menu would fire). Send a CDP
         # mouseMoved to (-1, -1) on the active page so Chromium treats it as
         # "cursor left the viewport" and tears down hover state.
-        tid = _get_active()
+        tid = _shared.active.get(msg['windowId']) if _shared is not None else _get_active()
         if not tid:
             return
         t = _target_for(tid, targets_by_id)
@@ -1049,7 +1058,7 @@ def handle_cmd(msg, targets_by_id, link):
         })
     elif cmd == "new":
         url = msg.get("url") or "about:blank"
-        new_tid = create_new_tab(url)
+        new_tid = (_shared.new_tab(msg['windowId'], url) if _shared is not None else create_new_tab(url))
         if not new_tid:
             return
         _set_active(new_tid, ttl=_NEW_TAB_TRUST_TTL)
@@ -1062,6 +1071,7 @@ def handle_cmd(msg, targets_by_id, link):
             "title": "",
             "url": url,
             "active": True,
+            **({'windowId': msg['windowId']} if _shared is not None else {}),
         })
     elif cmd == "navigate" and _is_safe_id(tid):
         url = msg.get("url")
@@ -1144,13 +1154,15 @@ def shortcut_listener(link):
                     continue
                 last_fire[key] = now
                 log(f"shortcut -> host: {key}")
-                link.send({"event": "shortcut", "key": key})
+                link.send({"event": "shortcut", "key": key,
+                           **({'windowId': _shared.focused_window} if _shared is not None else {})})
         except Exception as e:
             log(f"shortcut listener: {e}")
             time.sleep(0.1)
 
 
 def main():
+    global _shared
     # Wait for Chromium
     log("waiting for Chromium CDP…")
     for _ in range(180):
@@ -1166,6 +1178,20 @@ def main():
         log("CDP never came up; exiting")
         return
     log("CDP ready")
+
+    from pathlib import Path
+    # This module is installed alongside the agent, but only imported on an
+    # explicitly marked VM. A regular profile retains its original behavior.
+    if any(word.startswith('bromure.shared_windows=') for word in Path('/proc/cmdline').read_text().split()):
+        from shared_windows import Controller, enabled, cdp_call
+        enabled(Path('/proc/cmdline').read_text())
+
+        def browser_call(method, params):
+            ws = browser_ws_url()
+            return cdp_call(ws, method, params) if ws else None
+
+        _shared = Controller(cdp_list_targets, browser_call, scale=int(os.environ.get('DISPLAY_SCALE') or '2'))
+        threading.Thread(target=_shared.serve, daemon=True).start()
 
     link = HostLink()
     link.connect()
@@ -1183,7 +1209,30 @@ def main():
         log(f"initial target seed failed: {e}")
 
     def on_cmd(msg):
-        handle_cmd(msg, targets_by_id, link)
+        if _shared is None:
+            handle_cmd(msg, targets_by_id, link)
+            return
+        with _shared.lock:
+            try:
+                _shared.refresh()
+                cmd, tid, wid = msg.get('cmd'), msg.get('id'), msg.get('windowId')
+                if cmd in ('new', 'close_active', 'key_chord', 'mouse_park') and wid is None:
+                    raise ValueError('shared window command requires windowId')
+                if wid is not None:
+                    if type(wid) is not int or wid not in _shared.groups:
+                        raise ValueError('unknown windowId')
+                    if tid is not None and _shared.target_windows.get(tid) != wid:
+                        raise ValueError('target/window mismatch')
+                if cmd == 'key_chord':
+                    _shared.focus(wid)
+                handle_cmd(msg, targets_by_id, link)
+                if cmd == 'activate' and tid in _shared.target_windows:
+                    _shared.active[_shared.target_windows[tid]] = tid
+                    _shared.focused_window = _shared.target_windows[tid]
+            except (ValueError, OSError, RuntimeError) as error:
+                log('shared window command rejected: ' + str(error))
+                link.send({'event': 'window_error', 'windowId': msg.get('windowId'),
+                           'request_id': msg.get('request_id'), 'error': str(error)[:512]})
 
     threading.Thread(target=link.reader_loop, args=(on_cmd,), daemon=True).start()
     threading.Thread(target=shortcut_listener, args=(link,), daemon=True).start()
@@ -1238,7 +1287,20 @@ def main():
                 states[t["id"]] = ("", "")
 
         visibility = {tid: vis for tid, (vis, _) in states.items()}
-        active_id = active_target_id(targets, visibility)
+        if _shared is not None:
+            from shared_windows import active_by_window
+            try:
+                with _shared.lock:
+                    groups, target_windows = _shared.refresh(targets)
+                    _shared.active = active_by_window(groups, visibility, _shared.active)
+                    active_ids = set(_shared.active.values())
+            except (ValueError, OSError, RuntimeError) as error:
+                log('shared window grouping failed: ' + str(error))
+                time.sleep(POLL_INTERVAL)
+                continue
+        else:
+            active_ids = {active_target_id(targets, visibility)}
+            target_windows = {}
 
         current_ids = set()
         for t in targets:
@@ -1254,7 +1316,8 @@ def main():
                 prev is None
                 or prev.get("title") != title
                 or prev.get("url") != url
-                or prev.get("active") != (tid == active_id)
+                or prev.get("active") != (tid in active_ids)
+                or prev.get("windowId") != target_windows.get(tid)
                 or prev.get("camera") != using_camera
                 or prev.get("microphone") != using_microphone
             )
@@ -1264,7 +1327,8 @@ def main():
                     "id": tid,
                     "title": title,
                     "url": url,
-                    "active": tid == active_id,
+                    "active": tid in active_ids,
+                    **({'windowId': target_windows.get(tid)} if _shared is not None else {}),
                     "using_camera": using_camera,
                     "using_microphone": using_microphone,
                 })
@@ -1281,7 +1345,8 @@ def main():
             known[tid] = {
                 "title": title,
                 "url": url,
-                "active": tid == active_id,
+                "active": tid in active_ids,
+                "windowId": target_windows.get(tid),
                 "camera": using_camera,
                 "microphone": using_microphone,
             }
@@ -1290,7 +1355,8 @@ def main():
             if tid not in current_ids:
                 gone = known.get(tid, {})
                 _record_close(gone.get("title", ""), gone.get("url", ""))
-                link.send({"event": "remove", "id": tid})
+                link.send({"event": "remove", "id": tid,
+                           **({'windowId': gone.get('windowId')} if _shared is not None else {})})
                 known.pop(tid, None)
 
         time.sleep(POLL_INTERVAL)
