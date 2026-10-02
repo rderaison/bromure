@@ -1789,8 +1789,7 @@
     "Three 10-second trials, not overnight stability",
     "Audio omitted as explicitly deferred",
     "Historical-policy baseline keeps output-zero damage filtering; reconstructs former secondary capture policy",
-    "Experimental capture-cache candidate discarded after no convincing incremental benefit",
-    "Notarization currently blocked: missing Bromure Keychain credential"
+    "Experimental capture-cache candidate discarded after no convincing incremental benefit"
   ],
   "sourceSHA256": {
     "Sources/SandboxEngine/RendererCommandProcessor.swift": "52d2c3c793d18fac5efebe83fdd9fa0f099ad45c72d03356c4f39db2a7a877d8",
@@ -1800,10 +1799,21 @@
     "tools/gpu/test-scanout-crop.m": "c46d348dc05dfb0399132b4f173eaf94e072292247f16ab59b11bab7d271eeb4"
   },
   "finalPackage": {
-    "log": "/private/tmp/bromure-window-video-package-final.log",
+    "log": "/private/tmp/bromure-window-video-package-notarized.log",
+    "previousFailedLog": "/private/tmp/bromure-window-video-package-final.log",
+    "pipeline": "./package.sh bromure",
+    "keychainProfile": "Bromure",
     "signing": "Developer ID Application: RENAUD MARIE DERAISON (W3RD8G85BC)",
-    "signedBinary": "PASS package.sh strict verification",
-    "notarization": "BLOCKED: No Keychain password item found for profile Bromure",
-    "dmg": "not generated because app notarization failed"
+    "signedBinary": "PASS codesign --verify --deep --strict; spctl accepted Notarized Developer ID",
+    "notarization": "Accepted; app and DMG stapled and validated",
+    "appSubmissionId": "43d16f12-4726-4f13-ad28-489f150d5c58",
+    "dmgSubmissionId": "71e147d3-c537-4165-9818-bdc19e649d1d",
+    "app": "/Users/renaud/Desktop/Bromure-Shared-Windows-Video-Fix.app",
+    "dmg": "/Users/renaud/Desktop/Bromure-Shared-Windows-Video-Fix.dmg",
+    "sha256": {
+      "/Users/renaud/Desktop/Bromure-Shared-Windows-Video-Fix.dmg": "eed44d4398c61803a2cf4b644d2671da35daebc5e09ff308d7275999c9f4e808",
+      "/Users/renaud/Desktop/Bromure-Shared-Windows-Video-Fix.app/Contents/MacOS/bromure": "9da710ea824b4f1a0ce989894918274d3445ffa04c059cce71d30116a8b3ff8d"
+    },
+    "runtimeScope": "Live performance and resize acceptance used release preview; final signed package signature/notary verification passes"
   }
 }
