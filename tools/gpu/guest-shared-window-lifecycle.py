@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 import urllib.request
 import uuid
@@ -33,6 +34,54 @@ window.fixtureEvents=[];
 for(const type of ['pointerdown','pointerup','click','keydown','keyup','wheel'])
 addEventListener(type,e=>{if(fixtureEvents.length<512)fixtureEvents.push({type,key:e.key||null,x:e.clientX,y:e.clientY,t:performance.now()})},true);
 </script>'''
+
+
+class FixtureHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if not self.path.startswith('/fixture/'):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(HTML)))
+        self.end_headers()
+        self.wfile.write(HTML)
+    def log_message(self, *unused):
+        pass
+
+
+class FixtureServer(http.server.ThreadingHTTPServer):
+    # An idle Chromium preconnect must not queue real requests behind it.
+    # Bound both workers and each client's read/write time for this diagnostic.
+    max_clients = 16
+    daemon_threads = True
+
+    def __init__(self, address, handler=FixtureHandler):
+        self.slots = threading.BoundedSemaphore(self.max_clients)
+        super().__init__(address, handler)
+
+    def process_request(self, client, address):
+        if not self.slots.acquire(blocking=False):
+            print('BROMURE_SHARED_FIXTURE_REJECTED capacity=' + str(self.max_clients), flush=True)
+            self.shutdown_request(client)
+            return
+        try:
+            super().process_request(client, address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, client, address):
+        try:
+            super().process_request_thread(client, address)
+        finally:
+            self.slots.release()
+
+    def get_request(self):
+        client, address = super().get_request()
+        client.settimeout(1)
+        return client, address
 
 
 def get(path):
@@ -105,25 +154,7 @@ def main():
     args = parser.parse_args()
     if args.phase == 'serve':
         assert 1 <= args.seconds <= 3600
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                if not self.path.startswith('/fixture/'):
-                    self.send_error(404)
-                    return
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Cache-Control', 'no-store')
-                self.send_header('Content-Length', str(len(HTML)))
-                self.end_headers()
-                self.wfile.write(HTML)
-            def log_message(self, *unused):
-                pass
-        class Server(http.server.HTTPServer):
-            def get_request(self):
-                client, address = super().get_request()
-                client.settimeout(1)
-                return client, address
-        with Server(('127.0.0.1', PORT), Handler) as server:
+        with FixtureServer(('127.0.0.1', PORT)) as server:
             server.timeout = .5
             print('BROMURE_SHARED_FIXTURE_READY ' + ORIGIN, flush=True)
             deadline = time.monotonic() + args.seconds
