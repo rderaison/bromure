@@ -1207,16 +1207,46 @@ def handle_cmd(msg, targets_by_id, link):
 # Main poll loop
 # ---------------------------------------------------------------------------
 
+SHORTCUT_KEYS = frozenset({
+    "t", "w", "l", "r", "p", "h", "[", "]", "{", "}",
+    "n", "private-window", "o", "app-settings", "minimize", "hide-others",
+    "quit", "bookmarks-manager", "history",
+})
+
+
+def read_shortcut(conn, timeout=1.0):
+    """One bounded ASCII token, framed by helper connection close.
+
+    TCP reads can split named tokens. Never dispatch a valid prefix before EOF,
+    and keep a wall deadline so a partial sender cannot monopolize the listener.
+    """
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('shortcut read deadline exceeded')
+        conn.settimeout(remaining)
+        chunk = conn.recv(33 - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > 32:
+            return None
+    try:
+        key = data.decode('ascii')
+    except UnicodeDecodeError:
+        return None
+    return key if key in SHORTCUT_KEYS else None
+
+
 def shortcut_listener(link):
-    """Relay browser-chrome shortcuts that Openbox grabbed in the guest back
-    to the macOS host. While the VM holds keyboard focus the VZ view forwards
-    every chord to the guest before AppKit can swallow it, so Openbox grabs
-    ⌘T/⌘W/⌘L/⌘R/⌘P (which the Cmd↔Ctrl swap turns into Ctrl+… that Chromium
-    would act on) and runs `bromure-hostkey <k>`, which connects here and
-    sends the bare key letter. We forward it over vsock so the host owns the
-    chord. Localhost-only listener; only an allowlisted key letter is
-    relayed."""
-    allowed = {"t", "w", "l", "r", "p", "h", "[", "]", "{", "}"}
+    """Relay allowlisted native app actions from Openbox to the host.
+
+    Cmd↔Ctrl maps host chords to guest Control chords. Only native-chrome's
+    Openbox configuration grabs them; editing and legacy Chromium stay local.
+    The helper closes its loopback connection after writing one action token.
+    """
     # Debounce: a held chord autorepeats in the guest X server (xset r rate),
     # firing the Openbox keybind — and thus this listener — many times for one
     # intentional press. Collapse repeats of the same key within this window so
@@ -1235,13 +1265,11 @@ def shortcut_listener(link):
     while True:
         try:
             conn, _ = srv.accept()
-            conn.settimeout(1)
             try:
-                data = conn.recv(8)
+                key = read_shortcut(conn)
             finally:
                 conn.close()
-            key = data.decode("utf-8", "ignore").strip()
-            if key in allowed:
+            if key is not None:
                 now = time.monotonic()
                 if now - last_fire.get(key, 0.0) < debounce:
                     continue
