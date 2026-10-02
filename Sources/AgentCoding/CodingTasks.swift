@@ -1293,19 +1293,8 @@ final class CodingTaskEngine {
             guard let delegate, Self.isSafeBranch(branch) else {
                 return (nil, nil, nil)
             }
-            let root = ScheduledAutomationEngine.guestPath(repoPath)
-            let q = "'" + root.replacingOccurrences(of: "'", with: "'\\''") + "'"
-            let cmd = "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); "
-                + "[ -n \"$root\" ] || exit 0; "
-                + "dir=$(git -C \"$root\" worktree list --porcelain 2>/dev/null "
-                + "| awk -v b='refs/heads/\(branch)' "
-                + "'/^worktree /{d=substr($0,10)} $0==\"branch \" b {print d; exit}'); "
-                + "reg=\"$HOME/.bromure/worktrees/$(basename \"$root\")/.registry\"; "
-                + "parent=$(awk -F'\\x1f' -v b='\(branch)' '$1==b {print $2; exit}' "
-                + "\"$reg\" 2>/dev/null); "
-                + "[ -n \"$parent\" ] || parent=$(git -C \"$root\" rev-parse "
-                + "--abbrev-ref HEAD 2>/dev/null); "
-                + "printf '%s\\n%s\\n%s\\n' \"$dir\" \"$parent\" \"$root\""
+            let cmd = Self.worktreeMetadataCommand(
+                repoPath: ScheduledAutomationEngine.guestPath(repoPath), branch: branch)
             guard let out = try? await delegate.guestExec(
                 profileID: profileID, command: cmd, timeout: 15) else {
                 return (nil, nil, nil)
@@ -1316,6 +1305,35 @@ final class CodingTaskEngine {
                 lines.indices.contains(i) && !lines[i].isEmpty ? lines[i] : nil
             }
             return (v(0), v(1), v(2))
+    }
+
+    /// The guest command behind `resolveWorktreeMetadata`: prints the
+    /// branch's worktree dir, its parent branch and the repo root. The
+    /// parent is the one the registry recorded when the board made the
+    /// worktree; failing that (a task an agent did in a worktree of its
+    /// own), the branch the work forked from — the one `branch` is the
+    /// fewest commits ahead of, other task branches aside, the checked-out
+    /// one on a tie. The folder's HEAD alone named whatever that checkout
+    /// happened to be on, not where the work came from.
+    nonisolated static func worktreeMetadataCommand(repoPath: String, branch: String) -> String {
+        let q = "'" + repoPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); "
+            + "[ -n \"$root\" ] || exit 0; "
+            + "dir=$(git -C \"$root\" worktree list --porcelain 2>/dev/null "
+            + "| awk -v b='refs/heads/\(branch)' "
+            + "'/^worktree /{d=substr($0,10)} $0==\"branch \" b {print d; exit}'); "
+            + "reg=\"$HOME/.bromure/worktrees/$(basename \"$root\")/.registry\"; "
+            + "parent=$(awk -F'\\x1f' -v b='\(branch)' '$1==b {print $2; exit}' "
+            + "\"$reg\" 2>/dev/null); "
+            + "if [ -z \"$parent\" ]; then "
+            + "best=999999; "
+            + "head=$(git -C \"$root\" rev-parse --abbrev-ref HEAD 2>/dev/null); "
+            + "for b in \"$head\" $(git -C \"$root\" for-each-ref --count=300 --format='%(refname:short)' refs/heads/); do "
+            + "case \"$b\" in ''|HEAD|wt/*|\"\(branch)\") continue;; esac; "
+            + "n=$(git -C \"$root\" rev-list --count \"$b..\(branch)\" 2>/dev/null) || continue; "
+            + "if [ \"$n\" -lt \"$best\" ]; then best=$n; parent=$b; fi; "
+            + "done; fi; "
+            + "printf '%s\\n%s\\n%s\\n' \"$dir\" \"$parent\" \"$root\""
     }
 
     /// Immediate hand-to-review for the board_ready_for_review MCP tool: a
