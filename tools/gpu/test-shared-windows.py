@@ -9,6 +9,7 @@ import socket
 import threading
 import hashlib
 import base64
+import subprocess
 from unittest.mock import patch
 
 PATH = Path(__file__).resolve().parents[2] / 'Sources/SandboxEngine/Resources/vm-setup/scripts/shared_windows.py'
@@ -125,7 +126,8 @@ class ControllerTests(unittest.TestCase):
         self.calls, self.mutations = [], []
         self.fail_bounds = False
         self.controller = shared.Controller(lambda: [dict(id=t) for t in self.targets], self.call,
-                                            runner=self.command, sysfs=self.root)
+                                            runner=self.command, sysfs=self.root,
+                                            focus_observer=lambda target, timeout: {'xWindow': 50, 'browserPID': 123})
 
     def command(self, args):
         if '--query' in args:
@@ -148,6 +150,8 @@ class ControllerTests(unittest.TestCase):
 
     def call(self, method, params):
         self.calls.append((method, params))
+        if method == 'SystemInfo.getProcessInfo':
+            return {'processInfo': [{'type': 'browser', 'id': 123}]}
         if method == 'Browser.getWindowForTarget':
             wid = self.targets[params['targetId']]
             return dict(windowId=wid, bounds=self.bounds[wid])
@@ -219,6 +223,37 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.handle(dict(id=4, cmd='list', expectedScanouts=16))['ok'])
         with self.assertRaises(ValueError):
             self.controller.handle(dict(id=3, cmd='list'))
+
+    def test_focus_ack_requires_observation_and_failure_clears_cached_focus(self):
+        self.attach()
+        evidence = {'xWindow': 51, 'xFocus': 52, 'browserPID': 123, 'browserStartTicks': 42}
+        observer = unittest.mock.Mock(side_effect=[None, evidence])
+        self.controller.focus_observer = observer
+        reply = self.controller.handle(dict(id=3, cmd='focus', windowId=10))
+        self.assertTrue(reply['ok'], reply)
+        self.assertEqual(reply['focusEvidence'], evidence)
+        self.assertEqual(observer.call_count, 2)
+        self.controller.focus_observer = unittest.mock.Mock(side_effect=TimeoutError('X focus stalled'))
+        reply = self.controller.handle(dict(id=4, cmd='focus', windowId=10))
+        self.assertFalse(reply['ok'])
+        self.assertIsNone(self.controller.focused_window)
+        self.assertIsNone(self.controller.focus_evidence)
+        before = len(self.calls)
+        with self.assertRaises(TimeoutError):
+            self.controller.new_tab(10, 'about:blank')
+        self.assertFalse(any(method == 'Target.createTarget' for method, _ in self.calls[before:]))
+
+    def test_focus_probe_checks_document_and_bounds_x_subprocess(self):
+        target = {'webSocketDebuggerUrl': 'ws://127.0.0.1:9222/devtools/page/a'}
+        with patch.object(shared, 'cdp_call', return_value={'result': {'value': False}}), \
+                patch.object(shared.subprocess, 'run') as probe:
+            self.assertIsNone(shared.confirm_focus(target, .1))
+            probe.assert_not_called()
+        with patch.object(shared, 'cdp_call', return_value={'result': {'value': True}}), \
+                patch.object(shared.subprocess, 'run', side_effect=subprocess.TimeoutExpired('X', .1)) as probe:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                shared.confirm_focus(target, .1)
+            self.assertLessEqual(probe.call_args.kwargs['timeout'], .1)
 
     def test_invalid_url_precedes_layout_and_browser_mutation(self):
         self.attach()

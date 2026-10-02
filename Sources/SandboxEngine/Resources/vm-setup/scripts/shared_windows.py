@@ -59,7 +59,7 @@ def cdp_call(ws_url, method, params, timeout=3):
     url = urlparse(ws_url)
     if url.scheme != 'ws' or url.hostname != '127.0.0.1' or url.port != 9222 or url.query or url.fragment:
         raise ValueError('unexpected browser CDP endpoint')
-    if not re.fullmatch(r'/devtools/browser/[A-Za-z0-9-]+', url.path):
+    if not re.fullmatch(r'/devtools/(?:browser|page)/[A-Za-z0-9-]+', url.path):
         raise ValueError('unexpected browser CDP path')
     deadline = time.monotonic() + timeout
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -345,12 +345,100 @@ def run_command(args):
     return result.stdout
 
 
+def x_focus_snapshot():
+    """Read real X focus; run in a subprocess to bound even a hung X server.
+
+    No activation, grabs, property writes or focus changes. The focused child
+    must descend from the WM's active Chromium client, owned by its browser PID.
+    """
+    import ctypes as C
+    x = C.CDLL('libX11.so.6')
+    W, P = C.c_ulong, C.c_void_p
+    for name, result, args in (
+        ('XOpenDisplay', P, [C.c_char_p]), ('XCloseDisplay', C.c_int, [P]),
+        ('XDefaultRootWindow', W, [P]), ('XInternAtom', W, [P, C.c_char_p, C.c_int]),
+        ('XGetInputFocus', C.c_int, [P, C.POINTER(W), C.POINTER(C.c_int)]),
+        ('XQueryTree', C.c_int, [P, W, C.POINTER(W), C.POINTER(W), C.POINTER(C.POINTER(W)), C.POINTER(C.c_uint)]),
+        ('XGetWindowProperty', C.c_int, [P, W, W, C.c_long, C.c_long, C.c_int, W,
+                                       C.POINTER(W), C.POINTER(C.c_int), C.POINTER(W), C.POINTER(W), C.POINTER(P)]),
+        ('XFree', C.c_int, [P]),
+    ):
+        fn = getattr(x, name)
+        fn.restype, fn.argtypes = result, args
+    display = x.XOpenDisplay(None)
+    if not display:
+        raise RuntimeError('X display unavailable')
+    try:
+        def cardinal(window, name, kind):
+            actual, fmt, count, remaining, data = W(), C.c_int(), W(), W(), P()
+            atom = x.XInternAtom(display, name.encode(), True)
+            expected = x.XInternAtom(display, kind.encode(), True)
+            if not atom or not expected:
+                return None
+            status = x.XGetWindowProperty(display, window, atom, 0, 1, False, expected,
+                                          C.byref(actual), C.byref(fmt), C.byref(count), C.byref(remaining), C.byref(data))
+            try:
+                if status or actual.value != expected or fmt.value != 32 or count.value != 1 or remaining.value:
+                    return None
+                return C.cast(data, C.POINTER(W))[0]
+            finally:
+                if data:
+                    x.XFree(data)
+        active = cardinal(x.XDefaultRootWindow(display), '_NET_ACTIVE_WINDOW', 'WINDOW')
+        focused, revert = W(), C.c_int()
+        x.XGetInputFocus(display, C.byref(focused), C.byref(revert))
+        current, ancestors = focused.value, []
+        for _ in range(64):
+            if current in (0, 1) or current in ancestors:
+                break
+            ancestors.append(current)
+            if current == active:
+                pid = cardinal(current, '_NET_WM_PID', 'CARDINAL')
+                if not pid:
+                    break
+                path = Path('/proc') / str(pid)
+                command = path.joinpath('cmdline').read_bytes().split(b'\0')
+                if path.joinpath('exe').resolve().name not in ('chromium', 'chrome') or any(a.startswith(b'--type=') for a in command):
+                    break
+                start = path.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]
+                return dict(xWindow=active, xFocus=focused.value, browserPID=pid, browserStartTicks=int(start))
+            root, parent, children, count = W(), W(), C.POINTER(W)(), C.c_uint()
+            if not x.XQueryTree(display, current, C.byref(root), C.byref(parent), C.byref(children), C.byref(count)):
+                break
+            if children:
+                x.XFree(children)
+            current = parent.value
+        return None
+    finally:
+        x.XCloseDisplay(display)
+
+
+def confirm_focus(target, timeout):
+    """Independent Chromium document and X focus observations, within a deadline."""
+    deadline = time.monotonic() + timeout
+    result = cdp_call(target.get('webSocketDebuggerUrl', ''), 'Runtime.evaluate',
+                      {'expression': 'document.hasFocus() && document.visibilityState === "visible"',
+                       'returnByValue': True}, timeout=max(.001, deadline - time.monotonic()))
+    if not isinstance(result, dict) or 'exceptionDetails' in result or result.get('result', {}).get('value') is not True:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('focus observation deadline exceeded')
+    probe = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'probe-focus'],
+                           capture_output=True, text=True, timeout=remaining)
+    if probe.returncode:
+        raise RuntimeError('X focus observation failed: ' + probe.stderr[:256])
+    return json.loads(probe.stdout)
+
+
 class Controller:
     def __init__(self, list_targets, browser_call, scale=2, runner=run_command,
-                 sysfs=Path('/sys/class/drm')):
+                 sysfs=Path('/sys/class/drm'), focus_observer=confirm_focus):
         self.list_targets, self.browser_call = list_targets, browser_call
         self.scale = integer(scale, 1, 4, 'display scale')
         self.run, self.sysfs = runner, sysfs
+        self.focus_observer = focus_observer
+        self.focus_evidence = None
         self.lock = threading.RLock()
         self.epoch = str(uuid.uuid4())
         self.version = 0
@@ -489,6 +577,22 @@ class Controller:
         tid = tid or self.active.get(wid)
         tid = tid if tid in ids else ids[0]
         self.call('Target.activateTarget', {'targetId': tid})
+        self.focused_window, self.focus_evidence = None, None
+        processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
+        browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
+        if len(browser_pids) != 1:
+            raise RuntimeError('cannot identify sole CDP browser process')
+        deadline = time.monotonic() + 3
+        target = next(target for target in targets if target['id'] == tid)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Chromium/X focus did not converge')
+            evidence = self.focus_observer(target, remaining)
+            if evidence and evidence.get('browserPID') == browser_pids[0]:
+                self.focus_evidence = evidence
+                break
+            time.sleep(min(.025, max(0, deadline - time.monotonic())))
         self.active[wid] = tid
         self.focused_window = wid
         return tid
@@ -551,7 +655,7 @@ class Controller:
         if wid not in self.groups:
             raise ValueError('unknown browser window')
         if cmd == 'focus':
-            return {'windowId': wid, 'targetId': self.focus(wid)}
+            return {'windowId': wid, 'targetId': self.focus(wid), 'focusEvidence': self.focus_evidence}
         if cmd == 'close':
             if 'topology' in request:
                 validate_topology(request['topology'])
@@ -667,6 +771,9 @@ def prepare_window_manager(home=Path.home()):
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] == ['probe-focus']:
+        print(json.dumps(x_focus_snapshot()))
+        raise SystemExit(0)
     if sys.argv[1:] != ['prepare-wm'] or not enabled(Path('/proc/cmdline').read_text()):
         raise SystemExit('shared_windows.py prepare-wm requires explicit boot opt-in')
     prepare_window_manager()

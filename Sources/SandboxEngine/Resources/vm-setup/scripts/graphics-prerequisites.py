@@ -116,6 +116,12 @@ def contract_issues(capabilities):
                 or type(capabilities.get("pointerPort")) is not int
                 or capabilities["pointerPort"] != 5821):
             return ["Unsupported pointer configuration contract"]
+    if "sharedWindowProtocolVersion" in capabilities or "controllerPort" in capabilities:
+        if (type(capabilities.get("sharedWindowProtocolVersion")) is not int
+                or capabilities["sharedWindowProtocolVersion"] != 1
+                or type(capabilities.get("controllerPort")) is not int
+                or capabilities["controllerPort"] != 5832):
+            return ["Unsupported shared-window configuration contract"]
     return []
 
 
@@ -197,6 +203,9 @@ def collect_report(browser):
         "note": "Packaging check only; run graphics-diagnostics.py in X, verify Chromium and host Metal separately.",
     }
     # Additive marker: older/software images without this protocol stay valid.
+    if isinstance(capabilities, dict) and "sharedWindowProtocolVersion" in capabilities:
+        for path in ("/usr/local/bin/shared_windows.py", "/usr/local/bin/tab-agent.py"):
+            report["guestFiles"][path] = os.access(path, os.X_OK)
     if isinstance(capabilities, dict) and "pointerProtocolVersion" in capabilities:
         report["guestFiles"]["/usr/local/bin/pointer-agent.py"] = os.access(
             "/usr/local/bin/pointer-agent.py", os.X_OK)
