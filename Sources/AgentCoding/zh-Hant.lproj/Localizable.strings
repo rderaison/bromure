@@ -3581,3 +3581,8 @@
 "e.g. 1M, 256K or 131072" = "例如 1M、256K 或 131072";
 "Enter a number of tokens, like 1M or 200K." = "請輸入 token 數，例如 1M 或 200K。";
 "Use the server's value" = "使用伺服器的值";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "打開登入頁面並核准存取。";
+"Approve the sign-in in your browser; it should show this code:" = "在瀏覽器中核准登入；頁面上應顯示此代碼：";
+"Open the sign-in page and check that it shows this code:" = "打開登入頁面，確認頁面上顯示的是此代碼：";

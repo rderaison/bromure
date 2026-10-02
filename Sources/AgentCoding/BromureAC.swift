@@ -1800,20 +1800,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The MITM proxy saw a model *conversation* request for this VM. The proxy
     /// can't attribute traffic to a specific tab, so this is the per-VM fallback
-    /// for the agents WITHOUT reliable per-tab hooks (Codex/Grok/omp): flip
-    /// their tabs to .working and re-arm a timer to drop them back to .done.
-    /// Claude and Kimi tabs are left to their own per-window hooks (accurate per
-    /// tab), so a Claude call never flips a sibling Codex tab — and the 4s timer
-    /// can't mark a hook-driven tab .done mid-run.
+    /// for agents WITHOUT per-tab status hooks: flip their tabs to .working and
+    /// re-arm a timer to drop them back to .done after 4 s of quiet.
     ///
-    /// omp is deliberately NOT listed: it ALSO ships a turn hook
-    /// (~/.omp/agent/hooks/agent-status.ts, loaded via `--hook`) that drives its
-    /// dot per-tab through agent-status.sh → setTabAgentStatus — but that path is
-    /// independent of this set. Keeping omp OFF the list preserves the MITM
-    /// fallback for MITM-visible providers (Ollama/Anthropic) as a backstop,
-    /// while the hook covers the provider-agnostic case (z.ai/custom) where the
-    /// traffic heuristic is blind. Both agree on working/done, so they cooperate.
-    static let hookDrivenAgents: Set<String> = ["claude", "kimi"]
+    /// Every agent Bromure ships now reports through its own hooks, so the
+    /// fallback only covers an agent it doesn't know. The heuristic can't tell
+    /// a long command (no model traffic for minutes) from an idle agent, and
+    /// its 4-second .done stomped the hooks' .working — a Codex/omp tab read
+    /// "Ready" through every test run. The hooks:
+    ///   - claude: ~/.claude/settings.json (Profile.prepareHomeDirectory)
+    ///   - grok:   loads the same ~/.claude/settings.json hooks
+    ///   - kimi:   `[[hooks]]` in its config (SessionDisk.kimiHooksTOML)
+    ///   - codex:  `[[hooks.*]]` + pre-seeded trust in ~/.codex/config.toml
+    ///             (agentd `_seed_codex_hooks`)
+    ///   - omp:    the --hook module ~/.omp/agent/hooks/agent-status.ts
+    static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp"]
 
     func noteAgentActivity(_ id: Profile.ID) {
         setNonClaudeAgentTabs(id, .working)
@@ -1832,11 +1833,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// transition).
     private func setNonClaudeAgentTabs(_ id: Profile.ID, _ status: AgentStatus) {
         guard let pane = pane(for: id) else { return }
-        for tab in pane.model.tabs {
-            guard let kind = BromureIcons.agentKind(forLabel: tab.shownLabel),
-                  !Self.hookDrivenAgents.contains(kind) else { continue }
+        for (tab, kind) in agentTabs(of: pane) where !Self.hookDrivenAgents.contains(kind) {
             if status == .done && tab.agentStatus != .working { continue }
             tab.agentStatus = status
+        }
+    }
+
+    /// The pane's agent tabs with the tool each runs. The tab's own labels
+    /// can't say: an agent launched from .bashrc never becomes tmux's
+    /// foreground program, so the window is named "bash", and a session tab
+    /// shows its @display title ("Fix the login page"). The session record
+    /// knows; the labels are the fallback for a tab no session owns.
+    private func agentTabs(of pane: SessionPane) -> [(TabsModel.Tab, String)] {
+        var sessionTools: [Int: String] = [:]
+        for s in agentSessionStore.sessions where s.profileID == pane.profile.id && !s.hasEnded {
+            if let w = s.windowIndex { sessionTools[w] = s.tool.rawValue }
+        }
+        return pane.model.tabs.compactMap { tab in
+            (sessionTools[tab.index] ?? pane.agentHints[tab.index]
+                ?? BromureIcons.agentKind(forLabel: tab.label)
+                ?? BromureIcons.agentKind(forLabel: tab.shownLabel)).map { (tab, $0) }
+        }
+    }
+
+    /// The provider refused a model call outright (401/402/403) for this VM.
+    /// Codex fires no hook for a failed turn — only the prompt's — so its tab
+    /// sat "working" forever; a refused sign-in or an empty balance is the
+    /// user's to fix. The other agents report it themselves (StopFailure).
+    /// Per VM, like all proxy signals: every Codex tab that is mid-turn shares
+    /// the refused credential.
+    func noteModelCallRefused(_ id: Profile.ID, status: Int) {
+        guard [401, 402, 403].contains(status), let pane = pane(for: id) else { return }
+        for (tab, kind) in agentTabs(of: pane) where kind == "codex" && tab.agentStatus == .working {
+            setTabAgentStatus(id, index: tab.index, .needsInput)
         }
     }
 
@@ -2224,6 +2253,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             e.traceStore.onConversationResult = { [weak self] pid, host, status in
                 self?.switchboardEngine.noteAPIResult(profileID: pid, host: host, status: status)
+                self?.noteModelCallRefused(pid, status: status)
             }
             // Detailed HTTP logs → analytics.bromure.io/session_events,
             // same wire shape + admin view as the Web browser. Enrollment-
@@ -4148,7 +4178,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // What session reconcile sees per workspace.
                     return ["entries": (self.unifiedWindow?.listModel.entries ?? []).map {
                         ["name": $0.name, "rosterLive": $0.model.rosterLive,
-                         "tabs": $0.model.tabs.map { "\($0.index):\($0.display ?? "")" }]
+                         "tabs": $0.model.tabs.map { "\($0.index):\($0.display ?? "")" },
+                         // label = the tmux window name (foreground program), status = the dot.
+                         "status": $0.model.tabs.map { "\($0.index):\($0.label):\($0.agentStatus)" }]
                     }]
                 case "files-state":
                     guard let m = self.unifiedWindow?.fileExplorerModel else { return ["error": "no window"] }

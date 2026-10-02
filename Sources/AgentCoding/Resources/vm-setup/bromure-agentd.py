@@ -2116,6 +2116,7 @@ def _preonboard(tool, cwd=None):
             _preonboard_claude()
         elif tool == "codex" and cwd:
             _pretrust_codex(cwd)
+            _seed_codex_hooks()
     except Exception as e:
         log("worktree", "preonboard failed:", e)
 
@@ -2376,6 +2377,88 @@ def _pretrust_codex(cwd):
         + key + '\ntrust_level = "trusted"\n'
     with open(path, "a") as f:
         f.write(block)
+
+
+# Codex's status hooks: the host's per-tab working / done / needs-you dot.
+# Without them the only signal was model traffic on Codex's one long-lived
+# WebSocket — "Ready" through every long command, never "needs you".
+# (event, matcher, status). A failed turn fires none of these (only
+# UserPromptSubmit); the host reads that refusal from the transcript.
+_CODEX_STATUS_HOOKS = [
+    ("UserPromptSubmit", None, "working"),
+    ("PreToolUse", "*", "working"),
+    ("PostToolUse", "*", "working"),
+    ("PermissionRequest", "*", "needsInput"),
+    ("Stop", None, "done"),
+    ("Interrupt", None, "done"),     # Esc — no Stop follows
+    ("SessionEnd", None, "done"),
+]
+_CODEX_HOOKS_BEGIN = "# >>> bromure-status-hooks (managed)"
+_CODEX_HOOKS_END = "# <<< bromure-status-hooks"
+
+
+def _codex_hook_trust(event, command, matcher, timeout):
+    """The hash Codex stores when the user trusts a hook in its review
+    screen (verified against codex 0.155.1): sha256 of the compact,
+    sorted-key JSON of the hook group. Pre-seeding it means no "Hooks need
+    review" screen and no --dangerously-bypass-hook-trust banner."""
+    snake = re.sub(r"(?<!^)([A-Z])", r"_\1", event).lower()
+    group = {"event_name": snake,
+             "hooks": [{"async": False, "command": command,
+                        "timeout": timeout, "type": "command"}]}
+    if matcher is not None:
+        group["matcher"] = matcher
+    blob = json.dumps(group, separators=(",", ":"), sort_keys=True)
+    return snake, "sha256:" + hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _seed_codex_hooks():
+    """Write the managed status hooks — and their trust — into
+    ~/.codex/config.toml, replacing an earlier managed block. A hook's
+    trust key names its position among the file's groups for that event,
+    so the user's own hooks (kept, ahead of ours) are counted first."""
+    cdir = os.path.join(HOME, ".codex")
+    path = os.path.join(cdir, "config.toml")
+    text = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            text = f.read()
+    # Drop our previous block.
+    text = re.sub(r"\n?%s\n.*?%s\n?" % (re.escape(_CODEX_HOOKS_BEGIN),
+                                        re.escape(_CODEX_HOOKS_END)),
+                  "\n", text, flags=re.S)
+    try:
+        import tomllib
+        existing = tomllib.loads(text).get("hooks", {})
+        existing = existing if isinstance(existing, dict) else {}
+    except Exception:
+        return   # a config we can't read: never write hooks against it
+    hook = os.path.join(HOME, ".bromure", "agent-status.sh")
+    lines, state = [], []
+    for event, matcher, status in _CODEX_STATUS_HOOKS:
+        command = "%s %s" % (hook, status)
+        # Codex caps Interrupt / SessionEnd at 3 s; the hash uses the
+        # effective timeout, so always write it explicitly.
+        timeout = 3 if event in ("Interrupt", "SessionEnd") else 10
+        groups = existing.get(event)
+        index = len(groups) if isinstance(groups, list) else 0
+        snake, digest = _codex_hook_trust(event, command, matcher, timeout)
+        lines.append("[[hooks.%s]]" % event)
+        if matcher is not None:
+            lines.append('matcher = "%s"' % matcher)
+        lines.append('hooks = [{ type = "command", command = "%s", timeout = %d }]'
+                     % (command, timeout))
+        state.append('[hooks.state."%s:%s:%d:0"]\ntrusted_hash = "%s"'
+                     % (path, snake, index, digest))
+    block = "\n".join([_CODEX_HOOKS_BEGIN] + lines + state + [_CODEX_HOOKS_END])
+    new = text.rstrip("\n") + ("\n\n" if text.strip() else "") + block + "\n"
+    if new == (open(path).read() if os.path.exists(path) else None):
+        return
+    os.makedirs(cdir, exist_ok=True)
+    tmp = path + ".tmp.%d" % os.getpid()
+    with open(tmp, "w") as f:
+        f.write(new)
+    os.replace(tmp, path)
 
 
 _TASK_MCP_SHIM = "/mnt/bromure-meta/bromure-task-mcp.py"
@@ -4401,6 +4484,13 @@ def _apply_home_seed_locked():
         _seed_question_hooks()
     except Exception:
         log("home", "question hook seeding failed:\n" + traceback.format_exc())
+    # Codex's status hooks likewise belong to a `codex` typed by hand, not
+    # only to the tabs agentd opens.
+    try:
+        if shutil.which("codex") or os.path.isdir(os.path.join(HOME, ".codex")):
+            _seed_codex_hooks()
+    except Exception:
+        log("home", "codex hook seeding failed:\n" + traceback.format_exc())
 
 
 def _approve_claude_api_key(suffix):
@@ -4571,6 +4661,8 @@ def _seed_claude_settings():
     hooks["PreToolUse"] = _hook_cmd("working") + _keep_others("PreToolUse")
     hooks["Stop"] = _hook_cmd("done") + _keep_others("Stop")
     hooks["Notification"] = _hook_cmd("needsInput") + _keep_others("Notification")
+    # A refused turn fires StopFailure, not Stop (host Profile.swift twin).
+    hooks["StopFailure"] = _hook_cmd("needsInput") + _keep_others("StopFailure")
     settings["hooks"] = hooks
     _write(settings)
 

@@ -1672,14 +1672,14 @@ final class CodingTaskEngine {
     /// Enter into an open menu or dialog picks its default — a permission
     /// granted, an "auto mode" setup accepted — and a digit in the text can
     /// pick a numbered option. So the tab is checked for one (the picker
-    /// footers `BeautifiedSessionModel.menuHints` knows, or a numbered "❯ 1."
-    /// row) before typing and again before Enter; with one up nothing more is
+    /// footers every agent prints — `AgentPhrases` — or a highlighted
+    /// numbered row, "❯ 1." / Grok's "1 (●)") before typing and again before Enter; with one up nothing more is
     /// sent and `typeHeldMarker` is printed, for the caller to hold the text.
     nonisolated static func guardedTypeCommand(tabIndex: Int, text: String) -> String {
         let b64 = Data(text.utf8).base64EncodedString()
         let t = "bromure:\(tabIndex)"
         let menu = "tmux capture-pane -p -t \(t) 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
-            + "| grep -qE '↑/↓|↑↓|enter to select|enter to confirm|esc to cancel|esc to close|esc to exit|esc close|❯ *[0-9]+\\.'"
+            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'"
         return "if \(menu); then echo \(typeHeldMarker); "
             + "else echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \(t) -l && sleep 1 && "
             + "if \(menu); then echo \(typeHeldMarker); else tmux send-keys -t \(t) Enter; fi; fi"
@@ -2638,14 +2638,14 @@ enum CodingTaskEngine {
     /// Enter into an open menu or dialog picks its default — a permission
     /// granted, an "auto mode" setup accepted — and a digit in the text can
     /// pick a numbered option. So the tab is checked for one (the picker
-    /// footers `BeautifiedSessionModel.menuHints` knows, or a numbered "❯ 1."
-    /// row) before typing and again before Enter; with one up nothing more is
+    /// footers every agent prints — `AgentPhrases` — or a highlighted
+    /// numbered row, "❯ 1." / Grok's "1 (●)") before typing and again before Enter; with one up nothing more is
     /// sent and `typeHeldMarker` is printed, for the caller to hold the text.
     nonisolated static func guardedTypeCommand(tabIndex: Int, text: String) -> String {
         let b64 = Data(text.utf8).base64EncodedString()
         let t = "bromure:\(tabIndex)"
         let menu = "tmux capture-pane -p -t \(t) 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
-            + "| grep -qE '↑/↓|↑↓|enter to select|enter to confirm|esc to cancel|esc to close|esc to exit|esc close|❯ *[0-9]+\\.'"
+            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'"
         return "if \(menu); then echo \(typeHeldMarker); "
             + "else echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \(t) -l && sleep 1 && "
             + "if \(menu); then echo \(typeHeldMarker); else tmux send-keys -t \(t) Enter; fi; fi"

@@ -198,6 +198,10 @@ struct SessionTimeline: Equatable {
                     continue
                 }
                 advance(to: ts)
+            case .agentError:
+                // The turn ends where the provider refused it.
+                advance(to: ts)
+                closeTurn()
             }
         }
         closeTurn()

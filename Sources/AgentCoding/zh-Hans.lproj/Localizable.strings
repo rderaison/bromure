@@ -3578,3 +3578,8 @@
 "e.g. 1M, 256K or 131072" = "例如 1M、256K 或 131072";
 "Enter a number of tokens, like 1M or 200K." = "请输入 token 数，例如 1M 或 200K。";
 "Use the server's value" = "使用服务器的值";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "打开登录页面并批准访问。";
+"Approve the sign-in in your browser; it should show this code:" = "在浏览器中批准登录；页面上应显示此代码：";
+"Open the sign-in page and check that it shows this code:" = "打开登录页面，确认页面上显示的是此代码：";

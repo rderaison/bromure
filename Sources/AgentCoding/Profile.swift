@@ -4247,6 +4247,11 @@ public final class ProfileStore {
             hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
             hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
+            // A turn the API refused (auth, quota, overload) fires StopFailure,
+            // not Stop: without it the tab sat "working" forever. A refused
+            // turn is the user's to fix — needs you. (Grok runs these hooks
+            // too and has the same event.)
+            hooks["StopFailure"] = hookCmd("needsInput") + othersUnder("StopFailure")
             settings["hooks"] = hooks
 
             let data = try JSONSerialization.data(withJSONObject: settings,
@@ -4344,14 +4349,67 @@ public final class ProfileStore {
             # types over). Only a real prompt is needsInput; idle is done;
             # anything else (auth_success, elicitation bookkeeping, quota
             # notices) says nothing about the turn.
+            # Grok runs these same hooks (it loads ~/.claude/settings.json)
+            # but spells the field notificationType; without it every grok
+            # notification, idle included, read as a dialog.
             if [ "$signal" = "needsInput" ] && [ -n "$hook_json" ]; then
-              ntype=$(printf '%s' "$hook_json" | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+              ntype=$(printf '%s' "$hook_json" | sed -n 's/.*"notification_\{0,1\}[tT]ype"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
               case "$ntype" in
                 "") ;;
                 permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) ;;
                 idle_prompt) signal="done" ;;
                 *) exit 0 ;;
               esac
+            fi
+            # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
+            # agent-tool-<idx>.jsonl — the call's id, tool, command and the
+            # agent's pid, written BEFORE the tool runs. The host ties the
+            # processes and network flows that follow to the call
+            # (NetworkLineage). Every agent spells it its own way (Grok's
+            # camelCase + a snake alias, Kimi's tool_call_id); python3
+            # normalizes. Only on a PreToolUse — other events skip it cheaply.
+            if [ -n "$hook_json" ] && printf '%s' "$hook_json" | grep -q '"hook_event_name"[[:space:]]*:[[:space:]]*"PreToolUse"'; then
+              printf '%s' "$hook_json" | BROMURE_TOOL_OUT="$d/agent-tool-$idx.jsonl" BROMURE_HOOK_PPID="$PPID" \
+                python3 -c '
+            import json, os, sys, time
+            try:
+                e = json.load(sys.stdin)
+            except Exception:
+                sys.exit(0)
+            def proc(pid, f):
+                try:
+                    return open("/proc/%d/%s" % (pid, f), "rb").read()
+                except Exception:
+                    return b""
+            # The agent: the first ancestor that is not the shell running the hook.
+            pid = int(os.environ.get("BROMURE_HOOK_PPID") or 0)
+            for _ in range(6):
+                comm = proc(pid, "comm").decode(errors="replace").strip()
+                if pid <= 1 or comm not in ("sh", "bash", "dash", "zsh"):
+                    break
+                stat = proc(pid, "stat").decode(errors="replace")
+                pid = int(stat.rsplit(")", 1)[-1].split()[1]) if ")" in stat else 0
+            argv = proc(pid, "cmdline").replace(b"\0", b" ").decode(errors="replace").lower()
+            agent = next((a for a in ("claude", "codex", "kimi", "grok", "omp") if a in argv), "")
+            if not agent:
+                agent = "grok" if os.environ.get("GROK_HOOK_EVENT") else \
+                    ("kimi" if str(e.get("client_type", "")).startswith("kimi") else "")
+            inp = e.get("tool_input") or e.get("toolInput") or {}
+            cmd = inp.get("command") if isinstance(inp, dict) else None
+            if isinstance(cmd, list):
+                cmd = " ".join(str(c) for c in cmd)
+            line = {
+                "agent": agent,
+                "tool_use_id": e.get("tool_use_id") or e.get("toolUseId") or e.get("tool_call_id") or "",
+                "tool": e.get("tool_name") or e.get("toolName") or "",
+                "command": (cmd if isinstance(cmd, str) else json.dumps(inp, sort_keys=True))[:4000],
+                "session_id": e.get("session_id") or e.get("sessionId") or "",
+                "pid": pid,
+                "ts": time.time(),
+            }
+            with open(os.environ["BROMURE_TOOL_OUT"], "a") as f:
+                f.write(json.dumps(line, separators=(",", ":")) + "\n")
+            ' 2>/dev/null || true
             fi
             # "start" (SessionStart) says nothing about the turn — it's only
             # here to record the transcript below before the first prompt.
@@ -4425,9 +4483,32 @@ public final class ProfileStore {
                   /* status reporting must never break a turn */
                 }
               };
-              pi.on("turn_start", () => { report("working"); });
-              pi.on("tool_call", () => { report("working"); });
-              pi.on("turn_end", () => { report("done"); });
+              // agent_start / agent_end bracket the whole run of one prompt.
+              // turn_end fires after EVERY model step — including the one
+              // that only asks for a tool — so it read "done" while the tool
+              // ran (verified on omp 18.2.8).
+              pi.on("agent_start", () => { report("working"); });
+              // The call itself, Claude-hook shaped, for the tool-call lineage
+              // line agent-status.sh writes (agent-tool-<win>.jsonl).
+              pi.on("tool_call", (event: any) => {
+                if (!pane) return;
+                const payload = JSON.stringify({
+                  hook_event_name: "PreToolUse",
+                  tool_name: event?.toolName ?? event?.name ?? "",
+                  tool_use_id: event?.toolCallId ?? event?.id ?? "",
+                  tool_input: event?.input ?? event?.args ?? event?.arguments ?? {},
+                  session_id: event?.sessionId ?? "",
+                });
+                const b64 = Buffer.from(payload).toString("base64");
+                const cmd = "echo " + b64 + " | base64 -d | TMUX='" + tmux + "' TMUX_PANE='" + pane +
+                  "' /home/ubuntu/.bromure/agent-status.sh working";
+                try {
+                  Promise.resolve(pi.exec("sh", ["-c", cmd])).catch(() => {});
+                } catch {
+                  /* status reporting must never break a turn */
+                }
+              });
+              pi.on("agent_end", () => { report("done"); });
               pi.on("session_shutdown", () => { report("done"); });
             }
             """#

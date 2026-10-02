@@ -580,6 +580,10 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The tab shows (or stopped showing) a sign-in screen — the sidebar
     /// reflects it.
     var loginPromptChanged: ((Bool) -> Void)?
+    /// The agent's transcript now ends on a refused turn (auth, quota…).
+    /// Codex fires no hook for a failed turn — only the prompt's — so its
+    /// tab would read "working" forever; the host turns this into "needs you".
+    var recordedFailureAppeared: (() -> Void)?
     /// What the host sign-in is doing right now, for the card. nil = idle.
     @Published var hostSignInStatus: String?
     /// Why the last host sign-in didn't land, shown in the card under the
@@ -613,6 +617,7 @@ final class BeautifiedSessionModel: ObservableObject {
                     self.hostSignInStatus = text
                 case .finished(let ok, let message):
                     if ok {
+                        self.settleRecordedFailure()
                         self.hostSignInStatus = String(format: NSLocalizedString(
                             "Signed in. Starting %@ again…", comment: "sign-in"), self.agentDisplayName)
                         self.relaunchAfterSignIn?()
@@ -657,6 +662,10 @@ final class BeautifiedSessionModel: ObservableObject {
     private var nextOptimisticID = Int.max
     /// The parsed transcript (source of truth).
     private var parsedItems: [TranscriptItem] = []
+    /// The recorded refusal the user has moved past — sent something, or
+    /// signed in again — so it stops being the state while the transcript
+    /// still ends on it (a slash command or a restart writes no new turn).
+    private var settledFailureID: Int?
     /// Consecutive polls that parsed to EMPTY while we already had a transcript.
     /// A populated transcript that suddenly reads empty is almost always a
     /// transient fetch glitch — the session-floor probe momentarily resolving a
@@ -1171,13 +1180,18 @@ final class BeautifiedSessionModel: ObservableObject {
 
     private func applyParsed(_ parsed: [TranscriptItem]) {
         guard parsed != parsedItems else { return }
+        let hadRecorded = recordedFailure(in: parsedItems) != nil
         TranscriptMarkdownCache.prewarm(parsed)
         parsedItems = parsed
         ensureDropImages()
-        // Real transcript progress ⇒ any earlier terminal card is stale.
-        if failure != nil || prompt != nil {
+        // Real transcript progress ⇒ any earlier terminal card is stale —
+        // unless that progress IS the agent recording a refused turn, which
+        // is the failure, typed, in no particular language.
+        let recorded = recordedFailure(in: parsed)
+        if recorded != nil, !hadRecorded { recordedFailureAppeared?() }
+        if failure != nil || prompt != nil || recorded != nil {
             let wasLogin = prompt?.kind == .login
-            withAnimation(.easeOut(duration: 0.2)) { failure = nil; prompt = nil }
+            withAnimation(.easeOut(duration: 0.2)) { failure = recorded; prompt = nil }
             if wasLogin { loginPromptChanged?(false) }
             hostSignInStatus = nil
         }
@@ -1268,6 +1282,10 @@ final class BeautifiedSessionModel: ObservableObject {
         // something it printed or ran (a grep through this very detector
         // raised the card), not the agent's state.
         if newFailure?.kind == .auth, SessionFailure.modelAnswered(since: parsedItems) { newFailure = nil }
+        // What the agent recorded in its transcript beats any banner read
+        // off the screen: typed by the agent, and still true once the
+        // banner scrolls away.
+        if newPrompt == nil, let recorded = recordedFailure(in: parsedItems) { newFailure = recorded }
         guard newPrompt != prompt || newFailure != failure else { return }
         let wasLogin = prompt?.kind == .login
         withAnimation(.easeOut(duration: 0.2)) {
@@ -1276,6 +1294,17 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         let isLogin = newPrompt?.kind == .login
         if isLogin != wasLogin { loginPromptChanged?(isLogin) }
+    }
+
+    /// `SessionFailure.recorded(in:)`, unless the user has moved past it.
+    private func recordedFailure(in items: [TranscriptItem]) -> SessionFailure? {
+        guard let last = items.last(where: { if case .agentError = $0.kind { true } else { false } }),
+              last.id != settledFailureID else { return nil }
+        return SessionFailure.recorded(in: items)
+    }
+
+    private func settleRecordedFailure() {
+        settledFailureID = parsedItems.last(where: { if case .agentError = $0.kind { true } else { false } })?.id
     }
 
     /// Whether a terminal line is a fragment of something the conversation
@@ -1465,6 +1494,7 @@ final class BeautifiedSessionModel: ObservableObject {
         pendingAttachments = []
         failure = nil
         prompt = nil
+        settleRecordedFailure()
         gate.userSent()                   // a fresh send supersedes any prior stop
         // A slash command (/model, /cost, /help…) drives the TUI's own overlay;
         // it does NOT start an agent turn. Marking it "working" showed the
@@ -1715,32 +1745,19 @@ final class BeautifiedSessionModel: ObservableObject {
     /// to exit", "↑/↓ providers · Esc close"). Never the idle prompt's own
     /// hints ("? for shortcuts", "esc to interrupt").
     nonisolated static func menuHints(_ screen: String) -> Bool {
-        let tail = screen.split(whereSeparator: \.isNewline).suffix(30).joined(separator: "\n").lowercased()
-        return tail.contains("↑/↓") || tail.contains("↑↓") || tail.contains("enter to select")
-            || tail.contains("enter to confirm") || tail.contains("esc to cancel") || tail.contains("esc to close")
-            || tail.contains("esc to exit") || tail.contains("esc close")
-            || (tail.contains("arrow") && tail.contains("select"))
+        let tail = screen.split(whereSeparator: \.isNewline).suffix(30).joined(separator: "\n")
+        let low = AgentPhrases.normalize(tail)
+        return AgentPhrases.matches(tail, .footer, agent: nil)
+            || (low.contains("arrow") && low.contains("select"))
     }
 
-    /// A menu is open: its footer hints, or a highlighted row ("❯ …") that
-    /// sits inside a list — not Claude Code's input prompt, which starts
-    /// with the same glyph but has nothing but chrome and "? for shortcuts"
-    /// under it.
+    /// A menu is open: its footer hints, or the shape of one — a cursor on
+    /// one of sibling options at the bottom of the screen (`AgentScreen`),
+    /// never the agent's input box, which starts with the same glyph.
     nonisolated static func looksLikeMenu(_ screen: String) -> Bool {
         if menuHints(screen) { return true }
-        let lines = Array(screen.split(whereSeparator: \.isNewline).suffix(40)).map { String($0) }
-        for (i, raw) in lines.enumerated() {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("❯ ") else { continue }
-            let below = lines[(i + 1)..<min(lines.count, i + 4)]
-            let listy = below.contains { r in
-                let t = r.trimmingCharacters(in: .whitespaces)
-                return !t.isEmpty && !isChrome(t) && !t.lowercased().contains("for shortcuts")
-                    && !t.lowercased().contains("esc to interrupt")
-            }
-            if listy { return true }
-        }
-        return false
+        let lines = screen.split(whereSeparator: \.isNewline).suffix(40).map(String.init)
+        return AgentScreen.liveMenu(lines, after: -1) != nil
     }
 
     /// Rewrite host file paths in `text` to guest paths, uploading each file.
@@ -2800,47 +2817,46 @@ struct SessionFailure: Equatable {
         }
     }
 
-    // High-signal banners, calibrated against every supported agent's real
-    // wording (Claude prints "401 API key is invalid" — note the word order, the
-    // reason the first cut missed it; Codex "Incorrect API key provided" /
-    // "401 Unauthorized"; xAI/Grok, Kimi and omp echo their provider's message).
-    // Deliberately phrase-specific — bare "error"/"401" are NOT triggers — and a
-    // false positive self-heals the instant real transcript content returns.
-    private static let authNeedles = [
-        // invalid / missing key — both word orders, across CLIs
-        "api key is invalid", "invalid api key", "invalid x-api-key", "incorrect api key",
-        "api key not valid", "no api key", "didn't provide an api key", "missing api key",
-        "invalid_api_key", "x-api-key header is invalid", "invalid access token",
-        // authentication / authorization
-        "authentication_error", "authentication error", "authentication failed",
-        "invalid authentication", "401 unauthorized", "not authenticated",
-        "invalid bearer token", "could not refresh token", "permission_error",
-        // login / session / subscription
-        "please run /login", "run `/login`", "please log in", "not logged in",
-        "login expired", "session expired", "token has expired", "token expired",
-        "oauth token", "sign in again", "re-authenticate",
-        "subscription has expired", "subscription is invalid", "subscription expired",
-        // Kimi Code at startup: `Skipped refreshing managed:kimi-code: OAuth
-        // provider "managed:kimi-code" requires login before it can be used.`
-        // Without this the beautified view never saw the agent was blocked and
-        // sat on "Thinking…" forever. ("requires login" alone is specific
-        // enough; a real answer doesn't say it.)
-        "requires login", "requires you to log in", "run login",
-    ]
-    // "rate limit" on its own is NOT a needle: an answer that merely talks
-    // about one (a firewall's "3-per-minute rate limit") is on the same
-    // screen, and read as the agent being throttled.
-    private static let quotaNeedles = [
-        "credit balance is too low", "usage limit reached", "reached your usage limit",
-        "you've reached your usage", "hit your limit", "insufficient_quota",
-        "rate_limit", "rate-limit", "rate limit reached", "rate limit exceeded",
-        "rate limited", "being rate limit",
-        "quota exceeded", "exceeded your current quota", "overloaded_error",
-        "session limit reached", "out of credits", "too many requests",
-    ]
+    // High-signal banners live in `AgentPhrases` (.auth / .quota / .generic),
+    // per agent. They're the fallback: a refusal the agent RECORDS comes from
+    // its transcript, typed (`recorded(in:)`); the screen is read for what
+    // never reaches it — a retry loop in progress, a logged-out banner at
+    // startup. Deliberately phrase-specific — bare "error"/"401" are NOT
+    // triggers — and a false positive self-heals the instant real
+    // transcript content returns.
 
-    static func detect(inScreen screen: String) -> SessionFailure? {
-        detect(tail: terminalTail(screen))
+    static func detect(inScreen screen: String, agent: String? = nil) -> SessionFailure? {
+        detect(tail: terminalTail(screen), agent: agent)
+    }
+
+    init(kind: Kind, detail: String) {
+        self.kind = kind
+        self.detail = detail
+    }
+
+    init(_ error: AgentAPIError) {
+        switch error.kind {
+        case .auth: kind = .auth
+        case .quota, .rateLimit: kind = .quota
+        case .overloaded, .other: kind = .generic
+        }
+        let line = error.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        detail = line.isEmpty ? (error.status.map { "HTTP \($0)" } ?? "") : Self.clean(line)
+    }
+
+    /// The refusal the agent recorded for its latest turn — the transcript's
+    /// last word, with nothing (a new prompt, an answer) after it. Read from
+    /// the agent's own error enum / HTTP status, so it holds in any locale
+    /// and through any rewording of the banner.
+    static func recorded(in items: [TranscriptItem]) -> SessionFailure? {
+        for item in items.reversed() {
+            switch item.kind {
+            case .agentError(let e): return SessionFailure(e)
+            case .todo: continue
+            default: return nil
+            }
+        }
+        return nil
     }
 
     /// Whether the model has answered since the user's latest prompt — a
@@ -2852,8 +2868,7 @@ struct SessionFailure: Equatable {
             case .userText: return false
             case .toolUse, .thinking, .question, .todo: return true
             case .assistantText(let t):
-                let low = t.lowercased()
-                if !authNeedles.contains(where: { low.contains($0) }) { return true }
+                if !AgentPhrases.matches(t, .auth, agent: nil) { return true }
             default: continue
             }
         }
@@ -2862,37 +2877,32 @@ struct SessionFailure: Equatable {
 
     /// Scan a pre-split terminal tail (shared with `TerminalScan`, which splits
     /// once). Bottom-up: the lowest matching line is the current state.
-    static func detect(tail: [String]) -> SessionFailure? {
-        func match(_ needles: [String]) -> String? {
+    /// `agent`: the tab's agent, for the wording only it uses (nil = any).
+    static func detect(tail: [String], agent: String? = nil) -> SessionFailure? {
+        func match(_ topic: AgentPhrases.Topic) -> String? {
             for raw in tail.reversed() {
                 let line = raw.trimmingCharacters(in: .whitespaces)
                 guard !line.isEmpty else { continue }
-                let low = line.lowercased()
-                if needles.contains(where: { low.contains($0) }) { return clean(line) }
+                if AgentPhrases.matches(line, topic, agent: agent) { return clean(line) }
             }
             return nil
         }
-        if let d = match(quotaNeedles) { return SessionFailure(kind: .quota, detail: d) }
-        if let d = match(authNeedles)  { return SessionFailure(kind: .auth,  detail: d) }
+        if let d = match(.quota) { return SessionFailure(kind: .quota, detail: d) }
+        if let d = match(.auth)  { return SessionFailure(kind: .auth,  detail: d) }
         // The launcher's "<tool> exited with status N": what the agent said
         // before it went is the useful part.
         if let d = AgentSessionEngine.earlyExitReason(tail.joined(separator: "\n")) {
             return SessionFailure(kind: .generic, detail: clean(d))
         }
-        if let d = match(genericNeedles) { return SessionFailure(kind: .generic, detail: d) }
+        // The agent stopped before it could start a turn — a run that died
+        // on configuration (Kimi: "No model configured") or a launcher that
+        // reported a non-zero exit.
+        if let d = match(.generic) { return SessionFailure(kind: .generic, detail: d) }
         return nil
     }
 
-    // The agent stopped before it could start a turn — a run that died on
-    // configuration (Kimi: "No model configured", "failed to run prompt") or a
-    // launcher that reported a non-zero exit. Without these the chat sat on
-    // "Thinking…" (or, worse, mis-read a nearby warning as a trust dialog).
-    private static let genericNeedles = [
-        "no model configured", "failed to run prompt", "exited with status",
-    ]
-
     /// Strip a TUI box/bullet gutter and clamp length so the line reads cleanly.
-    private static func clean(_ line: String) -> String {
+    static func clean(_ line: String) -> String {
         let gutter = Set("│┃|>•*✗✘⎿⏺●─╮╯ ")
         let stripped = String(line.drop(while: { gutter.contains($0) }))
             .trimmingCharacters(in: .whitespaces)
@@ -2903,15 +2913,12 @@ struct SessionFailure: Equatable {
 
 /// The last N lines of a terminal snapshot — "now". Split once and shared by
 /// both detectors (an old banner scrolled above this isn't the current state).
+/// Blank lines inside are kept — they separate a dialog from what's around
+/// it — and the empty rows below the content are not.
 func terminalTail(_ screen: String, _ n: Int = 45) -> [String] {
-    Array(screen.split(whereSeparator: \.isNewline).map(String.init).suffix(n))
-}
-
-/// One selectable method in the `/login` menu ("1. Claude account with…").
-struct LoginOption: Equatable, Identifiable {
-    let index: Int
-    let label: String
-    var id: Int { index }
+    var lines = screen.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+    while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+    return Array(lines.suffix(n))
 }
 
 /// A blocking TUI prompt the agent is showing that the beautified view hides —
@@ -2937,6 +2944,8 @@ struct TerminalPrompt: Equatable {
     var authURL: String? = nil
     /// Login — the agent is waiting for the verification code ("Paste code here").
     var awaitingCode: Bool = false
+    /// Login — a device-code sign-in: the code to confirm on the page.
+    var deviceCode: String? = nil
     /// Picker — any other modal the agent put up ("Try the new fullscreen
     /// renderer?"): its title, its numbered options, and which one the
     /// cursor sits on (so an answer is arrow moves from there, then Enter).
@@ -2961,206 +2970,77 @@ struct TerminalPrompt: Equatable {
         return Array(repeating: moves > 0 ? "Down" : "Up", count: abs(moves)) + ["Enter"]
     }
 
-    private static let trustNeedles = [
-        "trust the files in this", "do you trust", "trust this folder",
-        "trust this directory", "trust this workspace", "is this a project you created",
-        "yes, i trust this folder", "trust the authors of", "quick safety check",
-        // Codex's onboarding ("You are running Codex in … allow Codex to work
-        // in this folder without asking for approval").
-        "allow codex to work in this folder", "you are running codex in",
-    ]
-
     static func detect(inScreen screen: String, agent: String? = nil) -> TerminalPrompt? {
         detect(tail: terminalTail(screen), agent: agent)
     }
 
-    /// `agent`: the tab's agent kind, for the wording only it uses (Oh My Pi
-    /// has no account — a missing provider key is its "sign-in").
+    /// `agent`: the tab's agent kind, for the wording only it uses (nil =
+    /// any agent's). Shapes first — a sign-in URL, a live menu — wording
+    /// only to name what a shape is (a sign-in method list, a trust dialog
+    /// we can answer in one click).
     static func detect(tail: [String], agent: String? = nil) -> TerminalPrompt? {
-        let trimmed = tail.map { $0.trimmingCharacters(in: .whitespaces) }
-        let low = trimmed.joined(separator: "\n").lowercased()
+        // Indentation kept (it aligns an unnumbered menu); trailing blanks off.
+        let lines = tail.map { String($0.reversed().drop(while: \.isWhitespace).reversed()) }
+        let screen = lines.joined(separator: "\n")
+        let low = AgentPhrases.normalize(screen)
 
-        // Sign-in screens: Claude's `/login` flow (the method menu, then the
-        // OAuth URL + code prompt), Codex's first-run picker, and the
-        // logged-out banners Grok / Kimi print.
-        let looksLikeLogin = low.contains("select login method")
-            || low.contains("browser didn't open")
-            || low.contains("paste code here")
-            || trimmed.contains { $0.contains("/oauth/authorize") }
-            || low.contains("sign in with chatgpt")
-            || low.contains("sign in with your chatgpt")
-            || low.contains("grok login") || low.contains("kimi login")
-            || low.contains("not logged in") || low.contains("please log in")
-            || low.contains("login required")
-            // Grok's first run: its own device-code screen.
-            || low.contains("approve in your browser")
-            // Oh My Pi's first-run wizard ("Setup step 1 of 5 · Set up your
-            // providers"), or a run with no provider key at all.
-            || (agent == "omp" && (low.contains("set up your providers") || low.contains("select provider to login")
-                                   || low.contains("no api key") || low.contains("api key is not set")
-                                   || low.contains("missing api key") || low.contains("anthropic_api_key")))
-        if looksLikeLogin {
+        // Sign-in: a sign-in URL or a device code on screen (any agent, any
+        // wording), or the agent's own login wording — Claude's `/login`
+        // method menu, Codex's first-run picker, the logged-out banners.
+        let url = AgentScreen.signInURL(lines)
+        let loginWords = AgentPhrases.matches(screen, .login, agent: agent)
+        if url != nil || loginWords {
             return TerminalPrompt(
                 kind: .login,
-                loginMethods: trimmed.compactMap(loginOption),
-                authURL: trimmed.compactMap(authorizeURL).first,
-                awaitingCode: low.contains("paste code here"))
+                loginMethods: AgentScreen.numberedOptions(lines),
+                authURL: url,
+                awaitingCode: url.map(AgentScreen.wantsPastedCode) == true
+                    || low.contains("paste code here") || low.contains("paste the authorization code"),
+                deviceCode: AgentScreen.deviceCode(lines))
         }
 
-        // Folder-trust dialog (Claude's picker, Codex's "Do you trust the
-        // contents of this directory?").
-        // Kimi's ONE-SHOT runs never ask — they print a warning ("this
-        // folder is not trusted; skipped N project-level MCP servers … Run
-        // `kimi` here and choose Trust") and carry on. That text hits the
-        // trust needles but there is nothing to answer, and the real state is
-        // whatever error follows (e.g. "No model configured"). Only a live
-        // dialog (its option rows on screen) is a trust prompt.
+        // Folder trust we know well enough to answer in one click (Claude's
+        // "Yes, I trust this folder" is one Down from "No, exit"). Kimi's
+        // ONE-SHOT runs never ask: they print a warning that names the
+        // dialog ("this folder is not trusted; … choose Trust this folder")
+        // and carry on — no options on screen, nothing to answer.
         let kimiWarningOnly = low.contains("folder is not trusted")
             && !low.contains("don't trust") && !low.contains("❯ trust")
-        if trustNeedles.contains(where: { low.contains($0) }), !kimiWarningOnly {
-            // The folder: a line that is just a path (Claude), else the first
-            // absolute path mentioned ("You are in /home/…" — Codex). Never a
-            // file the screen happens to mention (a log path).
-            let isFile: (Substring) -> Bool = { $0.hasSuffix(".log") || $0.contains("/logs/") }
-            let folder = trimmed.first(where: { $0.hasPrefix("/") && !$0.contains(" ") && !isFile($0[...]) })
-                ?? trimmed.joined(separator: " ").split(separator: " ")
-                    .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") || $0.hasPrefix("/Users/") })
-                    .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,:;)")) }
-                ?? NSLocalizedString("this folder", comment: "prompt")
-            let claudePicker = low.contains("yes, i trust this folder")
-            // Any other agent's trust dialog — Codex, Kimi, Grok, Oh My Pi,
-            // whatever each version words it as — is answered from its own
-            // numbered options: a card that only knew exact phrasings sat
-            // there "waiting for the agent's trust dialog" with nothing to click.
-            if !claudePicker, let menu = liveMenu(trimmed, after: -1) {
-                let asked = pickerTitle(trimmed, before: menu.firstOffset)
+        if AgentPhrases.matches(screen, .trust, agent: agent), !kimiWarningOnly {
+            let folder = AgentScreen.folder(lines) ?? NSLocalizedString("this folder", comment: "prompt")
+            if low.contains("yes, i trust this folder") {
+                return TerminalPrompt(kind: .trust, detail: folder, canAnswerTrust: true,
+                                      trustKeys: ["Down", "Enter"])
+            }
+            // Anyone else's trust dialog is answered from its own options.
+            if let menu = AgentScreen.liveMenu(lines, after: -1) {
+                let asked = AgentScreen.title(lines, before: menu.firstOffset)
                 return TerminalPrompt(kind: .picker, detail: folder,
                                       title: asked.isEmpty
                                           ? NSLocalizedString("Trust this folder?", comment: "prompt") : asked,
                                       options: menu.options, selectedOption: menu.selected)
             }
-            let codexPicker = low.contains("yes, continue")
-            // Kimi's picker defaults to "Trust this folder" (Enter picks it).
-            let kimiPicker = low.contains("don't trust") && low.contains("trust this folder")
+            // Codex's older dialog defaults to "Yes, continue": Enter takes it.
             return TerminalPrompt(kind: .trust, detail: folder,
-                                  canAnswerTrust: claudePicker || codexPicker || kimiPicker,
-                                  trustKeys: claudePicker ? ["Down", "Enter"] : ["Enter"])
+                                  canAnswerTrust: low.contains("yes, continue"), trustKeys: ["Enter"])
         }
 
-        // A permission prompt: a tool call waiting for approval, or auto mode
-        // paused after its classifier blocked actions in a row ("Auto mode
-        // classifier requires confirmation…"). Hidden, it left the chat
-        // sitting stuck with nothing to click. The card shows what's asked and
-        // relays the user's pick — it never answers on its own.
-        let permissionNeedles = ["do you want to proceed", "requires confirmation",
-                                 "don't ask again", "do you want to make this edit",
-                                 "do you want to create", "do you want to allow",
-                                 // Codex's approvals.
-                                 "would you like to run the following command",
-                                 "would you like to make the following edits",
-                                 "would you like to grant", "allow command?", "approve this"]
-        if let mark = trimmed.lastIndex(where: { l in permissionNeedles.contains { l.lowercased().contains($0) } }) {
-            // Options at or below the question — never a numbered list
-            // further up the transcript.
-            let from = trimmed[..<mark].lastIndex(where: { $0.isEmpty || Self.boxRule($0) }) ?? max(0, mark - 12)
-            if let menu = liveMenu(trimmed, after: from) {
-                let (options, selected, first) = (menu.options, menu.selected, menu.firstOffset)
-                let title = pickerTitle(trimmed, before: first)
-                let context = trimmed[max(0, first - 10)..<first]
-                    .map(unboxed)
-                    .filter { !$0.isEmpty && $0 != title && $0.contains(where: \.isLetter) }
-                return TerminalPrompt(kind: .picker, detail: context.joined(separator: "\n"),
-                                      title: title, options: options, selectedOption: selected)
-            }
-        }
-
-        // Any other modal picker — a numbered list under a title with a
-        // picker footer ("Try the new fullscreen renderer?" → 1. Yes, try it
-        // / 2. Not now). Surfaced generically so nothing ever blocks the
-        // chat unseen; the user picks here, or dismisses (Esc). Not the
-        // AskUserQuestion pickers (their own card answers those; footers
-        // "Enter to select" / "Space to toggle") and not tool-permission
-        // prompts, which auto mode never shows and a card must not decide.
-        if BeautifiedSessionModel.menuHints(trimmed.joined(separator: "\n")),
-           !low.contains("enter to select"), !low.contains("space to toggle"),
-           !low.contains("don't ask again"), !low.contains("do you want to proceed") {
-            let optionLines = trimmed.enumerated().filter { loginOption($0.element) != nil }
-            let options = optionLines.compactMap { loginOption($0.element) }
-            if options.count >= 2, options.map(\.index) == Array(1...options.count),
-               let first = optionLines.first {
-                let selected = optionLines.first { $0.element.hasPrefix("❯") }
-                    .flatMap { loginOption($0.element)?.index }
-                return TerminalPrompt(kind: .picker,
-                                      title: pickerTitle(trimmed, before: first.offset),
-                                      options: options, selectedOption: selected)
-            }
+        // Any other dialog up right now — a permission prompt, auto mode's
+        // pause, an upsell, a quota menu — read from its SHAPE: a cursor on
+        // one of sibling options at the bottom of the screen. What it says
+        // doesn't matter, so it holds in any language and through rewording.
+        // The card shows what's asked and relays the user's pick; it never
+        // answers on its own.
+        if let menu = AgentScreen.liveMenu(lines, after: -1) {
+            // Claude's AskUserQuestion picker: its own card answers it.
+            let footer = lines[(menu.lastOffset + 1)...].joined(separator: " ")
+            if AgentPhrases.matches(footer, .questionFooter, agent: agent) { return nil }
+            let title = AgentScreen.title(lines, before: menu.firstOffset)
+            return TerminalPrompt(kind: .picker,
+                                  detail: AgentScreen.context(lines, before: menu.firstOffset, title: title),
+                                  title: title, options: menu.options, selectedOption: menu.selected)
         }
         return nil
-    }
-
-    /// The dialog's title: the nearest question above the options, else the
-    /// nearest line of prose — never a bullet, box art, or the footer.
-    /// The numbered options of a dialog that is up RIGHT NOW: 1…n below
-    /// `after`, one of them under the selection cursor, and at the bottom
-    /// of the screen (a footer and the box's edge may follow). A numbered
-    /// list in the agent's own reply has no cursor and scrolls up — it was
-    /// being offered as a dialog to answer.
-    static func liveMenu(_ lines: [String], after from: Int)
-        -> (options: [LoginOption], selected: Int?, firstOffset: Int)? {
-        let optionLines = lines.enumerated().filter { $0.offset > from && loginOption($0.element) != nil }
-        let options = optionLines.compactMap { loginOption($0.element) }
-        guard options.count >= 2, options.map(\.index) == Array(1...options.count),
-              let first = optionLines.first, let last = optionLines.last else { return nil }
-        let cursor = optionLines.first { l in ["❯", "›", ">"].contains { unboxed(l.element).hasPrefix($0) } }
-        guard let cursor else { return nil }
-        // After the options: only a footer, blank lines, box edges.
-        let below = lines[(last.offset + 1)...].filter { !unboxed($0).isEmpty && !boxRule($0) }
-        guard below.count <= 3 else { return nil }
-        return (options, loginOption(cursor.element)?.index, first.offset)
-    }
-
-    /// A line without the dialog box drawn around it ("│ ❯ 1. Yes   │").
-    private static func unboxed(_ line: String) -> String {
-        line.trimmingCharacters(in: CharacterSet(charactersIn: " │┃|"))
-    }
-
-    /// A box's top or bottom edge, or a rule across the screen.
-    private static func boxRule(_ line: String) -> Bool {
-        !line.isEmpty && line.allSatisfy { "─━═╭╮╰╯┌┐└┘ ".contains($0) }
-    }
-
-    private static func pickerTitle(_ lines: [String], before end: Int) -> String {
-        let above = lines[0..<end].suffix(12).reversed()
-        func prose(_ l: String) -> String? {
-            let t = l.trimmingCharacters(in: CharacterSet(charactersIn: " │┃|"))
-            guard !t.isEmpty, t.count <= 90, t.contains(where: \.isLetter),
-                  !t.hasPrefix("·"), !t.hasPrefix("•"), !t.hasPrefix("-"), !t.hasPrefix("—")
-            else { return nil }
-            return t
-        }
-        if let q = above.compactMap(prose).first(where: { $0.hasSuffix("?") }) { return q }
-        return above.compactMap(prose).first ?? ""
-    }
-
-    /// "❯ 1. Claude account with subscription · Pro, Max…" → (1, "Claude account
-    /// with subscription"). The part after " · " is a tagline we drop.
-    private static func loginOption(_ line: String) -> LoginOption? {
-        let s = unboxed(line).drop(while: { $0 == "❯" || $0 == "›" || $0 == ">" || $0 == " " })
-        guard let dot = s.firstIndex(of: "."),
-              let n = Int(s[s.startIndex..<dot]), (1...9).contains(n) else { return nil }
-        var label = s[s.index(after: dot)...].trimmingCharacters(in: .whitespaces)
-        if let sep = label.range(of: " · ") { label = String(label[..<sep.lowerBound]) }
-        guard !label.isEmpty else { return nil }
-        return LoginOption(index: n, label: label)
-    }
-
-    /// The OAuth authorize URL on a (tmux `-J`-joined) line — not the changelog
-    /// link or the percent-encoded redirect_uri buried inside it.
-    private static func authorizeURL(_ line: String) -> String? {
-        guard let r = line.range(of: "https://") else { return nil }
-        let url = String(line[r.lowerBound...])
-            .split(whereSeparator: { $0 == " " }).first.map(String.init) ?? ""
-        return url.contains("/oauth/authorize") ? url : nil
     }
 }
 
@@ -3176,7 +3056,7 @@ enum TerminalScan {
     static func classify(_ screen: String, agent: String? = nil) -> TerminalState? {
         let tail = terminalTail(screen)
         if let p = TerminalPrompt.detect(tail: tail, agent: agent) { return .prompt(p) }
-        if let f = SessionFailure.detect(tail: tail) { return .failure(f) }
+        if let f = SessionFailure.detect(tail: tail, agent: agent) { return .failure(f) }
         return nil
     }
 }
@@ -3539,15 +3419,29 @@ private struct PromptCard: View {
                 }
                 .buttonStyle(.plain)
             }
-        } else if prompt.authURL != nil {
-            // Stage 2 — approve in the browser, paste the code back.
-            Text(NSLocalizedString("Open the sign-in page, approve access, then paste the code back here.",
-                                   comment: "login")).font(.system(size: 11)).foregroundStyle(.secondary)
-            Button(action: onOpenURL) {
-                Label(NSLocalizedString("Open sign-in page", comment: "login"),
-                      systemImage: "arrow.up.right.square.fill")
+        } else if prompt.authURL != nil || prompt.deviceCode != nil {
+            // Stage 2 — approve in the browser: paste the code back (OAuth
+            // code flow), or check the page shows the agent's code (device flow).
+            Text(prompt.awaitingCode
+                 ? NSLocalizedString("Open the sign-in page, approve access, then paste the code back here.", comment: "login")
+                 : prompt.deviceCode == nil
+                 ? NSLocalizedString("Open the sign-in page and approve access.", comment: "login")
+                 : prompt.authURL == nil
+                 ? NSLocalizedString("Approve the sign-in in your browser; it should show this code:", comment: "login")
+                 : NSLocalizedString("Open the sign-in page and check that it shows this code:", comment: "login"))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let code = prompt.deviceCode, !prompt.awaitingCode {
+                Text(code)
+                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                    .textSelection(.enabled)
             }
-            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            if prompt.authURL != nil {
+                Button(action: onOpenURL) {
+                    Label(NSLocalizedString("Open sign-in page", comment: "login"),
+                          systemImage: "arrow.up.right.square.fill")
+                }
+                .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            }
             if prompt.awaitingCode {
                 HStack(spacing: 6) {
                     TextField(NSLocalizedString("Paste code", comment: "login"), text: $code)

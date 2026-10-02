@@ -22,10 +22,125 @@ struct TranscriptItem: Identifiable, Equatable {
         /// parser, which merges the plan's items with the latest todo-tool
         /// result (its authoritative per-item status).
         case todo(title: String, rows: [TodoRowModel])
+        /// A turn the provider refused (bad sign-in, quota, overload),
+        /// as the agent itself recorded it.
+        case agentError(AgentAPIError)
     }
     let id: Int
     var kind: Kind
     var timestamp: Date?
+}
+
+/// An API failure read from the agent's own transcript, typed by what the
+/// agent wrote down — an error enum, an HTTP status — never by its wording,
+/// which is English today, changes between versions, and on some agents
+/// is the provider's message passed through in any language.
+struct AgentAPIError: Equatable {
+    enum Kind: String, Equatable { case auth, quota, rateLimit, overloaded, other }
+    let kind: Kind
+    let status: Int?
+    /// What the agent showed for it, for the card's detail line.
+    let message: String
+
+    var headline: String {
+        switch kind {
+        case .auth: NSLocalizedString("The agent couldn't authenticate", comment: "failure")
+        case .quota, .rateLimit: NSLocalizedString("The agent hit a usage limit", comment: "failure")
+        case .overloaded, .other: NSLocalizedString("The agent stopped with an error", comment: "failure")
+        }
+    }
+
+    /// When the agent's own enum says nothing more specific: the HTTP status.
+    /// 403 stays `.other` — a refused permission on some providers, an empty
+    /// balance on others.
+    static func kind(forStatus status: Int?) -> Kind {
+        switch status {
+        case 401: .auth
+        case 402: .quota
+        case 429: .rateLimit
+        case 503, 529: .overloaded
+        default: .other
+        }
+    }
+
+    /// The first HTTP-looking status in an agent's error message — "API
+    /// Error: 401 …", "unexpected status 401 Unauthorized", "(status 429 Too
+    /// Many Requests)", "Unauthorized (401) from …". Numbers only, so it
+    /// reads the same whatever language the rest is in.
+    static func status(in message: String) -> Int? {
+        let pattern = #"(?<![\d.])(40[0-9]|42[0-9]|5[0-9]{2})(?![\d.])"#
+        guard let r = message.range(of: pattern, options: .regularExpression) else { return nil }
+        return Int(message[r])
+    }
+
+    /// Claude Code: `error` on an `isApiErrorMessage` line (also the
+    /// StopFailure hook's enum).
+    static func claude(error: String?, status: Int?, message: String) -> AgentAPIError {
+        let kind: Kind
+        switch error ?? "" {
+        case "authentication_failed", "oauth_org_not_allowed", "account_on_hold",
+             "verification_required", "cloud_credential_error": kind = .auth
+        case "billing_error": kind = .quota
+        case "rate_limit": kind = .rateLimit
+        case "overloaded", "server_error": kind = .overloaded
+        default: kind = Self.kind(forStatus: status ?? Self.status(in: message))
+        }
+        return AgentAPIError(kind: kind, status: status ?? Self.status(in: message), message: message)
+    }
+
+    /// Codex: `codex_error_info` (rollout, snake_case) / `codexErrorInfo`
+    /// (app-server, camelCase). An API-key 401 comes through as "other".
+    static func codex(info: String?, message: String) -> AgentAPIError {
+        let status = Self.status(in: message)
+        let kind: Kind
+        switch (info ?? "").replacingOccurrences(of: "_", with: "").lowercased() {
+        case "unauthorized": kind = .auth
+        case "usagelimitexceeded", "sessionbudgetexceeded": kind = .quota
+        case "ratelimitexceeded": kind = .rateLimit
+        case "serveroverloaded": kind = .overloaded
+        default: kind = Self.kind(forStatus: status)
+        }
+        return AgentAPIError(kind: kind, status: status, message: message)
+    }
+
+    /// Kimi Code: `turn.ended` error `code` + class `name` + `statusCode`.
+    static func kimi(code: String?, name: String?, status: Int?, message: String) -> AgentAPIError {
+        let code = code ?? ""
+        let kind: Kind
+        if code == "provider.auth_error" || code.hasPrefix("auth.") {
+            kind = .auth
+        } else if name == "APIProviderQuotaExhaustedError" {
+            kind = .quota
+        } else if code == "provider.rate_limit" || name == "APIProviderRateLimitError" {
+            kind = .rateLimit
+        } else {
+            kind = Self.kind(forStatus: status ?? Self.status(in: message))
+        }
+        return AgentAPIError(kind: kind, status: status ?? Self.status(in: message), message: message)
+    }
+
+    /// Grok: `retry_state.error_type` (auth / rate_limited / api).
+    static func grok(errorType: String?, rateLimited: Bool, message: String) -> AgentAPIError {
+        let status = Self.status(in: message)
+        let kind: Kind
+        switch errorType ?? "" {
+        case "auth": kind = .auth
+        case "rate_limited": kind = .rateLimit
+        default: kind = rateLimited ? .rateLimit : Self.kind(forStatus: status)
+        }
+        return AgentAPIError(kind: kind, status: status, message: message)
+    }
+
+    /// Oh My Pi: the `errorId` classifier bitfield (pi-ai error/flags.ts)
+    /// and `errorStatus`.
+    static func omp(errorID: Int?, status: Int?, message: String) -> AgentAPIError {
+        let id = errorID ?? 0
+        let kind: Kind
+        if id & 0x1000000 != 0 || id & 0x40000000 != 0 { kind = .auth }        // AuthFailed, OAuthExpiry
+        else if id & 0x80000 != 0 { kind = .quota }                              // UsageLimit
+        else { kind = Self.kind(forStatus: status ?? Self.status(in: message)) }
+        return AgentAPIError(kind: kind, status: status ?? Self.status(in: message), message: message)
+    }
 }
 
 extension TranscriptItem.Kind {
@@ -39,6 +154,7 @@ extension TranscriptItem.Kind {
         case .toolResult: 5
         case .question: 6
         case .todo: 7
+        case .agentError: 8
         }
     }
 }
@@ -145,6 +261,16 @@ enum ClaudeTranscriptParser {
 
             func add(_ kind: TranscriptItem.Kind) {
                 items.append(TranscriptItem(id: items.count, kind: kind, timestamp: stamp))
+            }
+
+            // A refused API call ("Please run /login · API Error: 401 …"),
+            // written as a synthetic assistant turn but tagged with its enum
+            // and status — the tags are the signal, the text only the detail.
+            if type == "assistant", obj["isApiErrorMessage"] as? Bool == true {
+                let text = resultText(message["content"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                add(.agentError(.claude(error: obj["error"] as? String,
+                                        status: obj["apiErrorStatus"] as? Int, message: text)))
+                continue
             }
 
             // content is either a bare string or an array of typed blocks.
@@ -454,6 +580,20 @@ enum OmpTranscriptParser {
             }
             guard role == "user" || role == "assistant" else { continue }
 
+            // A turn the provider refused: omp records the HTTP status and
+            // its classifier bits next to the (provider-worded) message.
+            if role == "assistant", message["stopReason"] as? String == "error" {
+                let text = (message["errorMessage"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let status = message["errorStatus"] as? Int
+                let errorID = message["errorId"] as? Int
+                // A user's Esc is an "error" stop too — not a failure.
+                if errorID.map({ $0 & (0x4000000 | 0x8000000) != 0 }) != true,
+                   status != nil || errorID != nil || !text.isEmpty {
+                    add(.agentError(.omp(errorID: errorID, status: status, message: text)))
+                }
+            }
+
             // content: a bare string or an array of blocks.
             if let s = message["content"] as? String {
                 let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -576,6 +716,14 @@ enum CodexTranscriptParser {
                 }
             case "event_msg":
                 guard let payload = obj["payload"] as? [String: Any] else { continue }
+                // A failed turn: the error rides on its task_complete, typed
+                // by codex_error_info. Not mirrored by any response_item, so
+                // it belongs in both lists.
+                if let error = Self.turnError(payload) {
+                    primary.append(error); stamps.append(stamp)
+                    fallback.append(error); fallbackStamps.append(stamp)
+                    continue
+                }
                 for kind in eventKinds(payload) {
                     fallback.append(kind)
                     fallbackStamps.append(stamp)
@@ -672,6 +820,24 @@ enum CodexTranscriptParser {
         default:
             return []
         }
+    }
+
+    /// `task_complete` (or a bare `error` event) carrying the turn's failure.
+    private static func turnError(_ payload: [String: Any]) -> TranscriptItem.Kind? {
+        let type = payload["type"] as? String ?? ""
+        let error: [String: Any]?
+        switch type {
+        case "task_complete", "turn_complete": error = payload["error"] as? [String: Any]
+        case "error": error = payload
+        default: return nil
+        }
+        guard let error else { return nil }
+        let message = (error["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let info = error["codex_error_info"] ?? error["codexErrorInfo"]
+        // The plain variants are strings; the http ones are a one-key object.
+        let infoName = (info as? String) ?? (info as? [String: Any])?.keys.first
+        guard !message.isEmpty || infoName != nil else { return nil }
+        return .agentError(.codex(info: infoName, message: message))
     }
 
     /// The legacy-mode UI mirror of the same conversation (fallback only).
@@ -811,8 +977,19 @@ enum GrokTranscriptParser {
                 }
                 add(.toolResult(tool: tool, content: content,
                                 isError: status == "failed"))
+            case "retry_state":
+                // The turn's request gave up — "failed" (not retryable, e.g.
+                // auth) or "exhausted" (retries spent). Typed by error_type;
+                // "retrying" is still in flight and says nothing yet.
+                let state = update["type"] as? String ?? ""
+                guard state == "failed" || state == "exhausted" else { continue }
+                let text = (update["message"] as? String ?? update["reason"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                add(.agentError(.grok(errorType: update["error_type"] as? String,
+                                      rateLimited: update["is_rate_limited"] as? Bool ?? false,
+                                      message: text)))
             default:
-                continue    // plan, turn_completed, hook_execution, retry_state, …
+                continue    // plan, turn_completed, hook_execution, …
             }
         }
         return trimmedTextItems(items)
@@ -992,6 +1169,17 @@ enum KimiTranscriptParser {
                 default:
                     continue    // step.begin / step.end / …
                 }
+            case "turn.ended":
+                // A failed turn carries Kimi's own error code and the HTTP
+                // status; the message after it is the provider's, any language.
+                lastPartStep = nil
+                guard obj["reason"] as? String == "failed",
+                      let error = obj["error"] as? [String: Any] else { continue }
+                let details = error["details"] as? [String: Any]
+                add(.agentError(.kimi(code: error["code"] as? String, name: error["name"] as? String,
+                                      status: details?["statusCode"] as? Int,
+                                      message: (error["message"] as? String ?? "")
+                                          .trimmingCharacters(in: .whitespacesAndNewlines))))
             default:
                 // metadata, profile.bind, llm.*, usage.record, turn.*, … —
                 // plumbing. turn.prompt duplicates the user append_message.
@@ -1719,6 +1907,11 @@ struct TranscriptItemView: View {
             ToolCallCard(name: name, summary: summary, detail: detail)
         case .todo(let title, let rows):
             TodoListView(title: title, rows: rows)
+        case .agentError(let e):
+            CollapsibleRow(icon: "exclamationmark.triangle.fill", title: e.headline,
+                           subtitle: firstLine(e.message), tint: .orange) {
+                if !e.message.isEmpty { codeBlock(String(e.message.prefix(4_000))) }
+            }
         case .toolResult(let tool, let content, let isError):
             CollapsibleRow(
                 icon: isError ? "exclamationmark.octagon" : "arrow.turn.down.right",

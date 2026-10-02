@@ -110,9 +110,11 @@ struct SessionFailureTests {
         #expect(q?.options.map(\.label) == ["Yes, continue", "No, quit"])
     }
 
-    @Test("Kimi's real trust dialog IS a trust prompt, answerable inline with Enter")
+    @Test("Kimi's real trust dialog is answered from its own options")
     func kimiTrustDialogIsAnswerable() throws {
-        // Real capture (kimi 2.0.2) of the interactive dialog.
+        // Real capture (kimi 2.0.2) of the interactive dialog. Read from its
+        // shape (cursor row + aligned rows), so the card offers Kimi's own
+        // choices, not a guess at which key means "trust".
         let screen = """
           Trust this folder?
           ↑↓ navigate · Enter select · Esc exit
@@ -124,10 +126,10 @@ struct SessionFailureTests {
              Exit Kimi Code. Asked again next launch.
         """
         let p = try #require(TerminalPrompt.detect(inScreen: screen, agent: "kimi"))
-        #expect(p.kind == .trust)
+        #expect(p.kind == .picker)
         #expect(p.detail == "/home/ubuntu/trustprobe")
-        #expect(p.canAnswerTrust)
-        #expect(p.trustKeys == ["Enter"])
+        #expect(p.options.map(\.label) == ["Trust this folder", "Don't trust"])
+        #expect(p.keys(picking: 1) == ["Enter"])
     }
 
     @Test("Credit/usage banners are read as a quota failure")

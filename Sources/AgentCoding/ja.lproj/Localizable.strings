@@ -3578,3 +3578,8 @@
 "e.g. 1M, 256K or 131072" = "例: 1M、256K、131072";
 "Enter a number of tokens, like 1M or 200K." = "1M や 200K のようにトークン数を入力してください。";
 "Use the server's value" = "サーバーの値を使用";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "サインインページを開いてアクセスを承認してください。";
+"Approve the sign-in in your browser; it should show this code:" = "ブラウザでサインインを承認してください。次のコードが表示されているはずです：";
+"Open the sign-in page and check that it shows this code:" = "サインインページを開き、次のコードが表示されていることを確認してください：";

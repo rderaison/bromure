@@ -191,6 +191,9 @@ enum TranscriptItemWire {
                 if let p = r.phase { e["phase"] = p }
                 return e
             }
+        case .agentError(let e):
+            d["k"] = "agent_error"; d["kind"] = e.kind.rawValue; d["text"] = e.message
+            if let s = e.status { d["status"] = s }
         }
         return d
     }
@@ -227,6 +230,10 @@ enum TranscriptItemWire {
             }
             kind = .todo(title: d["title"] as? String ?? NSLocalizedString("To-dos", comment: "todo card"),
                          rows: rows)
+        case "agent_error":
+            kind = .agentError(AgentAPIError(
+                kind: AgentAPIError.Kind(rawValue: d["kind"] as? String ?? "") ?? .other,
+                status: d["status"] as? Int, message: d["text"] as? String ?? ""))
         default:
             return nil
         }

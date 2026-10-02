@@ -1856,6 +1856,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let pinnedCA = clusterCAs.ca(for: host, profileID: profileID)
 
         let upstreamFD = try connectTCP(host: host, port: port)
+        // The handshake reads block: an upstream that never answers the
+        // upgrade (seen with Codex's reconnect loop) held its thread for
+        // good. Bounded here; the relay below polls and ignores it.
+        var handshakeDeadline = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(upstreamFD, SOL_SOCKET, SO_RCVTIMEO, &handshakeDeadline,
+                   socklen_t(MemoryLayout<timeval>.size))
         let upstreamTLS: TLSClientStream
         do {
             upstreamTLS = try TLSClientStream(fd: upstreamFD, peerName: host,
@@ -1937,6 +1943,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // under the stream's own lock and never block while holding it — the
         // `poll()`s in `pumpDirection` wait OUTSIDE the lock, so the two
         // directions can't deadlock either.
+        var noDeadline = timeval(tv_sec: 0, tv_usec: 0)
+        setsockopt(upstreamFD, SOL_SOCKET, SO_RCVTIMEO, &noDeadline, socklen_t(MemoryLayout<timeval>.size))
         serverTLS.setNonBlocking()
         upstreamTLS.setNonBlocking()
         let serverFD = serverTLS.pumpFD
