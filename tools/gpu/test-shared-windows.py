@@ -10,6 +10,7 @@ import threading
 import hashlib
 import base64
 import subprocess
+import os
 from unittest.mock import patch
 
 PATH = Path(__file__).resolve().parents[2] / 'Sources/SandboxEngine/Resources/vm-setup/scripts/shared_windows.py'
@@ -24,6 +25,28 @@ def output(index, x, y=0, width=1920, height=1252):
 
 
 class Tests(unittest.TestCase):
+    def test_shared_boot_starts_internal_cdp_without_enabling_external_automation(self):
+        source = PATH.with_name('xinitrc').read_text()
+        # Execute the actual startup block with only its process launcher stubbed.
+        block = source.split('# Internal CDP is also needed', 1)[1].split('if [ "$NATIVE_CHROME"', 1)[0]
+        block = '# Internal CDP is also needed' + block
+        block = block.replace('/usr/local/bin/resilient-launch.sh', 'launch')
+        for automation, shared_mode, lan, expected in (
+            ('0', '0', '1', []), ('', '0', '', []),
+            ('0', '1', '1', ['cdp-agent.py']), ('', '1', '', ['cdp-agent.py']),
+            ('1', '0', '0', ['cdp-agent.py']),
+            ('1', '0', '1', ['cdp-agent.py', 'cdp-lan-forwarder.py']),
+            ('1', '1', '1', ['cdp-agent.py', 'cdp-lan-forwarder.py']),
+        ):
+            with self.subTest(automation=automation, shared=shared_mode, lan=lan):
+                script = 'launch() { printf "%s\\n" "$1"; };\n' + block + '\nwait\nprintf "AUTOMATION=%s\\n" "$AUTOMATION"\n'
+                result = subprocess.run(['sh', '-c', script], capture_output=True, text=True, timeout=3,
+                                        env=dict(os.environ, AUTOMATION=automation,
+                                                 _SHARED_WINDOWS=shared_mode, CDP_LAN_ACCESS=lan), check=True)
+                lines = result.stdout.splitlines()
+                self.assertEqual(lines[-1], 'AUTOMATION=' + automation)
+                self.assertEqual(sorted(Path(line).name for line in lines[:-1]), sorted(expected))
+
     def test_navigation_policy(self):
         for url in ('about:blank', 'about:blank#section', 'https://example.com/a%20b',
                     'http://127.0.0.1:8080/', 'http://[::1]:8080/', 'chrome://history/',

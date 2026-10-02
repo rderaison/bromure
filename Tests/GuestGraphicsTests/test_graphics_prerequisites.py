@@ -48,6 +48,7 @@ class GraphicsPrerequisitesTests(unittest.TestCase):
         self.assertEqual(marker['controllerPort'], 5832)
         self.assertFalse(self.report(missing_guest='/usr/local/bin/shared_windows.py')['readyForGuestProbe'])
         self.assertFalse(self.report(missing_guest='/usr/local/bin/tab-agent.py')['readyForGuestProbe'])
+        self.assertFalse(self.report(missing_guest='/usr/local/bin/cdp-agent.py')['readyForGuestProbe'])
         for changes in ({'controllerPort': 1}, {'sharedWindowProtocolVersion': True},
                         {'sharedWindowProtocolVersion': 2}):
             self.assertTrue(prerequisites.contract_issues(dict(marker, **changes)))

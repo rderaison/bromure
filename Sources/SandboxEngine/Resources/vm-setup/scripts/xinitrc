@@ -141,7 +141,11 @@ fi
 # file-agent.py and webcam-agent.py are started at boot via inittab
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl
 [ "$MICROPHONE" = "1" ] && pactl load-module module-alsa-source device=hw:0,1 source_name=virtio_mic source_properties=device.description=Microphone 2>/dev/null &
-[ "$AUTOMATION" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-agent.py &
+# Internal CDP is also needed for target-scoped shared-window scrolling.
+# This does not enable the external automation setting or LAN forwarding.
+if [ "$AUTOMATION" = "1" ] || [ "$_SHARED_WINDOWS" = "1" ]; then
+    /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-agent.py &
+fi
 # CDP LAN forwarder: lets the workspace VM drive CDP over VM↔VM TCP (host stays
 # out of the loop → no main-queue wedge). No-ops unless CDP_LAN_ACCESS=1.
 [ "$AUTOMATION" = "1" ] && [ "$CDP_LAN_ACCESS" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-lan-forwarder.py &

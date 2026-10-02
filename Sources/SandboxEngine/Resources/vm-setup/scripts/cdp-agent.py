@@ -13,7 +13,8 @@ Architecture (guest-initiated connection pool):
 This matches the existing Bromure vsock pattern where the guest always
 initiates connections to the host (CID 2).
 
-Started from xinitrc when AUTOMATION=1.
+Started from xinitrc when AUTOMATION=1 or shared-window boot mode requires
+internal target-scoped input. The latter does not enable external automation.
 """
 
 import os
