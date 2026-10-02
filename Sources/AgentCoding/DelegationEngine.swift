@@ -804,6 +804,15 @@ final class DelegationEngine {
         case (.host, .note): to = .parent
         default: throw DelegationRefusal("A \(from.rawValue) can't send a \(kind.rawValue).")
         }
+        // A session the user archived is done: nothing an agent sends may
+        // bring it back (a follow-up on an old thread used to resume it).
+        // A cancel is still recorded — it asks nothing of it.
+        if kind != .cancel, kind != .note,
+           let recipient = sessions.session(to == .parent ? d.parentSessionID : d.childSessionID),
+           recipient.isArchived || recipient.isDeleted {
+            let name = recipient.nickname.map { "@" + $0 } ?? "“\(recipient.title)”"
+            throw DelegationRefusal("\(name) is \(recipient.isDeleted ? "deleted" : "archived") — the user has to bring it back first.")
+        }
         var m = DelegationMessage(kind: kind, from: from, to: to, text: text, answers: answering)
         if from != .host, let snippet = await scan(text) {
             m.blocked = snippet
@@ -1224,7 +1233,10 @@ final class DelegationEngine {
             }
         }
         items.sort { $0.1.at < $1.1.at }
-        guard !items.isEmpty, let s = sessions.session(sessionID), let delegate, !s.isDeleted else { return }
+        // Archived: the user put it away — what it's owed waits on the record
+        // and is never typed in or resumed for.
+        guard !items.isEmpty, let s = sessions.session(sessionID), let delegate, !s.isDeleted, !s.isArchived
+        else { return }
         if s.isLaunching { return }
         let lines = items.map { d, m in
             m.to == .parent ? DelegationNotice.toParent(m, in: d) : DelegationNotice.toChild(m, in: d)

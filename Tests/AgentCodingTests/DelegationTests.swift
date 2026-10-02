@@ -552,6 +552,32 @@ struct DelegationTests {
         #expect(f.sessions.session(seclio.id)?.windowIndex == 4)
     }
 
+    @Test("an archived peer can't be brought back by a message on an old thread")
+    func archivedPeerStaysPut() async throws {
+        let f = fixture()
+        var alice = AgentSession(profileID: f.profileID, tool: .claude, title: "Alice", cwd: "~/alice")
+        alice.nickname = "alice"
+        f.sessions.upsert(alice)
+        var d = Delegation(profileID: f.profileID, parentSessionID: f.parentID, childSessionID: alice.id,
+                           title: "Review", brief: "Review the diff.", kind: .request)
+        d.status = .working   // still open: only the archive stands in the way
+        f.store.upsert(d)
+        f.sessions.setArchived(alice.id, true)
+        // A follow-up to her is refused, with the reason…
+        do {
+            try await f.engine.post(d.id, from: .parent, kind: .steer, text: "One more thing.")
+            Issue.record("a steer to an archived session went through")
+        } catch let r as DelegationRefusal {
+            #expect(r.why.contains("@alice is archived"), Comment(rawValue: r.why))
+        }
+        // …nothing is owed to her, and she isn't relaunched.
+        #expect(f.store.unnoticed(for: alice.id).isEmpty)
+        #expect(f.sessions.session(alice.id)?.isLaunching == false)
+        #expect(f.sessions.session(alice.id)?.isArchived == true)
+        // A cancel still closes the thread on the record.
+        _ = try? await f.engine.post(d.id, from: .parent, kind: .cancel, text: "Never mind.")
+    }
+
     @Test("the reach policy is the workspace's word: only the workspaces it names, and none of the rest")
     func reachPolicy() async {
         let f = fixture()
