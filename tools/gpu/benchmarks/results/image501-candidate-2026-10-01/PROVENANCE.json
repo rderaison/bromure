@@ -1,0 +1,30 @@
+{
+  "source": "8016485e",
+  "appVersionDuringMeasurement": "5.0.0",
+  "finalReleaseRequested": "5.0.1",
+  "baseImageVersion": "500",
+  "baseImageUUID": "c3d89033-06a4-4321-b9c3-603f2e1246ee",
+  "baseImageDownload": "Fresh normal signed-catalog download; preserved pristine baseline",
+  "candidateMesaArchiveSHA256": "434a69b2c516aa54cd364b1e2c975f25207ef0003df438922986aa136596e1f4",
+  "candidateImage": "Private clone with patched Mesa; NOT a downloaded/published501 image",
+  "mesaVersion": "25.2.8",
+  "hostFixCommits": [
+    "69e69944",
+    "fdd4af68"
+  ],
+  "status": "Complete:45 WebGL samples and30 final video trials passed;15 additional diagnostic video trials passed",
+  "guestPatchCommits": [
+    "7031d1e1",
+    "9d574cae"
+  ],
+  "markers": [
+    "virgl-bitstream-range=1",
+    "virgl-fence-reference=1"
+  ],
+  "supersededCandidateArchiveSHA256": "f322d2b716fce296796b96c6668c6fa9ebc8dcdd40b61a1fb2fb8744dea5f2ca",
+  "measurementExecutableSHA256": "0954c0873bbfc801a5743c34eecdf78ab8da6147371f066dc38cf24205351578",
+  "candidateLibgalliumSHA256": "8468eb40d1f7e695be5d703c384f686180a9025fc8887b63bb2622deca62e077",
+  "publishedCatalogRecheckedUTC": "2026-10-01T23:55:47.869615+00:00",
+  "releaseVersion": "5.0.1",
+  "releaseImageVersion": "501"
+}

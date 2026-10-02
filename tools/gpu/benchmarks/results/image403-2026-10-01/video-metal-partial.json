@@ -1,0 +1,406 @@
+{
+  "status": "Incomplete run stopped at user request to redownload published500; not five-trial acceptance",
+  "imageVersion": "403 private rebuilt",
+  "samples": [
+    {
+      "case": "h264_1080p60",
+      "trial": 1,
+      "elapsedSeconds": 60.004400000000004,
+      "totalVideoFrames": 3280,
+      "droppedVideoFrames": 1562,
+      "dropRatePercent": 47.6219512195122,
+      "before": {
+        "total": 186,
+        "dropped": 106,
+        "currentTime": 2.959448,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 2.95667,
+          "samples": 0
+        },
+        "wall": 4113.4000000000015,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3466,
+        "dropped": 1668,
+        "currentTime": 7.873269,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 54.91624400000002,
+          "lastTime": 7.872914,
+          "samples": 600
+        },
+        "wall": 64117.8,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 28.631233709527965,
+      "mediaSecondsAdvanced": 54.91659900000002,
+      "playbackSpeedRatio": 0.9152095346341271,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "B9A242F2F0F52A7ABA255231B2CC6C1A": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "VaapiVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "true",
+          "kFrameUrl": "http://127.0.0.1:19847/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790890302.5811963
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 1,
+      "elapsedSeconds": 60.000899999999994,
+      "totalVideoFrames": 1805,
+      "droppedVideoFrames": 538,
+      "dropRatePercent": 29.806094182825486,
+      "before": {
+        "total": 97,
+        "dropped": 37,
+        "currentTime": 1.627698,
+        "error": null,
+        "paused": false,
+        "readyState": 2,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 1.627698,
+          "samples": 0
+        },
+        "wall": 4143,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 1902,
+        "dropped": 575,
+        "currentTime": 1.591938,
+        "error": null,
+        "paused": false,
+        "readyState": 2,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 29.96424000000002,
+          "lastTime": 1.591938,
+          "samples": 599
+        },
+        "wall": 64143.899999999994,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 21.116349921417847,
+      "mediaSecondsAdvanced": 29.96424000000002,
+      "playbackSpeedRatio": 0.4993965090523646,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "5AFC532D4D408469DB822BC680766D0F": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "VaapiVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "true",
+          "kFrameUrl": "http://127.0.0.1:19847/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790890366.7274928
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 1,
+      "elapsedSeconds": 60.00080000000002,
+      "totalVideoFrames": 3593,
+      "droppedVideoFrames": 353,
+      "dropRatePercent": 9.824659059281936,
+      "before": {
+        "total": 187,
+        "dropped": 25,
+        "currentTime": 3.00007,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 2.999573,
+          "samples": 0
+        },
+        "wall": 4091,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3780,
+        "dropped": 378,
+        "currentTime": 2.907434,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.90677100000004,
+          "lastTime": 2.906344,
+          "samples": 600
+        },
+        "wall": 64091.80000000002,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 53.99928000959986,
+      "mediaSecondsAdvanced": 59.90786100000004,
+      "playbackSpeedRatio": 0.9984510373195027,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "7D01650591815EBD0D0AD02A0E83F12D": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:19847/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790890430.8217368
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 2,
+      "elapsedSeconds": 60.001699999999985,
+      "totalVideoFrames": 1556,
+      "droppedVideoFrames": 723,
+      "dropRatePercent": 46.46529562982005,
+      "before": {
+        "total": 82,
+        "dropped": 32,
+        "currentTime": 1.244081,
+        "error": null,
+        "paused": false,
+        "readyState": 2,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 1.244081,
+          "samples": 0
+        },
+        "wall": 4085.1999999999825,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 1638,
+        "dropped": 755,
+        "currentTime": 7.246079,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 25.90617500000001,
+          "lastTime": 7.150256,
+          "samples": 599
+        },
+        "wall": 64086.899999999965,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 13.882939983367141,
+      "mediaSecondsAdvanced": 26.00199800000001,
+      "playbackSpeedRatio": 0.43335435495994307,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "BE782E8B9953A0C816E0865B02D0A3E0": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "VaapiVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "true",
+          "kFrameUrl": "http://127.0.0.1:19847/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790890494.9112103
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 2,
+      "elapsedSeconds": 60.00079999999999,
+      "totalVideoFrames": 3594,
+      "droppedVideoFrames": 802,
+      "dropRatePercent": 22.3149693934335,
+      "before": {
+        "total": 186,
+        "dropped": 42,
+        "currentTime": 3.004645,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.004059,
+          "samples": 0
+        },
+        "wall": 4050.399999999965,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3780,
+        "dropped": 844,
+        "currentTime": 2.903056,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.89776400000002,
+          "lastTime": 2.901823,
+          "samples": 600
+        },
+        "wall": 64051.19999999995,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 46.532712897161375,
+      "mediaSecondsAdvanced": 59.89899700000002,
+      "playbackSpeedRatio": 0.9983033059559211,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "653F1D04D47F128F88E8380B68019F9C": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:19847/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790890558.9648387
+    }
+  ]
+}

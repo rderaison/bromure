@@ -1,0 +1,1532 @@
+{
+  "browser": "Chrome/154.0.8037.57",
+  "renderer": "ANGLE (Mesa, llvmpipe (LLVM 20.1.2 128 bits), OpenGL 4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.3)",
+  "clips": {
+    "generator": "FFmpeg 7.1",
+    "clips": [
+      {
+        "name": "h264_1080p60",
+        "file": "h264_1080p60.mp4",
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "durationSeconds": 10,
+        "codec": "libx264",
+        "bytes": 8968476,
+        "sha256": "950683cab054fc9b9d18206a19ad63af0b13c1743fae6f613248a790dae6fc48",
+        "command": [
+          "/private/tmp/bromure-video-tools/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=size=1920x1080:rate=60",
+          "-t",
+          "10",
+          "-an",
+          "-c:v",
+          "libx264",
+          "-threads",
+          "4",
+          "-preset",
+          "veryfast",
+          "-crf",
+          "23",
+          "-profile:v",
+          "high",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          "/private/tmp/bromure-video-clips/h264_1080p60.mp4"
+        ]
+      },
+      {
+        "name": "h264_4k60",
+        "file": "h264_4k60.mp4",
+        "width": 3840,
+        "height": 2160,
+        "fps": 60,
+        "durationSeconds": 10,
+        "codec": "libx264",
+        "bytes": 31502513,
+        "sha256": "7e0ad660b5df6214394d8dc59f756e3bf9796c491d8735c192049d0c8d1ef160",
+        "command": [
+          "/private/tmp/bromure-video-tools/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=size=3840x2160:rate=60",
+          "-t",
+          "10",
+          "-an",
+          "-c:v",
+          "libx264",
+          "-threads",
+          "4",
+          "-preset",
+          "veryfast",
+          "-crf",
+          "23",
+          "-profile:v",
+          "high",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          "/private/tmp/bromure-video-clips/h264_4k60.mp4"
+        ]
+      },
+      {
+        "name": "av1_1080p60",
+        "file": "av1_1080p60.mp4",
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "durationSeconds": 10,
+        "codec": "libsvtav1",
+        "bytes": 13278484,
+        "sha256": "32582ec2d3222faf0a7309a3a11ff526e412943350c6e6cddcf79f952c173230",
+        "command": [
+          "/private/tmp/bromure-video-tools/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=size=1920x1080:rate=60",
+          "-t",
+          "10",
+          "-an",
+          "-c:v",
+          "libsvtav1",
+          "-threads",
+          "4",
+          "-preset",
+          "10",
+          "-crf",
+          "35",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          "/private/tmp/bromure-video-clips/av1_1080p60.mp4"
+        ]
+      }
+    ]
+  },
+  "secondsPerTrial": 60,
+  "trials": 5,
+  "samples": [
+    {
+      "case": "h264_1080p60",
+      "trial": 1,
+      "elapsedSeconds": 60.00540000000001,
+      "totalVideoFrames": 3596,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08342602892102335,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 0,
+        "currentTime": 3.010899,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.007779,
+          "samples": 0
+        },
+        "wall": 7082.500000000002,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3782,
+        "dropped": 3,
+        "currentTime": 2.933847,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.92050300000005,
+          "lastTime": 2.928282,
+          "samples": 600
+        },
+        "wall": 67087.90000000001,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.877944318344674,
+      "mediaSecondsAdvanced": 59.92606800000005,
+      "playbackSpeedRatio": 0.9986779189872919,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "8197749351EF625DF6E830053E553B40": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892452.5339453,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.4190286645849244,
+          "virtualMachine": 38.02325710403425
+        },
+        "totalPercent": 41.44228576861917,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 1,
+      "elapsedSeconds": 60.0025,
+      "totalVideoFrames": 3590,
+      "droppedVideoFrames": 2,
+      "dropRatePercent": 0.055710306406685235,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.00798,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.007499,
+          "samples": 0
+        },
+        "wall": 4107.699999999997,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3776,
+        "dropped": 3,
+        "currentTime": 2.856446,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.848714000000015,
+          "lastTime": 2.856213,
+          "samples": 600
+        },
+        "wall": 64110.2,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.79750843714845,
+      "mediaSecondsAdvanced": 59.84894700000002,
+      "playbackSpeedRatio": 0.9974408899629186,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "AE469A86EB525D920BBE5272970F8C2A": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892516.6485589,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.5584529654030743,
+          "virtualMachine": 84.1042285950912
+        },
+        "totalPercent": 86.66268156049428,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 1,
+      "elapsedSeconds": 60.001700000000014,
+      "totalVideoFrames": 3592,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08351893095768374,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 0,
+        "currentTime": 3.004189,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.003634,
+          "samples": 0
+        },
+        "wall": 4092.1999999999825,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 3,
+        "currentTime": 2.857871,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.853773999999966,
+          "lastTime": 2.857408,
+          "samples": 600
+        },
+        "wall": 64093.899999999994,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.81497190912923,
+      "mediaSecondsAdvanced": 59.85423699999997,
+      "playbackSpeedRatio": 0.9975423529666652,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "966F8471C374EC40979A4678D04AE17D": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892580.745264,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.15833775487689,
+          "virtualMachine": 57.1290710222888
+        },
+        "totalPercent": 60.28740877716569,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 2,
+      "elapsedSeconds": 60.004699999999985,
+      "totalVideoFrames": 3592,
+      "droppedVideoFrames": 4,
+      "dropRatePercent": 0.111358574610245,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 0,
+        "currentTime": 3.004848,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.004412,
+          "samples": 0
+        },
+        "wall": 4090.399999999994,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 4,
+        "currentTime": 2.859702,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.851821999999984,
+          "lastTime": 2.856234,
+          "samples": 600
+        },
+        "wall": 64095.09999999998,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.795316033577386,
+      "mediaSecondsAdvanced": 59.85528999999998,
+      "playbackSpeedRatio": 0.9975100283811101,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "082290E711A4E7C73B68913A3D9BB8D0": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892644.843166,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.51903771311901,
+          "virtualMachine": 83.50953705297617
+        },
+        "totalPercent": 86.02857476609518,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 2,
+      "elapsedSeconds": 60.001,
+      "totalVideoFrames": 3590,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08356545961002786,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 0,
+        "currentTime": 3.002578,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.001872,
+          "samples": 0
+        },
+        "wall": 4042.2999999999884,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3776,
+        "dropped": 3,
+        "currentTime": 2.838659,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.83514500000004,
+          "lastTime": 2.837017,
+          "samples": 600
+        },
+        "wall": 64043.29999999999,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.78233696105065,
+      "mediaSecondsAdvanced": 59.83678700000004,
+      "playbackSpeedRatio": 0.9972631622806293,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "B3420BD5E4F1165EA13F2ECC44D1B44C": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892708.889187,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.296781098072682,
+          "virtualMachine": 59.258073442385886
+        },
+        "totalPercent": 62.55485454045857,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 2,
+      "elapsedSeconds": 60.002,
+      "totalVideoFrames": 3596,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08342602892102335,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 1,
+        "currentTime": 3.003091,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002441,
+          "samples": 0
+        },
+        "wall": 4022.9000000000233,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3781,
+        "dropped": 4,
+        "currentTime": 2.916676,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.91176200000005,
+          "lastTime": 2.914203,
+          "samples": 600
+        },
+        "wall": 64024.90000000002,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.88133728875704,
+      "mediaSecondsAdvanced": 59.914235000000055,
+      "playbackSpeedRatio": 0.9985372987567089,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "2B093B57347A7AA9F889A5C90270BFAB": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892772.9175088,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.237694869415197,
+          "virtualMachine": 35.79631189171328
+        },
+        "totalPercent": 39.03400676112848,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 3,
+      "elapsedSeconds": 60.002799999999986,
+      "totalVideoFrames": 3590,
+      "droppedVideoFrames": 1,
+      "dropRatePercent": 0.027855153203342618,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.004216,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.003098,
+          "samples": 0
+        },
+        "wall": 4048.7000000000116,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3776,
+        "dropped": 2,
+        "currentTime": 2.855615,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.849425999999966,
+          "lastTime": 2.852524,
+          "samples": 600
+        },
+        "wall": 64051.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.813875352483564,
+      "mediaSecondsAdvanced": 59.85251699999996,
+      "playbackSpeedRatio": 0.9974954002146562,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "40268E3E106201FAC9B096D99946A04C": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892836.9730134,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.3138674184907004,
+          "virtualMachine": 59.43585060566198
+        },
+        "totalPercent": 62.749718024152685,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 3,
+      "elapsedSeconds": 60.001,
+      "totalVideoFrames": 3594,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08347245409015025,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.003158,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002557,
+          "samples": 0
+        },
+        "wall": 4022.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3780,
+        "dropped": 4,
+        "currentTime": 2.914503,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.910472000000055,
+          "lastTime": 2.913029,
+          "samples": 600
+        },
+        "wall": 64023.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.84900251662472,
+      "mediaSecondsAdvanced": 59.91194600000006,
+      "playbackSpeedRatio": 0.9985157914034776,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "61D25D13A36BCD83A643D94B31EF4E39": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892900.9994302,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.2797115912956247,
+          "virtualMachine": 36.07153967684924
+        },
+        "totalPercent": 39.351251268144864,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 3,
+      "elapsedSeconds": 60.00210000000009,
+      "totalVideoFrames": 3591,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.0835421888053467,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.007109,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.006646,
+          "samples": 0
+        },
+        "wall": 4108.399999999907,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 4,
+        "currentTime": 2.863063,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.854774999999975,
+          "lastTime": 2.861421,
+          "samples": 600
+        },
+        "wall": 64110.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.79790707325235,
+      "mediaSecondsAdvanced": 59.85641699999997,
+      "playbackSpeedRatio": 0.9975720349787738,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "E1F3EC768DEDD921553FEADD810EA487": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790892965.1131964,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.557825050481679,
+          "virtualMachine": 83.88661702334038
+        },
+        "totalPercent": 86.44444207382206,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 4,
+      "elapsedSeconds": 60.00320000000007,
+      "totalVideoFrames": 3594,
+      "droppedVideoFrames": 33,
+      "dropRatePercent": 0.9181969949916527,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.003208,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002405,
+          "samples": 0
+        },
+        "wall": 4025.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3780,
+        "dropped": 34,
+        "currentTime": 2.918326,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.91459899999998,
+          "lastTime": 2.917004,
+          "samples": 600
+        },
+        "wall": 64028.70000000007,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.34683483547537,
+      "mediaSecondsAdvanced": 59.91592099999998,
+      "playbackSpeedRatio": 0.9985454275771944,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "308FDC037336BDF30B41F0B6D61D3C11": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790893029.144369,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.7304483564266624,
+          "virtualMachine": 33.215344418094844
+        },
+        "totalPercent": 36.94579277452151,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 4,
+      "elapsedSeconds": 60.00369999999995,
+      "totalVideoFrames": 3594,
+      "droppedVideoFrames": 15,
+      "dropRatePercent": 0.41736227045075125,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 0,
+        "currentTime": 3.019012,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.018361,
+          "samples": 0
+        },
+        "wall": 4095,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3780,
+        "dropped": 15,
+        "currentTime": 2.896094,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.877141999999985,
+          "lastTime": 2.895503,
+          "samples": 600
+        },
+        "wall": 64098.69999999995,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.64632181015509,
+      "mediaSecondsAdvanced": 59.877732999999985,
+      "playbackSpeedRatio": 0.9979006794581007,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "E439B06D577637B342A62B93904A5C2C": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790893093.2461789,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.3644258499125956,
+          "virtualMachine": 80.57547741720016
+        },
+        "totalPercent": 82.93990326711275,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 4,
+      "elapsedSeconds": 60.00080000000005,
+      "totalVideoFrames": 3595,
+      "droppedVideoFrames": 2,
+      "dropRatePercent": 0.055632823365785816,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 0,
+        "currentTime": 3.002728,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002361,
+          "samples": 0
+        },
+        "wall": 4027.5999999999767,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3780,
+        "dropped": 2,
+        "currentTime": 2.911867,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.908562000000074,
+          "lastTime": 2.910923,
+          "samples": 600
+        },
+        "wall": 64028.40000000002,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.882534899534626,
+      "mediaSecondsAdvanced": 59.90950600000007,
+      "playbackSpeedRatio": 0.9984784536206188,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "54067C48417D452FE0E797A48A08701B": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790893157.2770858,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.345365768058204,
+          "virtualMachine": 39.95581052046584
+        },
+        "totalPercent": 42.30117628852404,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 5,
+      "elapsedSeconds": 60.001199999999955,
+      "totalVideoFrames": 3593,
+      "droppedVideoFrames": 5,
+      "dropRatePercent": 0.13915947676036738,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 0,
+        "currentTime": 3.005289,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.00465,
+          "samples": 0
+        },
+        "wall": 4078.5999999999767,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3779,
+        "dropped": 5,
+        "currentTime": 2.887186,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.880960999999985,
+          "lastTime": 2.885611,
+          "samples": 600
+        },
+        "wall": 64079.79999999993,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.798804023919566,
+      "mediaSecondsAdvanced": 59.88253599999999,
+      "playbackSpeedRatio": 0.9980223062205428,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "83A7EEBD691A922B707CF6FF209A95AB": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790893221.3590152,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.2166776552913574,
+          "virtualMachine": 76.93133499883947
+        },
+        "totalPercent": 79.14801265413084,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 5,
+      "elapsedSeconds": 60.00120000000007,
+      "totalVideoFrames": 3590,
+      "droppedVideoFrames": 6,
+      "dropRatePercent": 0.1671309192200557,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.001868,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.001414,
+          "samples": 0
+        },
+        "wall": 4027.1999999999534,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3776,
+        "dropped": 7,
+        "currentTime": 2.844536,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.841829999999966,
+          "lastTime": 2.843244,
+          "samples": 600
+        },
+        "wall": 64028.40000000002,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.73213869055945,
+      "mediaSecondsAdvanced": 59.843121999999966,
+      "playbackSpeedRatio": 0.9973654193582778,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "12AAB596888624A701F4CADFAC4DF3B4": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790893285.3898046,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.5828124491484736,
+          "virtualMachine": 53.10506499640271
+        },
+        "totalPercent": 56.68787744555118,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 5,
+      "elapsedSeconds": 60.006,
+      "totalVideoFrames": 3595,
+      "droppedVideoFrames": 1,
+      "dropRatePercent": 0.027816411682892908,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.003325,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002823,
+          "samples": 0
+        },
+        "wall": 4032.5999999999767,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3781,
+        "dropped": 2,
+        "currentTime": 2.919877,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.913137000000006,
+          "lastTime": 2.91596,
+          "samples": 600
+        },
+        "wall": 64038.59999999998,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.894010598940106,
+      "mediaSecondsAdvanced": 59.91705400000001,
+      "playbackSpeedRatio": 0.9985177148951773,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "8E2E20249D7ED9665DDBC06ACA245053": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:4457/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "wallTime": 1790893349.4316566,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.614329638866134,
+          "virtualMachine": 35.94331659974587
+        },
+        "totalPercent": 39.557646238612,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s ps cumulative process CPU snapshots; weighted boundary intervals; application+renderer broker/worker+uniquely identified new VZ VM service; excludes WindowServer, kernel GPU work and shared system daemons. Native reference uses Chrome process family."
+      }
+    }
+  ],
+  "summary": {
+    "h264_1080p60": {
+      "medianDropRatePercent": 0.08342602892102335,
+      "minDropRatePercent": 0.027816411682892908,
+      "maxDropRatePercent": 0.9181969949916527,
+      "failedTrials": 0,
+      "samplesDropRatePercent": [
+        0.08342602892102335,
+        0.08342602892102335,
+        0.08347245409015025,
+        0.9181969949916527,
+        0.027816411682892908
+      ],
+      "medianPresentedFramesPerSecond": 59.877944318344674,
+      "medianPlaybackSpeedRatio": 0.9985372987567089,
+      "medianHostCPUPercent": 39.351251268144864
+    },
+    "h264_4k60": {
+      "medianDropRatePercent": 0.111358574610245,
+      "minDropRatePercent": 0.055710306406685235,
+      "maxDropRatePercent": 0.41736227045075125,
+      "failedTrials": 0,
+      "samplesDropRatePercent": [
+        0.055710306406685235,
+        0.111358574610245,
+        0.0835421888053467,
+        0.41736227045075125,
+        0.13915947676036738
+      ],
+      "medianPresentedFramesPerSecond": 59.79750843714845,
+      "medianPlaybackSpeedRatio": 0.9975720349787738,
+      "medianHostCPUPercent": 86.02857476609518
+    },
+    "av1_1080p60": {
+      "medianDropRatePercent": 0.08351893095768374,
+      "minDropRatePercent": 0.027855153203342618,
+      "maxDropRatePercent": 0.1671309192200557,
+      "failedTrials": 0,
+      "samplesDropRatePercent": [
+        0.08351893095768374,
+        0.08356545961002786,
+        0.027855153203342618,
+        0.055632823365785816,
+        0.1671309192200557
+      ],
+      "medianPresentedFramesPerSecond": 59.813875352483564,
+      "medianPlaybackSpeedRatio": 0.9974954002146562,
+      "medianHostCPUPercent": 60.28740877716569
+    }
+  },
+  "method": "Muted local synthetic clips looped and filling a controlled 960x540 CSS viewport at DPR2 (1920x1080 physical rendering); 3s warm-up, then fixed-duration counter deltas. DOM/OS fullscreen is not used because guest fullscreen exited during setup. Browser frame counters do not measure host display presentation latency or audio synchronization."
+}
