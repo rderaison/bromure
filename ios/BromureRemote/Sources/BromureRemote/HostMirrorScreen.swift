@@ -477,6 +477,7 @@ struct CodingBoardScreen: View {
                 backToInProgress: { controller.taskCommand($0, "to-in-progress") },
                 merge: { controller.taskCommand($0, "merge") },
                 closeNoMerge: { controller.taskCommand($0, "close-no-merge") },
+                markDone: { controller.taskCommand($0, "mark-done") },
                 delete: { controller.deleteTask($0) },
                 save: { controller.upsertTask($0) },
                 validate: { controller.upsertTask($0) },

@@ -146,6 +146,8 @@ final class TaskReviewWindowManager {
                     _ cleanup: Bool) -> Void
         /// "Create Pull Request…" — the worktree-pr agent flow.
         var openPR: (UUID) -> Void
+        /// "Mark as Done": Testing → Done as it stands, nothing merged or removed.
+        var markDone: (UUID) -> Void
         /// Branches of the task's repo, for the "Merge into…" picker.
         var fetchBranches: (CodingTask) async -> [String]
         /// Append a review comment. Host: store.mutate; fat client: POST
@@ -207,7 +209,17 @@ final class TaskReviewWindowManager {
                 composerHint: NSLocalizedString("⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back", comment: "review composer hint"),
                 openTerminal: { if let task = t() { c.openTerminal(task) } },
                 trailing: { [weak self] in
-                    AnyView(TaskMergeMenu(
+                    AnyView(HStack(spacing: 8) {
+                    Button {
+                        c.markDone(id)
+                        self?.host.close(id)
+                    } label: {
+                        Label(NSLocalizedString("Mark as Done", comment: "review"), systemImage: "checkmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .help(NSLocalizedString("Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay.",
+                                            comment: "review"))
+                    TaskMergeMenu(
                         branch: t()?.branch, parent: t()?.parentBranch,
                         fetchBranches: {
                             guard let task = t() else { return [] }
@@ -221,7 +233,8 @@ final class TaskReviewWindowManager {
                             c.openPR(id)
                             self?.host.close(id)
                         },
-                        assignee: t().flatMap { $0.delegationID == nil ? nil : $0.assignment?.label }))
+                        assignee: t().flatMap { $0.delegationID == nil ? nil : $0.assignment?.label })
+                    })
                 })
         }
     }

@@ -3618,3 +3618,5 @@
 "Squash into one commit" = "Fusionner en un seul commit";
 "Ask %@ to Merge into…" = "Demander à %@ de fusionner dans…";
 "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Choisissez la branche : l’agent qui a fait le travail le fusionne là où il a travaillé, et la carte passe à Terminé quand il en rend compte.";
+"Mark as Done" = "Marquer comme terminé";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Passe la tâche à Terminé telle quelle — rien n’est fusionné, et le worktree et sa branche restent.";

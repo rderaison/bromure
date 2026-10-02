@@ -244,6 +244,8 @@ struct CodingKanbanView: View {
         var backToInProgress: (UUID) -> Void = { _ in }
         var merge: (UUID) -> Void = { _ in }
         var closeNoMerge: (UUID) -> Void = { _ in }
+        /// Testing → Done as it stands (no merge, nothing removed).
+        var markDone: (UUID) -> Void = { _ in }
         var delete: (UUID) -> Void = { _ in }
         var save: (CodingTask) -> Void = { _ in }
         /// Persist the draft, then run the plan-validation agent; the
@@ -781,6 +783,10 @@ struct CodingKanbanView: View {
                                             onRemove: { actions.delete(task.id) },
                                             onDestroy: { actions.destroy(task.id) }))
                     .contextMenu {
+                        Button(NSLocalizedString("Mark as Done", comment: "kanban menu")) {
+                            actions.markDone(task.id)
+                        }
+                        Divider()
                         Button(String(format: NSLocalizedString("Merge into %@…",
                                                                 comment: "kanban menu"),
                                       task.parentBranch ?? NSLocalizedString(

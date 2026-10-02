@@ -3701,6 +3701,7 @@ final class RemoteHostWindow: NSWindow {
                 self?.controller.taskCommand(id, "merge", body: body)
             },
             openPR: { [weak self] id in self?.controller.taskCommand(id, "open-pr") },
+            markDone: { [weak self] id in self?.controller.taskCommand(id, "mark-done") },
             fetchBranches: { [weak self] task in
                 guard let self, let root = task.rootRepo, !root.isEmpty else { return [] }
                 let cmd = "git -C '" + root.replacingOccurrences(of: "'", with: "'\\''")
@@ -3958,6 +3959,7 @@ final class RemoteHostWindow: NSWindow {
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
                     merge: { c.taskCommand($0, "merge") },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
+                    markDone: { c.taskCommand($0, "mark-done") },
                     delete: { c.deleteTask($0) },
                     save: { c.upsertTask($0) },
                     validate: { task in

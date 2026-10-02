@@ -3618,3 +3618,5 @@
 "Squash into one commit" = "压缩为一个提交";
 "Ask %@ to Merge into…" = "请 %@ 合并到…";
 "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "选择分支：完成工作的代理会在其工作的地方合并，它回报后卡片即标记为完成。";
+"Mark as Done" = "标记为完成";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "将任务原样移到“完成”——不合并任何内容，工作树及其分支保留。";
