@@ -5749,6 +5749,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "diskAllocatedBytes": dash.diskAllocated,
                 "diskCapacityBytes": dash.diskCapacity,
+                // Which credentials it holds (never the values): a fat client's
+                // automation and code-review editors gate on them, and its
+                // mirrored profile carries no credentials at all.
+                "hasGitHubToken": p.hasGitHubCredential,
+                "hasLinearToken": !p.linearToken.isEmpty,
+                "askBeforeUseLabels": p.askBeforeUseCredentialLabels,
             ]
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
