@@ -269,8 +269,8 @@ public final class VMPool {
             imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
         if requestedMetal, #available(macOS 27.0, *) {
             do {
-                guard (1...2).contains(config.experimentalGPUCount) else {
-                    throw SandboxError.vmStartFailed("Experimental GPU count must be 1 or 2")
+                guard (1...16).contains(config.experimentalGPUCount) else {
+                    throw SandboxError.vmStartFailed("Experimental GPU count must be 1 through 16")
                 }
                 var sessions: [MacOS27GPUSession] = []
                 do {

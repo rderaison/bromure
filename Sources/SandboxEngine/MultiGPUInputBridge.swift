@@ -26,7 +26,7 @@ public final class MultiGPUInputBridge {
     public func send(display: Int, x: Double, y: Double, buttons: Int,
                      focus: Bool = false, wheelX: Double = 0, wheelY: Double = 0,
                      coalescingMotion: Bool = false) {
-        guard !stopped, (0...1).contains(display), x.isFinite, y.isFinite,
+        guard !stopped, (0..<16).contains(display), x.isFinite, y.isFinite,
               wheelX.isFinite, wheelY.isFinite else { return }
         lastDisplay = display; lastX = min(max(x, 0), 1); lastY = min(max(y, 0), 1)
         self.buttons = buttons & 7

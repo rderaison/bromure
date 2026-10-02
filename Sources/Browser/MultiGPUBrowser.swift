@@ -9,9 +9,11 @@ import Darwin
 /// Explicit experimental entry point; normal browser/profile sessions remain single-GPU.
 struct MultiGPUBrowser: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "multi-gpu-browser",
-        abstract: "Open two accelerated browser windows backed by one Linux VM.")
+        abstract: "Open accelerated browser windows backed by one Linux VM.")
     @Option(name: .long) var storageDir: String
     @Option(name: .long) var seconds: Int = 0
+    @Option(name: .long) var gpuCount: Int = 2
+    @Option(name: .long) var memoryGB: Int = 4
     @Option(name: .long) var url: String = "https://www.slashdot.org"
     @Option(name: .long) var guestProbe: String?
     @Flag(name: .long) var allowOlderTestImage = false
@@ -21,6 +23,9 @@ struct MultiGPUBrowser: ParsableCommand {
 
     func validate() throws {
         guard (0...3600).contains(seconds) else { throw ValidationError("Duration must be 0 (interactive) through 3600 seconds") }
+        guard (2...16).contains(gpuCount), (4...32).contains(memoryGB) else {
+            throw ValidationError("GPU count must be 2 through 16; memory must be 4 through 32 GiB")
+        }
         if requireGPUCheck && (guestProbe == nil || seconds < 30) {
             throw ValidationError("GPU acceptance needs a guest probe and at least 30 seconds")
         }
@@ -44,8 +49,9 @@ struct MultiGPUBrowser: ParsableCommand {
         var config = VMConfig()
         config.enableGPU = true; config.enableWebGL = true; config.enableMetalRenderer = true
         config.nativeChrome = false; config.nativeChromeInset = 0
-        config.experimentalGPUCount = 2
-        config.extraKernelOptions += " bromure.experimental_multigpu=2"
+        config.experimentalGPUCount = gpuCount
+        config.memorySize = UInt64(memoryGB) * 1024 * 1024 * 1024
+        config.extraKernelOptions += " bromure.experimental_multigpu=\(gpuCount)"
         config.homePage = url
         let pool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir),
                           requireImageVersion: !allowOlderTestImage, experimentalGPU: true)
@@ -54,9 +60,9 @@ struct MultiGPUBrowser: ParsableCommand {
             await pool.shutdown(); throw ValidationError("VM claim failed")
         }
         let sessions = warm.graphicsSessions
-        guard sessions.count == 2, sessions.allSatisfy({ $0.backendName == "virgl" }) else {
+        guard sessions.count == gpuCount, sessions.allSatisfy({ $0.backendName == "virgl" }) else {
             await pool.retire(warm); await pool.shutdown()
-            throw ValidationError("Both custom GPU devices must initialize; no software fallback in this experiment")
+            throw ValidationError("All requested custom GPU devices must initialize; no software fallback in this experiment")
         }
         warm.serialWaiter.observer = { print("[multi-GPU guest] " + $0, terminator: "") }
         let owner = MultiGPUWindowOwner(warm: warm)
@@ -177,7 +183,7 @@ private final class MultiGPUWindowOwner: NSObject, NSWindowDelegate, NSApplicati
             try await Task.sleep(for: .milliseconds(100))
         }
         guard input?.isConnected == true else { throw ValidationError("Input service is not connected") }
-        for index in 0..<2 {
+        for index in 0..<warm.graphicsSessions.count {
             guard let window = windows.first(where: { views[$0.windowNumber]?.display == index }),
                   let view = views[window.windowNumber], let surface = surfaces[index] else {
                 throw ValidationError("Missing GPU window or surface")
@@ -187,7 +193,7 @@ private final class MultiGPUWindowOwner: NSObject, NSWindowDelegate, NSApplicati
             let pixel = IOSurfaceGetBaseAddress(surface).advanced(by: y * IOSurfaceGetBytesPerRow(surface) + x * 4)
             let colour = Array(UnsafeBufferPointer(start: pixel.assumingMemoryBound(to: UInt8.self), count: 3))
             IOSurfaceUnlock(surface, .readOnly, nil)
-            let expected: [UInt8] = index == 0 ? [74,160,22] : [210,84,32]
+            let expected: [UInt8] = [UInt8(40 + (index * 71) % 180), UInt8(40 + (index * 53) % 180), UInt8(40 + (index * 37) % 180)]
             guard zip(colour, expected).allSatisfy({ abs(Int($0)-Int($1)) <= 1 }) else {
                 throw ValidationError("GPU \(index) has wrong fixture pixels: \(colour)")
             }
@@ -201,12 +207,12 @@ private final class MultiGPUWindowOwner: NSObject, NSWindowDelegate, NSApplicati
                 if type == .leftMouseDown { view.mouseDown(with: event) } else { view.mouseUp(with: event) }
             }
             try await Task.sleep(for: .milliseconds(500))
-            let character = index == 0 ? "a" : "b"
+            let character = "a"
             for type: NSEvent.EventType in [.keyDown, .keyUp] {
                 let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [],
                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                     context: nil, characters: character, charactersIgnoringModifiers: character,
-                    isARepeat: false, keyCode: index == 0 ? 0 : 11)!
+                    isARepeat: false, keyCode: 0)!
                 if type == .keyDown { view.keyDown(with: event) } else { view.keyUp(with: event) }
             }
             input?.send(display: index, x: 0.25, y: 0.6, buttons: 0, wheelY: 240)
@@ -228,7 +234,7 @@ private final class MultiGPUWindowOwner: NSObject, NSWindowDelegate, NSApplicati
     }
 
     func checkLifecycle() async throws {
-        guard windows.count == 2 else { throw ValidationError("Expected two windows for lifecycle check") }
+        guard windows.count == warm.graphicsSessions.count else { throw ValidationError("Expected all GPU windows for lifecycle check") }
         let first = windows[0], second = windows[1]
         let original = surfaces.mapValues { (IOSurfaceGetWidth($0), IOSurfaceGetHeight($0)) }
         first.setContentSize(NSSize(width: 800, height: 500))
@@ -244,7 +250,7 @@ private final class MultiGPUWindowOwner: NSObject, NSWindowDelegate, NSApplicati
         guard resized else { throw ValidationError("Both GPU windows must receive resized surfaces") }
         first.close()
         try await Task.sleep(for: .seconds(2))
-        guard windows.count == 1, warm.vm.state == .running,
+        guard windows.count == warm.graphicsSessions.count - 1, warm.vm.state == .running,
               warm.graphicsSessions.allSatisfy({ $0.isRendererRunning }) else {
             throw ValidationError("Closing one window stopped the shared VM or a renderer")
         }
