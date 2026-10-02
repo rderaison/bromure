@@ -55,6 +55,27 @@ class MemoryTraceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             trace.identity('ERROR: process disappeared')
 
+    def test_cpu_ticks_and_bounded_thread_wait_samples(self):
+        tail = ['0'] * 20
+        tail[0], tail[7], tail[9], tail[11], tail[12], tail[19] = 'S', '3', '4', '17', '19', '123'
+        stat = '42 (chrome (GPU)) ' + ' '.join(tail)
+        self.assertEqual(trace.cpu_counters(stat), dict(state='S', minor_faults=3,
+                         major_faults=4, user_ticks=17, system_ticks=19))
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            for tid in range(65):
+                task = base / 'task' / str(tid + 100)
+                task.mkdir(parents=True)
+                (task / 'stat').write_text(stat)
+                (task / 'comm').write_text('GpuMain\n')
+                (task / 'wchan').write_text('dma_fence_default_wait\n')
+            result = trace.gpu_threads(base)
+            self.assertEqual(len(result['threads']), 64)
+            self.assertTrue(result['truncated'])
+            self.assertFalse(result['errors'])
+            self.assertEqual(result['threads'][0]['wchan'], 'dma_fence_default_wait')
+            self.assertEqual(result['threads'][0]['user_ticks'], 17)
+
     def test_proc_identity_memory_and_fd(self):
         with tempfile.TemporaryDirectory() as temp:
             original = trace.PROC
@@ -123,7 +144,7 @@ class MemoryTraceTests(unittest.TestCase):
                                   '--type=gpu-process'], executable=sys.executable)
         try:
             result = subprocess.run([sys.executable, str(SCRIPT), '--seconds', '1',
-                                     '--interval', '.25'], capture_output=True,
+                                     '--interval', '.25', '--gpu-threads'], capture_output=True,
                                     text=True, timeout=8, check=True)
             rows = [json.loads(line) for line in result.stdout.splitlines()]
             samples = [r for r in rows if r['kind'] == 'sample']
@@ -136,6 +157,11 @@ class MemoryTraceTests(unittest.TestCase):
                 self.assertGreaterEqual(records[0]['fd_count'], 3)
             self.assertIn('fd_types', next(p for p in samples[0]['processes']
                                           if p['pid'] == child.pid))
+            process = next(p for p in samples[0]['processes'] if p['pid'] == child.pid)
+            self.assertGreaterEqual(process['cpu']['user_ticks'], 0)
+            self.assertEqual(process['gpu_threads']['threads'][0]['tid'], child.pid)
+            self.assertFalse(process['gpu_threads']['errors'])
+            self.assertGreater(rows[0]['clock_ticks_per_second'], 0)
         finally:
             child.terminate()
             child.wait(timeout=3)
