@@ -49,7 +49,8 @@ final class TaskDispatcher {
                 let bucket = model.map { SessionHome.bucket(for: s, in: $0) }
                 return .init(id: s.id, label: delegate.delegationEngine.label(s),
                              workspace: delegate.profile(for: s.profileID)?.name ?? "",
-                             busy: bucket == .working || bucket == .needsYou)
+                             busy: bucket == .working || bucket == .needsYou,
+                             profileID: s.profileID)
             }
         let rooms = delegate.agentRoomStore.rooms
             .filter { $0.archivedAt == nil }

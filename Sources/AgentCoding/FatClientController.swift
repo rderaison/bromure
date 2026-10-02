@@ -3980,7 +3980,8 @@ final class RemoteHostWindow: NSWindow {
                                 .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
                                 .prefix(40)
                                 .map { .init(id: $0.id, label: $0.nickname.map { "@" + $0 } ?? $0.title,
-                                             workspace: c.profile(for: $0.profileID)?.name ?? "", busy: false) },
+                                             workspace: c.profile(for: $0.profileID)?.name ?? "", busy: false,
+                                             profileID: $0.profileID) },
                             rooms: c.roomStore.rooms.filter { $0.archivedAt == nil }
                                 .map { .init(id: $0.id, name: $0.name) })
                     },
