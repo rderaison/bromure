@@ -57,7 +57,8 @@ class GraphicsPrerequisitesTests(unittest.TestCase):
         self.assertFalse(prerequisites.contract_issues(marker))
 
     def test_broken_egl_or_browser_fails_packaging_gate(self):
-        for kwargs in ({"missing_library": "libEGL_mesa.so.0"}, {"browser_exit": 127}):
+        for kwargs in ({"missing_library": "libEGL_mesa.so.0"},
+                       {"missing_library": "libXss.so.1"}, {"browser_exit": 127}):
             with self.subTest(kwargs=kwargs):
                 report = self.report(**kwargs)
                 self.assertFalse(report["readyForGuestProbe"])

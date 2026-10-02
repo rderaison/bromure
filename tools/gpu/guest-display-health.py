@@ -6,6 +6,7 @@ separate guest-memory-trace.py as root alongside it for GPU FD types/limits/OOM.
 Includes XScreenSaver state (not just configured timeout), DPMS power level,
 CDP video counters and GPU process identity. Missing access is recorded, not
 interpreted as a healthy device. These observations do not prove pixel output.
+Requires libxss1 for XScreenSaverQueryInfo; image setup installs it explicitly.
 """
 import argparse
 import ctypes as C

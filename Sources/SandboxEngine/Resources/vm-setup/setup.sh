@@ -309,7 +309,7 @@ log "apt-get install X + WM + fonts + audio"
 retry apt-get install -y -q --no-install-recommends \
     xserver-xorg-core xserver-xorg-legacy \
     xserver-xorg-input-libinput xserver-xorg-video-modesetting \
-    xinit xauth x11-xserver-utils x11-xkb-utils x11-utils libxtst6 \
+    xinit xauth x11-xserver-utils x11-xkb-utils x11-utils libxtst6 libxss1 \
     keyboard-configuration console-setup xkb-data \
     openbox xdotool \
     spice-vdagent \

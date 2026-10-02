@@ -4,6 +4,7 @@
 --live-display deliberately blanks the current private-test display, then applies
 the exact patched /home/chrome/.xinitrc policy (override BROMURE_XINITRC).
 Run as chrome with DISPLAY/XAUTHORITY set; do not run on a working user desktop.
+Requires libxss1 (libXss.so.1), now explicitly installed by the image builder.
 """
 import ctypes as C
 import os

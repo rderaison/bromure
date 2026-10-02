@@ -17,12 +17,13 @@ import sysconfig
 
 PACKAGES = (
     "libgl1-mesa-dri", "mesa-libgallium", "libegl-mesa0", "libglx-mesa0",
-    "libgbm1", "libegl1", "libgles2", "mesa-utils", "chromium",
+    "libgbm1", "libegl1", "libgles2", "mesa-utils", "libxss1", "chromium",
     "google-chrome-stable", "mesa-va-drivers", "libva2", "libva-drm2", "vainfo",
 )
 LIBRARIES = (
     "libEGL.so.1", "libEGL_mesa.so.0", "libGLESv2.so.2",
     "libGLX_mesa.so.0", "libgbm.so.1",
+    "libXss.so.1",  # Display-health/idle diagnostics use XScreenSaverQueryInfo.
 )
 CAPABILITIES = Path("/etc/bromure/graphics-capabilities.json")
 MESA_ROOT = Path("/opt/bromure/mesa-virgl")
