@@ -2971,6 +2971,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // the new "Models" pane opens pre-populated. Idempotent once configured.
         ModelSettingsStore.shared.seedIfEmpty(from: profiles + [store.loadTemplate()])
         migrateBedrockWorkspaces()
+        migrateLegacyOmpWorkspaces()
         installLiveModelRefresh()
         provisionKimiRecordsIfNeeded()
         NotificationCenter.default.addObserver(
@@ -8502,6 +8503,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             } catch {
                 FileHandle.standardError.write(Data(
                     "[models] couldn't save the Bedrock override for \(p.name): \(error)\n".utf8))
+            }
+        }
+        if changed { profiles = store.loadAll() }
+    }
+
+    /// Pre-5.0 omp custom servers still on a workspace's agent (issue #36):
+    /// moved into that workspace's model override, where they're visible
+    /// and removable. Idempotent — the agent no longer carries one after.
+    @MainActor
+    private func migrateLegacyOmpWorkspaces() {
+        let global = ModelSettingsStore.shared.settings
+        var changed = false
+        for p in profiles {
+            guard let moved = p.migratedLegacyOmpCustom(global: global) else { continue }
+            do {
+                try store.save(moved)
+                changed = true
+                InferenceLog.shared.record(
+                    "[models] \(p.name): moved omp's custom server into the workspace's model settings")
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[models] couldn't move omp's custom server for \(p.name): \(error)\n".utf8))
             }
         }
         if changed { profiles = store.loadAll() }
