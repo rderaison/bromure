@@ -2,6 +2,16 @@
 # Cursor size and display scale are set after chrome-env is loaded (runtime, not build-time)
 export XCURSOR_THEME=Adwaita
 
+# macOS owns display sleep. Keep the virtual desktop available even while a
+# pre-warmed VM waits for a profile or Chromium releases its video wake lock.
+# The DPMS extension is optional; lack of it must not prevent session startup.
+# BROMURE_IDLE_POLICY_BEGIN
+xset s off >/dev/null 2>&1 || true
+xset s noblank >/dev/null 2>&1 || true
+xset -dpms >/dev/null 2>&1 || true
+xset s reset >/dev/null 2>&1 || true
+# BROMURE_IDLE_POLICY_END
+
 _SHARED_WINDOWS=0
 _SHARED_MAXIMIZE=--start-maximized
 if grep -Eq '(^|[[:space:]])bromure\.shared_windows=' /proc/cmdline; then
