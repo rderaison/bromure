@@ -3578,3 +3578,8 @@
 "e.g. 1M, 256K or 131072" = "p. ex. 1M, 256K ou 131072";
 "Enter a number of tokens, like 1M or 200K." = "Saisissez un nombre de tokens, comme 1M ou 200K.";
 "Use the server's value" = "Utiliser la valeur du serveur";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "Ouvrez la page de connexion et approuvez l’accès.";
+"Approve the sign-in in your browser; it should show this code:" = "Approuvez la connexion dans votre navigateur ; il doit afficher ce code :";
+"Open the sign-in page and check that it shows this code:" = "Ouvrez la page de connexion et vérifiez qu’elle affiche ce code :";

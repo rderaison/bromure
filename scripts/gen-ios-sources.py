@@ -35,6 +35,7 @@ SHARED = [
     "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store
     "Profile.swift",
     "CodingTasks.swift",
+    "AgentScreen.swift",        # agent-screen shapes + per-agent wording (CodingTasks uses its menu regex)
     "ScheduledAutomations.swift",
     # Policy / token / routing types Profile.swift and the mirror reference.
     "Mitm/TraceRecord.swift",

@@ -3613,3 +3613,8 @@
 "e.g. 1M, 256K or 131072" = "e.g. 1M, 256K or 131072";
 "Enter a number of tokens, like 1M or 200K." = "Enter a number of tokens, like 1M or 200K.";
 "Use the server's value" = "Use the server's value";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "Open the sign-in page and approve access.";
+"Approve the sign-in in your browser; it should show this code:" = "Approve the sign-in in your browser; it should show this code:";
+"Open the sign-in page and check that it shows this code:" = "Open the sign-in page and check that it shows this code:";

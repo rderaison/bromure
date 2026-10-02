@@ -478,7 +478,8 @@ public final class MitmEngine {
     /// per-profile policy chain as the vsock path. Takes ownership of `appFD`.
     @available(macOS, deprecated: 10.15)
     public nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int) {
-        Task.detached(priority: .userInitiated) { [weak self] in
+        // Off the cooperative pool: the connection blocks on its sockets.
+        MitmTasks.spawn { [weak self] in
             guard let self else { close(appFD); return }
 
             // Plain HTTP (:80) — no TLS. Peek the Host header to identify the
@@ -832,9 +833,8 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             guardrailsProvider: guardrailsCopy,
             supplyChainProvider: supplyChainCopy
         )
-        Task.detached(priority: .userInitiated) {
-            await conn.run()
-        }
+        // Off the cooperative pool: the connection blocks on its sockets.
+        MitmTasks.spawn { await conn.run() }
         return true
     }
 }

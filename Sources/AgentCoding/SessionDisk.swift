@@ -1797,6 +1797,21 @@ public final class SessionDisk {
     event = "PermissionRequest"
     command = "/home/ubuntu/.bromure/agent-status.sh needsInput"
 
+    # Answered: back to work (else "needs you" until the turn ends).
+    [[hooks]]
+    event = "PermissionResult"
+    command = "/home/ubuntu/.bromure/agent-status.sh working"
+
+    # A turn the provider refused fires StopFailure, not Stop: the user's to fix.
+    [[hooks]]
+    event = "StopFailure"
+    command = "/home/ubuntu/.bromure/agent-status.sh needsInput"
+
+    # Esc: no Stop follows.
+    [[hooks]]
+    event = "Interrupt"
+    command = "/home/ubuntu/.bromure/agent-status.sh done"
+
     # Agent-to-agent traffic (our own delegation MCP to the host) never
     # waits on an approval. A bare server name matches nothing; the glob does.
     [[permission.rules]]

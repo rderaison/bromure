@@ -687,6 +687,9 @@ final class SwitchboardEngine {
                 lines.append("QUESTION: \(q.question) " + opts.joined(separator: " "))
             case .todo(let title, let rows):
                 lines.append("[plan] \(title) (\(rows.count) items)")
+            case .agentError(let e):
+                lines.append("[api error: \(e.kind.rawValue)\(e.status.map { " \($0)" } ?? "")] "
+                             + String(e.message.prefix(300)))
             default: break
             }
         }
