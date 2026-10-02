@@ -39,7 +39,12 @@ enum bromure_sentry_kind {
 	BSK_MOUNT = 10,
 	BSK_UNSHARE = 11,
 	BSK_SETNS = 12,
-	BSK_CONNECT = 13,
+	/* Superseded by BSK_NET_FLOW, which reports the same connection with the
+	 * protocol, the source port, the process's start time and the ancestor
+	 * chain -- and folds repeats instead of emitting one event per call.
+	 * Retired at the host's request once nothing there consumed it. Kept so
+	 * the number is never reused. */
+	BSK_CONNECT_UNUSED = 13,
 	/* Superseded by BSK_SANDBOX_DENIED, which reports the same thing for
 	 * every path operation rather than only `open`. Kept so the number is
 	 * never reused. */
@@ -57,7 +62,34 @@ enum bromure_sentry_kind {
 	 * strongly than that. `BSK_LANDLOCK_DENIED` stays reserved for the day
 	 * BPF-LSM or an upstream tracepoint can name the LSM. */
 	BSK_SANDBOX_DENIED = 18,
+	/* One event the first time a socket talks to a destination -- never per
+	 * packet. Carries the process CHAIN, so a flow can be explained back to
+	 * the agent that caused it even for processes that started before this
+	 * module loaded. */
+	BSK_NET_FLOW = 19,
 	BSK_MAX
+};
+
+/* `proto` on a BSK_NET_FLOW. The host renders the string. */
+enum bromure_sentry_proto {
+	BSPR_NONE = 0,
+	BSPR_TCP,
+	BSPR_UDP,
+	BSPR_ICMP,
+	BSPR_ICMPV6,
+	BSPR_RAW,
+	BSPR_MAX
+};
+
+#define BROMURE_SENTRY_ARGV_LEN  1024
+#define BROMURE_SENTRY_CHAIN_MAX 8
+
+/* One ancestor. `(pid, start_ns)` is a process's identity: pids are reused,
+ * start times are not. */
+struct bromure_sentry_ancestor {
+	__u32 pid;
+	__u64 start_ns;
+	char  comm[BROMURE_SENTRY_COMM_LEN];
 };
 
 /* Which operation a BSK_SANDBOX_DENIED refers to. The host renders the string;
@@ -101,6 +133,17 @@ struct bromure_sentry_event {
 				 * 100 rather than 100 rows -- or, worse, 64 rows
 				 * and a silent token-bucket drop. */
 	__u8  op;		/* enum bromure_sentry_op */
+	/* `start_boottime`, nanoseconds. With `pid` this is the identity the host
+	 * keys its process table on -- a pid alone is ambiguous the moment one is
+	 * reused, which on a busy workspace is minutes, not days. */
+	__u64 start_ns;
+	__u8  proto;		/* enum bromure_sentry_proto */
+	__u8  ip_proto;		/* IPPROTO_*, the number */
+	__u8  icmp_type;	/* 8 = echo request; 0xff when not read */
+	__u8  argv_truncated;
+	__u16 sport;		/* local port; for a ping socket, the echo id */
+	__u8  chain_len;
+	struct bromure_sentry_ancestor chain[BROMURE_SENTRY_CHAIN_MAX];
 	__u8  phase;		/* 0 = boot (Bromure's own root helpers are still
 				 * setting the VM up), 1 = session, 2 = shutdown.
 				 * Nothing outside `session` is a security event. */
@@ -110,12 +153,16 @@ struct bromure_sentry_event {
 				 * a credential gain from HERE is the real signal;
 				 * the same event from a helper is merely visible. */
 	__u8  flag1;		/* kind-specific boolean: signed / lowering / … */
-	__u8  addr[16];		/* BSK_CONNECT: IPv6 bytes, or v4-mapped */
+	__u8  addr[16];		/* BSK_NET_FLOW: IPv6 bytes, or v4-mapped */
 	__u8  addr_family;
 	__u8  truncated;	/* the path or argv below was cut short */
 	char  comm[BROMURE_SENTRY_COMM_LEN];
 	char  path[BROMURE_SENTRY_PATH_LEN];	/* exe path, mount source, … */
 	char  arg[BROMURE_SENTRY_ARG_LEN];	/* argv[0], module name, … */
+	/* The command line, args joined by single spaces. Last, and the largest
+	 * field by far, which is why SENTRY_FIFO_EVENTS came down when it was
+	 * added: the fifo is allocated once and sized in whole events. */
+	char  argv[BROMURE_SENTRY_ARGV_LEN];
 };
 
 /* Ring buffer size. 256 KiB holds ~380 events; the drain thread wakes on every
@@ -149,6 +196,13 @@ enum bromure_sentry_tally {
 	 * silent -- every other suppression in this module has cost a round when
 	 * it was invisible. */
 	BST_CAPS_IN_USERNS,
+	/* A flow whose destination is loopback, which is not egress and can
+	 * never carry a switch decision. Counted rather than emitted because it
+	 * is the single largest source of volume in the module: measured on an
+	 * otherwise quiet VM, 93 of 97 flow probe hits in 90 seconds were
+	 * datagram connects to 127.0.0.53, the systemd-resolved stub -- three
+	 * per `sudo`, each from a short-lived pid the dedup cannot fold. */
+	BST_FLOW_LOCAL,
 	BST_MAX
 };
 

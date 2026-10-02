@@ -64,6 +64,14 @@ say() { printf '\n=== %s ===\n' "$1"; }
 ok()   { printf '  ok   %s\n' "$1"; }
 bad()  { printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
 
+# This suite boots the real sandboxd, which grants ICMP echo sockets to the
+# workload's gid -- correct in production, and a change to the machine that a
+# test has no business leaving behind. Measured: a full run left the range at a
+# run_as_user workspace's system gid, so some unrelated system group kept ping
+# sockets until the next reboot.
+PING_RANGE=/proc/sys/net/ipv4/ping_group_range
+PING_SAVED=$(cat "$PING_RANGE" 2>/dev/null || echo "1	0")
+
 cleanup() {
     for m in "$WORK/etc/sudoers.d" "$WORK/etc/group" "$WORK/etc/gshadow"; do
         mountpoint -q "$m" 2>/dev/null && sudo umount "$m" 2>/dev/null
@@ -75,6 +83,15 @@ cleanup() {
     done
     sudo pkill -f "python3 .*bromure-attestd.py" 2>/dev/null
     sudo tmux -S "$WORK/run/server/tmux.sock" kill-server 2>/dev/null
+    # LAST, after every daemon above is dead. This suite starts sandboxd as a
+    # systemd TRANSIENT UNIT, which outlives this script's own process -- so a
+    # restore at the top of cleanup races a sandboxd that is still running and
+    # about to grant the range again. Measured: a full suite run ended at
+    # `1000 1000` with the restore first, and the journal showed the transient
+    # unit being stopped a moment later. Stop the writer, then restore the
+    # state.
+    sudo systemctl stop bromure-sandboxd 2>/dev/null
+    sudo sh -c "printf '%s' '$PING_SAVED' > $PING_RANGE" 2>/dev/null
     sudo rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -1535,5 +1552,16 @@ if [ "$skipped_cases" -gt 0 ]; then
         "$skipped_cases"
 fi
 
-printf '\n%s\n' "$([ "$fails" -eq 0 ] && echo "ALL BOOT TESTS PASSED" || echo "$fails CHECK(S) FAILED")"
-exit $((fails > 0))
+if [ "$fails" -ne 0 ]; then
+    printf '\n%d CHECK(S) FAILED\n' "$fails"
+    exit 1
+fi
+if [ "$skipped_cases" -gt 0 ]; then
+    # Not 0: the cases that ran passed, but one did not run, and the exit status
+    # has to say so or the skip notice above is decoration.
+    printf '\nTHE BOOT CASES THAT RAN PASSED -- but %d did NOT RUN (above)\n' \
+        "$skipped_cases"
+    exit 77
+fi
+printf '\nALL BOOT TESTS PASSED\n'
+exit 0

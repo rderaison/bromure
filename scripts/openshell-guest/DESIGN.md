@@ -634,6 +634,90 @@ workload's own gid and cannot write `/run/utmp` whatever Landlock says. Under
 strict that message is expected; this addition is what removes it in the
 Landlock-only mode, where there is no nnp.
 
+#### The HTTP proxy, and how a loopback flow is still attributable
+
+Every non-OpenShell workspace runs with `HTTPS_PROXY=http://127.0.0.1:<proxy_port>`
+(65534 on a fresh boot; the file may say 8080 for a snapshot resumed under an
+older daemon). So the destination of almost every real client's connection is
+the proxy. The kernel sentry reports that flow (§4.3c), but a row saying
+"curl → 127.0.0.1" tells nobody anything.
+
+The one value both sides hold is the client's **source port**:
+
+```
+guest: net_flow  tcp 127.0.0.1:<proxy_port>  sport=45678  comm=curl  chain=[bash, …]
+guest: bridge    BROMURE-CLIENT 1 sport=45678 peer=127.0.0.1
+host:  MITM      that connection's CONNECT example.com:443, and its L7 decisions
+```
+
+`bridge_http_proxy_service` writes that one line to the **host** end of the
+vsock bridge before any client byte. `addr` comes from `accept()`, so the port
+is known before the client has sent anything, and the line is written before the
+pump threads start rather than racing them. Properties that matter:
+
+- **HTTP only.** `ssh`, `aws` and `llm` carry their own protocols from the first
+  byte and must not be prefixed; `_bridge` takes no preamble by default and only
+  the HTTP listener passes one. The suite asserts the ssh bridge is unprefixed.
+- **A trailing newline and a version number**, so a host that does not know the
+  line can skip it and a later field does not break the parse.
+- **Docker-bridge peers are announced too**, with the container's address as
+  `peer`. There will be no sentry flow for a process inside a container — it is
+  not a guest process — so the host gets a peer it cannot join, which is better
+  than a join made to the wrong process.
+- **A write failure fails the connection** rather than bridging it unannounced.
+  A stream the host reads as HTTP when it expected a preamble is worse than a
+  refused request the client will retry, and a half-written line is the one
+  state nobody can parse.
+- `BROMURE_BRIDGE_PREAMBLE=0` turns it off, for a host that cannot take it.
+
+This is a wire-format change on a channel that crosses the guest/host boundary,
+which is why it is versioned, skippable, and has a kill switch; agentd ships in
+the meta share with the host, so in practice the versions always match.
+
+#### ICMP, which could not work in a sandboxed workspace at all
+
+`net.ipv4.ping_group_range` ships as **`1 0`** on this image — low *above* high,
+an **empty** range — so no group may open a `SOCK_DGRAM`/`IPPROTO_ICMP` socket.
+`/usr/bin/ping` tries exactly that first and falls back to `SOCK_RAW` on its
+`cap_net_raw` file capability, which is why `ping` works for a normal user.
+
+Inside the strict sandbox the fallback cannot work: `no_new_privs` is
+irreversible and a file capability is not honoured under it. So `ping` failed for
+the agent in a way it never does for the user, for a reason neither the policy
+nor any error message mentions.
+
+Measured, before and after, with no capability anywhere:
+
+| `ping_group_range` | `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` | what `ping` does |
+|---|---|---|
+| `1 0` (shipped) | `EACCES` | falls back to `SOCK_RAW`, 1 hit on `raw_sendmsg` |
+| `1000 1000` | succeeds | 1 hit on `ping_v4_sendmsg`, 0 on `raw_sendmsg` |
+
+`bromure-sandboxd` sets it to the **workload's** gid — `plan.gid`, the gid the
+session actually runs as. The kernel checks the caller's egid *and* its
+supplementary groups against the range (measured: uid 999 with gid 1000 is
+allowed, the same uid with gid 999 is refused), so it has to be the gid the agent
+really has rather than the workspace owner's.
+
+**Runtime only**, written to `/proc`, never to a `sysctl.d` drop-in — the same
+rule as the strict revocation (§1.7): a boot-time change this daemon makes dies
+with the boot. A workspace with no spec at all gets it too, before the "nothing
+to do" early return, so `ping` does not depend on whether a policy happened to be
+staged.
+
+**One sysctl covers both families.** ICMPv6 ping sockets go through the same
+`ping_init_sock`, so there is no `net.ipv6.ping_group_range`; verified that
+`AF_INET6`/`IPPROTO_ICMPV6` opens with the same range set, and that the v6 path
+does not exist in `/proc`.
+
+Two consequences worth stating. It is also what makes ICMP *visible*: the dgram
+path is a probe point the sentry can see (`ping_v4_sendmsg`, §4.3c) and the raw
+path is the one a sandboxed process cannot reach anyway. And a range is a single
+contiguous span, so when the workload's gid differs from the workspace owner's,
+the owner's login shell loses `ping` — a contiguous range covering both would
+also cover every system group between them. That case adds a `warnings` line
+rather than leaving someone to discover it by running `ping`.
+
 #### DNS, which was dead in every sandboxed workspace
 
 `/etc/resolv.conf` on this image is a symlink to
@@ -1055,7 +1139,10 @@ at two different times — `bromure-sandboxd`'s `status.json` and
 is a defined state, never an exception.
 
 Fields beyond the contract are additive: `warnings` (§1.8, §1.12), `lockdown`,
-`tmux_socket`, and **`sentry_digest`** — `sha256` of the hex secret string the
+`tmux_socket`, `ping_sockets` (the gid that may open an ICMP echo socket, read
+**live** from `/proc` rather than from a recorded intention, so it is reported
+even in a workspace with no spec and stays honest if anything else moves it —
+§1.10), and **`sentry_digest`** — `sha256` of the hex secret string the
 module puts in its 5841 hello, `null` whenever the sentry is not running, so the
 host can alarm on "guest says unavailable but something is connected".
 
@@ -1135,8 +1222,8 @@ cannot be closed from userland.
 
 ### 4.2 What is captured
 
-22 **capture** probes (19 kprobes and 3 kretprobes), plus a 23rd on the module's
-own canary function, which captures nothing and exists only to prove the others
+39 **capture** probes (27 kprobes and 12 kretprobes), plus one more on the
+module's own canary function, which captures nothing and exists only to prove the others
 are firing (§4.5). The counts in `probes.armed`/`probes.total` and the hello's
 probe list are the capture probes; the canary reports separately, as
 `probes.canary`.
@@ -1156,7 +1243,8 @@ reports rather than refusing to load.
 | `kexec_attempt` | `__arm64_sys_kexec_{load,file_load}` |
 | `lockdown_change_attempt` | kretprobe on `lockdown_write`, rejected writes only |
 | `mount`, `unshare`, `setns` | the corresponding `__arm64_sys_*` |
-| `connect` | `security_socket_connect` (kernel `sockaddr`) |
+| `connect` | `security_socket_connect` (kernel `sockaddr`) — superseded by `net_flow`, kept for the host's cross-check |
+| `net_flow` | `tcp_connect`; `udp{,v6}_sendmsg`; `ping_v{4,6}_sendmsg`; `raw{,v6}_sendmsg` — seven probes, one kind (§4.3c) |
 | `file_open_denied` | kretprobe on `security_file_open`, `-EACCES`/`-EPERM` only |
 
 **`file_open_denied` is deliberately not called `landlock_denied`.** Landlock
@@ -1539,6 +1627,296 @@ backwards. `bromure-sandboxd` also verifies `/proc/sys/kernel/seccomp/actions_lo
 covers the actions in use; measured as already correct on this image, so it is a
 guard against an image change rather than a fix.
 
+### 4.3c Network lineage: `net_flow`, and the chain that caused it
+
+One event when a socket first talks to a destination — **never per packet**.
+`exec` gained `argv` and `start_ns` in the same change, because the host's join
+needs both halves: the flow says what left the VM, the process table says which
+tool call produced it.
+
+#### The probe points, and why nine
+
+| probe | protocol | when |
+|---|---|---|
+| `tcp_connect` | TCP | after the source port is chosen, which is why `sport` is reliable |
+| `udp_sendmsg`, `udpv6_sendmsg` | UDP | the first send — connected or not |
+| `ping_v4_sendmsg`, `ping_v6_sendmsg` | ICMP, ICMPv6 | a ping socket's first send |
+| `raw_sendmsg`, `rawv6_sendmsg` | RAW | a raw socket's first send |
+
+**A datagram connect is not a packet, so it is not probed.** `connect()` on a
+UDP socket only records where that socket would send if it ever sends. The first
+version watched `ip4_datagram_connect`/`ip6_datagram_connect` and put rows on the
+timeline for traffic that never existed — live, in the host's own Security
+Timeline:
+
+```
+Network | seen | systemd → python3 → bash → ping → UDP 1.1.1.1:1025
+```
+
+iputils connects a UDP socket to `dst:1025` purely to ask the routing table
+which source address it would use, and never sends a byte. Any
+`getaddrinfo`-style route lookup does the same. So UDP — connected or not — is
+reported on its **first send**: a connected send leaves `msg_name` NULL and the
+destination comes off the socket, which the handler already reads, so nothing is
+lost by not watching the connect. Measured after the change: a UDP socket that
+connects and never sends hits **no probe at all**, a connect-then-send hits
+`udp_sendmsg` once, and `ping -c1` hits `ping_v4_sendmsg` once and nothing else.
+
+TCP is different and unchanged: `tcp_connect` *is* a packet — the SYN.
+
+**Nor is a send with nowhere to go.** Removing the connect probes left the
+guard below them unreachable: it tested `addr_family`, which cannot be zero once
+the family has been filtered, and the `connect(AF_UNSPEC)` case it was written
+for can no longer arrive. The *situation* is real, though — `send()` on an
+unconnected UDP socket runs `udp_sendmsg` **before** failing with
+`-EDESTADDRREQ` (measured: one probe hit, errno 89), which would emit
+`dst: 0.0.0.0, dport: 0` for a packet that never left. So the guard now tests
+the destination address itself, and on the address alone: ICMP and RAW
+legitimately carry no destination port, so a `dport == 0` condition would have
+discarded every ping.
+
+#### The protocol label comes from the socket, not from the probe
+
+`ip4_datagram_connect` is `udp_prot`'s connect **and** `ping_prot`'s. Measured:
+a single `ping -c1` fires it twice. A static per-probe label therefore reported a
+ping as `proto: "udp"`, which is simply wrong. `sentry_proto_from_sock()` asks
+the socket instead and the table's label survives only as a fallback. `sk_type`
+is checked before `sk_protocol`, because `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)`
+has `sk_protocol == IPPROTO_ICMP` and is still a raw socket — a different
+capability that belongs in a different bucket.
+
+**A ping socket reports its send, never its connect** — now because no datagram
+connect is probed at all. While connects *were* probed this needed an explicit
+guard, for two reasons worth keeping on record: the echo identifier is the local
+port and the socket may not be bound at connect time, so the connect event would
+carry `sport: 0`; and since the dedup key is `(pid, proto, dst, dport)`, the
+connect event would *win* the slot and fold the send into it, leaving the host
+the one event without the identifier. The guard is gone with the probes — an
+unreachable branch in a security module is a claim nobody can check.
+
+#### Loopback is counted, not reported
+
+Measured over 90 s on a VM doing nothing but running one agent session: **97 hits
+across every flow probe, of which 93 were datagram connects to 127.0.0.53**, the
+systemd-resolved stub — three per `sudo`. Each is a different short-lived pid, so
+the dedup cannot fold them; an `npm ci` would turn that into thousands of rows.
+None of them can ever be joined to a switch decision, because none of them leaves
+the VM. They would bury exactly the flows the feature exists to show.
+
+So a loopback destination increments a tally and emits nothing. What that costs:
+the agent's own DNS goes through the stub, so the *process → name* link via
+127.0.0.53 is not reported. The name is still recoverable — systemd-resolved's
+**upstream** query is a real egress flow and is reported, attributed to
+`systemd-resolve` rather than to the agent — and the host snoops DNS anyway.
+`flow_local=1` turns them back on, and every heartbeat carries
+`flows.local_suppressed`, so the decision is a visible number rather than
+something inferred from an absence. The same filter was applied to the older
+`connect` kind, which needed it more: that kind has no dedup at all, so before
+this every `sudo` on the machine produced three events.
+
+This is the round-19 lesson applied before it bit: an event stream whose bulk is
+the platform's own plumbing trains people to ignore it.
+
+**One loopback destination is not plumbing: the proxy.** agentd sets
+`HTTPS_PROXY=http://127.0.0.1:<proxy_port>` in every non-OpenShell workspace, so
+`curl`, `npm`, `pip` and git-over-https all connect to **loopback** — and the
+blanket filter swallowed every one of them. Measured live: `curl https://1.1.1.1/`
+produced no flow at all. That is the exact inverse of the mistake the filter was
+added to prevent; suppressing the agent's real egress while keeping noise would
+be worse than keeping both.
+
+`flow_local_ports` (a `ushort` array, up to 8) names loopback ports to report
+rather than suppress, and `bromure-sentryd` sets it from `$META/proxy_port` —
+**the same file agentd's `_read_proxy_port()` reads**, with the same fallbacks,
+so the two cannot disagree about which port the proxy is on. The exemption is
+one port, not loopback in general; the suite asserts that other loopback ports
+stay suppressed, so the fix cannot quietly reopen the flood.
+
+The destination of such a flow is the proxy, not the site, so on its own the row
+reads "curl → 127.0.0.1" — true and useless. The join is `sport`: see §1.10.
+
+**What suppressing the resolver stub actually costs, measured.** For *proxied*
+traffic it costs nothing, because a proxied client does not resolve anything in
+the guest at all — it hands the name to the proxy in `CONNECT`. Measured, with a
+name that does not exist and a proxy that is not listening:
+
+| | curl's error |
+|---|---|
+| `--proxy http://127.0.0.1:…` | `(7) Failed to connect to 127.0.0.1 port …` |
+| `--noproxy '*'` | `(6) Could not resolve host: …` |
+
+Error 7 rather than 6 is the whole point: with a proxy configured there is no
+guest DNS query for that name, so there was never a stub query to attribute. The
+name reaches the host from the `CONNECT` line, which the MITM already parses —
+a better source than snooping would be.
+
+It costs something only for traffic that does *not* go through the proxy — a
+database client, `ssh`, git-over-ssh — where the guest does resolve through the
+stub. There the host has "process → IP" from the flow and "name → IP" from
+resolved's upstream query (a real egress flow, reported, attributed to
+`systemd-resolve`), and joins them on address and time rather than on pid.
+
+#### Two fields that were quietly incomplete
+
+Found by re-reading the contract's field list against the code rather than
+against memory — both had shipped for rounds.
+
+**`path` (the exe) was always empty.** `sentry_fill_common` never set it, and
+the flow handler did not either, so every `net_flow` carried `"path": ""`. The
+key was *present* in the JSON, so a test that checked for the key passed; the
+required-field tuple in the suite simply did not list `path`. It matters for the
+case `chain` exists to cover: a process that started before the sentry loaded
+has no `exec` event, so there is nothing else to resolve its binary from.
+
+Filling it naively would have cost a `d_path` dentry walk **per packet** — which
+is the per-packet cost this kind exists to avoid, since a QUIC-style workload
+sends thousands of packets a second to one destination already folded into a
+single event. So the exe and the ancestor chain are now resolved **lazily**:
+`sentry_dedup_live()` asks, under the lock that already exists and with no
+allocation, whether a slot is already holding this key, and only if none is are
+either resolved. That required taking `path` out of the *flow* branch of the
+dedup key — the key is computed once before the exe is filled and again inside
+the absorb, and hashing `path` would make those disagree and give every flow a
+slot of its own. Nothing is lost: for a flow, `pid` already determines the exe.
+
+**`icmp_type` was always "not read".** The contract asks for it "when cheap", it
+was not cheap when first written (reading the message meant a faulting copy from
+a kprobe handler), and the condition changed when `sentry_copy_user_nofault`
+arrived. It is one guarded byte now: a ping socket's send begins with the ICMP
+header the application built, so byte 0 is the type, read through
+`copy_from_user_nofault` — the raw primitive, not the string helper beside it,
+because that stops at the first NUL and type 0 (echo reply) would come back as
+"nothing copied", leaving the field unread for exactly the value hardest to
+tell from absent.
+
+**Ping sockets only, never raw.** A raw socket with `IP_HDRINCL` supplies the IP
+header itself, so byte 0 there is version/IHL — `0x45` — which would be reported
+as `icmp_type: 69`. The type is not determinable for a raw socket without
+parsing a header whose presence depends on a socket option, so it stays unread
+and the field is omitted. A field that is honestly absent beats one that is
+confidently wrong, and the suite asserts both halves: `8` for `ping`, absent for
+the raw-socket driver.
+
+#### Dedup, and two different windows
+
+Per `(pid, proto, dst, dport)`, folded with a `count`, in a **10 s** window —
+separate from the denial window (`dedup_ms`, 1 s), because the two measure
+different things: a connection is something a process does occasionally, a
+denial is something it does in bursts. Sharing one parameter would have quietly
+given flows the denial's 1 s.
+
+**This paragraph was false for one round, which is worth recording.** The key
+was `(kind, op, aux1, path, arg, pid)` — nothing in it distinguishes one
+destination from another — so **every flow a process made in the window folded
+into its first one.** It shipped documented as "(pid, proto, dst, dport)" in
+this file, in a code comment, and in the handover, because the property was
+written down rather than checked.
+
+It was caught by the first live run, in a line that reads like a pass:
+
+```
+ok   ping flows to 1.1.1.1: 2 event(s) for 1 + 5 + 1 packets, folded counts [2, 6]
+```
+
+`count: 2` for `ping -c1` is the UDP source-address probe **plus** the ICMP
+send, folded together. `count: 6` for `ping -c5` is that probe plus five sends.
+Nothing was wrong with the probe, the socket-based label, or the
+report-the-send-not-the-connect path: the ICMP event was built correctly and
+then absorbed into the slot the UDP probe already held, so the only flow the
+host saw was the one nobody asked about. It was never really about ping — a
+process connecting to ten hosts reported one event with `count: 10`.
+
+The key now folds in `proto`, `addr_family`, `dport` and all sixteen address
+bytes (by explicit length: an address is binary and may contain NULs, and
+1.1.1.1 against 1.1.1.2 differs only in the last octet). Kind-gated, so the
+denial key is bit-for-bit what it was — `aux2` is a file's `f_flags` on a denial
+and the destination port on a flow, and folding it in unconditionally would
+have re-cut denial dedup that is already verified in the field.
+
+Two things this cost. The comment immediately above that function already
+described this exact bug class, written after a missing `aux1` merged a refused
+`unshare` with a refused `setns`; the same mistake was made one field along, in
+the same function, one feature later. And the test that would have caught it was
+correct from the start and had **never been executed**, because this VM cannot
+load the module. A suite that cannot run is not a weaker form of a suite that
+passes.
+
+The contract also asks for dedup per `(socket, destination)` for the socket's
+life. That is **approximated** by the window: per-socket state would have to live
+in `sk_user_data`, which belongs to the protocol. For TCP it makes no difference
+— `tcp_connect` fires once per connection anyway.
+
+#### `chain`, and `(pid, start_ns)`
+
+`chain` is the ancestors, nearest first, up to 8: `[{pid, start_ns, comm}]`,
+walked through `current->real_parent` under RCU, stopping at pid ≤ 1 and
+defensively on a cycle. The host normally rebuilds the tree from `exec`; the
+chain is what covers processes that started before the sentry loaded, and pid
+reuse.
+
+`start_ns` is `task->start_boottime` and is on **every** event, not only on
+flows. `(pid, start_ns)` is a process's identity because pids are reused and
+start times are not. `tests/test_net_flow.sh` cross-checks it against field 22 of
+`/proc/<pid>/stat` — which is what proves the field is the process's start time
+and not the time the event was built.
+
+#### `argv`
+
+Read in the exec hook from **`bprm->p`**, not from `mm->arg_start`: at
+`security_bprm_committed_creds` the new mm's `arg_start` is not set yet — it is
+filled later, in `create_elf_tables` — so reading from there yielded an empty
+argv. NUL-separated args are joined with single spaces, capped at 1024 bytes,
+with `argv_truncated` when cut. The read goes through `copy_from_user_nofault`
+(see below), so it cannot fault or sleep.
+
+#### Two things this change had to fix in the module itself
+
+**A 1792-byte event does not belong on a kernel stack.** `argv[1024]` and
+`chain[8]` took the event from 512 to 1792 bytes, and sixteen probe handlers
+staged one as a local — sixteen 1808-byte frames, inside `udp_sendmsg`, inside
+the LSM hooks, on a 16 KB arm64 stack already partly spent by the kprobe
+trampoline. A watchdog that can overflow the stack of what it watches is worse
+than no watchdog. The handlers now share a **per-CPU** staging buffer, which
+needs no lock for a reason specific to this context: a kprobe handler on arm64 is
+reached from the debug exception, which `debug_exception_enter()` enters with
+preemption disabled, and same-CPU re-entry is refused by the kprobe framework
+itself — `kprobe_breakpoint_handler()` reads the per-CPU `current_kprobe`, sees
+one in flight and accounts the hit to `nmissed` rather than calling a second
+`pre_handler`. So "one user per CPU" is a property of the context, not a hope,
+and it stops being true anywhere else: the two sleepable emitters (the sentry
+thread's drain buffer and the dedup flush) have their own storage, the flush's
+under a mutex because module exit flushes *before* `kthread_stop()`. The
+`memset` in `sentry_fill_common()` is load-bearing for a shared buffer rather
+than incidental, so it is checked for all sixteen callers rather than assumed.
+`tests/test_net_flow.sh` fails the build if a frame-size warning comes back.
+
+**`strncpy_from_user` can sleep, and a kprobe handler cannot.** Pre-existing in
+`sentry_kp_mount` and found while reading that path. `strncpy_from_user_nofault`
+is not exported to modules; `copy_from_user_nofault` is, so
+`sentry_copy_user_nofault()` is built on it in 32-byte chunks and both the mount
+path and `argv` use it.
+
+#### Cost
+
+Measured as `security_file_open` was — the same loop with and without, on
+loopback so nothing is hidden behind a network round trip, which makes it an
+upper bound:
+
+| | without | with | delta |
+|---|---|---|---|
+| TCP connect | 6301 ns | 6870 ns | +569 ns (+9.0%) |
+| UDP send | 1770 ns | 1896 ns | +127 ns (+7.2%) |
+
+Those figures are the **kprobe mechanism** on these exact symbols, measured with
+tracefs kprobes because this VM cannot load the module (lockdown, §4.8).
+`tests/test_net_flow.sh` repeats the measurement against the real module, loaded
+and unloaded, and prints both; that is the number to quote. The percentage is
+against the tightest loop the kernel will run: a connect to a real destination
+costs orders of magnitude more, so the proportional cost in a workload is far
+smaller. The allowed path of the hot denial hook pays nothing — the staging
+buffer is claimed *after* the early returns, so an allowed `security_file_open`
+does not touch it.
+
 ### 4.4 Tamper resistance
 
 | vector | answer |
@@ -1852,6 +2230,8 @@ on its own merits, but nothing here waits on it.
 | `tests/test_strict.sh` | the revocation leaves /etc byte-identical, twice over |
 | `tests/test_boot.sh` | the real agentd main(), booted twice, for all three configurations |
 | `tests/test_idmap.py` | idmapped mount remap, namespace privacy, honest degradation |
+| `tests/test_sandbox.sh` §26 | the HTTP bridge's client preamble, over a **real** vsock on `VMADDR_CID_LOCAL`: the exact line, the newline and version, docker peers, the kill switch, a malformed `accept()` address, that it is the first thing the host reads and the client's bytes follow it byte for byte, that ssh is *not* prefixed, and that sentryd and agentd read the same proxy port from the same file |
+| `tests/test_net_flow.sh` | **fresh VM only.** Drives `ping`, a bound ping socket with a known echo id, a raw-socket echo request, `curl`, a bare TCP connect, connected and unconnected UDP, `dig`/`nc` when installed, IPv6 when routable — and asserts a `net_flow` for each whose `chain` names the shell that spawned it. Also: no event per packet, loopback counted not emitted, a ping socket reporting its send rather than its connect, `argv` and its truncation flag, `start_ns` against `/proc`, chain order and depth, no stack-frame warning in the build, and the per-connect/send cost with the module loaded against unloaded. Since the first live run it also asserts that **one process's three destinations are three events** (the dedup-key regression), that a proxied `curl` to loopback *is* reported while every other loopback port stays suppressed, and that `ping`'s own UDP source-address probe is reported as what it is rather than treated as a mislabel |
 | `tests/test_lockdown.sh` | before/after table for ~20 kernel surfaces |
 
 ### Not proven by execution

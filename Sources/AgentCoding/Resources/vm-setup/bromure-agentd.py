@@ -151,7 +151,7 @@ _OVERRIDE_ENV = ("BROMURE_META", "BROMURE_RUN_DIR", "BROMURE_STRICT_DONE",
                  "BROMURE_WORKSPACE_USER", "BROMURE_AGENTD_PID",
                  "BROMURE_SANDBOXD_NO_POWEROFF", "BROMURE_HOSTS_FILE",
                  "BROMURE_HOST_CID", "BROMURE_SENTRY_PORT",
-                 "BROMURE_SENTRY_NO_LOCKDOWN")
+                 "BROMURE_SENTRY_NO_LOCKDOWN", "BROMURE_BRIDGE_PREAMBLE")
 
 
 def _systemd_setenv_args():
@@ -917,9 +917,21 @@ def _view_attach_command(view, window, size_passive=False):
     if name == "view-":
         name = "view-" + os.urandom(4).hex()
     passthrough = "on" if _terminal_graphics_enabled() else "off"
+    # `_tmux_argv()`, NOT a bare "tmux". Under a spec the server listens on the
+    # supervisor's socket; a bare `tmux` inside the sandbox looks for
+    # /tmp/tmux-1000/default instead, so `has-session -t bromure` fails and this
+    # command `exit 1`s before printing a byte -- the host then retries an empty
+    # window forever. Measured inside the sandbox cgroup: no TMUX in the
+    # environment, `has-session` exit 1, "error connecting to
+    # /tmp/tmux-1000/default".
+    #
+    # `_tmux_argv`'s own docstring already claimed "every tmux invocation in
+    # this file goes through here". It was not true of this function, and the
+    # claim is what stopped anyone looking.
+    tm = " ".join(shlex.quote(a) for a in _tmux_argv())
     tmux = (
-        "exec tmux"
-        " set-option -g allow-passthrough " + passthrough + " \\;"
+        "exec " + tm
+        + " set-option -g allow-passthrough " + passthrough + " \\;"
         # set-clipboard on is safe now that tmux mouse is off (no tmux-side
         # copy happens on selection) — it just lets a program's own OSC 52
         # copy reach the macOS clipboard.
@@ -964,10 +976,10 @@ def _view_attach_command(view, window, size_passive=False):
     # pty, so by the time it runs the session exists; if it somehow does not,
     # failing is the correct outcome.
     if openshell_requested():
-        return "tmux has-session -t bromure 2>/dev/null || exit 1; " + tmux
+        return tm + " has-session -t bromure 2>/dev/null || exit 1; " + tmux
     return (
-        "tmux has-session -t bromure 2>/dev/null"
-        " || tmux new-session -d -s bromure; " + tmux
+        tm + " has-session -t bromure 2>/dev/null"
+        " || " + tm + " new-session -d -s bromure; " + tmux
     )
 
 
@@ -983,27 +995,62 @@ def _run_interactive(vsock_sock, req):
     cols = int(req.get("cols", 80) or 80)
     rows = int(req.get("rows", 24) or 24)
 
-    pid, master = pty.fork()
-    if pid == 0:
-        # Child: stdin/stdout/stderr are the pty slave. Source proxy.env so
-        # curl/pip/npm see the MITM proxy, then exec the command (or a login
-        # shell). `bash -li` makes the default shell interactive so .bashrc
-        # runs; `-lc` runs an explicit command with the login environment.
+    # ONE argv for both spawn paths.
+    #
+    # Source proxy.env so curl/pip/npm see the MITM proxy, then run the command
+    # (or a login shell). `bash -li` makes the default shell interactive so
+    # .bashrc runs; `-lc` runs an explicit command with the login environment.
+    #
+    # NB: no `exec` prefix — it would replace the shell with the first word of a
+    # compound command (`a; b; c`) and drop the rest.
+    #
+    # Built once, above the branch, because the two paths MUST launch the same
+    # thing and the last version of this had them diverge: the sandboxed spawn
+    # was never written at all.
+    if cmd:
+        wrapped = (
+            "if [ -r %s/proxy.env ]; then "
+            "set -a; . %s/proxy.env; set +a; fi; " % (META, META) + cmd
+        )
+        argv = ["/bin/bash", "-lc", wrapped]
+    else:
+        argv = ["/bin/bash", "-li"]
+
+    # BOTH bound before the try, on every path. The `finally` below reads them,
+    # and this function previously bound only `pid` while the `finally` branched
+    # on `proc` -- so every interactive session ended in
+    # `NameError: name 'proc' is not defined`, and in a workspace with a spec
+    # the attach failed outright. No terminal could attach, in any workspace
+    # with an active spec, for many rounds.
+    proc = None
+    pid = None
+
+    if openshell_requested():
+        # Sandboxed. agentd allocates the pty and keeps the master, exactly as
+        # `pty.fork` would have left it; only the SLAVE crosses to the
+        # supervisor, which makes it the child's controlling terminal. So the
+        # pumping below is identical and the shell is confined -- which is the
+        # whole point: a `pty.fork` here would run `tmux attach` outside the
+        # sandbox against the sandbox's own socket.
+        master, slave = pty.openpty()
+        proc = _SandboxPty(argv, slave)
+        # `_SandboxPty` dups the slave in its constructor, before its thread
+        # starts, so closing ours now is safe -- and necessary, or the pty never
+        # reports hangup when the shell exits.
         try:
-            os.environ.setdefault("TERM", "xterm-256color")
-            if cmd:
-                # NB: no `exec` prefix — it would replace the shell with the
-                # first word of a compound command (`a; b; c`) and drop the rest.
-                wrapped = (
-                    "if [ -r %s/proxy.env ]; then "
-                    "set -a; . %s/proxy.env; set +a; fi; " % (META, META) + cmd
-                )
-                os.execvp("/bin/bash", ["/bin/bash", "-lc", wrapped])
-            else:
-                os.execvp("/bin/bash", ["/bin/bash", "-li"])
-        except Exception:
+            os.close(slave)
+        except OSError:
             pass
-        os._exit(127)
+    else:
+        pid, master = pty.fork()
+        if pid == 0:
+            # Child: stdin/stdout/stderr are the pty slave.
+            try:
+                os.environ.setdefault("TERM", "xterm-256color")
+                os.execvp(argv[0], argv)
+            except Exception:
+                pass
+            os._exit(127)
 
     # Parent: pump pty master <-> vsock until the child exits or the host hangs up.
     _set_winsize(master, rows, cols)
@@ -1465,7 +1512,49 @@ def _bridge_pump(src, dst):
             pass
 
 
-def _bridge(client, vsock_port, label):
+# One line, written to the HOST end of the HTTP bridge before any client byte.
+#
+# Why it exists. Every non-OpenShell workspace gets `HTTPS_PROXY=http://
+# 127.0.0.1:<proxy_port>`, so `curl`, `npm`, `pip` and git-over-https connect to
+# LOOPBACK. The kernel sentry sees that flow and reports it, but its destination
+# is the proxy, not the site -- on its own it reads "curl → 127.0.0.1", which is
+# true and useless. The client's SOURCE PORT is the one value present on both
+# sides: the sentry puts it in the flow's `sport`, and this line hands the same
+# number to the MITM, which already knows the CONNECT target and every L7
+# decision on that connection. With the two joined, the row becomes
+# "curl → CONNECT example.com:443 → GET /path (allowed)".
+#
+# It has to be the first thing on the wire. `addr` comes from `accept()`, so it
+# is known before the client has sent anything, and it is written before the
+# pumps start rather than racing them.
+#
+# Trailing newline and a version number, so a host that has not been taught the
+# line can skip it, and a later field can be added without breaking the parse.
+# Only on the HTTP bridge -- ssh, aws and llm carry their own protocols from the
+# first byte and must not be prefixed.
+BRIDGE_PREAMBLE_VERSION = 1
+
+
+def _client_preamble(addr):
+    """`BROMURE-CLIENT 1 sport=<port> peer=<ip>\n`, or None if disabled.
+
+    Docker-bridge peers get one too, with `peer` being the container's address:
+    the sentry will have no flow for a process inside a container (it is not a
+    guest process), and the host simply gets a peer it cannot join, which is
+    better than a join it makes to the wrong process.
+    """
+    if os.environ.get("BROMURE_BRIDGE_PREAMBLE") == "0":
+        return None
+    try:
+        peer, sport = addr[0], int(addr[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return ("BROMURE-CLIENT %d sport=%d peer=%s\n"
+            % (BRIDGE_PREAMBLE_VERSION, sport, peer)).encode("ascii",
+                                                              "replace")
+
+
+def _bridge(client, vsock_port, label, preamble=None):
     """Open a vsock connection to the host, then pump both directions."""
     try:
         host = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
@@ -1475,6 +1564,20 @@ def _bridge(client, vsock_port, label):
                     % (label, vsock_port, e))
         client.close()
         return
+
+    if preamble:
+        try:
+            host.sendall(preamble)
+        except OSError as e:
+            # Fail the connection rather than bridging it unannounced. A stream
+            # the host reads as HTTP when it expected a preamble is a worse
+            # outcome than a refused request the client will retry, and a silent
+            # half-written line is the one state nobody can parse.
+            _bridge_log("[%s] could not write the client preamble: %s"
+                        % (label, e))
+            client.close()
+            host.close()
+            return
 
     _bridge_log("[%s] bridging client → host:%d" % (label, vsock_port))
     t1 = threading.Thread(target=_bridge_pump, args=(client, host), daemon=True)
@@ -1547,7 +1650,8 @@ def bridge_http_proxy_service():
                 pass
             continue
         threading.Thread(
-            target=_bridge, args=(conn, HTTP_PROXY_VSOCK_PORT, "http"),
+            target=_bridge,
+            args=(conn, HTTP_PROXY_VSOCK_PORT, "http", _client_preamble(addr)),
             daemon=True).start()
 
 

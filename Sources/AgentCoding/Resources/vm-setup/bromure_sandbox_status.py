@@ -136,6 +136,33 @@ def installed_kernels():
     return list(value)
 
 
+PING_GROUP_RANGE = "/proc/sys/net/ipv4/ping_group_range"
+
+
+def ping_sockets():
+    """Who may open an ICMP echo socket, read LIVE rather than from status.json.
+
+    Live, because it is a fact about the running kernel and not a record of what
+    this daemon intended: it is reported in a workspace with no spec (where
+    nothing writes a status file at all), and it stays honest if anything else
+    on the system moves the range afterwards.
+
+    `"none"` is Ubuntu's shipped `1 0` -- low above high, an empty range, which
+    reads as "no group" rather than "group 1". A single gid renders as itself
+    (`"1000"`), a span as `"low-high"`.
+    """
+    try:
+        with open(PING_GROUP_RANGE) as handle:
+            low, high = (int(part) for part in handle.read().split()[:2])
+    except (OSError, ValueError):
+        return None
+    if low > high:
+        return "none"
+    if low == high:
+        return str(low)
+    return "%d-%d" % (low, high)
+
+
 def build(sandbox_path=SANDBOX_STATUS, sentry_path=SENTRY_STATUS,
           strict_path=STRICT_STATUS, spec_path=SPEC_PATH):
     """The unsolicited line, exactly in the contract's §3 shape.
@@ -225,6 +252,10 @@ def build(sandbox_path=SANDBOX_STATUS, sentry_path=SENTRY_STATUS,
         # `installed_kernels`.
         "sentry_kernel": os.uname().release,
         "installed_kernels": installed_kernels(),
+        # The gid that may open ICMP echo sockets, so the host can tell a
+        # workspace where the agent's `ping` works from one where it silently
+        # falls back to a raw socket it cannot have under no_new_privs.
+        "ping_sockets": ping_sockets(),
     }
 
 
@@ -257,7 +288,7 @@ def fingerprint(status):
                     "sentry", "sentry_reason", "sentry_digest", "landlock_abi",
                     "lockdown", "server_pid", "server_restarts", "strict_applied",
                     "build",
-                    "sentry_kernel", "installed_kernels")
+                    "sentry_kernel", "installed_kernels", "ping_sockets")
     }, sort_keys=True) + json.dumps(sorted(set(status.get("warnings") or [])))
 
 

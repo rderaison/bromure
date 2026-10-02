@@ -123,7 +123,9 @@ say "drive activity"
 id -u > /dev/null
 sudo -n true 2>/dev/null                 # setuid/setresuid + exec
 cat /etc/hostname > /dev/null
-echo "  ok   drove exec / connect / setuid"
+# The loopback connect stays as activity, but it no longer names a kind: the
+# `connect` kind is retired, and a loopback flow is counted rather than emitted.
+echo "  ok   drove exec / a loopback TCP connect / setuid"
 
 say "drive the remaining alarm-class syscalls"
 # Seven alarm-class kinds were registered and unproven. Two probes in this module
@@ -372,11 +374,17 @@ for required in ("exec",):
 events = [f for f in frames if f.get("type") == "event"]
 
 # The retired kinds must not appear at all.
-retired = {k: kinds.get(k, 0) for k in ("setuid", "setgid", "capset")}
+# `connect` is retired too: `net_flow` reports the same connection with the
+# protocol, the source port, the start time and the ancestor chain, and folds
+# repeats instead of emitting one event per call. The probe on
+# `security_socket_connect` is gone; the ABI number stays reserved.
+retired = {k: kinds.get(k, 0)
+           for k in ("setuid", "setgid", "capset", "connect")}
 if any(retired.values()):
     print("  FAIL retired per-syscall kinds are still emitted: %s" % retired)
     sys.exit(1)
-print("  ok   setuid/setgid/capset are counted, not emitted")
+print("  ok   setuid/setgid/capset are counted and `connect` is retired, "
+      "so none of them is emitted")
 
 beats = [f for f in frames if f.get("type") == "heartbeat"]
 tallies = [b.get("tallies") for b in beats if b.get("tallies")]
@@ -702,7 +710,11 @@ fails = 0
 # Driven by this test, and therefore required to appear.
 DRIVEN = {
     "exec":            "/bin/true and friends",
-    "connect":         "a TCP connect to 127.0.0.1:9",
+    # NOT `connect`. The kind was retired in favour of `net_flow`, so requiring
+    # it to fire asserted the opposite of what the retired-kinds check below
+    # asserts -- the suite contradicted itself, and only a run on a VM that can
+    # load the module could notice. `net_flow` is not here either: it needs an
+    # AF_INET destination and its own drivers, which `test_net_flow.sh` has.
     "cred_gain":       "sudo -n true",
     "module_load":     "modprobe overlay / br_netfilter, plus one refused",
     "sandbox_denied":  "seven denied file operations",

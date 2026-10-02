@@ -468,6 +468,9 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
                 alarm("sentry_boot_phase", "the kernel sentry still labels events as boot-time \(Int(KernelSentryService.bootBudget))s after the VM started", weight: 0)
             }
         }
+        // Network lineage: the process tree (exec) and each flow (net_flow).
+        if kind == "exec" { NetworkLineage.shared.noteExec(profileID: profileID, frame) }
+        if kind == "net_flow" { NetworkLineage.shared.noteFlow(profileID: profileID, frame) }
         guard let (weight, category) = KernelSentryService.classify(kind, fields, strict: strict) else {
             lock.lock(); counted[kind, default: 0] += 1; lock.unlock()
             return

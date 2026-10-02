@@ -2139,6 +2139,97 @@ def _stay_up_reporting(status):
                 pass
 
 
+PING_GROUP_RANGE = "/proc/sys/net/ipv4/ping_group_range"
+
+
+def ping_sockets_value():
+    """The live range, rendered the way `sandbox_status` reports it."""
+    try:
+        with open(PING_GROUP_RANGE) as handle:
+            low, high = (int(part) for part in handle.read().split()[:2])
+    except (OSError, ValueError):
+        return None
+    if low > high:
+        return "none"          # the kernel's empty range; Ubuntu ships `1 0`
+    if low == high:
+        return str(low)
+    return "%d-%d" % (low, high)
+
+
+def ensure_ping_sockets(status, gid, owner_gid=None):
+    """Let the workload's group open ICMP echo sockets, for this boot only.
+
+    Ubuntu ships `net.ipv4.ping_group_range = 1 0` -- an EMPTY range, so no
+    group may open a `SOCK_DGRAM`/`IPPROTO_ICMP` socket and `/usr/bin/ping`
+    falls back to `SOCK_RAW` on its `cap_net_raw` file capability. Inside the
+    strict sandbox that fallback cannot work: `no_new_privs` is irreversible, so
+    the file capability is not honoured and ping fails for the agent in a way it
+    never does for the user.
+
+    Measured, before and after, on this image:
+
+        range `1 0`        ping: socket(DGRAM, ICMP) -> EACCES, then SOCK_RAW
+        range `1000 1000`  ping: socket(DGRAM, ICMP) -> ok, sends via
+                           `ping_v4_sendmsg` (1 hit, 0 on `raw_sendmsg`)
+
+    which is also why this is worth doing for the sentry and not only for the
+    agent: the dgram path is a probe point the module can see, and the raw path
+    is the one a sandboxed process cannot reach anyway.
+
+    `gid` is the WORKLOAD's group -- `plan.gid`, the gid the session actually
+    runs as. The kernel checks the caller's egid and its supplementary groups
+    against the range (measured: uid 999 with gid 1000 is allowed, the same uid
+    with gid 999 is refused), so the range has to contain the gid the agent
+    really has, not the workspace owner's.
+
+    One sysctl covers BOTH families: ICMPv6 ping sockets go through the same
+    `ping_init_sock`, so there is no `net.ipv6.ping_group_range` to set.
+    Verified: with the range set, AF_INET/ICMP and AF_INET6/ICMPV6 both open.
+
+    RUNTIME ONLY -- written to /proc, never to a `sysctl.d` drop-in. Same lesson
+    as the strict revocation: a boot-time change this daemon makes should die
+    with the boot, so a workspace that stops asking for it stops having it, and
+    nothing we do here outlives the VM.
+    """
+    want = "%d %d" % (gid, gid)
+    try:
+        with open(PING_GROUP_RANGE) as handle:
+            current = handle.read().strip()
+    except OSError as exc:
+        if status is not None:
+            status["warnings"].append(
+                "cannot read %s (%s): ICMP from the sandbox will fail"
+                % (PING_GROUP_RANGE, exc))
+        return
+    if current.split() != want.split():
+        try:
+            with open(PING_GROUP_RANGE, "w") as handle:
+                handle.write(want)
+            log("ping_group_range: %s (was %s)" % (want, current))
+        except OSError as exc:
+            if status is not None:
+                status["warnings"].append(
+                    "cannot set %s to %s (%s): `ping` will not work inside the "
+                    "sandbox, because no_new_privs drops the cap_net_raw it "
+                    "would otherwise fall back to"
+                    % (PING_GROUP_RANGE, want, exc))
+            return
+    if status is not None:
+        status["ping_sockets"] = ping_sockets_value()
+        # Say it out loud when the range the WORKLOAD needs excludes the person
+        # using the workspace. The range is a single contiguous span, so a
+        # workload gid that differs from the owner's cannot include both without
+        # also covering every system group in between -- which is a wider grant
+        # than this is worth. The agent keeps ping; the login shell loses it;
+        # nobody has to find that out by running `ping` and reading an EACCES.
+        if owner_gid is not None and owner_gid != gid:
+            status["warnings"].append(
+                "ping_group_range is %s (the workload's gid). ICMP echo sockets "
+                "are available to the sandboxed session but NOT to %s (gid %d); "
+                "a contiguous range covering both would also cover the system "
+                "groups between them." % (want, WORKSPACE_USER, owner_gid))
+
+
 SECCOMP_ACTIONS_LOGGED = "/proc/sys/kernel/seccomp/actions_logged"
 
 
@@ -2245,6 +2336,7 @@ def build_plan(spec, policy, status, group_gid, sandbox_cgroup=None):
         write_status(status)
         return None, _stay_up_reporting(status)
 
+    ensure_ping_sockets(status, gid, owner_gid)
     needs_idmap = uid != owner_uid
     run_as_name = (pwd.getpwuid(uid).pw_name if osh._passwd_has(uid) else str(uid))
     unreachable = check_workdir_access(uid, gid, workdirs)
@@ -2396,6 +2488,15 @@ def main():
         log("must run as root")
         return 2
     if not os.path.exists(SPEC_PATH):
+        # No spec, so no plan, no status file and no sandbox -- but still grant
+        # the workspace user ICMP echo sockets, so `ping` behaves the same in
+        # every workspace rather than depending on whether a policy happens to
+        # be staged. There is no status dict on this path; nothing to report to.
+        try:
+            owner_gid = pwd.getpwnam(WORKSPACE_USER).pw_gid
+        except KeyError:
+            owner_gid = 1000
+        ensure_ping_sockets(None, owner_gid)
         log("no %s; nothing to do" % SPEC_PATH)
         return 0
 

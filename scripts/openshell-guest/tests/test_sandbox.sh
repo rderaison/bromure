@@ -40,9 +40,44 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2'
 SOCK="$WORK/run/server/tmux.sock"
 CTL="$WORK/run/ctl.sock"
 
+# Every `launch` in this suite now moves net.ipv4.ping_group_range, because
+# sandboxd grants it to the workload's gid at startup. Saved here, before the
+# first one runs, and put back on the way out -- otherwise the value section 25
+# "restores" is just whatever the previous section happened to set.
+# Kill every tmux server whose socket lives under a directory this suite made.
+#
+# `sudo find`, not `find`: the server directory is mode 0771 (root:bromure-tmux),
+# so "others" may traverse it but may not LIST it -- an unprivileged find
+# enumerates nothing and silently reports no sockets. Measured: the first
+# version of this ran without sudo, found nothing, and left a server per run
+# with its socket directory deleted out from under it.
+kill_tmux_under() {
+    local dir="$1"
+    [ -n "$dir" ] || return 0
+    for sock in $(sudo find "$dir" -name 'tmux.sock' 2>/dev/null); do
+        sudo tmux -S "$sock" kill-server 2>/dev/null
+    done
+}
+
+PING_RANGE=/proc/sys/net/ipv4/ping_group_range
+PING_SAVED=$(cat "$PING_RANGE" 2>/dev/null || echo "1	0")
+
 cleanup() {
     [ -n "$SUPERVISOR" ] && sudo kill "$SUPERVISOR" 2>/dev/null
-    sudo tmux -S "$SOCK" kill-server 2>/dev/null
+    # EVERY socket under $WORK, not just $SOCK. Sections that use a second run
+    # directory (`run15/` for the run_as_user case) left their server running
+    # with its socket directory deleted under it -- one survivor per run, which
+    # is how this VM accumulated 39 of them.
+    kill_tmux_under "$WORK"
+    # LAST, after the supervisor is dead -- the same ordering bug that was in
+    # test_boot.sh. Restoring first lets a sandboxd that is still running grant
+    # the range again after the restore, and a full suite run ended at
+    # `1000 1000` with the restore here at the top. Stop the writer, then
+    # restore the state.
+    for pid in $(pgrep -f "python3 $ROOT/bromure-sandboxd" 2>/dev/null); do
+        sudo kill "$pid" 2>/dev/null
+    done
+    sudo sh -c "printf '%s' '$PING_SAVED' > $PING_RANGE" 2>/dev/null
     sudo rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -1714,7 +1749,14 @@ HOSTS_SHA_BEFORE=$(sudo sha256sum /etc/hosts | cut -d' ' -f1)
 restore_hosts() {
     sudo sed -i '/# bromure-test-advisor$/d' /etc/hosts 2>/dev/null
 }
-trap 'restore_hosts' EXIT
+# COMPOSED with `cleanup`, not substituted for it. `trap 'restore_hosts' EXIT`
+# REPLACES the suite's EXIT trap, so from here on `cleanup` was never
+# registered -- and `trap - EXIT` below then removed the trap altogether. Every
+# section after this point therefore ran with no teardown at all: measured, the
+# suite left `ping_group_range` moved, six `/tmp/sandboxtest-*` directories and
+# a tmux server per run behind it. This is why the sysctl restore added two
+# rounds ago appeared to do nothing -- the function holding it was never called.
+trap 'restore_hosts; cleanup' EXIT
 printf '192.0.2.254\tpolicy.local\t# bromure-test-advisor\n' \
     | sudo tee -a /etc/hosts > /dev/null
 sudo python3 - <<PY
@@ -1797,7 +1839,9 @@ sys.exit(1 if fails else 0)
 PY
 rc=$?; [ $rc -eq 0 ] || { fails=$((fails + 1)); printf "  FAIL the block above exited %s\n" "$rc"; }
 restore_hosts
-trap - EXIT
+# Back to the suite's own trap, NOT `trap - EXIT`. Removing it entirely left
+# every later section with no teardown.
+trap cleanup EXIT
 HOSTS_SHA_AFTER=$(sudo sha256sum /etc/hosts | cut -d' ' -f1)
 check "the real /etc/hosts came back byte-identical" \
     "$HOSTS_SHA_AFTER" "$HOSTS_SHA_BEFORE"
@@ -2348,6 +2392,780 @@ else
 fi
 sudo systemctl reset-failed bromure-sentry-await 2>/dev/null
 sudo rm -rf "$SENTRY_W"
+
+# --------------------------------------------------------------------------
+say "25. ICMP echo sockets for the workload's group"
+# Ubuntu ships `net.ipv4.ping_group_range = 1 0` -- low ABOVE high, an EMPTY
+# range -- so no group may open a SOCK_DGRAM/IPPROTO_ICMP socket, and
+# /usr/bin/ping falls back to SOCK_RAW on its `cap_net_raw` file capability.
+# Inside the strict sandbox that fallback cannot work, because `no_new_privs` is
+# irreversible and a file capability is not honoured under it. So `ping` fails
+# for the agent in a way it never does for the user unless the range names the
+# workload's gid -- which is what sandboxd now sets at boot, runtime only.
+#
+# Its OWN workspace, not $WORK: by this point the earlier sections have left a
+# supervisor, a control socket and a server directory behind, and a `launch`
+# into that state publishes no status (measured -- the first version of this
+# section failed on exactly that and it had nothing to do with ping).
+PING_W=$(mktemp -d /tmp/sandboxtest-ping-XXXXXX)
+mkdir -p "$PING_W/meta" "$PING_W/run" "$PING_W/workdir"
+chmod 755 "$PING_W"
+MY_GID=$(id -g)
+OWNER_GID=$(id -g ubuntu 2>/dev/null || echo 1000)
+
+ping_sandboxd() {   # <spec-json-or-empty>
+    sudo rm -f "$PING_W/run/status.json"
+    if [ -n "$1" ]; then printf '%s' "$1" > "$PING_W/meta/openshell-sandbox.json"
+    else rm -f "$PING_W/meta/openshell-sandbox.json"; fi
+    sudo env BROMURE_META="$PING_W/meta" BROMURE_RUN_DIR="$PING_W/run" \
+        BROMURE_STRICT_DONE="$PING_W/strict.done" \
+        BROMURE_SANDBOXD_ONESHOT=1 BROMURE_AGENTD_PID="$$" \
+        /usr/bin/python3 "$ROOT/bromure-sandboxd" > "$PING_W/log" 2>&1
+}
+
+# The FUNCTIONAL claim first, both directions, with no capability anywhere.
+# Asserting the number in /proc would pass even if the kernel ignored it; and
+# the kernel checks the caller's egid AND its supplementary groups, so what
+# matters is whether the gid the agent really has falls in the range.
+ping_socket_as() {   # <uid> <gid> -> yes | no
+    sudo python3 -c "
+import os, socket, sys
+pid = os.fork()
+if pid == 0:
+    os.setgroups([]); os.setresgid($2, $2, $2); os.setresuid($1, $1, $1)
+    try:
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+        sys.stdout.write('yes\n')
+    except OSError:
+        sys.stdout.write('no\n')
+    sys.stdout.flush()
+    os._exit(0)
+os.waitpid(pid, 0)
+" 2>/dev/null
+}
+
+sudo sh -c "echo '1 0' > $PING_RANGE"
+check "with the shipped empty range, an unprivileged gid is refused" \
+    "$(ping_socket_as 999 "$MY_GID")" "no"
+
+# A spec with NO filesystem_policy and NO process section: the grant is not
+# conditional on which policy sections a workspace happens to carry.
+ping_sandboxd '{"version":1,"filesystem_policy":null,"process":null,"workdirs":["'"$PING_W"'/workdir"],"sentry":{"enabled":false}}'
+check "sandboxd sets the range to the workload's gid" \
+    "$(tr '\t' ' ' < "$PING_RANGE")" "$MY_GID $MY_GID"
+check "and an unprivileged uid in that gid can now open a ping socket" \
+    "$(ping_socket_as 999 "$MY_GID")" "yes"
+# The gid is the gate, not the uid: a uid in some other group stays refused, so
+# this is a grant to one group and not a hole for everybody.
+check "a uid outside that gid is still refused" \
+    "$(ping_socket_as 999 1)" "no"
+
+# Reported, so the host can tell a workspace where the agent's `ping` works from
+# one where it silently falls back to a raw socket it cannot have.
+check "status.json reports ping_sockets" \
+    "$(sudo python3 -c "
+import json
+print(json.load(open('$PING_W/run/status.json')).get('ping_sockets'))" 2>/dev/null)" \
+    "$MY_GID"
+check "the status builder reports the LIVE value, not a recorded intention" \
+    "$(python3 -c "
+import sys; sys.path.insert(0, '$ROOT')
+import bromure_sandbox_status as s
+print(s.build('/nonexistent','/nonexistent','/nonexistent','/nonexistent')['ping_sockets'])")" \
+    "$MY_GID"
+check "and it is in the fingerprint, so a change reaches the host" \
+    "$(python3 -c "
+import sys; sys.path.insert(0, '$ROOT')
+import bromure_sandbox_status as s
+print('yes' if 'ping_sockets' in s.fingerprint(s.build()) else 'no')")" "yes"
+
+# An empty range reads as "none", not as "group 1": `1 0` is low above high.
+sudo sh -c "echo '1 0' > $PING_RANGE"
+check "an empty range is reported as none, not as group 1" \
+    "$(python3 -c "
+import sys; sys.path.insert(0, '$ROOT')
+import bromure_sandbox_status as s; print(s.ping_sockets())")" "none"
+
+# A workspace with NO spec gets it too. sandboxd returns early on that path --
+# "nothing to do" -- so the grant has to happen BEFORE the early return, or
+# `ping` would depend on whether a policy happened to be staged.
+ping_sandboxd ""
+check "a workspace with no spec is granted it as well" \
+    "$(tr '\t' ' ' < "$PING_RANGE")" "$OWNER_GID $OWNER_GID"
+check "and it still writes no status file, as before" \
+    "$([ -e "$PING_W/run/status.json" ] && echo present || echo absent)" "absent"
+
+# RUNTIME ONLY. Same lesson as the strict revocation: a boot-time change this
+# daemon makes must die with the boot, so a workspace that stops asking for it
+# stops having it, and nothing done here outlives the VM.
+if grep -rl "ping_group_range" /etc/sysctl.conf /etc/sysctl.d 2>/dev/null | grep -q .; then
+    bad "a persistent sysctl drop-in for ping_group_range was written"
+else
+    ok "no persistent sysctl.d drop-in exists -- the grant dies with the boot"
+fi
+check "the only path sandboxd writes is under /proc" \
+    "$(python3 -c "
+import re
+src = open('$ROOT/bromure-sandboxd').read()
+m = re.search(r'^PING_GROUP_RANGE = \"([^\"]+)\"', src, re.M)
+print('proc' if m and m.group(1).startswith('/proc/') else (m.group(1) if m else 'missing'))")" \
+    "proc"
+
+# One sysctl, BOTH families: ICMPv6 ping sockets go through the same
+# `ping_init_sock`, so there is no net.ipv6.ping_group_range to set. Measured
+# rather than assumed, because "surely v6 has its own" is the obvious guess and
+# it is wrong.
+sudo sh -c "echo '$MY_GID $MY_GID' > $PING_RANGE"
+check "the same range also opens ICMPv6 ping sockets" \
+    "$(sudo python3 -c "
+import os, socket, sys
+pid = os.fork()
+if pid == 0:
+    os.setgroups([]); os.setresgid($MY_GID, $MY_GID, $MY_GID)
+    os.setresuid(999, 999, 999)
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, 58)
+        sys.stdout.write('yes\n')
+    except OSError:
+        sys.stdout.write('no\n')
+    sys.stdout.flush()
+    os._exit(0)
+os.waitpid(pid, 0)
+" 2>/dev/null)" "yes"
+check "and there is no separate v6 sysctl to forget" \
+    "$([ -e /proc/sys/net/ipv6/ping_group_range ] && echo exists || echo absent)" "absent"
+
+# Its own workspace means its own tmux server, which `cleanup` does not know
+# about: $WORK is not its parent.
+kill_tmux_under "$PING_W"
+sudo rm -rf "$PING_W"
+
+# --------------------------------------------------------------------------
+say "26. the HTTP bridge announces its client, so a proxied flow can be joined"
+# Every non-OpenShell workspace gets HTTPS_PROXY=http://127.0.0.1:<proxy_port>,
+# so curl, npm, pip and git-over-https connect to LOOPBACK. The sentry reports
+# that flow, but its destination is the proxy rather than the site -- on its own
+# the row reads "curl -> 127.0.0.1", which is true and useless. The client's
+# SOURCE PORT is the one value both sides have: the sentry puts it in the flow's
+# `sport`, and agentd hands the same number to the MITM, which knows the CONNECT
+# target. This section covers the guest half of that join.
+#
+# A real vsock listener on VMADDR_CID_LOCAL, not a mock: `_bridge` connects
+# AF_VSOCK to HOST_CID, and the ordering being tested -- preamble strictly
+# before the client's first byte -- is a property of that code path, not of a
+# stand-in. Measured: binding a high vsock port and connecting to CID 1 needs no
+# privilege.
+sudo modprobe vsock_loopback 2>/dev/null
+ROOT="$ROOT" python3 - <<'PYEOF'
+import importlib.machinery, importlib.util, os, socket, sys, tempfile, threading, time
+
+ROOT = os.environ["ROOT"]
+
+fails = 0
+def ok(m): print("  ok   %s" % m)
+def bad(m):
+    global fails
+    print("  FAIL %s" % m); fails += 1
+
+meta = tempfile.mkdtemp()
+open(os.path.join(meta, "proxy_port"), "w").write("65534")
+os.environ["BROMURE_META"] = meta
+os.environ["BROMURE_HOST_CID"] = "1"          # VMADDR_CID_LOCAL
+os.environ.pop("BROMURE_BRIDGE_PREAMBLE", None)
+
+loader = importlib.machinery.SourceFileLoader("ad", ROOT + "/patched/bromure-agentd.py")
+spec = importlib.util.spec_from_loader("ad", loader)
+ad = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(ad)
+except Exception as exc:
+    print("  FAIL could not import agentd: %s: %s" % (type(exc).__name__, exc))
+    sys.exit(1)
+ok("agentd imports as a module (its work is behind a __main__ guard)")
+
+# --- the line itself ---------------------------------------------------
+line = ad._client_preamble(("127.0.0.1", 45678))
+want = b"BROMURE-CLIENT 1 sport=45678 peer=127.0.0.1\n"
+if line == want:
+    ok("the preamble is exactly %r" % want.decode())
+else:
+    bad("preamble is %r, expected %r" % (line, want))
+if line and line.endswith(b"\n"):
+    ok("it ends with a newline, so a host that does not know it can skip it")
+else:
+    bad("no trailing newline: an unterminated line cannot be skipped")
+if line and line.split()[1] == b"1":
+    ok("it carries a version, so a field can be added later")
+
+# A docker-bridge peer is announced too; the host gets a peer it cannot join,
+# which beats a join made to the wrong process.
+docker = ad._client_preamble(("172.17.0.3", 51000))
+if docker == b"BROMURE-CLIENT 1 sport=51000 peer=172.17.0.3\n":
+    ok("a docker-bridge peer is announced with the container's address")
+else:
+    bad("docker peer preamble is %r" % docker)
+
+# --- the kill switch, and malformed input ------------------------------
+os.environ["BROMURE_BRIDGE_PREAMBLE"] = "0"
+if ad._client_preamble(("127.0.0.1", 1)) is None:
+    ok("BROMURE_BRIDGE_PREAMBLE=0 turns it off, for a host that cannot take it")
+else:
+    bad("the kill switch does not disable the preamble")
+os.environ.pop("BROMURE_BRIDGE_PREAMBLE")
+for junk in (None, ("127.0.0.1",), ("127.0.0.1", "not-a-port")):
+    if ad._client_preamble(junk) is not None:
+        bad("a malformed accept() address produced a preamble: %r" % (junk,))
+        break
+else:
+    ok("a malformed address yields no preamble rather than a broken line")
+
+# --- ordering, over a real vsock ---------------------------------------
+VMADDR_CID_ANY = 0xFFFFFFFF
+PORT = 19443
+listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+listener.bind((VMADDR_CID_ANY, PORT))
+listener.listen(2)
+received = {}
+
+def serve(key, want_bytes):
+    """Read until `want_bytes` have arrived, not merely until the first line.
+
+    Stopping at the first newline was enough to see the preamble and therefore
+    enough to pass -- which left "and the client's own bytes follow it" as a
+    branch that never ran. Reading further makes that a real assertion instead
+    of a hopeful one.
+    """
+    conn, _ = listener.accept()
+    conn.settimeout(1)
+    buf = b""
+    deadline = time.time() + 4
+    while len(buf) < want_bytes and time.time() < deadline:
+        try:
+            chunk = conn.recv(256)
+        except OSError:
+            continue          # the 1s timeout, not an error: keep waiting
+        if not chunk:
+            break
+        buf += chunk
+    received[key] = buf
+    conn.close()
+
+# http: the preamble must arrive BEFORE the client's first byte, so the client
+# deliberately writes immediately.
+t = threading.Thread(target=serve, args=("http", len(want) + 16),
+                     daemon=True); t.start()
+time.sleep(0.2)
+a, b = socket.socketpair()
+bridge = threading.Thread(target=ad._bridge,
+                          args=(a, PORT, "http",
+                                ad._client_preamble(("127.0.0.1", 45678))),
+                          daemon=True)
+bridge.start()
+b.sendall(b"GET / HTTP/1.1\r\n")
+t.join(6)
+got = received.get("http", b"")
+if got.startswith(want):
+    ok("over a real vsock, the preamble is the FIRST thing the host reads")
+    if got == want + b"GET / HTTP/1.1\r\n":
+        ok("and the client's own bytes follow it, byte for byte, with nothing "
+           "inserted between")
+    else:
+        bad("the stream after the preamble is %r, expected the client's bytes "
+            "unmodified" % got[len(want):][:60])
+else:
+    bad("host first read %r, which does not start with the preamble" % got[:80])
+try:
+    b.close()
+except OSError:
+    pass
+
+# ssh/aws/llm must NOT be prefixed: they carry their own protocol from byte one.
+t = threading.Thread(target=serve, args=("ssh", 15), daemon=True); t.start()
+time.sleep(0.2)
+c, d = socket.socketpair()
+threading.Thread(target=ad._bridge, args=(c, PORT, "ssh"), daemon=True).start()
+d.sendall(b"SSH-2.0-client\n")
+t.join(6)
+got = received.get("ssh", b"")
+if got.startswith(b"SSH-2.0-client"):
+    ok("the ssh bridge is not prefixed -- _bridge defaults to no preamble")
+elif b"BROMURE-CLIENT" in got:
+    bad("the ssh bridge was prefixed with a preamble; only http may be")
+else:
+    bad("ssh bridge first read %r" % got[:60])
+try:
+    d.close()
+except OSError:
+    pass
+listener.close()
+
+# --- and sentryd exempts the same port the proxy is actually on --------
+sloader = importlib.machinery.SourceFileLoader("sd", ROOT + "/bromure-sentryd")
+sspec = importlib.util.spec_from_loader("sd", sloader)
+sd = importlib.util.module_from_spec(sspec)
+sspec.loader.exec_module(sd)
+if sd.proxy_port() == ad.HTTP_PROXY_TCP_PORT:
+    ok("sentryd and agentd read the same proxy port (%d) from the same file"
+       % sd.proxy_port())
+else:
+    bad("sentryd says %d, agentd says %d -- they must not be able to disagree "
+        "about which port is the proxy"
+        % (sd.proxy_port(), ad.HTTP_PROXY_TCP_PORT))
+open(os.path.join(meta, "proxy_port"), "w").write("8080")
+if sd.proxy_port() == 8080:
+    ok("and it follows the file, for a snapshot resumed under an older daemon")
+else:
+    bad("sentryd ignored a changed proxy_port: %d" % sd.proxy_port())
+
+sys.exit(1 if fails else 0)
+PYEOF
+rc=$?; [ $rc -eq 0 ] || { fails=$((fails + 1)); printf "  FAIL the block above exited %s\n" "$rc"; }
+
+# --------------------------------------------------------------------------
+say "27. the build records the host's sourceHash, and records it correctly"
+# `sourceHash` is the identifier the host keys a CDN-delivered module on, and
+# the two sides were hashing different things for several rounds: per-file
+# SHA-256s here, one derived number there, and neither could confirm the other's
+# import matched the other's commit. build.sh now records the host's number.
+#
+# Checked against an INDEPENDENT implementation, in Python, rather than by
+# re-running the same shell. The value only has to be right when it disagrees
+# with the host's -- that is the whole point of it -- so a shell-quoting bug
+# that silently changed the number would cost exactly the round it exists to
+# save.
+ROOT="$ROOT" python3 - <<'PYEOF'
+import hashlib, os, re, subprocess, sys
+
+ROOT = os.environ["ROOT"]
+SENTRY = os.path.join(ROOT, "sentry")
+fails = 0
+def ok(m): print("  ok   %s" % m)
+def bad(m):
+    global fails
+    print("  FAIL %s" % m); fails += 1
+
+# The host's algorithm, implemented from its description: sha256 over Makefile,
+# bromure_sentry.c, bromure_sentry.h in that order, each framed as
+# `<name>\n<byte length>\n<bytes>`.
+digest = hashlib.sha256()
+for name in ("Makefile", "bromure_sentry.c", "bromure_sentry.h"):
+    data = open(os.path.join(SENTRY, name), "rb").read()
+    digest.update(("%s\n%d\n" % (name, len(data))).encode())
+    digest.update(data)
+want = digest.hexdigest()
+
+# And the shell one, from build.sh itself, extracted and run on its own so this
+# does not need a kernel build to check a string.
+# Extracted by plain string bounds, not a regex: the first version matched on
+# the exact indentation and line breaks of the assignment and broke the moment
+# it was formatted differently -- a test that fails when the code is merely
+# reformatted trains you to ignore it.
+src = open(os.path.join(SENTRY, "build.sh")).read()
+START, END = "SOURCE_HASH=$(", "| sha256sum | cut -d' ' -f1)"
+if START not in src or END not in src[src.index(START):]:
+    bad("could not find the SOURCE_HASH computation in build.sh")
+else:
+    body = src[src.index(START) + len(START):]
+    body = body[:body.index(END)]
+    snippet = 'HERE=%s\n%s %s\n' % (SENTRY, body, END[:-1])
+    run = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+    got = run.stdout.strip()
+    if run.returncode != 0:
+        bad("build.sh's snippet did not run: %s" % run.stderr.strip()[:120])
+    if got == want:
+        ok("build.sh's shell implementation agrees with an independent one (%s)"
+           % want[:16])
+    else:
+        bad("build.sh computes %r, an independent implementation says %r"
+            % (got, want))
+
+# The framing is the part worth proving: without it, moving a byte from one file
+# to the next would not change the hash.
+def framed(parts):
+    d = hashlib.sha256()
+    for name, data in parts:
+        d.update(("%s\n%d\n" % (name, len(data))).encode())
+        d.update(data)
+    return d.hexdigest()
+a = framed([("a", b"xx"), ("b", b"y")])
+b = framed([("a", b"x"), ("b", b"xy")])
+if a != b:
+    ok("the length framing makes a byte moved between files a different hash")
+else:
+    bad("the framing does not distinguish where a byte lives")
+
+sys.exit(1 if fails else 0)
+PYEOF
+rc=$?; [ $rc -eq 0 ] || { fails=$((fails + 1)); printf "  FAIL the block above exited %s\n" "$rc"; }
+
+# --------------------------------------------------------------------------
+say "28. this suite's own teardown actually runs"
+# A section once did `trap 'restore_hosts' EXIT` and later `trap - EXIT`, which
+# REPLACED and then REMOVED the suite's EXIT trap -- so `cleanup` was never
+# called for any section after it. Eight sections ran with no teardown, and the
+# symptom was indirect: `ping_group_range` left moved, `/tmp/sandboxtest-*`
+# directories and a tmux server accumulating per run. The sysctl restore added
+# to `cleanup` two rounds earlier appeared to do nothing, because the function
+# holding it was never called.
+#
+# Checked at the source level because a script cannot observe its own EXIT trap
+# from the inside. It is the reintroduction that matters: the next person adding
+# a section-local trap will reach for the same one-liner.
+trap_lines=$(grep -n "^[[:space:]]*trap " "$HERE/test_sandbox.sh" || true)
+if printf '%s\n' "$trap_lines" | grep -q "trap - EXIT"; then
+    bad "a 'trap - EXIT' removes the suite's teardown; compose with cleanup instead"
+else
+    ok "no 'trap - EXIT' drops the suite's teardown"
+fi
+bad_traps=$(printf '%s\n' "$trap_lines" | grep "EXIT" | grep -v "cleanup" || true)
+if [ -n "$bad_traps" ]; then
+    bad "an EXIT trap does not run cleanup: $bad_traps"
+else
+    ok "every EXIT trap in this suite runs cleanup ($(printf '%s\n' "$trap_lines" | grep -c EXIT) of them)"
+fi
+
+# --------------------------------------------------------------------------
+say "29. a host attach actually gets a shell"
+# The gap that let a NameError reach users. `_run_interactive` was half
+# converted: the `finally` branched on `proc`, the spawn bound only `pid`, and
+# nothing ever constructed `_SandboxPty`. So in any workspace with an active
+# spec a host attach ran `tmux attach` OUTSIDE the sandbox against the
+# sandbox's own socket, it exited at once, and the `finally` raised
+# `NameError: name 'proc' is not defined`. No terminal could attach, in any
+# workspace with a spec, for many rounds.
+#
+# Nothing caught it because the coverage stopped one step short: `vm exec` is
+# non-interactive and never enters this function, and the boot suite asserted
+# "a session exists" rather than "an attach gets a shell". So this drives the
+# interactive path itself, in BOTH shapes the host sends and BOTH workspace
+# configurations, and asserts bytes come back.
+ATTACH_W=$(mktemp -d /tmp/sandboxtest-attach-XXXXXX)
+mkdir -p "$ATTACH_W/meta" "$ATTACH_W/run" "$ATTACH_W/workdir" "$ATTACH_W/scratch"
+chmod 755 "$ATTACH_W"
+ATTACH_SUP=""
+
+attach_sup_start() {   # <spec-json>
+    printf '%s' "$1" > "$ATTACH_W/meta/openshell-sandbox.json"
+    sudo env BROMURE_META="$ATTACH_W/meta" BROMURE_RUN_DIR="$ATTACH_W/run" \
+        BROMURE_STRICT_DONE="$ATTACH_W/scratch/strict.done" \
+        BROMURE_AGENTD_PID="$$" BROMURE_SANDBOXD_NO_POWEROFF=1 \
+        /usr/bin/python3 "$ROOT/bromure-sandboxd" > "$ATTACH_W/sup.log" 2>&1 &
+    ATTACH_SUP=$!
+    for _ in $(seq 1 150); do [ -S "$ATTACH_W/run/ctl.sock" ] && break; sleep 0.1; done
+    for _ in $(seq 1 150); do
+        sudo tmux -S "$ATTACH_W/run/server/tmux.sock" has-session -t bromure \
+            2>/dev/null && break
+        sleep 0.1
+    done
+}
+
+# --- with a spec: the configuration that was broken -----------------------
+attach_sup_start '{"version":1,"filesystem_policy":null,"process":null,"workdirs":["'"$ATTACH_W"'/workdir"],"sentry":{"enabled":false}}'
+if [ -S "$ATTACH_W/run/ctl.sock" ]; then
+    ok "a supervisor is serving ctl.sock for the spec workspace"
+else
+    bad "no ctl.sock; the attach test cannot distinguish its own failure"
+fi
+
+ROOT="$ROOT" ATTACH_W="$ATTACH_W" python3 - <<'PYEOF'
+import importlib.machinery, importlib.util, os, socket, struct, subprocess
+import sys, tempfile, threading, time
+
+ROOT, W = os.environ["ROOT"], os.environ["ATTACH_W"]
+fails = 0
+def ok(m): print("  ok   %s" % m)
+def bad(m):
+    global fails
+    print("  FAIL %s" % m); fails += 1
+
+os.environ["BROMURE_META"] = W + "/meta"
+os.environ["BROMURE_RUN_DIR"] = W + "/run"
+# NO default-socket tmux server may be reachable. The first version of this
+# section left TMUX_TMPDIR alone, so a bare `tmux has-session -t bromure`
+# found THIS WORKSPACE'S OWN server -- which has a session called `bromure` --
+# and the view attached to the real session. It passed, it printed 500 bytes of
+# perfectly plausible terminal output, and it was exercising the wrong server
+# entirely. A second attach bug (`_view_attach_command` hard-coding `tmux`
+# instead of `_tmux_argv()`) sailed straight through it and reached the user as
+# a blank window.
+os.environ["TMUX_TMPDIR"] = tempfile.mkdtemp()
+os.environ.pop("TMUX", None)
+loader = importlib.machinery.SourceFileLoader("ad", ROOT + "/patched/bromure-agentd.py")
+spec = importlib.util.spec_from_loader("ad", loader)
+ad = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ad)
+# Exactly what production does before it builds an attach command: the socket
+# path is learned from the supervisor's status.json, not guessed.
+ad._load_sandbox_status()
+
+if ad.openshell_requested():
+    ok("the workspace has an active spec, so this exercises the broken path")
+else:
+    bad("openshell_requested() is False; this is not the configuration that broke")
+
+sock_path = (ad._SANDBOX or {}).get("tmux_socket")
+if sock_path:
+    ok("the supervisor published its tmux socket (%s)" % sock_path)
+else:
+    bad("no tmux_socket in status.json; the view command cannot be checked")
+view_cmd = ad._view_attach_command("agent", None)
+if sock_path and ("-S " + sock_path) in view_cmd:
+    ok("the view command targets the supervisor's socket, not the default one")
+else:
+    bad("the view command does not name the supervisor's socket: %s"
+        % view_cmd[:160])
+# Every tmux word in it must carry -S. A single bare one is the whole bug: it
+# looks for /tmp/tmux-<uid>/default, `has-session` fails, and the command
+# `exit 1`s before printing a byte.
+import re as _re
+# `/` and `.` in the lookbehind: the socket PATH ends in `tmux.sock`, and the
+# first version of this flagged that as a bare invocation -- a false positive
+# on the very command it was meant to bless.
+bare = [m.start() for m in _re.finditer(r'(?<![-\w/.])tmux(?! -S)', view_cmd)]
+if bare:
+    bad("%d bare `tmux` invocation(s) in the view command: %s"
+        % (len(bare), [view_cmd[i:i + 40] for i in bare[:2]]))
+else:
+    ok("no bare `tmux` remains in the view command")
+
+# And BEHAVIOURALLY, which the frame-level assertions below cannot do.
+#
+# `TMUX_TMPDIR` in this process does not reach the sandboxed child: it runs
+# through the supervisor, which gives it an environment of its own. So with the
+# bug present the child still found this workspace's real default-socket server
+# and the attach "worked" -- 640 bytes of plausible output from the wrong
+# server. Killing that server to force the issue is not an option; it is the
+# user's session.
+#
+# So run the command's OWN guard -- the `has-session` that decides whether
+# anything is printed at all -- in an environment where the default socket has
+# no server. With the socket named it connects; with a bare `tmux` it cannot,
+# `exit 1`s, and the user gets the blank window that was reported.
+guard = view_cmd.split(";")[0]
+empty_tmpdir = tempfile.mkdtemp()
+probe = subprocess.run(["bash", "-c", guard],
+                       env=dict(os.environ, TMUX_TMPDIR=empty_tmpdir),
+                       capture_output=True, text=True, timeout=20)
+if probe.returncode == 0:
+    ok("its has-session guard succeeds with NO default-socket server in reach, "
+       "so the attach gets as far as printing")
+else:
+    bad("the guard exits %d with no default-socket server (%s) -- this is the "
+        "blank window: it fails before printing a byte"
+        % (probe.returncode, (probe.stderr or "").strip()[:90]))
+
+
+def attach(req, send=None, want=None, seconds=12):
+    """Run one interactive request; return (error, output, exit_code)."""
+    a, b = socket.socketpair()
+    box = {}
+    def run():
+        try:
+            ad._run_interactive(a, req)
+        except Exception as exc:
+            box["err"] = "%s: %s" % (type(exc).__name__, exc)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    b.settimeout(1)
+    data, code, buf = b"", None, b""
+    deadline = time.time() + seconds
+    sent = False
+    while time.time() < deadline and code is None:
+        try:
+            chunk = b.recv(65536)
+        except socket.timeout:
+            chunk = b""
+        except OSError:
+            break
+        if chunk:
+            buf += chunk
+            while len(buf) >= 5:
+                ftype = buf[0]
+                flen = struct.unpack(">I", buf[1:5])[0]
+                if len(buf) < 5 + flen:
+                    break
+                payload, buf = buf[5:5 + flen], buf[5 + flen:]
+                if ftype == ad.FRAME_DATA:
+                    data += payload
+                elif ftype == ad.FRAME_EXIT:
+                    code = struct.unpack(">i", payload[:4])[0]
+        if send and not sent and data:
+            b.sendall(bytes([ad.FRAME_DATA]) + struct.pack(">I", len(send)) + send)
+            sent = True
+        if want and want in data:
+            # `shutdown(SHUT_WR)`, not a FRAME_EOF. Measured: FRAME_EOF does
+            # NOT end the session -- its `break` is inside the frame-PARSING
+            # loop, not the pump loop, so it only stops reading the rest of
+            # that batch. Half-closing is what the pump actually reacts to: the
+            # recv returns b"" and it treats it as the host hanging up, which
+            # is also what a real client disconnect looks like. Keeping the read
+            # side open is what lets the FRAME_EXIT still be observed.
+            b.shutdown(socket.SHUT_WR)
+            want = None
+    t.join(4)
+    try:
+        b.close()
+    except OSError:
+        pass
+    return box.get("err"), data, code
+
+# 1. A plain interactive request with a command -- the simplest shape, and the
+#    one that proves `proc` is bound and waited on.
+err, data, code = attach({"interactive": True, "cmd": "echo BROMURE-ATTACH-SPEC"})
+if err:
+    bad("plain interactive raised %s" % err)
+else:
+    ok("plain interactive ran with no exception (this is the NameError's home)")
+if b"BROMURE-ATTACH-SPEC" in data:
+    ok("and its output came back over the frame protocol")
+else:
+    bad("no output: %r" % data[-160:])
+if code == 0:
+    ok("and it ended with exit code 0")
+else:
+    bad("exit code was %r, expected 0" % code)
+
+# 2. A host ATTACH -- `view`, which is what the window sends and what the user
+#    saw fail. It must get a prompt, run a typed command, and exit cleanly.
+err, data, code = attach({"interactive": True, "view": "agent"},
+                         send=b"echo BROMURE-TYPED-OK\n",
+                         want=b"BROMURE-TYPED-OK", seconds=30)
+if err:
+    bad("the host attach raised %s" % err)
+else:
+    ok("a host attach (view) ran with no exception")
+if data:
+    ok("the attach produced terminal output (%d bytes)" % len(data))
+else:
+    bad("the attach produced no bytes at all -- this is what the user saw")
+if b"BROMURE-TYPED-OK" in data:
+    ok("a typed command ran in the attached session and its output came back")
+else:
+    bad("the typed command produced no output: %r" % data[-200:])
+if code is not None:
+    ok("the session ended with an exit code (%d), not by hanging" % code)
+else:
+    bad("no FRAME_EXIT: the host would retry the attach forever")
+
+sys.exit(1 if fails else 0)
+PYEOF
+rc=$?; [ $rc -eq 0 ] || { fails=$((fails + 1)); printf "  FAIL the block above exited %s\n" "$rc"; }
+
+[ -n "$ATTACH_SUP" ] && sudo kill "$ATTACH_SUP" 2>/dev/null
+kill_tmux_under "$ATTACH_W"
+
+# --- and with NO spec, where `proc` was unbound on every path too ---------
+rm -f "$ATTACH_W/meta/openshell-sandbox.json"
+ROOT="$ROOT" ATTACH_W="$ATTACH_W" python3 - <<'PYEOF'
+import importlib.machinery, importlib.util, os, socket, struct, sys, threading, time
+
+ROOT, W = os.environ["ROOT"], os.environ["ATTACH_W"]
+os.environ["BROMURE_META"] = W + "/meta"
+os.environ["BROMURE_RUN_DIR"] = W + "/run"
+loader = importlib.machinery.SourceFileLoader("ad", ROOT + "/patched/bromure-agentd.py")
+spec = importlib.util.spec_from_loader("ad", loader)
+ad = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ad)
+fails = 0
+if ad.openshell_requested():
+    print("  FAIL a spec is still active; this is not the no-spec case"); fails += 1
+else:
+    print("  ok   no spec, so this takes the pty.fork path")
+
+a, b = socket.socketpair()
+box = {}
+def run():
+    try:
+        ad._run_interactive(a, {"interactive": True, "cmd": "echo BROMURE-ATTACH-PLAIN"})
+    except Exception as exc:
+        box["err"] = "%s: %s" % (type(exc).__name__, exc)
+t = threading.Thread(target=run, daemon=True); t.start()
+b.settimeout(1)
+data, code, buf = b"", None, b""
+deadline = time.time() + 10
+while time.time() < deadline and code is None:
+    try:
+        chunk = b.recv(65536)
+    except socket.timeout:
+        continue
+    except OSError:
+        break
+    if not chunk:
+        break
+    buf += chunk
+    while len(buf) >= 5:
+        ftype = buf[0]
+        flen = struct.unpack(">I", buf[1:5])[0]
+        if len(buf) < 5 + flen:
+            break
+        payload, buf = buf[5:5 + flen], buf[5 + flen:]
+        if ftype == ad.FRAME_DATA:
+            data += payload
+        elif ftype == ad.FRAME_EXIT:
+            code = struct.unpack(">i", payload[:4])[0]
+t.join(4)
+if box.get("err"):
+    print("  FAIL no-spec interactive raised %s" % box["err"]); fails += 1
+else:
+    print("  ok   no-spec interactive ran with no exception")
+if b"BROMURE-ATTACH-PLAIN" in data:
+    print("  ok   and its output came back")
+else:
+    print("  FAIL no output: %r" % data[-160:]); fails += 1
+if code == 0:
+    print("  ok   and it exited 0")
+else:
+    print("  FAIL exit code %r" % code); fails += 1
+sys.exit(1 if fails else 0)
+PYEOF
+rc=$?; [ $rc -eq 0 ] || { fails=$((fails + 1)); printf "  FAIL the block above exited %s\n" "$rc"; }
+sudo rm -rf "$ATTACH_W"
+
+# --- no shell command string in agentd starts a bare `tmux` --------------
+# `_tmux_argv`'s docstring already claimed "every tmux invocation in this file
+# goes through here". It was false of `_view_attach_command`, and the claim is
+# what stopped anyone checking. Now the claim is checked.
+#
+# AST-based, not grep: the first version matched `log("tmux %s timed out ...")`
+# and a docstring, so it reported four failures that were all prose. A checker
+# that cries wolf gets ignored, which is worse than not having it.
+if python3 "$HERE/check_tmux_socket.py" "$ROOT/patched/bromure-agentd.py" \
+        > "$WORK/tmuxcheck.log" 2>&1; then
+    ok "no shell command string in agentd starts a bare \`tmux\`"
+else
+    bad "a tmux command is built without the sandbox socket:"
+    sed 's/^/       /' "$WORK/tmuxcheck.log"
+fi
+
+# --- the sentry suites must not contradict themselves --------------------
+# `test_sentry.sh` listed `connect` in DRIVEN ("required to appear") while its
+# own retired-kinds check required it never to appear. The suite asserted both,
+# and because it cannot run on a locked-down VM the contradiction survived two
+# rounds until someone else's fresh-VM run hit it.
+#
+# Checked HERE, in the suite that does run on this VM, precisely because the
+# suite it checks cannot. Needs no module and no kernel.
+if python3 "$HERE/check_kind_consistency.py" "$HERE/test_sentry.sh" \
+        > "$WORK/kinds.log" 2>&1; then
+    ok "the sentry suite does not require a kind to fire and to be absent"
+else
+    bad "the sentry suite contradicts itself:"
+    sed 's/^/       /' "$WORK/kinds.log"
+fi
+
+# --- and the shape itself, so this class cannot come back silently --------
+# A name read in a `finally`/`except` that the function never binds. The bug
+# above is exactly that, and it is invisible until the branch runs.
+if python3 "$HERE/check_unbound.py" \
+        "$ROOT/patched/bromure-agentd.py" "$ROOT/patched/bromure-attestd.py" \
+        "$ROOT/bromure-sandboxd" "$ROOT/bromure-sentryd" \
+        "$ROOT/bromure_openshell.py" "$ROOT/bromure_sandbox_status.py" \
+        > "$WORK/unbound.log" 2>&1; then
+    ok "no name is read in a finally/except that its function never binds"
+else
+    bad "a name is read in a finally/except but never bound:"
+    sed 's/^/       /' "$WORK/unbound.log"
+fi
 
 printf '\n%s\n' "$([ "$fails" -eq 0 ] && echo "ALL SANDBOX TESTS PASSED" || echo "$fails CHECK(S) FAILED")"
 exit $((fails > 0))

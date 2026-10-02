@@ -171,7 +171,8 @@ struct ConvParseTest: ParsableCommand {
             let parts = m.content.map { b -> String in
                 switch b {
                 case .text(let t): return "text(\(t.prefix(40).replacingOccurrences(of: "\n", with: " ")))"
-                case .toolUse(let name, _): return "tool_use(\(name))"
+                case .toolUse(let name, _, _): return "tool_use(\(name))"
+                case .thinking: return "thinking"
                 case .toolResult: return "tool_result"
                 case .image: return "image"
                 }

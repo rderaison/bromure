@@ -13017,6 +13017,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             }
         }
+        // Agents' PreToolUse hooks: each tool call before it runs, with its
+        // provider id and the agent's pid (network lineage).
+        sandbox.onAgentToolCall = { line in
+            guard let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let id = o["tool_use_id"] as? String, !id.isEmpty else { return }
+            NetworkLineage.shared.noteToolCall(
+                profileID: pid, id: String(id.prefix(128)), tool: o["tool"] as? String ?? "tool",
+                command: (o["command"] as? String).map { String($0.prefix(4000)) }, reasoning: "",
+                agentPid: o["pid"] as? Int, agent: o["agent"] as? String)
+        }
         sandbox.onDockerList = { [weak self] containers in
             Task { @MainActor in
                 self?.runningSessions[pid]?.mirrorDockerList(containers)

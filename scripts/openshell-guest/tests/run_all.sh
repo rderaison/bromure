@@ -13,43 +13,67 @@ skipped=""
 
 banner() { printf '\n\n########## %s ##########\n' "$1"; }
 
+# Run one suite and classify its status: 0 pass, 77 could-not-run, anything else
+# a failure.
+#
+# One classifier for every suite, because having it at only SOME call sites is
+# how a skip gets counted as a failure: `test_boot.sh` was changed to exit 77
+# when a case cannot run, and the plain `|| fails=$((fails + 1))` here turned
+# that into "1 SUITE(S) FAILED" on a run where nothing had failed. Either every
+# suite's 77 means the same thing or none of them do.
+run_suite() {   # run_suite <skip-note> <command...>
+    local note="$1"; shift
+    "$@"
+    local rc=$?
+    if [ "$rc" = 77 ]; then
+        skipped="${skipped}${note} "
+    elif [ "$rc" != 0 ]; then
+        fails=$((fails + 1))
+    fi
+}
+
 banner "syscall table + filter sizes"
-python3 "$HERE/test_syscall_table.py" || fails=$((fails + 1))
+run_suite "syscall table" python3 "$HERE/test_syscall_table.py"
 
 banner "differential vs OpenShell's own crates"
 if [ -x "$ROOT/differential/target/release/openshell-diff" ]; then
     (cd "$ROOT/differential" && ./diff.py --keep-going) || fails=$((fails + 1))
 else
-    echo "SKIP: build it first -> (cd differential && cargo build --release)"
+    # Counted as a FAILURE, and deliberately not called a skip: an unbuilt
+    # differential binary is something to fix in thirty seconds, not a limit of
+    # the machine. The word matters now that 77 means "could not run".
+    echo "FAIL: the differential harness is not built."
+    echo "      (cd differential && cargo build --release)"
     fails=$((fails + 1))
 fi
 
 banner "idmapped mounts"
-sudo python3 "$HERE/test_idmap.py" || fails=$((fails + 1))
+run_suite "idmapped mounts" sudo python3 "$HERE/test_idmap.py"
 
 banner "sandbox end to end"
-"$HERE/test_sandbox.sh" || fails=$((fails + 1))
+run_suite "sandbox end to end" "$HERE/test_sandbox.sh"
 
 banner "kernel sentry end to end"
 # 77 = "the environment cannot run this", not "it failed". The suite prints why.
 # It is still counted, loudly, in the summary: a skip that reads as a pass is how
 # a suite stops meaning anything.
-"$HERE/test_sentry.sh"
-sentry_rc=$?
-if [ "$sentry_rc" = 77 ]; then
-    skipped="${skipped}kernel sentry (lockdown refuses unsigned modules) "
-elif [ "$sentry_rc" != 0 ]; then
-    fails=$((fails + 1))
-fi
+run_suite "kernel sentry (lockdown refuses unsigned modules)" \
+    "$HERE/test_sentry.sh"
+
+banner "network lineage"
+# Also 77-on-skip: it loads the testable build, so lockdown stops it for the
+# same one-way reason.
+run_suite "network lineage (needs a fresh VM, or a tool/route was missing)" \
+    "$HERE/test_net_flow.sh"
 
 banner "strict revocation leaves nothing on disk"
-"$HERE/test_strict.sh" || fails=$((fails + 1))
+run_suite "strict revocation" "$HERE/test_strict.sh"
 
 banner "two-incarnation boot"
-"$HERE/test_boot.sh" || fails=$((fails + 1))
+run_suite "a boot case (see above)" "$HERE/test_boot.sh"
 
 banner "lockdown surfaces (probe only)"
-"$HERE/test_lockdown.sh" || fails=$((fails + 1))
+run_suite "lockdown surfaces" "$HERE/test_lockdown.sh"
 
 # The VERDICT carries the skip, not a line above it.
 #
@@ -69,4 +93,14 @@ else
     verdict="ALL SUITES PASSED"
 fi
 printf '\n%s\n' "$verdict"
-exit $((fails > 0))
+# And the EXIT STATUS carries it as well. The verdict line was already honest,
+# but `exit 0` on a run where a suite never executed is the same misleading green
+# one layer down: anything reading the status rather than the text -- CI, a
+# wrapper script, the next pair of eyes in a hurry -- was told everything passed.
+# 77 is "could not run", distinct from 0 and from 1.
+if [ "$fails" -ne 0 ]; then
+    exit 1
+elif [ -n "$skipped" ]; then
+    exit 77
+fi
+exit 0

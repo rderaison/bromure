@@ -308,6 +308,35 @@ def boot_id():
         return ""
 
 
+def proxy_port():
+    """The port Bromure's cooperative HTTP proxy listens on this boot.
+
+    Read from the SAME file agentd reads -- `$META/proxy_port` -- rather than
+    hardcoded, because the two must not be able to disagree about which port is
+    the proxy. agentd's `_read_proxy_port()` has the same fallbacks: 65534 on a
+    fresh boot, and the file may say 8080 when a workspace resumes a snapshot
+    taken under an older daemon.
+
+    This matters because agentd puts the proxy in `HTTPS_PROXY` for every
+    non-OpenShell workspace, so `curl`, `npm`, `pip` and git-over-https connect
+    to LOOPBACK. The sentry suppresses loopback flows as plumbing; without this
+    exemption it suppressed the agent's actual egress -- measured live, `curl`
+    produced no flow at all. Returning the wrong number here is not a crash, it
+    is a silent hole in the timeline, which is why it reads the file and warns
+    rather than assuming.
+    """
+    path = os.path.join(META, "proxy_port")
+    try:
+        with open(path) as handle:
+            value = int(handle.read().strip())
+        if 1 <= value <= 65535:
+            return value
+        log("%s says %r, which is not a port; using 65534" % (path, value))
+    except (OSError, ValueError):
+        pass
+    return 65534
+
+
 def load(path, cid, port):
     availability = osh.probe_availability()
     landlock_abi = availability.abi if availability.is_available else 0
@@ -315,7 +344,10 @@ def load(path, cid, port):
             "cid=%d" % cid,
             "port=%d" % port,
             "boot_id=%s" % boot_id(),
-            "landlock_abi=%d" % landlock_abi]
+            "landlock_abi=%d" % landlock_abi,
+            # Loopback is suppressed as plumbing, except this: the HTTP proxy,
+            # which is where every proxied client in the workspace connects.
+            "flow_local_ports=%d" % proxy_port()]
     result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         return False, result.stderr.strip() or "insmod failed"

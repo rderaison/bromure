@@ -38,6 +38,9 @@ struct SecurityTimelineView: View {
     @State private var outcomeFilter: SecurityTimeline.Decision?
     /// "" = this Mac; a host's name = that mirrored host; nil = all.
     @State private var machineFilter: String?
+    @State private var selection = Set<SecurityTimeline.Event.ID>()
+    /// The row whose lineage is open (double-click a Network row).
+    @State private var lineage: SecurityTimeline.Event?
 
     private var machines: [String] { timeline.remote.keys.sorted() }
 
@@ -90,6 +93,9 @@ struct SecurityTimelineView: View {
         }
         .frame(minWidth: 760, minHeight: 400)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(item: $lineage) { e in
+            NetworkLineageView(timeline: timeline, focus: e, onClose: { lineage = nil })
+        }
         .onAppear { if startOnTimeline { tab = .timeline } }
         .onDisappear(perform: onClose)
     }
@@ -236,7 +242,7 @@ struct SecurityTimelineView: View {
     }
 
     private var table: some View {
-        Table(rows) {
+        Table(rows, selection: $selection) {
             TableColumn(NSLocalizedString("Time", comment: "")) { e in
                 Text(e.time, format: .dateTime.year().month(.twoDigits).day(.twoDigits)
                         .hour().minute().second())
@@ -264,10 +270,19 @@ struct SecurityTimelineView: View {
             .width(min: 140, ideal: 160, max: 190)
 
             TableColumn(NSLocalizedString("Condition", comment: "")) { e in
-                Text(e.condition)
-                    .lineLimit(1).truncationMode(.tail)
-                    .help(e.condition)
-                    .textSelection(.enabled)
+                HStack(spacing: 6) {
+                    Text(e.condition)
+                        .lineLimit(1).truncationMode(.tail)
+                        .textSelection(.enabled)
+                    if e.detail != nil {
+                        Spacer(minLength: 4)
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+                .help(e.detail != nil
+                      ? e.condition + "\n" + NSLocalizedString("Double-click to see the whole chain", comment: "security timeline")
+                      : e.condition)
             }
 
             TableColumn(NSLocalizedString("Decision", comment: "")) { e in
@@ -279,6 +294,19 @@ struct SecurityTimelineView: View {
             }
             .width(min: 120, ideal: 160, max: 260)
         }
+        .contextMenu(forSelectionType: SecurityTimeline.Event.ID.self) { ids in
+            if let e = event(ids), e.detail != nil {
+                Button(NSLocalizedString("Show the Whole Chain", comment: "security timeline")) { lineage = e }
+            }
+        } primaryAction: { ids in
+            // Double-click (or Return): open a flow's lineage.
+            if let e = event(ids), e.detail != nil { lineage = e }
+        }
+    }
+
+    private func event(_ ids: Set<SecurityTimeline.Event.ID>) -> SecurityTimeline.Event? {
+        guard let id = ids.first else { return nil }
+        return rows.first { $0.id == id }
     }
 
     private func color(_ kind: SecurityTimeline.Decision) -> Color {
@@ -299,6 +327,10 @@ struct SecurityTimelineView: View {
         case "Supply chain":         return "shippingbox"
         case "Prompt injection":     return "exclamationmark.shield"
         case "Agent delegation":     return "arrow.triangle.branch"
+        case "Network":              return "point.3.connected.trianglepath.dotted"
+        case "Agent reasoning":      return "brain.head.profile"
+        case "Kernel sentry":        return "cpu"
+        case "Guest sandbox":        return "square.dashed.inset.filled"
         default:                     return "shield"
         }
     }

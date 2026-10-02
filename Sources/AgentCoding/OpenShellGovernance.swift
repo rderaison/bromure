@@ -34,6 +34,9 @@ public final class OpenShellGovernance: @unchecked Sendable {
         public var minKernelSentry: String?
         /// Highest advisor mode workspaces may use (`off` / `review` / `auto`).
         public var maxAdvisorMode: String?
+        /// Upload the agent's reasoning behind each tool call
+        /// (`agent.reasoning`, NETWORK_LINEAGE.md). Off unless the org opts in.
+        public var captureAgentReasoning: Bool = false
         public var updatedAt: String?
     }
 
@@ -214,9 +217,11 @@ enum OpenShellManagedPolicySync {
         m.requireStrictSandbox = o["require_strict_sandbox"] as? Bool ?? false
         m.maxAdvisorMode = text("max_advisor_mode")
         m.minKernelSentry = text("min_kernel_sentry")
+        m.captureAgentReasoning = o["capture_agent_reasoning"] as? Bool ?? false
         m.updatedAt = text("updated_at")
         let empty = m.boundaryYAML == nil && m.defaultPolicyYAML == nil && !m.requireStrictCredentials
             && !m.requireStrictSandbox && m.maxAdvisorMode == nil && m.minKernelSentry == nil
+            && !m.captureAgentReasoning
         return empty ? nil : m
     }
 }

@@ -62,6 +62,22 @@ public final class SecurityTimeline {
         /// How many things it covers when it's more than one (PII values
         /// swapped in one request); nil = one.
         public var count: Int? = nil
+        /// The raw event, kept for the rows that open into a detail view
+        /// (a network flow's full lineage, an agent's reasoning).
+        public var eventType: String? = nil
+        public var detail: [String: AnyJSON]? = nil
+    }
+
+    /// Event types whose rows keep their raw data (`detail`).
+    nonisolated static let detailedTypes: Set<String> = ["net.flow", "agent.reasoning"]
+
+    nonisolated static func foundation(_ d: [String: AnyJSON]) -> Any? {
+        (try? JSONEncoder().encode(d)).flatMap { try? JSONSerialization.jsonObject(with: $0) }
+    }
+    nonisolated static func anyJSON(_ v: Any?) -> [String: AnyJSON]? {
+        guard let v, JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v) else { return nil }
+        return try? JSONDecoder().decode([String: AnyJSON].self, from: data)
     }
 
     /// This Mac's events, oldest first (the most recent `cap` in memory; the
@@ -115,8 +131,9 @@ public final class SecurityTimeline {
     /// to nil and are ignored — this is a security view, not an activity log.
     nonisolated public func record(profileID: UUID, eventType: String,
                                    eventData: [String: AnyJSON]) {
-        guard let e = Self.map(profileID: profileID, eventType: eventType,
+        guard var e = Self.map(profileID: profileID, eventType: eventType,
                                eventData: eventData, now: Date()) else { return }
+        if Self.detailedTypes.contains(eventType) { e.eventType = eventType; e.detail = eventData }
         Task { @MainActor in self.append(e) }
     }
 
@@ -154,6 +171,7 @@ public final class SecurityTimeline {
                                 "d": e.decision, "k": e.kind.wire, "p": e.profileID.uuidString]
         if let w = e.workspace { d["w"] = w }
         if let n = e.count { d["n"] = n }
+        if let t = e.eventType, let x = e.detail.flatMap(foundation) { d["y"] = t; d["x"] = x }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -166,7 +184,8 @@ public final class SecurityTimeline {
         return Event(time: Date(timeIntervalSince1970: t), engine: engine, condition: condition,
                      decision: decision, kind: Decision(wire: d["k"] as? String ?? ""),
                      profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
-                     workspace: d["w"] as? String, count: d["n"] as? Int)
+                     workspace: d["w"] as? String, count: d["n"] as? Int,
+                     eventType: d["y"] as? String, detail: anyJSON(d["x"]))
     }
 
     private func persist(_ e: Event) {
@@ -231,6 +250,7 @@ public final class SecurityTimeline {
             ]
             if let w = e.workspace { r["workspace"] = w }
             if let n = e.count { r["count"] = n }
+            if let t = e.eventType, let x = e.detail.flatMap(Self.foundation) { r["type"] = t; r["detail"] = x }
             return r
         }
     }
@@ -248,7 +268,8 @@ public final class SecurityTimeline {
             return Event(time: t, engine: engine, condition: condition,
                          decision: decision, kind: Decision(wire: r["kind"] as? String ?? ""),
                          profileID: pid, workspace: r["workspace"] as? String, machine: host,
-                         count: r["count"] as? Int)
+                         count: r["count"] as? Int, eventType: r["type"] as? String,
+                         detail: Self.anyJSON(r["detail"]))
         }
     }
 
@@ -364,6 +385,44 @@ public final class SecurityTimeline {
             return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
                        "\(who)\(pid) — \(what)\(times)",
                        NSLocalizedString("denied", comment: "Security Timeline decision"), .blocked)
+
+        case "net.flow":
+            // One network flow, explained: who ran it (the process chain from
+            // the agent down) and, when known, which tool call caused it.
+            let chain: [String] = {
+                guard case .array(let ps)? = d["processes"] else { return [] }
+                return ps.compactMap { if case .object(let p) = $0 { return Self.str(p, "comm") } else { return nil } }
+            }()
+            let proto = (str(d, "proto") ?? "ip").uppercased()
+            let dst = str(d, "host") ?? str(d, "dst") ?? "?"
+            let port = (int(d, "dport") ?? 0) > 0 ? ":\(int(d, "dport")!)" : ""
+            var cond = (chain + ["\(proto) \(dst)\(port)"]).joined(separator: " → ")
+            if case .object(let agent)? = d["agent"], let tool = Self.str(agent, "tool") {
+                cond = "\(tool)" + (str(d, "command").map { " `\($0)`" } ?? "") + ": " + cond
+            }
+            if (int(d, "count") ?? 1) > 1 { cond += " ×\(int(d, "count")!)" }
+            let decision = str(d, "decision") ?? "unknown"
+            let shown: String
+            switch decision {
+            case "deny": shown = str(d, "reason").map { "denied — \($0)" } ?? NSLocalizedString("denied", comment: "Security Timeline decision")
+            case "audit": shown = NSLocalizedString("audited", comment: "Security Timeline decision")
+            case "unfiltered": shown = NSLocalizedString("passed (not filtered)", comment: "network flow decision")
+            case "unknown": shown = NSLocalizedString("seen", comment: "network flow decision")
+            default: shown = NSLocalizedString("allowed", comment: "Security Timeline decision")
+            }
+            return row(NSLocalizedString("Network", comment: "Security Timeline engine"), cond, shown,
+                       decision == "deny" ? .blocked : decision == "allow" ? .allowed : .info)
+
+        case "agent.reasoning":
+            let tool = str(d, "tool") ?? "tool"
+            // The model's reasoning when it gave any, else its stated intent,
+            // else the prompt it was acting on.
+            let text = [str(d, "text"), str(d, "intent"), str(d, "prompt")]
+                .compactMap { $0 }.first { !$0.isEmpty }?
+                .replacingOccurrences(of: "\n", with: " ") ?? ""
+            return row(NSLocalizedString("Agent reasoning", comment: "Security Timeline engine"),
+                       "\(tool): \(String(text.prefix(300)))\(text.count > 300 || { if case .bool(true)? = d["truncated"] { return true }; return false }() ? "…" : "")",
+                       NSLocalizedString("before the tool call", comment: "Security Timeline decision"), .info)
 
         case "sandbox.activity":
             let allowed = int(d, "allowed_file_ops") ?? 0

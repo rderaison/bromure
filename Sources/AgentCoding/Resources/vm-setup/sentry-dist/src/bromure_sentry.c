@@ -57,6 +57,7 @@
 #include <linux/reboot.h>
 #include <linux/notifier.h>
 #include <net/sock.h>
+#include <net/ipv6.h>
 
 #include "bromure_sentry.h"
 
@@ -68,7 +69,12 @@
 #define SENTRY_VERSION "1.0.0"
 
 /* Ring capacity in events. A power of two, as kfifo requires. */
-#define SENTRY_FIFO_EVENTS 1024
+/* 256, not 1024. The event grew from ~460 bytes to ~1.7 KB when argv and the
+ * ancestor chain were added, and the fifo is allocated once in whole events:
+ * 1024 of them would be 1.8 MB of kernel memory held for a burst that never
+ * comes. The drain thread wakes on every submit, so this has to cover a burst,
+ * not a backlog. */
+#define SENTRY_FIFO_EVENTS 256
 /* Per-kind token bucket: this many events per refill window, refilled 1/s. */
 #define SENTRY_TOKENS_PER_SEC 64
 #define SENTRY_TOKENS_BURST   256
@@ -77,7 +83,11 @@
 /* Give up on one send after this long rather than wedging the kthread. */
 #define SENTRY_SEND_TIMEOUT_S 5
 /* Upper bound on one rendered frame. */
-#define SENTRY_JSON_MAX 2048
+/* argv is 1024 bytes and JSON-escaping is up to 6 bytes per byte (\uXXXX for
+ * anything non-ASCII), so the worst case is ~6 KB for argv alone, plus the
+ * chain. A truncated frame is invalid JSON rather than a short one, so this is
+ * sized for the worst case and not the common one. */
+#define SENTRY_JSON_MAX 12288
 
 static unsigned int sentry_cid = 2;	/* VMADDR_CID_HOST */
 module_param_named(cid, sentry_cid, uint, 0444);
@@ -335,6 +345,81 @@ static void sentry_tally(enum bromure_sentry_tally which)
 		atomic64_inc(&state.tallies[which]);
 }
 
+/* `(pid, start_ns)` is a process's identity; see "Process lineage" below. */
+static u64 sentry_start_ns(struct task_struct *task)
+{
+	return task ? task->start_boottime : 0;
+}
+
+
+/* -------- the probe handlers' staging buffer ----------------------------- */
+/*
+ * `struct bromure_sentry_event` is 1792 bytes since it gained `argv[1024]` and
+ * `chain[8]`; before that it was 512. Sixteen probe handlers staged one on the
+ * stack, and the compiler reported sixteen 1808-byte frames -- inside
+ * `udp_sendmsg`, inside the LSM hooks, on a 16 KB arm64 kernel stack already
+ * partly spent by the kprobe trampoline that got us there. A watchdog that can
+ * overflow the stack of the thing it is watching is worse than no watchdog, so
+ * the staging buffer is per-CPU and the handlers' frames go back to ~64 bytes.
+ *
+ * Why this needs no lock, and why it must ONLY be called from a probe handler:
+ *
+ *  - Preemption is off. A kprobe handler on arm64 is reached from the debug
+ *    exception, and `debug_exception_enter()` disables preemption for its
+ *    duration, so no other task can run on this CPU and take the buffer.
+ *  - Re-entry on the same CPU is refused by the kprobe framework itself, not by
+ *    us. `kprobe_breakpoint_handler()` reads the per-CPU `current_kprobe`; if a
+ *    handler is already in flight it accounts the hit to `nmissed` and does not
+ *    call a second `pre_handler`. That covers the interrupt case, which is the
+ *    only way in once preemption is off. kretprobes come through the same path.
+ *
+ * So "one user per CPU" is a property of the context rather than a hope -- and
+ * it stops being true the moment this is called from anywhere else, which is
+ * why the two sleepable emitters have their own buffers instead.
+ *
+ * No memset here: every caller's first act is `sentry_fill_common()`, which
+ * zeroes the whole struct. That is load-bearing for a shared buffer, not
+ * incidental -- without it an event would inherit the previous one's `argv` and
+ * `path` -- so it is checked for all sixteen callers rather than assumed.
+ */
+static DEFINE_PER_CPU(struct bromure_sentry_event, sentry_probe_scratch);
+
+static struct bromure_sentry_event *sentry_probe_event(void)
+{
+	return this_cpu_ptr(&sentry_probe_scratch);
+}
+
+/* The running binary's path into `event->path`.
+ *
+ * `get_mm_exe_file` is not exported to modules, so the RCU pointer is read
+ * directly and no reference is taken: the path is rendered and copied before
+ * the lock is dropped, and `d_path` is safe in this context.
+ *
+ * NOT free -- it walks the dentry chain -- so callers on a per-packet path must
+ * decide whether the event is going to be reported before calling it. See
+ * `sentry_kp_flow`.
+ */
+static void sentry_fill_exe(struct bromure_sentry_event *event)
+{
+	struct file *exe;
+
+	if (!current->mm)
+		return;			/* a kernel thread has no exe */
+	rcu_read_lock();
+	exe = rcu_dereference(current->mm->exe_file);
+	if (exe) {
+		char *rendered = file_path(exe, event->path,
+					   sizeof(event->path));
+
+		if (IS_ERR(rendered))
+			event->path[0] = '\0';
+		else if (rendered != event->path)
+			memmove(event->path, rendered,
+				strnlen(rendered, sizeof(event->path) - 1) + 1);
+	}
+	rcu_read_unlock();
+}
+
 static void sentry_fill_common(struct bromure_sentry_event *event, u32 kind)
 {
 	const struct cred *cred = current_cred();
@@ -349,6 +434,8 @@ static void sentry_fill_common(struct bromure_sentry_event *event, u32 kind)
 	event->gid = from_kgid_munged(&init_user_ns, cred->gid);
 	memcpy(event->comm, current->comm, sizeof(event->comm) - 1);
 	event->phase = (u8)sentry_phase;
+	event->start_ns = sentry_start_ns(current);
+	event->icmp_type = 0xff;	/* "not read", distinct from type 0 (reply) */
 	if (sentry_sandbox_cgroup) {
 		struct cgroup *cgrp;
 
@@ -431,6 +518,18 @@ static const char *sentry_op_name(u8 op)
 	}
 }
 
+static const char *sentry_proto_name(u8 proto)
+{
+	switch (proto) {
+	case BSPR_TCP:		return "tcp";
+	case BSPR_UDP:		return "udp";
+	case BSPR_ICMP:		return "icmp";
+	case BSPR_ICMPV6:	return "icmpv6";
+	case BSPR_RAW:		return "raw";
+	default:		return "other";
+	}
+}
+
 static const char *sentry_kind_name(u32 kind)
 {
 	switch (kind) {
@@ -450,9 +549,9 @@ static const char *sentry_kind_name(u32 kind)
 	case BSK_MOUNT:				return "mount";
 	case BSK_UNSHARE:			return "unshare";
 	case BSK_SETNS:				return "setns";
-	case BSK_CONNECT:			return "connect";
 	case BSK_CRED_GAIN:			return "cred_gain";
 	case BSK_SANDBOX_DENIED:		return "sandbox_denied";
+	case BSK_NET_FLOW:			return "net_flow";
 	case BSK_SECCOMP_DENIED:		return "seccomp_denied";
 	case BSK_LANDLOCK_DENIED:		return "landlock_denied";
 	default:				return "unknown";
@@ -466,7 +565,14 @@ struct sentry_scratch {
 	char comm[BROMURE_SENTRY_COMM_LEN * 6 + 1];
 	char path[BROMURE_SENTRY_PATH_LEN * 6 + 1];
 	char arg[BROMURE_SENTRY_ARG_LEN * 6 + 1];
+	char argv[BROMURE_SENTRY_ARGV_LEN * 6 + 1];
 	char json[SENTRY_JSON_MAX];
+	/* One event on its way from the fifo to the renderer. It lives here,
+	 * in the thread's own kzalloc, rather than on the thread's stack:
+	 * the event is 1792 bytes since it gained `argv` and `chain`, and a
+	 * buffer that size belongs on the heap. Only the sentry thread ever
+	 * touches this, and there is exactly one of it, so it needs no lock. */
+	struct bromure_sentry_event drained;
 };
 
 static int sentry_render_event(struct sentry_scratch *scratch, char *out,
@@ -476,6 +582,7 @@ static int sentry_render_event(struct sentry_scratch *scratch, char *out,
 	char *comm = scratch->comm;
 	char *path = scratch->path;
 	char *arg = scratch->arg;
+	char *argv = scratch->argv;
 	int used;
 
 	sentry_json_escape(comm, sizeof(scratch->comm), event->comm,
@@ -484,6 +591,8 @@ static int sentry_render_event(struct sentry_scratch *scratch, char *out,
 			   sizeof(event->path));
 	sentry_json_escape(arg, sizeof(scratch->arg), event->arg,
 			   sizeof(event->arg));
+	sentry_json_escape(argv, sizeof(scratch->argv), event->argv,
+			   sizeof(event->argv));
 
 	used = scnprintf(out, out_len,
 		"{\"type\":\"event\",\"seq\":%llu,\"t\":%llu,\"kind\":\"%s\","
@@ -495,6 +604,35 @@ static int sentry_render_event(struct sentry_scratch *scratch, char *out,
 		used += scnprintf(out + used, out_len - used, ",\"path\":\"%s\"", path);
 	if (arg[0])
 		used += scnprintf(out + used, out_len - used, ",\"arg\":\"%s\"", arg);
+	/* On every event: `(pid, start_ns)` is what the host keys a process on,
+	 * and it is useless if only some events carry it. */
+	used += scnprintf(out + used, out_len - used, ",\"start_ns\":%llu",
+			  event->start_ns);
+	if (argv[0]) {
+		used += scnprintf(out + used, out_len - used, ",\"argv\":\"%s\"",
+				  argv);
+		if (event->argv_truncated)
+			used += scnprintf(out + used, out_len - used,
+					  ",\"argv_truncated\":true");
+	}
+	if (event->chain_len) {
+		u8 i;
+
+		used += scnprintf(out + used, out_len - used, ",\"chain\":[");
+		for (i = 0; i < event->chain_len; i++) {
+			char ancestor[BROMURE_SENTRY_COMM_LEN * 6 + 1];
+
+			sentry_json_escape(ancestor, sizeof(ancestor),
+					   event->chain[i].comm,
+					   sizeof(event->chain[i].comm));
+			used += scnprintf(out + used, out_len - used,
+					  "%s{\"pid\":%u,\"start_ns\":%llu,"
+					  "\"comm\":\"%s\"}",
+					  i ? "," : "", event->chain[i].pid,
+					  event->chain[i].start_ns, ancestor);
+		}
+		used += scnprintf(out + used, out_len - used, "]");
+	}
 
 	used += scnprintf(out + used, out_len - used,
 			  ",\"phase\":\"%s\",\"sandboxed\":%s",
@@ -534,18 +672,6 @@ static int sentry_render_event(struct sentry_scratch *scratch, char *out,
 				  ",\"request\":%u,\"target_pid\":%u",
 				  event->aux1, event->aux2);
 		break;
-	case BSK_CONNECT: {
-		char addr[INET6_ADDRSTRLEN + 1] = { 0 };
-
-		if (event->addr_family == AF_INET)
-			snprintf(addr, sizeof(addr), "%pI4", event->addr);
-		else if (event->addr_family == AF_INET6)
-			snprintf(addr, sizeof(addr), "%pI6c", event->addr);
-		used += scnprintf(out + used, out_len - used,
-				  ",\"family\":%u,\"dst\":\"%s\",\"dport\":%u",
-				  event->addr_family, addr, event->aux2);
-		break;
-	}
 	case BSK_SANDBOX_DENIED:
 		/* `hook` is what the kernel actually told us; the host renders
 		 * "the sandbox denied <op> of <path>" rather than naming an LSM
@@ -557,6 +683,27 @@ static int sentry_render_event(struct sentry_scratch *scratch, char *out,
 				  sentry_op_name(event->op), arg,
 				  (int)event->aux1, event->aux2, event->count);
 		break;
+	case BSK_NET_FLOW: {
+		char addr[INET6_ADDRSTRLEN] = "";
+
+		if (event->addr_family == AF_INET)
+			snprintf(addr, sizeof(addr), "%pI4", event->addr);
+		else if (event->addr_family == AF_INET6)
+			snprintf(addr, sizeof(addr), "%pI6c", event->addr);
+		used += scnprintf(out + used, out_len - used,
+				  ",\"proto\":\"%s\",\"ip_proto\":%u,"
+				  "\"family\":%u,\"dst\":\"%s\",\"dport\":%u,"
+				  "\"sport\":%u,\"count\":%u",
+				  sentry_proto_name(event->proto),
+				  event->ip_proto, event->addr_family, addr,
+				  event->aux2, event->sport, event->count);
+		/* 0xff is "not read", which is not the same as type 0 (echo
+		 * reply) -- so the field is omitted rather than reported wrong. */
+		if (event->icmp_type != 0xff)
+			used += scnprintf(out + used, out_len - used,
+					  ",\"icmp_type\":%u", event->icmp_type);
+		break;
+	}
 	case BSK_SECCOMP_DENIED:
 		/* `syscall` is the NUMBER. The host already has the arm64 table
 		 * from the differential work; a second copy in the module would
@@ -778,7 +925,8 @@ static int sentry_send_heartbeat(struct socket *sock, u64 seq)
 		 * feeling for the walls. The denial count alone cannot tell
 		 * those apart. */
 		"\"sandbox\":{\"allowed_file_ops\":%llu,\"denied_file_ops\":%llu,"
-		"\"denied_syscalls\":%llu,\"caps_in_userns\":%llu}}",
+		"\"denied_syscalls\":%llu,\"caps_in_userns\":%llu},"
+		"\"flows\":{\"local_suppressed\":%llu}}",
 		seq, ktime_get_ns(),
 		(u64)atomic64_read(&state.dropped),
 		(u64)atomic64_read(&state.rate_limited),
@@ -793,7 +941,8 @@ static int sentry_send_heartbeat(struct socket *sock, u64 seq)
 		(u64)atomic64_read(&state.tallies[BST_FILE_ALLOWED]),
 		(u64)atomic64_read(&state.tallies[BST_FILE_DENIED]),
 		(u64)atomic64_read(&state.tallies[BST_SYSCALL_DENIED]),
-		(u64)atomic64_read(&state.tallies[BST_CAPS_IN_USERNS]));
+		(u64)atomic64_read(&state.tallies[BST_CAPS_IN_USERNS]),
+		(u64)atomic64_read(&state.tallies[BST_FLOW_LOCAL]));
 	return sentry_send_frame(sock, json, len);
 }
 
@@ -801,14 +950,15 @@ static int sentry_thread(void *unused)
 {
 	struct socket *sock = NULL;
 	struct sentry_scratch *scratch;
+	struct bromure_sentry_event *event;
 	char *json;
-	struct bromure_sentry_event event;
 	unsigned long next_heartbeat = jiffies;
 
 	scratch = kzalloc(sizeof(*scratch), GFP_KERNEL);
 	if (!scratch)
 		return -ENOMEM;
 	json = scratch->json;
+	event = &scratch->drained;
 
 	while (!kthread_should_stop()) {
 		if (!sock) {
@@ -830,11 +980,11 @@ static int sentry_thread(void *unused)
 				sentry_cid, sentry_port);
 		}
 
-		while (kfifo_out_spinlocked(&state.fifo, &event, sizeof(event),
-					    &state.fifo_lock) == sizeof(event)) {
+		while (kfifo_out_spinlocked(&state.fifo, event, sizeof(*event),
+					    &state.fifo_lock) == sizeof(*event)) {
 			u64 seq = atomic64_inc_return(&state.seq);
 			int len = sentry_render_event(scratch, json,
-						      SENTRY_JSON_MAX, &event, seq);
+						      SENTRY_JSON_MAX, event, seq);
 
 			if (sentry_send_frame(sock, json, len) < 0) {
 				sock_release(sock);
@@ -899,22 +1049,111 @@ static unsigned long sentry_syscall_arg(struct pt_regs *regs, int index)
 	return user->regs[index];
 }
 
+/* ------------------------------------------------------------------ */
+/* Process lineage                                                      */
+/* ------------------------------------------------------------------ */
+/*
+ * A flow is only meaningful if you can say what caused it: the user wants
+ * `claude -> bash -> ping -> ICMP to 1.1.1.1`, not "something sent a packet".
+ *
+ * The host rebuilds the tree from `exec` events, and the chain carried here is
+ * what covers the two cases it cannot: a process that started before this
+ * module loaded, and a pid that has been reused since. `(pid, start_ns)` is the
+ * identity -- pids come round again in minutes on a busy workspace, start times
+ * do not.
+ */
+
+static void sentry_fill_chain(struct bromure_sentry_event *event)
+{
+	struct task_struct *task;
+	u8 count = 0;
+
+	event->chain_len = 0;
+	rcu_read_lock();
+	task = rcu_dereference(current->real_parent);
+	while (task && count < BROMURE_SENTRY_CHAIN_MAX) {
+		struct task_struct *next;
+
+		event->chain[count].pid = task_tgid_nr(task);
+		event->chain[count].start_ns = sentry_start_ns(task);
+		memcpy(event->chain[count].comm, task->comm,
+		       sizeof(event->chain[count].comm) - 1);
+		event->chain[count].comm[sizeof(event->chain[count].comm) - 1] = '\0';
+		count++;
+		if (task_tgid_nr(task) <= 1)
+			break;		/* init; nothing above it is interesting */
+		next = rcu_dereference(task->real_parent);
+		if (next == task)
+			break;		/* defensive: never spin on a cycle */
+		task = next;
+	}
+	rcu_read_unlock();
+	event->chain_len = count;
+}
+
+/*
+ * A NUL-terminated string from userspace, in a context that must never fault.
+ *
+ * This used `strncpy_from_user`, which **can fault and therefore sleep**, from
+ * inside a kprobe handler running with preemption disabled. It has never been
+ * hit -- the strings these probes read were just written by the caller, so the
+ * pages are resident -- but "has not happened yet" is not the same as safe, and
+ * `mount(2)` with a path in a page that has been reclaimed is all it would take.
+ *
+ * `strncpy_from_user_nofault` would be the obvious answer and is **not exported
+ * to modules** on this kernel. `copy_from_user_nofault` is, so the string is
+ * read in small chunks and stopped at the first NUL. Chunks rather than one
+ * large copy because `copy_from_user_nofault` is all-or-nothing for the size
+ * asked for: a short string near the end of a mapping would fail entirely if
+ * the whole buffer were requested.
+ *
+ * Returns the length copied, or -1 when nothing could be read -- which the
+ * caller must be able to tell apart from an empty string.
+ */
+#define SENTRY_USER_CHUNK 32
+
+static long sentry_copy_user_nofault(char *dst, size_t dst_len,
+				     const void __user *src, u8 *truncated)
+{
+	size_t used = 0;
+	bool any = false;
+
+	if (!dst_len)
+		return -1;
+	dst[0] = '\0';
+	if (!src)
+		return -1;
+	while (used + 1 < dst_len) {
+		size_t want = min(sizeof(char) * SENTRY_USER_CHUNK,
+				  dst_len - 1 - used);
+		size_t i;
+
+		if (copy_from_user_nofault(dst + used,
+					   (const char __user *)src + used,
+					   want))
+			break;
+		any = true;
+		for (i = 0; i < want; i++) {
+			if (dst[used + i] == '\0') {
+				dst[used + i] = '\0';
+				return (long)(used + i);
+			}
+		}
+		used += want;
+	}
+	dst[used] = '\0';
+	if (!any)
+		return -1;
+	if (used + 1 >= dst_len && truncated)
+		*truncated = 1;
+	return (long)used;
+}
+
 static void sentry_copy_user_string(char *dst, size_t dst_len,
 				    const void __user *src, u8 *truncated)
 {
-	long copied;
-
-	dst[0] = '\0';
-	if (!src)
-		return;
-	copied = strncpy_from_user(dst, src, dst_len);
-	if (copied < 0) {
+	if (sentry_copy_user_nofault(dst, dst_len, src, truncated) < 0)
 		dst[0] = '\0';
-		return;
-	}
-	if ((size_t)copied >= dst_len - 1)
-		*truncated = 1;
-	dst[dst_len - 1] = '\0';
 }
 
 /*
@@ -926,17 +1165,116 @@ static void sentry_copy_user_string(char *dst, size_t dst_len,
  * kernel memory rather than a re-read of a userspace pointer that the caller
  * could have changed underneath us.
  */
+/*
+ * The command line, read from `bprm->p` and NOT from `mm->arg_start`.
+ *
+ * The contract said "the new mm's arg area", and at this hook that area does not
+ * exist yet: `exec_mmap()` has run, so `current->mm` IS the new mm, but
+ * `mm->arg_start` is set later, in `create_elf_tables()` -- after
+ * `setup_arg_pages()`, both of which happen in `load_elf_binary` *after*
+ * `begin_new_exec()` calls this hook. Reading `arg_start` here would read zero.
+ *
+ * `bprm->p` is the top of the copied strings in that same new mm, written by
+ * `copy_strings()` before the mm was installed. So it is a valid userspace
+ * address in `current->mm` at this moment, and the pages are resident because
+ * they were just populated.
+ *
+ * `_nofault` throughout: a kprobe handler runs with preemption disabled and must
+ * never take a page fault. A string that cannot be read is reported as absent
+ * rather than guessed at, and `argv_truncated` distinguishes "cut short" from
+ * "could not be read" only in the sense that the latter leaves argv empty --
+ * which the test checks, because an argv that is silently always empty would
+ * look exactly like a quiet process.
+ *
+ * `arg_start` is still used as a FALLBACK, for a kernel or a binfmt that has
+ * already populated it. Cheap, and it costs nothing when it is zero.
+ */
+static void sentry_read_argv(struct bromure_sentry_event *event,
+			     struct linux_binprm *bprm)
+{
+	unsigned long addr = 0;
+	int argc = 0;
+	size_t used = 0;
+	int i;
+
+	event->argv[0] = '\0';
+	if (bprm) {
+		addr = bprm->p;
+		argc = bprm->argc;
+	}
+	if ((!addr || argc <= 0) && current->mm) {
+		/* Fallback: an already-populated arg area. */
+		unsigned long start = current->mm->arg_start;
+		unsigned long end = current->mm->arg_end;
+
+		if (start && end > start) {
+			size_t want = min_t(size_t, end - start,
+					    sizeof(event->argv) - 1);
+			long got = sentry_copy_user_nofault(
+				event->argv, want + 1,
+				(const void __user *)start, NULL);
+
+			if (got > 0) {
+				/* The area is NUL-separated; make it readable. */
+				size_t n;
+
+				for (n = 0; n < (size_t)got; n++) {
+					if (event->argv[n] == '\0')
+						event->argv[n] = ' ';
+				}
+				event->argv[got] = '\0';
+				if ((unsigned long)got < end - start)
+					event->argv_truncated = 1;
+			}
+		}
+		return;
+	}
+	if (argc > 256)
+		argc = 256;		/* a bound, not a judgement */
+	for (i = 0; i < argc && used + 1 < sizeof(event->argv); i++) {
+		long got = sentry_copy_user_nofault(
+			event->argv + used, sizeof(event->argv) - used,
+			(const void __user *)addr, &event->argv_truncated);
+
+		/* `< 0`, not `<= 0`. Zero is an EMPTY argument -- `cmd '' x` --
+		 * which is a perfectly ordinary thing to exec; only a negative
+		 * return means the copy failed. Treating 0 as failure ended the
+		 * loop at the first empty arg and flagged the result truncated,
+		 * so `cmd '' x` was reported as `cmd`. The arithmetic below
+		 * already handles it: `addr` advances past the NUL, `used` does
+		 * not move, and the separator is appended as usual. */
+		if (got < 0)
+			break;
+		addr += (unsigned long)got + 1;	/* past this string's NUL */
+		used += (size_t)got;
+		if (used + 1 >= sizeof(event->argv)) {
+			event->argv_truncated = 1;
+			break;
+		}
+		if (i + 1 < argc)
+			event->argv[used++] = ' ';
+	}
+	event->argv[min(used, sizeof(event->argv) - 1)] = '\0';
+	if (i < argc)
+		event->argv_truncated = 1;
+}
+
 static int sentry_kp_exec(struct kprobe *probe, struct pt_regs *regs)
 {
 	struct linux_binprm *bprm = (struct linux_binprm *)regs->regs[0];
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_EXEC);
+	sentry_fill_common(event, BSK_EXEC);
 	if (bprm && bprm->filename)
-		strscpy(event.path, bprm->filename, sizeof(event.path));
+		strscpy(event->path, bprm->filename, sizeof(event->path));
 	if (bprm && bprm->interp && bprm->interp != bprm->filename)
-		strscpy(event.arg, bprm->interp, sizeof(event.arg));
-	sentry_submit(&event);
+		strscpy(event->arg, bprm->interp, sizeof(event->arg));
+	sentry_read_argv(event, bprm);
+	/* The chain, so the host can place this process even if it missed the
+	 * parent's own exec -- which it always does for anything that started
+	 * before the module loaded. */
+	sentry_fill_chain(event);
+	sentry_submit(event);
 	return 0;
 }
 
@@ -977,7 +1315,7 @@ static int sentry_kp_commit_creds(struct kprobe *probe, struct pt_regs *regs)
 {
 	const struct cred *new = (const struct cred *)regs->regs[0];
 	const struct cred *old = current_cred();
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 	kernel_cap_t gained_permitted;
 	bool entitled, uid_gain, cap_gain;
 
@@ -1047,49 +1385,31 @@ static int sentry_kp_commit_creds(struct kprobe *probe, struct pt_regs *regs)
 		return 0;
 	}
 
-	sentry_fill_common(&event, BSK_CRED_GAIN);
-	event.aux1 = from_kuid_munged(&init_user_ns, old->euid);
-	event.aux2 = from_kuid_munged(&init_user_ns, new->euid);
-	event.aux4 = old->cap_permitted.val;
-	event.aux3 = new->cap_permitted.val;
+	sentry_fill_common(event, BSK_CRED_GAIN);
+	event->aux1 = from_kuid_munged(&init_user_ns, old->euid);
+	event->aux2 = from_kuid_munged(&init_user_ns, new->euid);
+	event->aux4 = old->cap_permitted.val;
+	event->aux3 = new->cap_permitted.val;
 	/* Mid-execve means a setuid binary or a file capability taking effect
 	 * rather than a syscall. The `exec` event that follows carries the path
 	 * from the binprm; here the new mm may not have its exe_file yet, so the
 	 * path is best-effort and `comm` is always right. */
-	event.flag1 = current->in_execve ? 1 : 0;
+	event->flag1 = current->in_execve ? 1 : 0;
 	if (current->mm) {
-		struct file *exe;
-
-		/* `get_mm_exe_file` is not exported to modules, so read the RCU
-		 * pointer directly under rcu_read_lock and take no reference: the
-		 * path is rendered and copied before the lock is dropped, and
-		 * `d_path` is safe in this context. */
-		rcu_read_lock();
-		exe = rcu_dereference(current->mm->exe_file);
-		if (exe) {
-			char *rendered = file_path(exe, event.path,
-						   sizeof(event.path));
-
-			if (IS_ERR(rendered))
-				event.path[0] = '\0';
-			else if (rendered != event.path)
-				memmove(event.path, rendered,
-					strnlen(rendered, sizeof(event.path) - 1) + 1);
-		}
-		rcu_read_unlock();
+		sentry_fill_exe(event);
 	}
-	sentry_submit(&event);
+	sentry_submit(event);
 	return 0;
 }
 
 static int sentry_kp_ptrace(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_PTRACE);
-	event.aux1 = (u32)sentry_syscall_arg(regs, 0);	/* request */
-	event.aux2 = (u32)sentry_syscall_arg(regs, 1);	/* target pid */
-	sentry_submit(&event);
+	sentry_fill_common(event, BSK_PTRACE);
+	event->aux1 = (u32)sentry_syscall_arg(regs, 0);	/* request */
+	event->aux2 = (u32)sentry_syscall_arg(regs, 1);	/* target pid */
+	sentry_submit(event);
 	return 0;
 }
 
@@ -1111,20 +1431,20 @@ static int sentry_kp_ptrace(struct kprobe *probe, struct pt_regs *regs)
 static int sentry_kp_do_init_module(struct kprobe *probe, struct pt_regs *regs)
 {
 	struct module *mod = (struct module *)regs->regs[0];
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_MODULE_LOAD);
+	sentry_fill_common(event, BSK_MODULE_LOAD);
 	if (mod) {
-		strscpy(event.arg, mod->name, sizeof(event.arg));
-		event.aux3 = mod->taints;
+		strscpy(event->arg, mod->name, sizeof(event->arg));
+		event->aux3 = mod->taints;
 #ifdef CONFIG_MODULE_SIG
-		event.flag1 = mod->sig_ok ? 1 : 0;
+		event->flag1 = mod->sig_ok ? 1 : 0;
 #else
-		event.flag1 = 0;
+		event->flag1 = 0;
 #endif
 	}
-	event.result = 0;
-	sentry_submit(&event);
+	event->result = 0;
+	sentry_submit(event);
 	return 0;
 }
 
@@ -1142,16 +1462,16 @@ static int sentry_krp_load_module(struct kretprobe_instance *instance,
 	 * and this probe returned early on every refused module. It never
 	 * reported one. Same bug as the denial probes; see the comment there. */
 	int ret = (int)regs_return_value(regs);
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
 	if (ret >= 0)
 		return 0;		/* success is reported by do_init_module */
 
-	sentry_fill_common(&event, BSK_MODULE_LOAD);
-	strscpy(event.arg, "<refused>", sizeof(event.arg));
-	event.result = (s32)ret;
-	event.flag1 = 0;
-	sentry_submit(&event);
+	sentry_fill_common(event, BSK_MODULE_LOAD);
+	strscpy(event->arg, "<refused>", sizeof(event->arg));
+	event->result = (s32)ret;
+	event->flag1 = 0;
+	sentry_submit(event);
 	return 0;
 }
 
@@ -1164,13 +1484,13 @@ static bool load_module_kretprobe_registered;
 
 static int sentry_kp_delete_module(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_MODULE_LOAD);
-	strscpy(event.arg, "<delete_module>", sizeof(event.arg));
-	event.result = 0;
-	event.flag1 = 1;	/* not an unsigned load; the host treats it as info */
-	sentry_submit(&event);
+	sentry_fill_common(event, BSK_MODULE_LOAD);
+	strscpy(event->arg, "<delete_module>", sizeof(event->arg));
+	event->result = 0;
+	event->flag1 = 1;	/* not an unsigned load; the host treats it as info */
+	sentry_submit(event);
 	return 0;
 }
 
@@ -1185,12 +1505,12 @@ static int sentry_kp_delete_module(struct kprobe *probe, struct pt_regs *regs)
  */
 static int sentry_kp_bpf(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 	u32 command = (u32)sentry_syscall_arg(regs, 0);
 	u32 prog_type = 0;
 
-	sentry_fill_common(&event, BSK_BPF_LOAD);
-	event.aux1 = command;
+	sentry_fill_common(event, BSK_BPF_LOAD);
+	event->aux1 = command;
 	if (command == 5 /* BPF_PROG_LOAD */) {
 		const u32 __user *attr =
 			(const u32 __user *)sentry_syscall_arg(regs, 1);
@@ -1198,18 +1518,18 @@ static int sentry_kp_bpf(struct kprobe *probe, struct pt_regs *regs)
 		if (attr && get_user(prog_type, attr))
 			prog_type = 0;
 	}
-	event.aux2 = prog_type;
-	sentry_submit(&event);
+	event->aux2 = prog_type;
+	sentry_submit(event);
 	return 0;
 }
 
 static int sentry_kp_kexec(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_KEXEC_ATTEMPT);
-	strscpy(event.arg, probe->symbol_name, sizeof(event.arg));
-	sentry_submit(&event);
+	sentry_fill_common(event, BSK_KEXEC_ATTEMPT);
+	strscpy(event->arg, probe->symbol_name, sizeof(event->arg));
+	sentry_submit(event);
 	return 0;
 }
 
@@ -1231,15 +1551,15 @@ static int sentry_krp_lockdown_write(struct kretprobe_instance *instance,
 	 * ssize_t, which is 64 bits on arm64, so the register really is the
 	 * signed value. The probes above return int and must be cast. */
 	long ret = regs_return_value(regs);
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
 	if (ret >= 0)
 		return 0;
 
-	sentry_fill_common(&event, BSK_LOCKDOWN_CHANGE_ATTEMPT);
-	event.result = (s32)ret;
-	event.flag1 = 1;	/* a rejected write is an attempt to lower */
-	sentry_submit(&event);
+	sentry_fill_common(event, BSK_LOCKDOWN_CHANGE_ATTEMPT);
+	event->result = (s32)ret;
+	event->flag1 = 1;	/* a rejected write is an attempt to lower */
+	sentry_submit(event);
 	return 0;
 }
 
@@ -1254,68 +1574,188 @@ static bool lockdown_kretprobe_registered;
 
 static int sentry_kp_mount(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_MOUNT);
-	sentry_copy_user_string(event.path, sizeof(event.path),
+	sentry_fill_common(event, BSK_MOUNT);
+	sentry_copy_user_string(event->path, sizeof(event->path),
 				(const void __user *)sentry_syscall_arg(regs, 1),
-				&event.truncated);
-	sentry_copy_user_string(event.arg, sizeof(event.arg),
+				&event->truncated);
+	sentry_copy_user_string(event->arg, sizeof(event->arg),
 				(const void __user *)sentry_syscall_arg(regs, 2),
-				&event.truncated);
-	sentry_submit(&event);
+				&event->truncated);
+	sentry_submit(event);
 	return 0;
 }
 
 static int sentry_kp_unshare(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_UNSHARE);
-	event.aux3 = sentry_syscall_arg(regs, 0);	/* clone flags */
-	sentry_submit(&event);
+	sentry_fill_common(event, BSK_UNSHARE);
+	event->aux3 = sentry_syscall_arg(regs, 0);	/* clone flags */
+	sentry_submit(event);
 	return 0;
 }
 
 static int sentry_kp_setns(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
-	sentry_fill_common(&event, BSK_SETNS);
-	event.aux1 = (u32)sentry_syscall_arg(regs, 0);	/* fd */
-	event.aux3 = sentry_syscall_arg(regs, 1);	/* nstype */
-	sentry_submit(&event);
+	sentry_fill_common(event, BSK_SETNS);
+	event->aux1 = (u32)sentry_syscall_arg(regs, 0);	/* fd */
+	event->aux3 = sentry_syscall_arg(regs, 1);	/* nstype */
+	sentry_submit(event);
 	return 0;
 }
 
 /* --- outbound connections, for the host to cross-check against attestd --- */
 
-static int sentry_kp_connect(struct kprobe *probe, struct pt_regs *regs)
+/* Loopback is not egress.
+ *
+ * Measured over 90 seconds on a VM doing nothing but running this session: 97
+ * hits across every flow probe point, of which 93 were datagram connects to
+ * 127.0.0.53 -- the systemd-resolved stub -- three of them per `sudo`. Each is a
+ * different short-lived pid, so the (pid, proto, dst, dport) dedup cannot fold
+ * them; an `npm ci` would turn that into thousands of rows. None of them can
+ * ever be joined to a switch decision, because none of them leaves the VM. So
+ * they would bury exactly the flows the feature exists to show.
+ *
+ * What this costs: the agent's own DNS goes through the stub, so the
+ * process -> name link via 127.0.0.53 is not reported. The name is still
+ * recoverable -- systemd-resolved's UPSTREAM query is a real egress flow and is
+ * reported, attributed to `systemd-resolve` rather than to the agent -- and the
+ * host snoops DNS anyway. Set `flow_local=1` to get them back; the count in
+ * every heartbeat says how many were held back, so the trade is visible rather
+ * than inferred from an absence.
+ */
+static bool sentry_flow_local;
+module_param_named(flow_local, sentry_flow_local, bool, 0644);
+MODULE_PARM_DESC(flow_local,
+		 "report flows to loopback destinations too (default: count them only)");
+
+/* Loopback destinations that are NOT plumbing, and must be reported anyway.
+ *
+ * Bromure's cooperative HTTP proxy listens on 127.0.0.1:<proxy_port> (65534 on
+ * a fresh boot), and agentd puts it in `HTTPS_PROXY` for every non-OpenShell
+ * workspace. So `curl`, `npm`, `pip` and git-over-https all connect to
+ * LOOPBACK, and the blanket loopback filter swallowed every one of them --
+ * measured live: `curl https://1.1.1.1/` produced no flow at all. That is the
+ * opposite of the mistake the filter was added to avoid: suppressing the
+ * agent's real egress while keeping the noise would be worse than keeping both.
+ *
+ * The destination of such a flow is the proxy rather than the site, which is
+ * the host's problem and it has one: agentd writes a `BROMURE-CLIENT` preamble
+ * on the vsock bridge carrying the client's source port, and the host ties that
+ * `sport` to the CONNECT target and to every L7 decision on the connection.
+ * This event's `sport` is the join key -- which is why it matters that
+ * `tcp_connect` runs after the source port has been chosen.
+ *
+ * `bromure-sentryd` sets this from the same file agentd reads
+ * (/mnt/bromure-meta/proxy_port), so the two cannot disagree about which port
+ * the proxy is on.
+ */
+#define SENTRY_FLOW_PORTS_MAX 8
+static unsigned short sentry_flow_local_ports[SENTRY_FLOW_PORTS_MAX];
+static int sentry_flow_local_ports_count;
+/*
+ * 0444 -- set at insmod and NOT writable afterwards, unlike `flow_local` and
+ * the dedup windows beside it. The asymmetry is deliberate: this is the only
+ * flow parameter whose value can make the sentry report LESS.
+ *
+ * A root agent -- which the non-strict mode still permits -- could write a
+ * shorter array to drop the proxy port out of the exemption, and from then on
+ * every HTTP and HTTPS request it made would be suppressed as ordinary
+ * loopback plumbing. That is a one-line way to hide its own egress.
+ *
+ * The others cannot do that. `flow_local=1` only adds events. A longer
+ * `flow_dedup_ms` folds repeats of the SAME (pid, proto, dst, dport) and still
+ * emits the first one with a count, so it cannot conceal a destination the
+ * process had not already reached.
+ */
+module_param_array_named(flow_local_ports, sentry_flow_local_ports, ushort,
+			 &sentry_flow_local_ports_count, 0444);
+MODULE_PARM_DESC(flow_local_ports,
+		 "loopback destination ports to report rather than suppress (the HTTP proxy); set at load, not writable after");
+
+static bool sentry_flow_port_exempt(u16 dport)
 {
-	struct bromure_sentry_event event;
-	struct sockaddr *addr = (struct sockaddr *)regs->regs[1];
+	int i;
 
-	if (!addr)
-		return 0;
-	if (addr->sa_family != AF_INET && addr->sa_family != AF_INET6)
-		return 0;
-
-	sentry_fill_common(&event, BSK_CONNECT);
-	event.addr_family = addr->sa_family;
-	if (addr->sa_family == AF_INET) {
-		struct sockaddr_in *v4 = (struct sockaddr_in *)addr;
-
-		memcpy(event.addr, &v4->sin_addr, 4);
-		event.aux2 = ntohs(v4->sin_port);
-	} else {
-		struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)addr;
-
-		memcpy(event.addr, &v6->sin6_addr, 16);
-		event.aux2 = ntohs(v6->sin6_port);
-	}
-	sentry_submit(&event);
-	return 0;
+	for (i = 0; i < sentry_flow_local_ports_count; i++)
+		if (sentry_flow_local_ports[i] == dport)
+			return true;
+	return false;
 }
+
+static bool sentry_flow_is_local(const struct bromure_sentry_event *event)
+{
+	if (event->addr_family == AF_INET) {
+		__be32 v4;
+
+		memcpy(&v4, event->addr, sizeof(v4));
+		return ipv4_is_loopback(v4);
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	if (event->addr_family == AF_INET6) {
+		const struct in6_addr *v6 = (const struct in6_addr *)event->addr;
+
+		if (ipv6_addr_loopback(v6))
+			return true;
+		/* ::ffff:127.0.0.0/8 -- v4 loopback reached through a v6
+		 * socket, which is what a dual-stack resolver client does, and
+		 * is where most of the measured volume actually came from. */
+		if (ipv6_addr_v4mapped(v6))
+			return ipv4_is_loopback(v6->s6_addr32[3]);
+	}
+#endif
+	return false;
+}
+
+/* A send with no destination is not a flow.
+ *
+ * The guard here used to be `if (!event->addr_family)`, carried over from when
+ * datagram connects were probed and `connect(AF_UNSPEC)` could reach this code.
+ * With the family filtered earlier, `addr_family` is always AF_INET or
+ * AF_INET6 by this point, so that test had become unreachable -- while the
+ * situation it was meant to catch is real and still happens:
+ *
+ *   send() on an unconnected UDP socket returns -EDESTADDRREQ, and `udp_sendmsg`
+ *   runs FIRST. Measured: one probe hit, errno 89. The event that would have
+ *   been emitted reads `dst: 0.0.0.0, dport: 0` -- a row for a packet that was
+ *   never sent, which is the same defect as reporting a source-address probe.
+ *
+ * Tested on the address alone, not on the port: ICMP and RAW legitimately have
+ * no destination port (the handler zeroes it), so a `dport == 0` condition
+ * would throw away every ping.
+ */
+static bool sentry_flow_no_destination(const struct bromure_sentry_event *event)
+{
+	if (event->addr_family == AF_INET) {
+		__be32 v4;
+
+		memcpy(&v4, event->addr, sizeof(v4));
+		return v4 == 0;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	if (event->addr_family == AF_INET6)
+		return ipv6_addr_any((const struct in6_addr *)event->addr);
+#endif
+	return true;		/* neither family: nothing we can report */
+}
+
+/* The one question both emitters ask. A predicate rather than a repeated
+ * three-part condition, because the first version of this WAS duplicated at two
+ * call sites and that is exactly how one of them ends up without the port
+ * exemption. */
+static bool sentry_flow_held_back(const struct bromure_sentry_event *event)
+{
+	if (sentry_flow_local)
+		return false;
+	if (!sentry_flow_is_local(event))
+		return false;
+	return !sentry_flow_port_exempt((u16)event->aux2);
+}
+
 
 /*
  * Denied opens.
@@ -1460,6 +1900,14 @@ static void sentry_denial_path(struct bromure_sentry_event *event, u8 src,
 
 static int sentry_dedup_ms = 1000;
 module_param_named(dedup_ms, sentry_dedup_ms, int, 0644);
+
+/* The contract's window for `net_flow`: one event per (pid, proto, dst, dport)
+ * per 10 s, folded with a count. Separate from `dedup_ms` because the two
+ * measure different things -- see `sentry_dedup_absorb`. */
+static int sentry_flow_dedup_ms = 10000;
+module_param_named(flow_dedup_ms, sentry_flow_dedup_ms, int, 0644);
+MODULE_PARM_DESC(flow_dedup_ms,
+		 "window in which one process's repeat flows to the same destination fold into one event");
 MODULE_PARM_DESC(dedup_ms,
 		 "window in which identical denials collapse into one event with a count");
 
@@ -1485,13 +1933,62 @@ static u64 sentry_dedup_key(const struct bromure_sentry_event *event)
 	 * losing one of the two events. */
 	key = key * 1000003ULL + event->aux1;
 
-	key = key * 1000003ULL + full_name_hash(NULL, event->path,
-					       strnlen(event->path,
-						       sizeof(event->path)));
+	/* `path` is in the key for every kind EXCEPT a flow.
+	 *
+	 * A flow resolves its exe lazily -- `file_path()` walks the dentry chain,
+	 * and paying that per packet to fill a field the folded event already
+	 * carries is exactly the per-packet cost this kind exists to avoid. So
+	 * the key is computed once with `path` still empty (to ask whether a
+	 * live slot exists), the exe is filled only if none does, and the key is
+	 * computed again inside the absorb. Hashing `path` would make those two
+	 * disagree, and every single flow would get a slot of its own.
+	 *
+	 * Nothing is lost: for a flow `pid` already determines the exe, and the
+	 * destination fields below carry the identity that matters.
+	 */
+	if (event->kind != BSK_NET_FLOW)
+		key = key * 1000003ULL + full_name_hash(NULL, event->path,
+						       strnlen(event->path,
+							       sizeof(event->path)));
 	key = key * 1000003ULL + full_name_hash(NULL, event->arg,
 					       strnlen(event->arg,
 						       sizeof(event->arg)));
 	key = key * 1000003ULL + event->pid;
+
+	/* A FLOW's identity is its destination, and leaving that out made the
+	 * same mistake the `aux1` comment above describes -- one feature later,
+	 * in the same function.
+	 *
+	 * The contract's key is (pid, proto, dst, dport). This one was
+	 * (kind, op, aux1, path, arg, pid), none of which distinguishes one
+	 * destination from another, so EVERY flow a process made in the window
+	 * folded into its first one. Caught live, and the data says it exactly:
+	 * a `ping -c1` reported ONE event with `count: 2` and a `ping -c5` ONE
+	 * with `count: 6` -- iputils probes its source address by connecting a
+	 * real UDP socket to dst:1025 before pinging, that flow took the slot,
+	 * and every ICMP send was absorbed into it. The ICMP flow, which is the
+	 * one anybody wanted, never left the guest.
+	 *
+	 * It was never only about ping. A process connecting to ten different
+	 * hosts reported one flow with `count: 10`, which is not deduplication,
+	 * it is discarding nine destinations.
+	 *
+	 * Kind-gated so the denial key is bit-for-bit what it was: `aux2` is a
+	 * file's `f_flags` on a denial and the destination port on a flow, and
+	 * folding it in unconditionally would have quietly re-cut denial
+	 * dedup that is already verified in the field.
+	 */
+	if (event->kind == BSK_NET_FLOW) {
+		key = key * 1000003ULL + event->proto;
+		key = key * 1000003ULL + event->addr_family;
+		key = key * 1000003ULL + event->aux2;		/* dport */
+		/* The whole 16 bytes, by explicit length: an address is binary
+		 * and may contain NULs, so a string hash would stop at the
+		 * first zero octet -- and 1.1.1.1 against 1.1.1.2 differs only
+		 * in the last. */
+		key = key * 1000003ULL + full_name_hash(NULL, event->addr,
+							sizeof(event->addr));
+	}
 	return key;
 }
 
@@ -1500,7 +1997,14 @@ static bool sentry_dedup_absorb(const struct bromure_sentry_event *event)
 {
 	u64 key = sentry_dedup_key(event);
 	u64 now = ktime_get_ns();
-	u64 window = (u64)sentry_dedup_ms * NSEC_PER_MSEC;
+	/* Flows get their own, much longer window. The contract asks for 10 s
+	 * per (pid, proto, dst, dport) -- a connection is a thing a process does
+	 * occasionally, where a denial is a thing it does in bursts, so the two
+	 * want different windows and sharing `dedup_ms` would have quietly given
+	 * flows the denial's 1 s. */
+	u64 window = (u64)(event->kind == BSK_NET_FLOW ? sentry_flow_dedup_ms
+							: sentry_dedup_ms) *
+		     NSEC_PER_MSEC;
 	unsigned long flags;
 	size_t i, free_slot = SENTRY_DEDUP_SLOTS;
 	bool submit_now = false;
@@ -1531,29 +2035,91 @@ static bool sentry_dedup_absorb(const struct bromure_sentry_event *event)
 	return submit_now;
 }
 
-/* Called from the sentry thread once a second. */
+/*
+ * The flush's staging buffer, and why it is not the per-CPU one. This runs in
+ * process context and is preemptible, so `kprobe_running()` is false for it and
+ * the kprobe framework would happily run a probe handler on this CPU in the
+ * middle of it -- which would overwrite a half-copied event. And it is not a
+ * bare static either: the module's exit path flushes BEFORE `kthread_stop()`,
+ * so exit and the sentry thread can be inside here at the same time. Both are
+ * sleepable, so a mutex is legal, and with two possible users it never
+ * contends.
+ */
+static struct bromure_sentry_event sentry_flush_scratch;
+static DEFINE_MUTEX(sentry_flush_lock);
+
+/* Called from the sentry thread once a second, and once from module exit. */
 static void sentry_dedup_flush(bool force)
 {
+	struct bromure_sentry_event *event = &sentry_flush_scratch;
 	u64 now = ktime_get_ns();
 	unsigned long flags;
 	size_t i;
 
+	mutex_lock(&sentry_flush_lock);
 	for (i = 0; i < SENTRY_DEDUP_SLOTS; i++) {
-		struct bromure_sentry_event event;
 		bool ready = false;
 
 		spin_lock_irqsave(&sentry_dedup_lock, flags);
 		if (sentry_dedup[i].used &&
 		    (force || sentry_dedup[i].deadline_ns <= now)) {
-			event = sentry_dedup[i].event;
-			event.count = sentry_dedup[i].count;
+			*event = sentry_dedup[i].event;
+			event->count = sentry_dedup[i].count;
 			sentry_dedup[i].used = false;
 			ready = true;
 		}
 		spin_unlock_irqrestore(&sentry_dedup_lock, flags);
 		if (ready)
-			sentry_submit(&event);
+			sentry_submit(event);
 	}
+	mutex_unlock(&sentry_flush_lock);
+}
+
+/* Is a live dedup slot already holding this event's key?
+ *
+ * Read-only, and cheap: the same key the absorb will compute, one pass over 64
+ * slots under the lock that already exists, no allocation and no path walk.
+ *
+ * It exists so a flow can decide whether it is worth RESOLVING anything. Both
+ * the exe (`file_path`, a dentry walk) and the ancestor chain (up to eight
+ * tasks under RCU) are only needed for an event that will actually be reported;
+ * a QUIC-style workload sends thousands of packets a second to one destination
+ * that is already folded into a single event, and paying for both on every
+ * packet to fill fields the folded event already carries is precisely the
+ * per-packet cost `net_flow` exists to avoid.
+ *
+ * The margin is what makes the answer still true a moment later. A slot that is
+ * about to expire counts as NOT live, so between this check and the absorb it
+ * cannot lapse underneath us -- which would otherwise let the absorb create a
+ * new slot from an event whose exe and chain were never filled, and emit the
+ * empty `path` this lazy resolution exists to fill correctly. The two calls are
+ * sub-microsecond apart and the margin is a millisecond, so the window is shut
+ * rather than merely unlikely. Being wrong in the other direction is free: we
+ * resolve the fields and then fold into the dying slot, which already has them.
+ *
+ * The opposite race needs no handling: if another CPU creates the slot in
+ * between, the work was wasted and the event folds, which is correct.
+ */
+#define SENTRY_DEDUP_LIVE_MARGIN_NS (1 * NSEC_PER_MSEC)
+static bool sentry_dedup_live(const struct bromure_sentry_event *event)
+{
+	u64 key = sentry_dedup_key(event);
+	u64 now = ktime_get_ns();
+	unsigned long flags;
+	size_t i;
+	bool live = false;
+
+	spin_lock_irqsave(&sentry_dedup_lock, flags);
+	for (i = 0; i < SENTRY_DEDUP_SLOTS; i++) {
+		if (sentry_dedup[i].used && sentry_dedup[i].key == key &&
+		    sentry_dedup[i].deadline_ns > now +
+						SENTRY_DEDUP_LIVE_MARGIN_NS) {
+			live = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&sentry_dedup_lock, flags);
+	return live;
 }
 
 static void sentry_emit_denial(struct bromure_sentry_event *event)
@@ -1644,7 +2210,7 @@ static int sentry_krp_denial(struct kretprobe_instance *instance,
 	 * checked the probe was REGISTERED, which it always was.
 	 */
 	int ret = (int)regs_return_value(regs);
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event;
 
 	if (!probe || !ctx->sandboxed)
 		return 0;
@@ -1656,11 +2222,16 @@ static int sentry_krp_denial(struct kretprobe_instance *instance,
 		return 0;
 	sentry_tally(BST_FILE_DENIED);
 
-	sentry_fill_common(&event, BSK_SANDBOX_DENIED);
-	event.op = probe->op;
-	event.aux1 = (u32)(-ret);
-	strscpy(event.arg, probe->symbol, sizeof(event.arg));
-	sentry_denial_path(&event, probe->src, ctx->a, ctx->b);
+	/* Claimed only now, past the early returns. This hook is the hot one --
+	 * every `security_file_open` in the workspace comes through it, and the
+	 * overwhelming majority are allowed -- so the allowed path must not
+	 * touch the staging buffer at all, let alone memset 1792 bytes of it. */
+	event = sentry_probe_event();
+	sentry_fill_common(event, BSK_SANDBOX_DENIED);
+	event->op = probe->op;
+	event->aux1 = (u32)(-ret);
+	strscpy(event->arg, probe->symbol, sizeof(event->arg));
+	sentry_denial_path(event, probe->src, ctx->a, ctx->b);
 
 	/* `open` is three operations wearing one hook. Landlock's EXECUTE right
 	 * is checked here too, so a binary outside the policy shows up as a
@@ -1669,7 +2240,7 @@ static int sentry_krp_denial(struct kretprobe_instance *instance,
 	if (probe->src == SPS_FILE && ctx->a) {
 		struct file *file = (struct file *)ctx->a;
 
-		event.aux2 = file->f_flags;
+		event->aux2 = file->f_flags;
 		/* BOTH, and measured: an `execve` reaches `security_file_open`
 		 * with `__FMODE_EXEC` in **f_flags**, which is where
 		 * `do_open_execat` puts it -- `f_mode` does not necessarily
@@ -1678,13 +2249,13 @@ static int sentry_krp_denial(struct kretprobe_instance *instance,
 		 * "the agent tried to run something it may not run" is the row
 		 * the user is looking for. */
 		if ((file->f_mode & FMODE_EXEC) || (file->f_flags & __FMODE_EXEC))
-			event.op = BSO_OPEN_EXEC;
+			event->op = BSO_OPEN_EXEC;
 		else if (file->f_mode & FMODE_WRITE)
-			event.op = BSO_OPEN_WRITE;
+			event->op = BSO_OPEN_WRITE;
 		else
-			event.op = BSO_OPEN_READ;
+			event->op = BSO_OPEN_READ;
 	}
-	sentry_emit_denial(&event);
+	sentry_emit_denial(event);
 	return 0;
 }
 
@@ -1740,40 +2311,351 @@ static const char *sentry_seccomp_action(u32 code)
 
 static int sentry_kp_seccomp(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct bromure_sentry_event event;
+	struct bromure_sentry_event *event = sentry_probe_event();
 
 	if (!sentry_task_sandboxed())
 		return 0;
 	sentry_tally(BST_SYSCALL_DENIED);
-	sentry_fill_common(&event, BSK_SECCOMP_DENIED);
+	sentry_fill_common(event, BSK_SECCOMP_DENIED);
 	/* The syscall NUMBER, not a name: a name table in the module would be a
 	 * second copy of something the host already has, and the two would
 	 * eventually disagree. */
-	event.aux1 = (u32)regs->regs[0];
-	event.aux2 = (u32)regs->regs[2];
-	strscpy(event.arg, sentry_seccomp_action((u32)regs->regs[2]),
-		sizeof(event.arg));
+	event->aux1 = (u32)regs->regs[0];
+	event->aux2 = (u32)regs->regs[2];
+	strscpy(event->arg, sentry_seccomp_action((u32)regs->regs[2]),
+		sizeof(event->arg));
 	{
 		struct file *exe;
 
 		rcu_read_lock();
 		exe = current->mm ? rcu_dereference(current->mm->exe_file) : NULL;
 		if (exe) {
-			char *rendered = file_path(exe, event.path,
-						   sizeof(event.path));
+			char *rendered = file_path(exe, event->path,
+						   sizeof(event->path));
 
 			if (IS_ERR(rendered))
-				event.path[0] = '\0';
-			else if (rendered != event.path)
-				memmove(event.path, rendered,
+				event->path[0] = '\0';
+			else if (rendered != event->path)
+				memmove(event->path, rendered,
 					strnlen(rendered,
-						sizeof(event.path) - 1) + 1);
+						sizeof(event->path) - 1) + 1);
 		}
 		rcu_read_unlock();
 	}
-	sentry_emit_denial(&event);
+	sentry_emit_denial(event);
 	return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Network flows                                                        */
+/* ------------------------------------------------------------------ */
+/*
+ * One event the first time a socket talks to a destination. Never per packet:
+ * a `curl` of a large file is one flow, and so is a `ping -i0.2` that runs for
+ * a minute.
+ *
+ * The probe points were chosen by TRACING, not from the header files, and two
+ * of the guesses in the original brief turned out to be wrong on this image:
+ *
+ *   ping -c1 1.1.1.1   ->  ip4_datagram_connect x2, raw_sendmsg x1
+ *   curl https://…     ->  tcp_connect x1
+ *   connected UDP      ->  ip4_datagram_connect, udp_sendmsg
+ *   unconnected UDP    ->  udp_sendmsg
+ *
+ * So: Ubuntu's `ping` uses a RAW socket, not a ping socket, because
+ * `net.ipv4.ping_group_range` is `1 0` -- an empty range -- and `/usr/bin/ping`
+ * carries `cap_net_raw=ep`. `ping_v4_sendmsg` never fires here. It is probed
+ * anyway: it costs one kprobe and it becomes the live path the moment that
+ * sysctl is widened, which is also the only way a SANDBOXED ping can work at
+ * all (nnp drops the file capability, so a confined `ping` gets neither socket).
+ *
+ * And `ping` *does* call `connect()`, so the existing `connect` event was never
+ * blind to ICMP. The reason for `net_flow` is the fields and the chain.
+ */
+
+enum sentry_flow_src {
+	SFS_SOCK,		/* arg0 is a struct sock *, destination from it  */
+	SFS_SOCK_MSG,		/* arg0 sock, arg1 a struct msghdr *            */
+};
+
+struct sentry_flow_probe {
+	const char *symbol;
+	u8 proto;
+	u8 src;
+	struct kprobe probe;
+	bool registered;
+};
+
+/* Destination from a connected socket. */
+static void sentry_dst_from_sock(struct bromure_sentry_event *event,
+				 struct sock *sk)
+{
+	if (!sk)
+		return;
+	event->addr_family = (u8)sk->sk_family;
+	event->ip_proto = (u8)sk->sk_protocol;
+	event->aux2 = ntohs(sk->sk_dport);
+	event->sport = (u16)sk->sk_num;
+	if (sk->sk_family == AF_INET) {
+		__be32 v4 = sk->sk_daddr;
+
+		memcpy(event->addr, &v4, sizeof(v4));
+	} else if (sk->sk_family == AF_INET6) {
+#if IS_ENABLED(CONFIG_IPV6)
+		memcpy(event->addr, &sk->sk_v6_daddr, sizeof(event->addr));
+#endif
+	}
+}
+
+/* Destination from a kernel-side sockaddr. `__sys_connect` and `__sys_sendto`
+ * copy the address in before the protocol sees it, so this is kernel memory and
+ * needs no user access. */
+static void sentry_dst_from_addr(struct bromure_sentry_event *event,
+				 struct sockaddr *uaddr, int len)
+{
+	if (!uaddr)
+		return;
+	if (uaddr->sa_family == AF_INET && len >= (int)sizeof(struct sockaddr_in)) {
+		struct sockaddr_in *in4 = (struct sockaddr_in *)uaddr;
+
+		event->addr_family = AF_INET;
+		memcpy(event->addr, &in4->sin_addr, sizeof(in4->sin_addr));
+		event->aux2 = ntohs(in4->sin_port);
+	} else if (uaddr->sa_family == AF_INET6 &&
+		   len >= (int)sizeof(struct sockaddr_in6)) {
+		struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)uaddr;
+
+		event->addr_family = AF_INET6;
+		memcpy(event->addr, &in6->sin6_addr, sizeof(event->addr));
+		event->aux2 = ntohs(in6->sin6_port);
+	}
+}
+
+/* The flow's protocol LABEL, from the socket rather than from the probe it was
+ * caught on.
+ *
+ * Measured, and the reason this exists: `ip4_datagram_connect` is `udp_prot`'s
+ * connect AND `ping_prot`'s, so a `ping -c1` fires it -- and a static per-probe
+ * label reported that flow as `udp`. The socket always knows what it is, so ask
+ * it, and keep the table's label only as the fallback for a socket that does
+ * not say (an unusual `sk_protocol` on a shared entry point).
+ *
+ * `sk_type` is checked before `sk_protocol` because a RAW socket carries the
+ * protocol it was opened with -- `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)` has
+ * `sk_protocol == IPPROTO_ICMP` and is still a raw socket, which is a different
+ * capability and belongs in a different bucket.
+ */
+static u8 sentry_proto_from_sock(struct sock *sk)
+{
+	if (!sk)
+		return BSPR_NONE;
+	if (sk->sk_type == SOCK_RAW)
+		return BSPR_RAW;
+	switch (sk->sk_protocol) {
+	case IPPROTO_TCP:
+		return BSPR_TCP;
+	case IPPROTO_UDP:
+		return BSPR_UDP;
+	case IPPROTO_ICMP:
+		return BSPR_ICMP;
+	case IPPROTO_ICMPV6:
+		return BSPR_ICMPV6;
+	default:
+		return BSPR_NONE;
+	}
+}
+
+/* The ICMP type byte, for a ping socket's send.
+ *
+ * The contract asks for `icmp_type` "when cheap". It was not cheap when this
+ * was written -- reading the message meant a faulting copy from a kprobe
+ * handler -- and the field shipped as 0xff ("not read") for two rounds. It is
+ * cheap now: `sentry_copy_user_nofault` exists, and one byte is all it takes.
+ *
+ * A ping socket's send begins with the full ICMP header the application built:
+ * type, code, checksum, id, sequence. `ping_v4_sendmsg` reads the same eight
+ * bytes with `memcpy_from_msg`, so byte 0 is the type. (The kernel then
+ * overrides the id with the socket's local port, which is why `sport` carries
+ * the echo identifier.)
+ *
+ * PING SOCKETS ONLY, never raw. A raw socket with `IP_HDRINCL` supplies the IP
+ * header itself, so byte 0 there is version/IHL -- 0x45 -- which would be
+ * reported as `icmp_type: 69`. For a raw socket the type is not determinable
+ * without parsing a header whose presence depends on a socket option, so it
+ * stays "not read": a field that is honestly absent beats a field that is
+ * confidently wrong.
+ *
+ * `iter_iov_addr` is a header macro over `iter_iov`, which handles ITER_UBUF
+ * and ITER_IOVEC alike, so this adapts at compile time to whatever kernel the
+ * module is built against rather than reaching into `iov_iter` by hand.
+ */
+static void sentry_fill_icmp_type(struct bromure_sentry_event *event,
+				  struct msghdr *msg)
+{
+	const struct iov_iter *iter;
+	u8 type;
+
+	if (!msg)
+		return;
+	iter = &msg->msg_iter;
+	/* User-backed only. A kvec or bvec send is the kernel's own, and
+	 * `iter_iov_addr` would not be a user address. */
+	if (!iter_is_ubuf(iter) && !iter_is_iovec(iter))
+		return;
+	if (iter_iov_len(iter) < 1)
+		return;
+	/* `copy_from_user_nofault` directly, not the string helper beside it:
+	 * this is a FIXED one-byte binary read, and the string helper stops at
+	 * the first NUL -- so an ICMP type of 0 (echo reply) would come back as
+	 * "nothing copied" and the field would stay unread for exactly the value
+	 * that is hardest to distinguish from absent. */
+	if (copy_from_user_nofault(&type, (const void __user *)iter_iov_addr(iter),
+				   sizeof(type)))
+		return;
+	event->icmp_type = type;
+}
+
+static int sentry_kp_flow(struct kprobe *probe, struct pt_regs *regs)
+{
+	struct sentry_flow_probe *entry =
+		container_of(probe, struct sentry_flow_probe, probe);
+	struct sock *sk = (struct sock *)regs->regs[0];
+	struct bromure_sentry_event *event = sentry_probe_event();
+
+	if (!sk)
+		return 0;
+	/* AF_INET and AF_INET6 only. A unix-socket send is not a network flow,
+	 * and reporting one would bury the flows that are. */
+	if (sk->sk_family != AF_INET && sk->sk_family != AF_INET6)
+		return 0;
+
+	sentry_fill_common(event, BSK_NET_FLOW);
+	event->proto = sentry_proto_from_sock(sk);
+	if (event->proto == BSPR_NONE)
+		event->proto = entry->proto;
+	sentry_dst_from_sock(event, sk);
+
+	/* There used to be a guard here skipping a ping socket's CONNECT, so the
+	 * echo identifier (the local port, which may be unbound at connect time)
+	 * could not be lost to the dedup. It is gone because no probe watches a
+	 * datagram connect any more -- see the table. Removed rather than left
+	 * in: an unreachable branch in a security module is a claim nobody can
+	 * check. */
+
+	switch (entry->src) {
+	case SFS_SOCK_MSG: {
+		struct msghdr *msg = (struct msghdr *)regs->regs[1];
+
+		/* An unconnected send names its destination in the message; a
+		 * connected one leaves it NULL and the socket already has it. */
+		if (msg && msg->msg_name)
+			sentry_dst_from_addr(event,
+					     (struct sockaddr *)msg->msg_name,
+					     msg->msg_namelen);
+		/* A ping socket's first byte is the ICMP type it is sending.
+		 * Not for raw -- see the helper. */
+		if (event->proto == BSPR_ICMP || event->proto == BSPR_ICMPV6)
+			sentry_fill_icmp_type(event, msg);
+		break;
+	}
+	default:
+		break;
+	}
+
+	/* ICMP has no ports. For a ping socket the kernel puts the echo
+	 * identifier in the local port, which is the one number that lets the
+	 * host match a reply to a request -- so it travels as `sport`. For a RAW
+	 * socket the identifier is in the payload, which would mean reading the
+	 * iov in a kprobe; not worth a fault for a field the host treats as a
+	 * hint. `icmp_type` stays 0xff ("not read") for the same reason. */
+	if (event->proto == BSPR_ICMP || event->proto == BSPR_ICMPV6 ||
+	    event->proto == BSPR_RAW)
+		event->aux2 = 0;
+
+	/* `send()` with nowhere to send it: the syscall is about to fail with
+	 * -EDESTADDRREQ and no packet will leave. See above. */
+	if (sentry_flow_no_destination(event))
+		return 0;
+
+	/* Before the chain walk, so a suppressed flow costs no ancestry. */
+	if (sentry_flow_held_back(event)) {
+		sentry_tally(BST_FLOW_LOCAL);
+		return 0;
+	}
+
+	/* The exe and the ancestry, but only for a flow that is going to be
+	 * reported. Both cost real work -- a dentry walk and up to eight task
+	 * dereferences -- and a folded repeat needs neither, because the event
+	 * holding the slot already carries them for this same pid. */
+	if (!sentry_dedup_live(event)) {
+		sentry_fill_exe(event);
+		sentry_fill_chain(event);
+	}
+	/* Folded exactly like a denial: one event per (pid, proto, dst, dport)
+	 * per window, with a count. A socket-lifetime key would need per-socket
+	 * storage, and the only place to put it is `sk_user_data`, which belongs
+	 * to the protocol -- so the window is the honest approximation, and for
+	 * TCP it makes no difference because `tcp_connect` fires once per
+	 * connection anyway. */
+	sentry_emit_denial(event);
+	return 0;
+}
+
+#define SENTRY_FLOW(sym, protocol, source) {				\
+	.symbol = (sym), .proto = (protocol), .src = (source),		\
+}
+
+/*
+ * Nine probes, one kind. Every entry here is a `struct proto` method, which is
+ * what makes reading arg0/arg1 safe to assert rather than to hope: the
+ * prototypes are fixed by the vtable, not by each implementation --
+ *
+ *   int (*sendmsg)(struct sock *sk, struct msghdr *msg, size_t len);
+ *   int (*connect)(struct sock *sk, struct sockaddr *uaddr, int addr_len);
+ *
+ * -- so arg0 is always the sock and arg1 is always the msghdr or the sockaddr.
+ * Four of the nine also appear in `include/net/` and were checked directly;
+ * the other five are static to their translation units and are guaranteed by
+ * the vtable they are assigned into. `tcp_connect(struct sock *sk)` is the one
+ * that is not a proto method, and takes the sock alone.
+ *
+ * The sockaddr and `msg->msg_name` are KERNEL memory: `__sys_connect` and
+ * `__sys_sendto`/`copy_msghdr_from_user` both run `move_addr_to_kernel` before
+ * the protocol sees them, so nothing here touches user memory.
+ */
+static struct sentry_flow_probe sentry_flow_probes[] = {
+	/* TCP, once the source port is chosen. Shared by v4 and v6. */
+	SENTRY_FLOW("tcp_connect",		BSPR_TCP,	SFS_SOCK),
+	/* NOT `ip4_datagram_connect`/`ip6_datagram_connect`. A datagram connect
+	 * is not a packet: it only records where this socket will send if it
+	 * ever sends. Probing it put rows on the timeline for traffic that
+	 * never existed -- iputils connects a UDP socket to dst:1025 purely to
+	 * ask the routing table which source address it would use, and never
+	 * sends a byte, which arrived live as
+	 * "bash -> ping -> UDP 1.1.1.1:1025". Any `getaddrinfo`-style route
+	 * lookup does the same.
+	 *
+	 * So UDP -- connected or not -- is reported on its FIRST SEND, from the
+	 * two probes below. A connected send leaves `msg_name` NULL and the
+	 * destination comes off the socket, which `sentry_dst_from_sock`
+	 * already does, so nothing is lost by not watching the connect. TCP is
+	 * different and unchanged: `tcp_connect` IS a packet, the SYN.
+	 */
+	/* Sends: unconnected UDP names its destination per message; a connected
+	 * one leaves it NULL and the socket carries it. */
+	SENTRY_FLOW("udp_sendmsg",		BSPR_UDP,	SFS_SOCK_MSG),
+	SENTRY_FLOW("udpv6_sendmsg",		BSPR_UDP,	SFS_SOCK_MSG),
+	/* Ping sockets. Dead while `ping_group_range` is `1 0` (Ubuntu's
+	 * shipped value), live once it names the workload's gid -- which
+	 * `bromure-sandboxd` now does at boot, and which is the only way a
+	 * sandboxed `ping` can work at all, since `no_new_privs` means the
+	 * `cap_net_raw` on /usr/bin/ping is not honoured. */
+	SENTRY_FLOW("ping_v4_sendmsg",		BSPR_ICMP,	SFS_SOCK_MSG),
+	SENTRY_FLOW("ping_v6_sendmsg",		BSPR_ICMPV6,	SFS_SOCK_MSG),
+	/* Raw sockets. This is what Ubuntu's `ping` actually uses today. */
+	SENTRY_FLOW("raw_sendmsg",		BSPR_RAW,	SFS_SOCK_MSG),
+	SENTRY_FLOW("rawv6_sendmsg",		BSPR_RAW,	SFS_SOCK_MSG),
+};
 
 struct sentry_kprobe {
 	const char *symbol;
@@ -1801,7 +2683,6 @@ static struct sentry_kprobe sentry_kprobes[] = {
 	{ "__arm64_sys_mount",		sentry_kp_mount },
 	{ "__arm64_sys_unshare",	sentry_kp_unshare },
 	{ "__arm64_sys_setns",		sentry_kp_setns },
-	{ "security_socket_connect",	sentry_kp_connect },
 	{ "security_bprm_committed_creds", sentry_kp_exec },
 };
 
@@ -1891,6 +2772,18 @@ static void sentry_probe_health(int *armed, int *total, u64 *missed, bool *canar
 		if (!kprobe_disabled(&entry->probe))
 			(*armed)++;
 	}
+	for (i = 0; i < ARRAY_SIZE(sentry_flow_probes); i++) {
+		struct sentry_flow_probe *entry = &sentry_flow_probes[i];
+
+		if (!entry->registered)
+			continue;
+		(*total)++;
+		*missed += entry->probe.nmissed;
+		if (kprobe_ftrace(&entry->probe))
+			(*ftrace)++;
+		if (!kprobe_disabled(&entry->probe))
+			(*armed)++;
+	}
 	for (i = 0; i < ARRAY_SIZE(sentry_denial_probes); i++) {
 		struct sentry_denial_probe *entry = &sentry_denial_probes[i];
 
@@ -1946,6 +2839,13 @@ static int sentry_probe_list(char *out, size_t out_len)
 				  first ? "" : ",", entry->symbol);
 		first = false;
 	}
+	for (i = 0; i < ARRAY_SIZE(sentry_flow_probes); i++) {
+		if (!sentry_flow_probes[i].registered)
+			continue;
+		used += scnprintf(out + used, out_len - used, "%s\"%s\"",
+				  first ? "" : ",", sentry_flow_probes[i].symbol);
+		first = false;
+	}
 	for (i = 0; i < ARRAY_SIZE(sentry_denial_probes); i++) {
 		if (!sentry_denial_probes[i].registered)
 			continue;
@@ -1992,6 +2892,24 @@ static int sentry_register_probes(int *armed, int *missing)
 	} else {
 		pr_warn(SENTRY_NAME ": canary probe unavailable; blinding via the "
 			"global kprobe switch will not be detectable\n");
+	}
+
+	for (i = 0; i < ARRAY_SIZE(sentry_flow_probes); i++) {
+		struct sentry_flow_probe *entry = &sentry_flow_probes[i];
+
+		entry->probe.symbol_name = entry->symbol;
+		entry->probe.pre_handler = sentry_kp_flow;
+		if (register_kprobe(&entry->probe) == 0) {
+			entry->registered = true;
+			(*armed)++;
+		} else {
+			/* A protocol this kernel does not build is a gap in what
+			 * the host can see, not a reason to refuse: the others
+			 * still report, and the hello's probe list says which. */
+			(*missing)++;
+			pr_warn(SENTRY_NAME ": flow probe %s unavailable\n",
+				entry->symbol);
+		}
 	}
 
 	for (i = 0; i < ARRAY_SIZE(sentry_denial_probes); i++) {
@@ -2104,7 +3022,29 @@ static int __init sentry_init(void)
 	int armed = 0, missing = 0;
 	int i;
 
-	BUILD_BUG_ON(sizeof(struct bromure_sentry_event) > 512);
+	/* The fifo is allocated once and sized in whole events, so the event's
+	 * size is kernel memory held for the life of the module. 512 was the
+	 * right bound until argv (1024) and the ancestor chain (8 x 28) made the
+	 * record genuinely larger; the budget moved with it rather than the guard
+	 * being deleted, because the guard's job is to make the next person who
+	 * grows this think about the fifo.
+	 *
+	 * 2 KiB x 256 events = 512 KiB. Grow either and do the arithmetic again. */
+	BUILD_BUG_ON(sizeof(struct bromure_sentry_event) > 2048);
+	/* The frame budget, as arithmetic rather than as a comment. A rendered
+	 * frame that does not fit is TRUNCATED, which is invalid JSON rather
+	 * than a short record -- the host drops the connection, not the field.
+	 * Worst case is every escapable byte becoming \uXXXX (6 bytes), so
+	 * growing any of these lengths, or CHAIN_MAX, has to grow JSON_MAX with
+	 * it. Currently ~11.1 KB against 12288, which is thinner headroom than
+	 * it looks and is exactly why this is checked by the compiler. */
+	BUILD_BUG_ON(SENTRY_JSON_MAX <
+		     (BROMURE_SENTRY_ARGV_LEN + BROMURE_SENTRY_PATH_LEN +
+		      BROMURE_SENTRY_ARG_LEN + BROMURE_SENTRY_COMM_LEN) * 6 +
+		     BROMURE_SENTRY_CHAIN_MAX *
+		     (BROMURE_SENTRY_COMM_LEN * 6 + 64) + 512);
+	BUILD_BUG_ON(sizeof(struct bromure_sentry_event) * SENTRY_FIFO_EVENTS
+		     > 512 * 1024);
 
 	spin_lock_init(&state.fifo_lock);
 	spin_lock_init(&state.bucket_lock);
@@ -2226,6 +3166,10 @@ static void __exit sentry_exit(void)
 	for (i = 0; i < ARRAY_SIZE(sentry_kprobes); i++) {
 		if (sentry_kprobes[i].registered)
 			unregister_kprobe(&sentry_kprobes[i].probe);
+	}
+	for (i = 0; i < ARRAY_SIZE(sentry_flow_probes); i++) {
+		if (sentry_flow_probes[i].registered)
+			unregister_kprobe(&sentry_flow_probes[i].probe);
 	}
 	for (i = 0; i < ARRAY_SIZE(sentry_denial_probes); i++) {
 		if (sentry_denial_probes[i].registered)

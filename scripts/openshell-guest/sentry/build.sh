@@ -145,12 +145,33 @@ cp "$STAGE/first.ko.log" "$OUT/bromure_sentry-$KVER.build.log"
 HEADERS_PKG="linux-headers-$KVER"
 HEADERS_VER=$(dpkg-query -W -f='${Version}' "$HEADERS_PKG" 2>/dev/null || echo "unknown")
 
+# The HOST's `sourceHash` -- the identifier it keys a CDN-delivered module on.
+#
+# Recorded here so an import can be checked against a commit directly. The two
+# sides were hashing different things: these are per-file SHA-256s, the host
+# derives one number over all three, and neither could confirm the other.
+#
+# THE HOST OWNS THIS ALGORITHM; this is a copy of it, given by @openshell on
+# 2026-10-02: sha256 over Makefile, bromure_sentry.c, bromure_sentry.h in that
+# order, each framed as `<name>\n<byte length>\n<bytes>`. The framing is what
+# makes it unambiguous -- a rename or a byte added to one file cannot be
+# cancelled out by a change to another.
+#
+# Deliberately labelled rather than silently printed: if the host changes the
+# algorithm this copy goes stale, and a number that disagrees with the host's is
+# only useful if you can tell whose definition it follows.
+SOURCE_HASH=$({ for f in Makefile bromure_sentry.c bromure_sentry.h; do
+        printf '%s\n%s\n' "$f" "$(wc -c < "$HERE/$f" | tr -d ' ')"
+        cat "$HERE/$f"
+    done; } | sha256sum | cut -d' ' -f1)
+
 {
     echo "kernel:      $KVER"
     echo "vermagic:    $MAGIC"
     echo "headers:     $HEADERS_PKG $HEADERS_VER"
     echo "compiler:    $($CC --version | head -1)"
     echo "sha256:      $FIRST_HASH"
+    echo "sourceHash:  $SOURCE_HASH  (host's algorithm, see build.sh)"
     echo "source:      SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
     echo "built:       $(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
     echo "reproducible: $([ "$VERIFY" = "1" ] && echo "verified (two builds agree)" || echo "not checked this run")"

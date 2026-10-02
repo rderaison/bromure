@@ -135,6 +135,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// uses blocking syscalls under the hood. Closes the FD on exit
     /// regardless of success.
     @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
+    /// Remove a leading `BROMURE-CLIENT 1 sport=<n> …\n` line from `req`;
+    /// returns the client's source port when present and well formed.
+    static func stripClientPreamble(_ req: inout Data) -> Int? {
+        let magic = Data("BROMURE-CLIENT ".utf8)
+        guard req.starts(with: magic), let nl = req.firstIndex(of: 0x0A) else { return nil }
+        let line = String(decoding: req[req.startIndex..<nl], as: UTF8.self)
+        req = Data(req[req.index(after: nl)...])
+        for field in line.split(separator: " ") where field.hasPrefix("sport=") {
+            if let n = Int(field.dropFirst(6)), (1...65535).contains(n) { return n }
+        }
+        return nil
+    }
+
     func run() async {
         defer { close(fd) }
         do {
@@ -150,7 +163,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         // 1. CONNECT request from client (proxy command). Treat as
         //    ASCII — proxy headers don't legally carry non-ASCII.
-        let connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
+        var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
+        // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
+        // open the stream with `BROMURE-CLIENT 1 sport=<n> peer=<ip>\n`: the
+        // client socket this request came from, which the kernel sentry
+        // reports as a loopback flow. It ties the CONNECT target to the
+        // process chain (NETWORK_LINEAGE.md). Optional: older guests omit it.
+        let clientSport = Self.stripClientPreamble(&connectReq)
         guard let asString = String(data: connectReq, encoding: .ascii),
               let lineEnd = asString.range(of: "\r\n") else {
             throw MitmError.malformedHTTPRequest
@@ -180,6 +199,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             let afterScheme = target[scheme.upperBound...]
             let authority = String(afterScheme.prefix { $0 != "/" })
             let (host, port) = parseHTTPHostPort(authority)   // default 80
+            if let clientSport { NetworkLineage.shared.noteProxied(profileID: profileID, sport: clientSport, host: host, port: port) }
             let originPath = String(afterScheme.dropFirst(authority.count))
             let path = originPath.isEmpty ? "/" : originPath
 
@@ -203,6 +223,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         let target = String(parts[1])
         let (host, port) = parseHostPort(target)
+        if let clientSport { NetworkLineage.shared.noteProxied(profileID: profileID, sport: clientSport, host: host, port: port) }
 
         // Connection-layer egress verdict for the cooperative-proxy path. The
         // transparent path enforces this in acceptTransparentFlow, but proxied

@@ -118,6 +118,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// Drives the "Docker" sub-tree and the dashboard.
     public var onDockerList: (([DockerContainer]) -> Void)?
 
+    /// One JSON line from an agent's PreToolUse hook (`agent-tool-*.jsonl`):
+    /// a tool call, before it runs.
+    public var onAgentToolCall: ((Data) -> Void)?
+
     /// Called ~every 2s WHILE a dashboard is open with per-container CPU/mem
     /// (from `docker stats --no-stream`). Keyed by full container id.
     public var onDockerStats: (([(id: String, cpu: String, mem: String)]) -> Void)?
@@ -812,6 +816,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // relay / titles / roster) is latency-tolerant and stays on the
             // ~480ms cadence via the tick gate below.
             var ticks = 0
+            // agent-tool-<win>.jsonl: bytes already read, per file.
+            var toolOffsets: [String: Int] = [:]
             while !Task.isCancelled {
                 // FAST PATH — reboot-intent: the guest is going down for a
                 // reboot (systemd reboot.target), not a user-closed session.
@@ -870,6 +876,28 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 let maxURLFileSize = 8 * 1024
                 var urlsProcessedThisTick = 0
                 if let entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
+                    // agent-tool-<win>.jsonl — append-only, one line per tool
+                    // call, written by the agents' PreToolUse hooks before the
+                    // tool runs (NETWORK_LINEAGE.md). Read new complete lines;
+                    // truncate once fully consumed and large, so it can't grow
+                    // without bound (the hook appends with O_APPEND).
+                    for entry in entries where entry.lastPathComponent.hasPrefix("agent-tool-")
+                        && entry.pathExtension == "jsonl" {
+                        let key = entry.lastPathComponent
+                        guard let data = try? Data(contentsOf: entry) else { continue }
+                        var start = toolOffsets[key] ?? 0
+                        if start > data.count { start = 0 }   // truncated under us
+                        guard let lastNL = data.lastIndex(of: 0x0A), lastNL >= start else { continue }
+                        let chunk = data[start...lastNL]
+                        for line in chunk.split(separator: 0x0A) where line.count <= 8192 {
+                            self?.onAgentToolCall?(Data(line))
+                        }
+                        toolOffsets[key] = lastNL + 1
+                        if lastNL + 1 == data.count, data.count > 256 * 1024 {
+                            try? Data().write(to: entry)
+                            toolOffsets[key] = 0
+                        }
+                    }
                     for entry in entries where entry.pathExtension == "txt" {
                         let name = entry.lastPathComponent
                         // url-*.txt — guest's bromure-open relayed a URL.
