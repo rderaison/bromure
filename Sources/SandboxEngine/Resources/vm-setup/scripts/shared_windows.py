@@ -436,11 +436,12 @@ def confirm_focus(target, timeout):
 
 class Controller:
     def __init__(self, list_targets, browser_call, scale=2, runner=run_command,
-                 sysfs=Path('/sys/class/drm'), focus_observer=confirm_focus):
+                 sysfs=Path('/sys/class/drm'), focus_observer=confirm_focus, page_call=cdp_call):
         self.list_targets, self.browser_call = list_targets, browser_call
         self.scale = integer(scale, 1, 4, 'display scale')
         self.run, self.sysfs = runner, sysfs
         self.focus_observer = focus_observer
+        self.page_call = page_call
         self.focus_evidence = None
         self.lock = threading.RLock()
         self.epoch = str(uuid.uuid4())
@@ -581,13 +582,20 @@ class Controller:
         tid = tid or self.active.get(wid)
         tid = tid if tid in ids else ids[0]
         self.focused_window, self.focus_evidence = None, None
+        target = next(target for target in targets if target['id'] == tid)
         self.call('Target.activateTarget', {'targetId': tid})
+        # Target.activateTarget only activates the window and can leave the
+        # omnibox focused. Chromium's Page.bringToFront additionally calls
+        # WebContents::Focus, including for a newly created about:blank page.
+        # Keep the independent document/X observations below as the ACK gate.
+        result = self.page_call(target.get('webSocketDebuggerUrl', ''), 'Page.bringToFront', {}, timeout=3)
+        if not isinstance(result, dict):
+            raise RuntimeError('CDP page focus failed')
         processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
         browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
         if len(browser_pids) != 1:
             raise RuntimeError('cannot identify sole CDP browser process')
         deadline = time.monotonic() + 3
-        target = next(target for target in targets if target['id'] == tid)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

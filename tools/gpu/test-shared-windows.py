@@ -163,9 +163,20 @@ class ControllerTests(unittest.TestCase):
         self.focused = 10
         self.calls, self.mutations = [], []
         self.fail_bounds = False
-        self.controller = shared.Controller(lambda: [dict(id=t) for t in self.targets], self.call,
+        self.controller = shared.Controller(lambda: [dict(id=t, webSocketDebuggerUrl=f'ws://127.0.0.1:9222/devtools/page/{t}')
+                                                      for t in self.targets], self.call,
                                             runner=self.command, sysfs=self.root,
-                                            focus_observer=lambda target, timeout: {'xWindow': 50, 'browserPID': 123})
+                                            focus_observer=lambda target, timeout: {'xWindow': 50, 'browserPID': 123},
+                                            page_call=self.page_call)
+
+    def page_call(self, url, method, params, timeout):
+        self.assertEqual(method, 'Page.bringToFront')
+        self.assertEqual(params, {})
+        self.assertLessEqual(timeout, 3)
+        tid = url.rsplit('/', 1)[1]
+        self.focused = self.targets[tid]
+        self.calls.append((method, {'targetId': tid}))
+        return {}
 
     def command(self, args):
         if '--query' in args:
@@ -323,15 +334,36 @@ class ControllerTests(unittest.TestCase):
         evidence = {'xWindow': 51, 'xFocus': 52, 'browserPID': 123, 'browserStartTicks': 42}
         observer = unittest.mock.Mock(side_effect=[dict(evidence, browserPID=999), evidence])
         self.controller.focus_observer = observer
+        before = len(self.calls)
         reply = self.controller.handle(dict(id=3, cmd='focus', windowId=10))
         self.assertTrue(reply['ok'], reply)
         self.assertEqual(reply['focusEvidence'], evidence)
         self.assertEqual(observer.call_count, 2)
+        focus_calls = [(method, params) for method, params in self.calls[before:]
+                       if method in ('Target.activateTarget', 'Page.bringToFront', 'SystemInfo.getProcessInfo')]
+        self.assertEqual(focus_calls, [('Target.activateTarget', {'targetId': 'a'}),
+                                      ('Page.bringToFront', {'targetId': 'a'}),
+                                      ('SystemInfo.getProcessInfo', {})])
         self.controller.focus_observer = unittest.mock.Mock(side_effect=TimeoutError('X focus stalled'))
         reply = self.controller.handle(dict(id=4, cmd='focus', windowId=10))
         self.assertFalse(reply['ok'])
         self.assertIsNone(self.controller.focused_window)
         self.assertIsNone(self.controller.focus_evidence)
+        before = len(self.calls)
+        with self.assertRaises(TimeoutError):
+            self.controller.new_tab(10, 'about:blank')
+        self.assertFalse(any(method == 'Target.createTarget' for method, _ in self.calls[before:]))
+
+    def test_page_focus_failure_blocks_ack_and_new_tab(self):
+        self.attach()
+        observer = unittest.mock.Mock()
+        self.controller.focus_observer = observer
+        self.controller.page_call = unittest.mock.Mock(side_effect=TimeoutError('page focus stalled'))
+        reply = self.controller.handle(dict(id=3, cmd='focus', windowId=10))
+        self.assertFalse(reply['ok'])
+        self.assertIsNone(self.controller.focused_window)
+        self.assertIsNone(self.controller.focus_evidence)
+        observer.assert_not_called()
         before = len(self.calls)
         with self.assertRaises(TimeoutError):
             self.controller.new_tab(10, 'about:blank')
