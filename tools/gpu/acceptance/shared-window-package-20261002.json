@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-02",
+  "sourceRevision": "034f19d9",
+  "packaging": "Full ./package.sh bromure; Xcode backend, verified renderer XPC embedded through package script",
+  "notaryProfile": "Bromure",
+  "notaryAcceptedSubmissions": [
+    "5f30c0a3-816e-455a-8fe7-15e09ade1365",
+    "5f30c0a3-816e-455a-8fe7-15e09ade1365",
+    "5f30c0a3-816e-455a-8fe7-15e09ade1365",
+    "abb471e0-49b1-47f8-be42-b67f1907225c",
+    "abb471e0-49b1-47f8-be42-b67f1907225c",
+    "abb471e0-49b1-47f8-be42-b67f1907225c"
+  ],
+  "appAndDMGAcceptedAndStapled": true,
+  "desktopAppGatekeeper": "accepted: Notarized Developer ID",
+  "deepStrictCodeSignature": true,
+  "linuxImageGzipIntegrity": true,
+  "imageVersion": "501",
+  "imageScope": "private shared-window image; not uploaded/public catalog replacement; experimental async Squid disabled by default",
+  "sha256": {
+    "Bromure-Shared-Windows.dmg": "1e5871184b1d4af7521236b2bf3a815f0c0bad179a0e7ce6ac78b5deabd55cd4",
+    "Bromure-Linux-501-shared-windows.tar.gz": "fc6b36012946f17460538587b41bdc9b211f2a5952ba40207febf71484c028e9",
+    "bromure": "82ad9e971446d4b1b385a50651948f34bdbb9c29851a29417ceff8f6415ceb22"
+  },
+  "signedRuntime": {
+    "processExitCode": 0,
+    "nativeHistoryCompletionChildAndRoot": true,
+    "verifiedBrowserExitCount": 1,
+    "macReleaseCount": 1,
+    "gpuCommandRejections": 0,
+    "logSHA256": "cfa0737adbc7081bdb4228abe9759e78612ff6d4ffb1c4587b7dc093f5b958a2"
+  },
+  "limitations": [
+    "Audio validation deferred by user to physical Mac; production audio remains enabled",
+    "Ten-site graphics/network run omitted audio and used experimental async proxy; not full VPN/route acceptance",
+    "Signed combined resize+history diagnostic failed pretyping field-window attachment guard; static-size signed completion and live resize were verified separately; combined failure retained",
+    "Live resize movie checks central region of uniform stationary sibling, not every pixel/all workloads"
+  ]
+}
