@@ -1,0 +1,534 @@
+diff --git a/meson.build b/meson.build
+index b863eccb..98ed18e4 100644
+--- a/meson.build
++++ b/meson.build
+@@ -135,7 +135,7 @@ if with_drm_renderers
+   conf_data.set('ENABLE_DRM', 1)
+ endif
+ 
+-libdrm_dep = dependency('libdrm', version : '>=2.4.50', required: with_drm_renderers or get_option('video'))
++libdrm_dep = dependency('libdrm', version : '>=2.4.50', required: with_drm_renderers or (get_option('video') and not with_host_darwin))
+ libdrm_amdgpu_dep = dependency('libdrm_amdgpu', version : '>=2.4.121', required: with_drm_amdgpu)
+ conf_data.set('ENABLE_LIBDRM', libdrm_dep.found())
+ drm_uapi_dep = declare_dependency(
+@@ -453,8 +453,12 @@ if with_video
+      error('video require EGL, but it is not available')
+   endif
+   conf_data.set('ENABLE_VIDEO', 1)
+-  libva_dep = dependency('libva')
+-  libvadrm_dep = dependency('libva-drm')
++  if with_host_darwin
++    video_dep = dependency('appleframeworks', modules : ['VideoToolbox', 'CoreVideo', 'CoreMedia', 'IOSurface', 'Metal', 'Foundation'])
++  else
++    libva_dep = dependency('libva')
++    libvadrm_dep = dependency('libva-drm')
++  endif
+ endif
+ 
+ with_tests = get_option('tests')
+diff --git a/src/meson.build b/src/meson.build
+index 8b448a6b..fb0e6bc6 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -297,8 +297,13 @@ if with_render_server != ''
+ endif
+ 
+ if with_video
+-  virgl_sources += video_sources
+-  virgl_depends += [libva_dep, libvadrm_dep]
++  if with_host_darwin
++    virgl_sources += ['vrend/virgl_video_videotoolbox.m', 'vrend/vrend_video.c']
++    virgl_depends += [video_dep]
++  else
++    virgl_sources += video_sources
++    virgl_depends += [libva_dep, libvadrm_dep]
++  endif
+ endif
+ 
+ if with_host_windows
+diff --git a/src/vrend/virgl_video.h b/src/vrend/virgl_video.h
+index e9545594..b7f7e5ff 100644
+--- a/src/vrend/virgl_video.h
++++ b/src/vrend/virgl_video.h
+@@ -89,6 +89,9 @@ struct virgl_video_dma_buf {
+     uint32_t flags;
+ 
+     uint32_t num_planes;
++#ifdef __APPLE__
++    void *native_surface; /* Renderer-owned IOSurface; never a guest handle. */
++#endif
+     struct virgl_video_dma_buf_plane {
+         uint32_t drm_format;
+         int fd;
+@@ -125,6 +128,12 @@ struct virgl_video_callbacks {
+                              const unsigned *coded_sizes);
+ };
+ 
++#ifdef __APPLE__
++int virgl_video_copy_plane(void *surface, unsigned plane, void *texture);
++int virgl_video_copy_planar(void *surface, void *y, void *u, void *v);
++void virgl_video_copy_result(struct virgl_video_codec *codec, int result);
++#endif
++
+ int virgl_video_init(int drm_fd,
+                      struct virgl_video_callbacks *cbs,
+                      unsigned int flags);
+diff --git a/src/vrend/vrend_decode.c b/src/vrend/vrend_decode.c
+index 7774a253..89620d42 100644
+--- a/src/vrend/vrend_decode.c
++++ b/src/vrend/vrend_decode.c
+@@ -1787,10 +1787,8 @@ static int vrend_decode_create_video_codec(struct vrend_context *ctx,
+    if (length >= VIRGL_CREATE_VIDEO_CODEC_MAX_REF)
+       max_ref = get_buf_entry(buf, VIRGL_CREATE_VIDEO_CODEC_MAX_REF);
+ 
+-   vrend_video_create_codec(vctx, handle, profile, entrypoint,
+-                            chroma_fmt, level, width, height, max_ref, 0);
+-
+-   return 0;
++   return vrend_video_create_codec(vctx, handle, profile, entrypoint,
++                            chroma_fmt, level, width, height, max_ref, 0) ? EINVAL : 0;
+ }
+ 
+ static int vrend_decode_destroy_video_codec(struct vrend_context *ctx,
+@@ -1824,7 +1822,24 @@ static int vrend_decode_create_video_buffer(struct vrend_context *ctx,
+        num_res = VREND_VIDEO_BUFFER_PLANE_NUM;
+ 
+    uint32_t handle = get_buf_entry(buf, VIRGL_CREATE_VIDEO_BUFFER_HANDLE);
+-   uint32_t format = get_buf_entry(buf, VIRGL_CREATE_VIDEO_BUFFER_FORMAT);
++   uint32_t wire_format = get_buf_entry(buf, VIRGL_CREATE_VIDEO_BUFFER_FORMAT);
++   /* Video packets carry frozen VIRGL_FORMAT values, not Mesa's current
++    * PIPE_FORMAT enum. Map the supported planar formats explicitly. */
++   uint32_t format;
++   if (wire_format == VIRGL_FORMAT_NV12) format = PIPE_FORMAT_NV12;
++   else if (wire_format == VIRGL_FORMAT_IYUV) format = PIPE_FORMAT_IYUV;
++   else if (wire_format == VIRGL_FORMAT_YV12) format = PIPE_FORMAT_YV12;
++#ifdef __APPLE__
++   /* Generic guest VPP wraps RGB textures as video buffers. These carry no
++    * decoder capability and may never be passed to a hardware codec. */
++   else if (wire_format == VIRGL_FORMAT_B8G8R8A8_UNORM) format = PIPE_FORMAT_B8G8R8A8_UNORM;
++   else if (wire_format == VIRGL_FORMAT_R8G8B8A8_UNORM) format = PIPE_FORMAT_R8G8B8A8_UNORM;
++#endif
++#ifdef __APPLE__
++   else return EINVAL;
++#else
++   else format = wire_format; /* Preserve the Linux backend's other formats. */
++#endif
+    uint32_t width  = get_buf_entry(buf, VIRGL_CREATE_VIDEO_BUFFER_WIDTH);
+    uint32_t height = get_buf_entry(buf, VIRGL_CREATE_VIDEO_BUFFER_HEIGHT);
+ 
+@@ -1833,10 +1848,8 @@ static int vrend_decode_create_video_buffer(struct vrend_context *ctx,
+        res_handles[i] = get_buf_entry(buf,
+                                       VIRGL_CREATE_VIDEO_BUFFER_RES_BASE + i);
+ 
+-   vrend_video_create_buffer(vctx, handle, format, width, height,
+-                                      res_handles, num_res);
+-
+-   return 0;
++   return vrend_video_create_buffer(vctx, handle, format, width, height,
++                                      res_handles, num_res) ? EINVAL : 0;
+ }
+ 
+ static int vrend_decode_destroy_video_buffer(struct vrend_context *ctx,
+@@ -1865,9 +1878,7 @@ static int vrend_decode_begin_frame(struct vrend_context *ctx,
+ 
+    uint32_t cdc_handle = get_buf_entry(buf, VIRGL_BEGIN_FRAME_CDC_HANDLE);
+    uint32_t tgt_handle = get_buf_entry(buf, VIRGL_BEGIN_FRAME_TGT_HANDLE);
+-   vrend_video_begin_frame(vctx, cdc_handle, tgt_handle);
+-
+-   return 0;
++   return vrend_video_begin_frame(vctx, cdc_handle, tgt_handle) ? EINVAL : 0;
+ }
+ 
+ static int vrend_decode_decode_bitstream(struct vrend_context *ctx,
+@@ -1885,10 +1896,8 @@ static int vrend_decode_decode_bitstream(struct vrend_context *ctx,
+    uint32_t buf_handle = get_buf_entry(buf, VIRGL_DECODE_BS_BUF_HANDLE);
+    uint32_t buf_size   = get_buf_entry(buf, VIRGL_DECODE_BS_BUF_SIZE);
+ 
+-   vrend_video_decode_bitstream(vctx, cdc_handle, tgt_handle,
+-                                dsc_handle, 1, &buf_handle, &buf_size);
+-
+-   return 0;
++   return vrend_video_decode_bitstream(vctx, cdc_handle, tgt_handle,
++                                dsc_handle, 1, &buf_handle, &buf_size) ? EINVAL : 0;
+ }
+ 
+ static int vrend_decode_encode_bitstream(struct vrend_context *ctx,
+@@ -1906,10 +1915,8 @@ static int vrend_decode_encode_bitstream(struct vrend_context *ctx,
+    uint32_t desc_handle = get_buf_entry(buf, VIRGL_ENCODE_BS_DESC_HANDLE);
+    uint32_t feed_handle = get_buf_entry(buf, VIRGL_ENCODE_BS_FEED_HANDLE);
+ 
+-   vrend_video_encode_bitstream(vctx, cdc_handle, src_handle, dest_handle,
+-                                desc_handle, feed_handle);
+-
+-   return 0;
++   return vrend_video_encode_bitstream(vctx, cdc_handle, src_handle, dest_handle,
++                                desc_handle, feed_handle) ? EINVAL : 0;
+ }
+ 
+ static int vrend_decode_end_frame(struct vrend_context *ctx,
+@@ -1924,9 +1931,7 @@ static int vrend_decode_end_frame(struct vrend_context *ctx,
+    uint32_t cdc_handle = get_buf_entry(buf, VIRGL_END_FRAME_CDC_HANDLE);
+    uint32_t tgt_handle = get_buf_entry(buf, VIRGL_END_FRAME_TGT_HANDLE);
+ 
+-   vrend_video_end_frame(vctx, cdc_handle, tgt_handle);
+-
+-   return 0;
++   return vrend_video_end_frame(vctx, cdc_handle, tgt_handle) ? EINVAL : 0;
+ }
+ 
+ #else
+diff --git a/src/vrend/vrend_formats.c b/src/vrend/vrend_formats.c
+index 40ed4d55..abb3f72d 100644
+--- a/src/vrend/vrend_formats.c
++++ b/src/vrend/vrend_formats.c
+@@ -649,6 +649,19 @@ void vrend_check_texture_multisample(struct vrend_format_table *table,
+                                      bool enable_storage)
+ {
+    bool is_desktop_gl = epoxy_is_desktop_gl();
++   if (!is_desktop_gl && epoxy_gl_version() == 30) {
++      for (int i = 0; i < VIRGL_FORMAT_MAX_EXTENDED; ++i) {
++         if (!table[i].internalformat) continue;
++         GLuint rbo;
++         glGenRenderbuffers(1, &rbo);
++         glBindRenderbuffer(GL_RENDERBUFFER, rbo);
++         glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, table[i].internalformat, 32, 32);
++         if (glGetError() == GL_NO_ERROR) table[i].flags |= VIRGL_TEXTURE_CAN_MULTISAMPLE;
++         glDeleteRenderbuffers(1, &rbo);
++      }
++      glBindRenderbuffer(GL_RENDERBUFFER, 0);
++      return;
++   }
+    for (int i = 0; i < VIRGL_FORMAT_MAX_EXTENDED; i++) {
+       bool function_available =
+          (table[i].flags & VIRGL_TEXTURE_CAN_TEXTURE_STORAGE) ? enable_storage : is_desktop_gl;
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index e6ae0074..2c942897 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -993,6 +993,10 @@ static GLuint vrend_resource_get_internal_format_override(const struct vrend_res
+     * TODO: perhaps this can be generalized to all alpha-less formats?
+     */
+    const enum virgl_formats format = res->base.format;
++#ifdef ENABLE_METAL
++   /* Metal XRGB storage is four bytes, just like its RGBA counterpart. */
++   if (res->metal_native) return GL_NONE;
++#endif
+    if (has_bit(res->storage_bits, VREND_STORAGE_EGL_IMAGE)) {
+       switch (format) {
+       case VIRGL_FORMAT_B8G8R8X8_UNORM:
+@@ -3085,6 +3089,9 @@ void vrend_fb_bind_texture_id(struct vrend_resource *res,
+    }
+ 
+    switch (res->target) {
++   case GL_RENDERBUFFER:
++      glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER, id);
++      break;
+    case GL_TEXTURE_1D_ARRAY:
+    case GL_TEXTURE_2D_ARRAY:
+    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+@@ -3842,16 +3849,22 @@ void vrend_set_single_sampler_view(struct vrend_context *ctx,
+                glTexParameteri(view->texture->target, GL_TEXTURE_MAX_LEVEL, view->u.tex.last_level);
+                tex->cur_max = view->u.tex.last_level;
+             }
+-            if (memcmp(tex->cur_swizzle, view->gl_swizzle, 4 * sizeof(GLint))) {
++            static const GLint identity_swizzle[4] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
++            const GLint *sampler_swizzle = view->gl_swizzle;
++            if (vrend_resource_is_metal_native(view->texture) &&
++                (view->texture->base.format == VIRGL_FORMAT_R8_UNORM ||
++                 view->texture->base.format == VIRGL_FORMAT_R8G8_UNORM))
++               sampler_swizzle = identity_swizzle;
++            if (memcmp(tex->cur_swizzle, sampler_swizzle, 4 * sizeof(GLint))) {
+                if (vrend_state.use_gles) {
+                   for (unsigned int i = 0; i < 4; ++i) {
+-                     if (tex->cur_swizzle[i] != view->gl_swizzle[i]) {
+-                         glTexParameteri(view->texture->target, GL_TEXTURE_SWIZZLE_R + i, view->gl_swizzle[i]);
++                     if (tex->cur_swizzle[i] != sampler_swizzle[i]) {
++                         glTexParameteri(view->texture->target, GL_TEXTURE_SWIZZLE_R + i, sampler_swizzle[i]);
+                      }
+                   }
+                } else
+-                  glTexParameteriv(view->texture->target, GL_TEXTURE_SWIZZLE_RGBA, view->gl_swizzle);
+-               memcpy(tex->cur_swizzle, view->gl_swizzle, 4 * sizeof(GLint));
++                  glTexParameteriv(view->texture->target, GL_TEXTURE_SWIZZLE_RGBA, sampler_swizzle);
++               memcpy(tex->cur_swizzle, sampler_swizzle, 4 * sizeof(GLint));
+             }
+ 
+             if (tex->cur_srgb_decode != view->srgb_decode && util_format_is_srgb(tex->base.base.format)) {
+@@ -4268,6 +4281,24 @@ static inline void vrend_sync_shader_io(struct vrend_sub_context *sub_ctx,
+ static bool vrend_get_swizzle(struct vrend_sampler_view *view,
+                               enum pipe_swizzle swizzle[4])
+ {
++   /* Metal EGLImage video planes share one GL texture across component views.
++    * Lower their per-view swizzles into GLSL; GL texture state is shared. */
++   if (vrend_resource_is_metal_native(view->texture) &&
++       (view->texture->base.format == VIRGL_FORMAT_R8_UNORM ||
++        view->texture->base.format == VIRGL_FORMAT_R8G8_UNORM)) {
++      for (unsigned i = 0; i < 4; ++i) {
++         switch (view->gl_swizzle[i]) {
++         case GL_RED: swizzle[i] = PIPE_SWIZZLE_X; break;
++         case GL_GREEN: swizzle[i] = PIPE_SWIZZLE_Y; break;
++         case GL_BLUE: swizzle[i] = PIPE_SWIZZLE_Z; break;
++         case GL_ALPHA: swizzle[i] = PIPE_SWIZZLE_W; break;
++         case GL_ONE: swizzle[i] = PIPE_SWIZZLE_1; break;
++         default: swizzle[i] = PIPE_SWIZZLE_0; break;
++         }
++      }
++      return true;
++   }
++
+    static const enum pipe_swizzle OOOR[] = {PIPE_SWIZZLE_0, PIPE_SWIZZLE_0, PIPE_SWIZZLE_0, PIPE_SWIZZLE_X};
+    static const enum pipe_swizzle RRR1[] = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_X, PIPE_SWIZZLE_X, PIPE_SWIZZLE_1};
+    static const enum pipe_swizzle RRRG[] = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_X, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y};
+@@ -4450,7 +4481,10 @@ static inline void vrend_fill_shader_key(struct vrend_sub_context *sub_ctx,
+          vrend_shader_sampler_views_mask_set(key->sampler_views_emulated_rect_mask, i);
+       }
+ 
+-      if (view->texture->target == GL_TEXTURE_BUFFER) {
++      if (view->texture->target == GL_TEXTURE_BUFFER ||
++          (vrend_resource_is_metal_native(view->texture) &&
++           (view->texture->base.format == VIRGL_FORMAT_R8_UNORM ||
++            view->texture->base.format == VIRGL_FORMAT_R8G8_UNORM))) {
+          enum pipe_swizzle swizzle[4];
+          if (vrend_get_swizzle(view, swizzle)) {
+             vrend_shader_sampler_views_mask_set(key->sampler_views_lower_swizzle_mask, i);
+@@ -7925,10 +7959,14 @@ int vrend_renderer_init(const struct vrend_if_cbs *cbs, uint32_t flags)
+ 
+ #ifdef ENABLE_VIDEO
+    if (flags & VREND_USE_VIDEO) {
++#ifdef __APPLE__
++        if (vrend_video_init(-1)) virgl_warn("VideoToolbox hardware video unavailable\n");
++#else
+         if (vrend_clicbs->get_drm_fd)
+             vrend_video_init(vrend_clicbs->get_drm_fd());
+         else
+             virgl_warn("Video disabled due to missing get_drm_fd\n");
++#endif
+    }
+ #endif
+ 
+@@ -8764,7 +8802,8 @@ static void vrend_resource_metal_init(UNUSED struct vrend_resource *gr, UNUSED u
+    if (!vrend_state.native_share_texture)
+       return;
+ 
+-   if ((gr->base.bind & VIRGL_RES_BIND_SCANOUT) == 0)
++   if ((gr->base.bind & VIRGL_RES_BIND_SCANOUT) == 0 &&
++       format != VIRGL_FORMAT_R8_UNORM && format != VIRGL_FORMAT_R8G8_UNORM)
+       return;
+ 
+    if (gr->base.depth0 != 1 || gr->base.last_level != 0 || gr->base.nr_samples > 1)
+@@ -8879,6 +8918,29 @@ static int vrend_resource_alloc_texture(struct vrend_resource *gr,
+    if (format_can_texture_storage)
+       gr->storage_bits |= VREND_STORAGE_GL_IMMUTABLE;
+ 
++   /* GLES 3.0 supports real multisample renderbuffers, but not multisample
++    * textures. Keep those resources as renderbuffers and resolve via FBO blits. */
++   if (vrend_state.use_gles && epoxy_gl_version() == 30 && pr->nr_samples > 1) {
++      if (pr->target != PIPE_TEXTURE_2D || pr->depth0 != 1 || pr->array_size != 1 ||
++          pr->last_level != 0)
++         return EINVAL;
++      glGenRenderbuffers(1, &gr->gl_id);
++      glBindRenderbuffer(GL_RENDERBUFFER, gr->gl_id);
++      glRenderbufferStorageMultisample(GL_RENDERBUFFER, pr->nr_samples,
++                                       tex_conv_table[format].internalformat,
++                                       pr->width0, pr->height0);
++      const GLenum error = glGetError();
++      glBindRenderbuffer(GL_RENDERBUFFER, 0);
++      if (error != GL_NO_ERROR) {
++         virgl_error("MSAA allocation failed format=%u samples=%u size=%ux%u GL=%x\n", format, pr->nr_samples, pr->width0, pr->height0, error);
++         glDeleteRenderbuffers(1, &gr->gl_id); gr->gl_id = 0;
++         return EINVAL;
++      }
++      gr->target = GL_RENDERBUFFER;
++      gr->storage_bits = VREND_STORAGE_GL_RENDERBUFFER;
++      return 0;
++   }
++
+    if (!image_oes) {
+       vrend_resource_d3d_init(gr, format);
+       vrend_resource_metal_init(gr, format);
+@@ -9129,7 +9191,9 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
+ 
+ void vrend_renderer_resource_destroy(struct vrend_resource *res)
+ {
+-   if (has_bit(res->storage_bits, VREND_STORAGE_GL_TEXTURE)) {
++   if (has_bit(res->storage_bits, VREND_STORAGE_GL_RENDERBUFFER)) {
++      glDeleteRenderbuffers(1, &res->gl_id);
++   } else if (has_bit(res->storage_bits, VREND_STORAGE_GL_TEXTURE)) {
+       glDeleteTextures(1, &res->gl_id);
+    } else if (has_bit(res->storage_bits, VREND_STORAGE_GL_BUFFER)) {
+       glDeleteBuffers(1, &res->gl_id);
+@@ -9651,7 +9715,7 @@ static int vrend_renderer_transfer_write_iov(struct vrend_context *ctx,
+       glformat = tex_conv_table[res->base.format].glformat;
+       gltype = tex_conv_table[res->base.format].gltype;
+ 
+-      if ((!vrend_state.use_core_profile) && (res->y_0_top)) {
++      if ((!vrend_state.use_core_profile) && !vrend_state.use_gles && (res->y_0_top)) {
+          GLuint buffers;
+          GLuint fb_id;
+ 
+@@ -13146,19 +13210,11 @@ angle_done:
+    caps->v1.max_samples = vrend_renderer_query_multisample_caps(caps->v1.max_samples, &caps->v2);
+    virgl_debug("[VREND CAPS] After query_multisample_caps: max_samples=%u\n", caps->v1.max_samples);
+    
+-   /* For macOS Metal backend: Override to max_samples=1 to trigger Mesa's fake_sw_msaa.
+-    * Even though MSAA tests confirm 4 samples work, Mesa's format queries can't verify
+-    * multisample support, causing MaxSamples=0. Reporting 1 triggers fake_sw_msaa workaround.
+-    * Apply to both desktop GL and GLES (ANGLE) modes. */
+-   const char *version = (const char *)glGetString(GL_VERSION);
+-   bool is_metal = (version && strstr(version, "Metal"));
+-   bool is_angle = (version && strstr(version, "ANGLE"));
+-   if ((is_metal || is_angle) && caps->v1.max_samples > 1) {
+-      virgl_debug("[VREND CAPS] %s backend: Overriding max_samples %u -> 1 for fake_sw_msaa\n", 
+-                  is_angle ? "ANGLE" : "Metal",
+-                  caps->v1.max_samples);
+-      caps->v1.max_samples = 1;
+-   }
++   /* Mesa gates all multisample resources on this wire bit, including
++    * renderbuffers. GLES 3.0 resources are backed by real renderbuffers;
++    * multisample texture sampling requires GLES 3.1 and is unsupported. */
++   if (vrend_state.use_gles && gles_ver == 30)
++      caps->v1.bset.texture_multisample = 1;
+ 
+    caps->v2.capability_bits |= VIRGL_CAP_TGSI_INVARIANT | VIRGL_CAP_SET_MIN_SAMPLES |
+                                VIRGL_CAP_TGSI_PRECISE | VIRGL_CAP_APP_TWEAK_SUPPORT;
+diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
+index 814eb7e3..3ae1feda 100644
+--- a/src/vrend/vrend_renderer.h
++++ b/src/vrend/vrend_renderer.h
+@@ -81,6 +81,7 @@ struct vrend_context;
+ #define VREND_STORAGE_GL_IMMUTABLE       BIT(6)
+ #define VREND_STORAGE_GL_MEMOBJ          BIT(7)
+ #define VREND_STORAGE_NATIVE_TEXTURE     BIT(8)
++#define VREND_STORAGE_GL_RENDERBUFFER    BIT(9)
+ 
+ struct vrend_resource {
+    struct pipe_resource base;
+diff --git a/src/vrend/vrend_shader.c b/src/vrend/vrend_shader.c
+index 39895cec..d700e515 100644
+--- a/src/vrend/vrend_shader.c
++++ b/src/vrend/vrend_shader.c
+@@ -3582,6 +3582,22 @@ static void translate_tex(struct dump_ctx *ctx,
+                          srcs[0], src_swizzle, offset, bias,
+                          dinfo->dst_override_no_wm[0] ? "" : writemask);
+          }
++      } else if (vrend_shader_sampler_views_mask_get(ctx->key->sampler_views_lower_swizzle_mask, sinfo->sreg_index)) {
++         /* EGLImage component views can alias one texture. Apply their swizzle
++          * per sampler rather than changing shared GL texture state. */
++         emit_buff(&ctx->glsl_strbufs, "{\n vec4 val = %s(texture%s(%s, %s%s%s%s));\n val = vec4(",
++                   get_string(dtypeprefix), tex_ext, srcs[sampler_index],
++                   srcs[0], src_swizzle, offset, bias);
++         uint16_t packed = ctx->key->tex_swizzle[sinfo->sreg_index];
++         for (unsigned i = 0; i < 4; ++i) {
++            if (i) emit_buf(&ctx->glsl_strbufs, ", ");
++            unsigned swizzle = (packed >> (3 * i)) & 7;
++            if (swizzle == PIPE_SWIZZLE_0) emit_buf(&ctx->glsl_strbufs, "0.0");
++            else if (swizzle == PIPE_SWIZZLE_1) emit_buf(&ctx->glsl_strbufs, "1.0");
++            else emit_buff(&ctx->glsl_strbufs, "val%s", get_swizzle_string(swizzle));
++         }
++         emit_buff(&ctx->glsl_strbufs, ");\n %s = %s(val%s);\n}\n", dst,
++                   get_string(dinfo->dstconv), dinfo->dst_override_no_wm[0] ? "" : writemask);
+       } else {
+          emit_buff(&ctx->glsl_strbufs, "%s = %s(%s(texture%s(%s, %s%s%s%s)%s));\n",
+                    dst, get_string(dinfo->dstconv), get_string(dtypeprefix),
+diff --git a/src/vrend/vrend_video.c b/src/vrend/vrend_video.c
+index 57341d83..fa7ba278 100644
+--- a/src/vrend/vrend_video.c
++++ b/src/vrend/vrend_video.c
+@@ -106,6 +106,7 @@ struct vrend_video_buffer {
+     struct list_head head;
+ 
+     uint32_t num_planes;
++    uint32_t format;
+     struct vrend_video_plane planes[3];
+ };
+ 
+@@ -149,6 +150,30 @@ static struct vrend_video_buffer *get_video_buffer(
+ static int sync_dmabuf_to_video_buffer(struct vrend_video_buffer *buf,
+                                        const struct virgl_video_dma_buf *dmabuf)
+ {
++#ifdef __APPLE__
++    if (!dmabuf->native_surface || dmabuf->num_planes != 2 ||
++        (buf->num_planes != 2 && buf->num_planes != 3)) return -1;
++    if (buf->num_planes == 3) {
++        struct vrend_resource *planes[3];
++        for (unsigned i = 0; i < 3; ++i) {
++            planes[i] = vrend_renderer_ctx_res_lookup(buf->ctx->ctx, buf->planes[i].res_handle);
++            if (!planes[i] || !planes[i]->metal_texture) return -1;
++        }
++        glFinish();
++        unsigned u = buf->format == PIPE_FORMAT_YV12 ? 2 : 1;
++        unsigned v = buf->format == PIPE_FORMAT_YV12 ? 1 : 2;
++        return virgl_video_copy_planar(dmabuf->native_surface, planes[0]->metal_texture,
++                                       planes[u]->metal_texture, planes[v]->metal_texture);
++    }
++    glFinish(); /* Complete prior ANGLE use before updating its Metal textures. */
++    for (unsigned i = 0; i < 2; ++i) {
++        struct vrend_resource *res = vrend_renderer_ctx_res_lookup(buf->ctx->ctx, buf->planes[i].res_handle);
++        if (!res || !res->metal_texture || virgl_video_copy_plane(dmabuf->native_surface, i, res->metal_texture))
++            return -1;
++
++    }
++    return 0;
++#else
+     if (!(dmabuf->flags & VIRGL_VIDEO_DMABUF_READ_ONLY)) {
+         virgl_error("%s: dmabuf is not readable\n", __func__);
+         return -1;
+@@ -205,6 +230,7 @@ static int sync_dmabuf_to_video_buffer(struct vrend_video_buffer *buf,
+     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+ 
+     return 0;
++#endif
+ }
+ 
+ static int sync_video_buffer_to_dmabuf(struct vrend_video_buffer *buf,
+@@ -278,7 +304,12 @@ static void vrend_video_decode_completed(
+ 
+     (void)codec;
+ 
+-    sync_dmabuf_to_video_buffer(buf, dmabuf);
++    int result = sync_dmabuf_to_video_buffer(buf, dmabuf);
++#ifdef __APPLE__
++    virgl_video_copy_result(codec, result);
++#else
++    (void)result;
++#endif
+ }
+ 
+ 
+@@ -354,8 +385,10 @@ static struct virgl_video_callbacks video_callbacks = {
+ 
+ int vrend_video_init(int drm_fd)
+ {
++#ifndef __APPLE__
+     if (drm_fd < 0)
+         return -1;
++#endif
+ 
+     return virgl_video_init(drm_fd, &video_callbacks, 0);
+ }
+@@ -472,6 +505,7 @@ int vrend_video_create_buffer(struct vrend_video_context *ctx,
+     if (!buf)
+         return -1;
+ 
++    buf->format = format;
+     args.format = format;
+     args.width = width;
+     args.height = height;
+@@ -751,6 +785,7 @@ int vrend_video_decode_bitstream(struct vrend_video_context *ctx,
+         return -1;
+     }
+ 
++    if (!num_buffers || num_buffers > 128) return -1;
+     bs_buffers = calloc(num_buffers, sizeof(void *));
+     if (!bs_buffers) {
+         virgl_error("%s: alloc bs_buffers failed\n", __func__);
+@@ -771,6 +806,9 @@ int vrend_video_decode_bitstream(struct vrend_video_context *ctx,
+             continue;
+         }
+ 
++        if (res->base.target != PIPE_BUFFER || !buffer_sizes[i] ||
++            buffer_sizes[i] > res->base.width0 || buffer_sizes[i] > 8u * 1024u * 1024u)
++            goto err;
+         vrend_read_from_iovec(res->iov, res->num_iovs, 0,
+                               res->ptr, buffer_sizes[i]);
+         bs_buffers[num_bs] = res->ptr;

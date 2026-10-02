@@ -1,0 +1,13 @@
+{
+  "imageVersion": 403,
+  "guestRenderer": "virgl",
+  "guestEGLVersion": "1.5",
+  "hostRenderer": "ANGLE Metal Renderer: Apple M5 Pro",
+  "guestVirglClearAndReadback": true,
+  "readbackPixelRGBA": [255, 0, 0, 255],
+  "sandboxedHelper": true,
+  "appBackendEnabled": false,
+  "hardwareVideoDecodingVerified": false,
+  "test": "tools/gpu/guest-egl-smoke.py",
+  "date": "2026-09-30"
+}

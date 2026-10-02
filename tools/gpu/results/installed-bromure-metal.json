@@ -1,0 +1,12 @@
+{
+  "renderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)",
+  "compositing": "enabled",
+  "content": {
+    "title": "Bromure",
+    "url": "https://bromure.io/en/hello",
+    "width": 960,
+    "height": 571,
+    "dpr": 1,
+    "ready": "complete"
+  }
+}

@@ -98,6 +98,29 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// way forward is `startOver`, which clears this.
     var restartNeeded: Bool?
 
+    /// Who works on the task when it isn't a new agent in a fresh worktree
+    /// (nil, the default): an existing session, or a room (its Switchboard
+    /// hands it to a member). Rides a delegation request from the board.
+    var assignment: TaskAssignment?
+    /// The board's request to the assignee (DelegationStore record).
+    var delegationID: UUID?
+    /// The assignee's latest progress report.
+    var assigneeNote: String?
+    /// A question the assignee asked the board, waiting for the user.
+    var pendingQuestion: String?
+    var pendingAskID: UUID?
+    /// What the assignee said when it delivered.
+    var deliverySummary: String?
+    /// The pull request the assignee opened for it (found in its delivery).
+    var pullRequestURL: String?
+
+    /// The first GitHub pull-request link in `text`.
+    static func pullRequestURL(in text: String) -> String? {
+        let pattern = #"https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[0-9]+"#
+        guard let r = text.range(of: pattern, options: .regularExpression) else { return nil }
+        return String(text[r])
+    }
+
     init(id: UUID = UUID(), title: String = "", details: String = "",
          profileID: UUID, repoPath: String = "~", tool: Profile.Tool = .claude,
          stage: Stage = .backlog, branchSlug: String? = nil,
@@ -199,6 +222,94 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         if let done = validatedAt, done >= requested { return false }
         return Date().timeIntervalSince(requested) < 3600
     }
+}
+
+/// Who picks a backlog task up: a new agent in a fresh worktree (each
+/// task its own), a session that already exists, or a room (its
+/// Switchboard hands it to a member). Tasks queued for the same assignee
+/// are taken one after another, oldest first.
+struct TaskAssignment: Codable, Equatable, Sendable, Hashable {
+    /// worktree: a new agent; session: an existing one; room: the room's
+    /// Switchboard picks a member; switchboard: the app's Switchboard picks
+    /// any session.
+    enum Kind: String, Codable, Sendable { case worktree, session, room, switchboard }
+    var kind: Kind
+    /// The session's id, or the room's (unused for worktree).
+    var id: UUID
+    /// "@hotfixes" / "#payments" / "New agent" — how the card names it.
+    var label: String
+
+    static let newAgent = TaskAssignment(
+        kind: .worktree, id: UUID(uuidString: "00000000-0000-4000-8000-00000000A6E7")!,
+        label: NSLocalizedString("New agent", comment: "task assignee"))
+    static let switchboard = TaskAssignment(
+        kind: .switchboard, id: UUID(uuidString: "00000000-0000-4000-8000-0000005B0A2D")!,
+        label: "@switchboard")
+
+    /// The SF Symbol for an assignee.
+    var systemImage: String {
+        switch kind {
+        case .worktree:    return "arrow.triangle.branch"
+        case .session:     return "person.crop.circle.fill"
+        case .room:        return "square.grid.2x2.fill"
+        case .switchboard: return "switch.2"
+        }
+    }
+
+    /// How many new-agent tasks run at once from the queue.
+    static let newAgentConcurrency = 2
+
+    func same(as other: TaskAssignment?) -> Bool {
+        guard let other else { return false }
+        return kind == other.kind && (kind == .worktree || kind == .switchboard || id == other.id)
+    }
+
+    /// Where `task` stands in its assignee's queue (1 = next), nil when it
+    /// isn't queued.
+    static func queuePosition(of task: CodingTask, in tasks: [CodingTask]) -> Int? {
+        guard task.stage == .backlog, let a = task.assignment else { return nil }
+        let queue = tasks.filter { $0.stage == .backlog && a.same(as: $0.assignment) }
+            .sorted { $0.createdAt < $1.createdAt }
+        return queue.firstIndex { $0.id == task.id }.map { $0 + 1 }
+    }
+
+    /// Sessions and rooms finish a board task by pushing the branch and
+    /// opening a pull request (on by default), instead of leaving it local.
+    static var finishWithPullRequest: Bool {
+        get { UserDefaults.standard.object(forKey: "codingTasks.finishWithPR") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "codingTasks.finishWithPR") }
+    }
+
+    /// The board's standing choice for NEW backlog items (per Mac).
+    static var autoAssign: TaskAssignment? {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: "codingTasks.autoAssign") else { return nil }
+            return try? JSONDecoder().decode(TaskAssignment.self, from: data)
+        }
+        set {
+            if let newValue, let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: "codingTasks.autoAssign")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "codingTasks.autoAssign")
+            }
+        }
+    }
+}
+
+/// What the board can hand a task to: live sessions and rooms.
+struct TaskAssigneeChoices: Equatable, Sendable {
+    struct Session: Identifiable, Equatable, Sendable, Hashable {
+        let id: UUID
+        let label: String
+        let workspace: String
+        let busy: Bool
+    }
+    struct Room: Identifiable, Equatable, Sendable, Hashable {
+        let id: UUID
+        let name: String
+    }
+    var sessions: [Session] = []
+    var rooms: [Room] = []
 }
 
 /// One piece of review feedback on a task's changes. `file` scopes a
@@ -1265,6 +1376,23 @@ final class CodingTaskEngine {
         let unsent = task.comments.filter { $0.sentAt == nil }
         guard !unsent.isEmpty else { return }
         let feedback = Self.feedbackPrompt(comments: unsent)
+
+        // Done by someone else's session (a board request): the feedback
+        // goes back through the delegation, not into a task tab.
+        if task.delegationID != nil {
+            guard await delegate.taskDispatcher.sendBack(taskID, feedback: feedback) else { return }
+            let now = Date()
+            store.mutate(taskID) {
+                $0.stage = .inProgress
+                $0.lastError = nil
+                $0.mergingAt = nil
+                $0.deliverySummary = nil
+                for i in $0.comments.indices where $0.comments[i].sentAt == nil {
+                    $0.comments[i].sentAt = now
+                }
+            }
+            return
+        }
 
         var delivered = await typeIntoSession(
             profileID: task.profileID, branch: branch, text: feedback)

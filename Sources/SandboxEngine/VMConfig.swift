@@ -159,6 +159,9 @@ public struct VMConfig {
     /// Whether GPU acceleration is enabled in the browser.
     public var enableGPU: Bool
 
+    /// Per-profile host renderer choice; still subject to host/image availability.
+    public var enableMetalRenderer: Bool
+
     /// Whether WebGL and WebGPU are enabled in the browser.
     public var enableWebGL: Bool
 
@@ -375,6 +378,7 @@ public struct VMConfig {
         browser: BrowserChoice = .chromium,
         chromeEnrollmentToken: String? = nil,
         enableGPU: Bool = true,
+        enableMetalRenderer: Bool = true,
         enableWebGL: Bool = false,
         enableZeroCopy: Bool = true,
         enableSmoothScrolling: Bool = true,
@@ -466,6 +470,7 @@ public struct VMConfig {
         self.browser = browser
         self.chromeEnrollmentToken = chromeEnrollmentToken
         self.enableGPU = enableGPU
+        self.enableMetalRenderer = enableMetalRenderer
         self.enableWebGL = enableWebGL
         self.enableZeroCopy = enableZeroCopy
         self.enableSmoothScrolling = enableSmoothScrolling

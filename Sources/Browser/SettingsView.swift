@@ -55,12 +55,14 @@ struct SettingsView: View {
     @AppStorage("vm.networkMode") private var networkMode = "nat"
     @AppStorage("vm.bridgedInterface") private var bridgedInterface = ""
     @AppStorage("vm.extraKernelOptions") private var extraKernelOptions = VMConfig.defaultExtraKernelOptions
+    @AppStorage(MetalRendererPreference.defaultsKey) private var metalRendererEnabled = true
     @AppStorage("vm.energyMode") private var energyMode = EnergyMode.default.rawValue
     @AppStorage("phishingAnalysis.serverURL") private var phishingServerURL = PhishingAnalysisBridge.defaultServerBaseURL.absoluteString
     @AppStorage("automation.enabled") private var automationEnabled = false
     @AppStorage("automation.port") private var automationPort = 9222
     @AppStorage("automation.bindAddress") private var automationBindAddress = "127.0.0.1"
     @AppStorage("links.defaultProfileID") private var defaultProfileID = ""
+    @AppStorage(AppState.launchProfileKey) private var launchProfileID = ""
 
     var state: AppState?
 
@@ -408,6 +410,22 @@ struct SettingsView: View {
             sectionHeader("General", subtitle: "App-wide preferences")
 
             VStack(alignment: .leading, spacing: 6) {
+                Text("Open New Windows With").font(.headline)
+                Text("The profile Bromure opens when you launch it, click its Dock icon, or press \u{2318}N with no browser window in front. \u{201C}Last Used Profile\u{201D} picks the one you used most recently. You can also set this from the profile menu in any window.")
+                    .settingDescription()
+                Picker("", selection: $launchProfileID) {
+                    Text("Last Used Profile").tag("")
+                    ForEach(state?.profileManager.allProfiles ?? []) { profile in
+                        Text(profile.name).tag(profile.id.uuidString)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 260)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
                 Text("Default Profile for Links").font(.headline)
                 Text("When Bromure is your default browser, links clicked in other apps open with this profile. Choose \u{201C}Ask Every Time\u{201D} to pick a profile on each click.")
                     .settingDescription()
@@ -428,6 +446,19 @@ struct SettingsView: View {
     private var hardwareView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("Hardware", subtitle: "Resources allocated to each browser session")
+
+            settingToggle("Use Metal Renderer",
+                description: MetalRendererPreference.isSupported
+                    ? "Accelerates graphics and supported video playback. Applies to new browser windows; requires a rebuilt image."
+                    : "Requires macOS 27 or later. Software rendering remains available.",
+                isOn: Binding(get: { MetalRendererPreference.isSupported && metalRendererEnabled },
+                              set: { enabled in
+                                  if let state { state.setMetalRendererEnabled(enabled) }
+                                  else { metalRendererEnabled = enabled }
+                              }))
+                .disabled(!MetalRendererPreference.isSupported)
+
+            settingsDivider
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Memory").font(.headline)

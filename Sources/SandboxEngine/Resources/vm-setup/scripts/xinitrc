@@ -42,6 +42,7 @@ CHROME_LANG=
 CHROME_UA=
 BROWSER_BIN=
 DISPLAY_SCALE=
+GRAPHICS_BACKEND=software
 MTU=
 KEY_REPEAT_DELAY_MS=
 KEY_REPEAT_RATE_HZ=
@@ -138,11 +139,9 @@ if [ "$NATIVE_CHROME" = "1" ] && [ -f "$HOME/.config/openbox/rc-nativetabs.xml" 
 fi
 [ "$DEBUG_SHELL" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/shell-agent.py &
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
-# Mesa software GL (llvmpipe) — VZ's virtio-gpu has no 3D acceleration
-# for Linux guests, and llvmpipe beats Chromium's bundled SwiftShader by
-# ~2x on compositing. NO_LIBGL_SOFTWARE=1 (via vm.chromeEnvExtra) skips
-# this for experiments.
-[ "$NO_LIBGL_SOFTWARE" = "1" ] || export LIBGL_ALWAYS_SOFTWARE=1
+# Select the Mesa environment for the actual host device. Legacy hosts omit
+# GRAPHICS_BACKEND and continue using software GL; VirGL is explicit opt-in.
+. /usr/local/bin/graphics-env.sh
 
 
 # Boost Xorg and Chromium to high CPU priority (-10 nice).
@@ -273,4 +272,3 @@ done
 # dhclient -r under ifupdown — the udhcpc -R equivalent from Alpine days).
 doas ifdown eth0 2>/dev/null
 doas poweroff
-

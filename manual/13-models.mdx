@@ -210,7 +210,7 @@ The global settings are kept in `~/Library/Application Support/BromureAC/models.
 
 The on-device engine runs open-weight coding models on your Mac's GPU with Apple's [MLX](18-glossary.mdx) framework — no cloud round-trip, no per-token bill, and no code leaving the Mac. There is nothing to install, no Python environment and no server to configure.
 
-> **Note:** Inference runs on the Mac, not inside the VM. Virtualization.framework gives the Linux guest no GPU, Metal or MLX access, so the guest reaches the engine across the [wire boundary](18-glossary.mdx). Apple Silicon is required — the same requirement as the app itself.
+> **Note:** Inference runs on the Mac, not inside the VM. The browser's optional [Metal graphics device](06j-metal-renderer.mdx) does not provide GPU compute or MLX access to Linux, so the guest reaches the engine across the [wire boundary](18-glossary.mdx). Apple Silicon is required — the same requirement as the app itself.
 
 ### The engine process
 

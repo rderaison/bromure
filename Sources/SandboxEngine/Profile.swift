@@ -217,6 +217,7 @@ public struct ProfileSettings: Codable, Equatable {
     // Browser
     public var homePage: String = "https://bromure.io/hello"
     public var enableGPU: Bool = true
+    public var enableMetalRenderer: Bool = true
     public var enableWebGL: Bool = false
     public var enableZeroCopy: Bool = true
     public var enableSmoothScrolling: Bool = true
@@ -372,7 +373,7 @@ public struct ProfileSettings: Codable, Equatable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling, strictSiteIsolation, userAgent, browser
+        case homePage, enableGPU, enableMetalRenderer, enableWebGL, enableZeroCopy, enableSmoothScrolling, strictSiteIsolation, userAgent, browser
         case enableAdBlocking, enableWarp, warpAutoConnect
         case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case ikev2Server, ikev2RemoteID, ikev2AuthMethod, ikev2Username, ikev2UseDNS, ikev2AutoConnect
@@ -400,6 +401,7 @@ public struct ProfileSettings: Codable, Equatable {
         let defaults = ProfileSettings()
         homePage = try c.decodeIfPresent(String.self, forKey: .homePage) ?? defaults.homePage
         enableGPU = try c.decodeIfPresent(Bool.self, forKey: .enableGPU) ?? defaults.enableGPU
+        enableMetalRenderer = try c.decodeIfPresent(Bool.self, forKey: .enableMetalRenderer) ?? defaults.enableMetalRenderer
         enableWebGL = try c.decodeIfPresent(Bool.self, forKey: .enableWebGL) ?? defaults.enableWebGL
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
@@ -484,6 +486,7 @@ public struct ProfileSettings: Codable, Equatable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(homePage, forKey: .homePage)
         try c.encode(enableGPU, forKey: .enableGPU)
+        try c.encode(enableMetalRenderer, forKey: .enableMetalRenderer)
         try c.encode(enableWebGL, forKey: .enableWebGL)
         try c.encode(enableZeroCopy, forKey: .enableZeroCopy)
         try c.encode(enableSmoothScrolling, forKey: .enableSmoothScrolling)
@@ -619,6 +622,7 @@ public struct ProfileSettings: Codable, Equatable {
             chromeEnrollmentToken: browser == .chrome && !chromeEnrollmentToken.isEmpty
                 ? chromeEnrollmentToken : nil,
             enableGPU: enableGPU,
+            enableMetalRenderer: enableMetalRenderer,
             enableWebGL: enableGPU ? enableWebGL : false,  // WebGL requires GPU
             enableZeroCopy: enableZeroCopy,
             enableSmoothScrolling: enableSmoothScrolling,

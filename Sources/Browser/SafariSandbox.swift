@@ -14,7 +14,8 @@ struct Bromure: ParsableCommand {
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
         subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self,
-                      InitFossImage.self, BuildProvisioner.self, VerifyImage.self, VerifyBrowsers.self],
+                      InitFossImage.self, BuildProvisioner.self, VerifyImage.self, VerifyBrowsers.self,
+                      GPUDemo.self, GPUBrowser.self],
         defaultSubcommand: Launch.self
     )
 
@@ -149,6 +150,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var bookmarksStaticItemCount = 0
     /// The History menu, rebuilt from the key window's session on each open.
     private weak var historyMenu: NSMenu?
+    private weak var graphicsMenu: NSMenu?
+    private weak var graphicsMenuItem: NSMenuItem?
+    private var graphicsMenuTimer: Timer?
+    private var graphicsMenuOpen = false
     private var consentWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
     /// Sparkle auto-updater. Retained strongly — if this deallocates, scheduled
@@ -321,10 +326,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Launch flow
 
-    /// The profile a fresh window opens in when no window is key: the
-    /// most recently used one (``ProfileManager/allProfiles`` sorts by
-    /// last use), falling back to the ephemeral default.
+    /// The profile a fresh window opens in when no window is key: the one
+    /// chosen under "Open New Windows With" if it still exists, otherwise
+    /// the most recently used one (``ProfileManager/allProfiles`` sorts by
+    /// last use).
     @MainActor private func startupProfile() -> Profile? {
+        if let id = state.launchProfileID,
+           let p = state.profileManager.profile(withID: id) { return p }
         if let id = state.selectedProfileID,
            let p = state.profileManager.profile(withID: id) { return p }
         return state.profileManager.allProfiles.first
@@ -881,7 +889,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Menu
 
-    private func setupMenu() {
+    func setupMenu() {
         let mainMenu = NSMenu()
 
         // App menu
@@ -1070,7 +1078,61 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         mainMenu.addItem(windowItem)
         NSApp.windowsMenu = windowMenu
 
+        let graphics = NSMenu(title: "GPU")
+        graphics.autoenablesItems = false
+        graphics.delegate = self
+        let graphicsItem = NSMenuItem(title: "GPU", action: nil, keyEquivalent: "")
+        graphicsItem.submenu = graphics
+        mainMenu.addItem(graphicsItem)
+        self.graphicsMenu = graphics
+        self.graphicsMenuItem = graphicsItem
         NSApp.mainMenu = mainMenu
+        MainActor.assumeIsolated { updateGraphicsMenu() }
+        graphicsMenuTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateGraphicsMenu() }
+        }
+        graphicsMenuTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @MainActor private func updateGraphicsMenu() {
+        guard let menu = graphicsMenu else { return }
+        let open = sessions.filter { !$0.closing && $0.window.isVisible }
+        let active = keyWindowSession() ?? open.last
+        let renderer = active?.rendererDisplayName ?? "Software"
+        let title = active == nil ? "GPU" : renderer
+        graphicsMenuItem?.title = title
+        graphicsMenuItem?.image = active?.usesMetalRenderer == true ? MetalRendererBadge.image(size: 18) : nil
+        menu.title = title
+        guard !graphicsMenuOpen else { return }
+        menu.removeAllItems()
+        let status = NSMenuItem(title: active == nil ? "No browser window active" : "Renderer: " + renderer,
+                                action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+        let toggle = NSMenuItem(title: "Use Metal Renderer", action: #selector(toggleMetalRendererAction(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.isEnabled = MetalRendererPreference.isSupported
+        toggle.state = MetalRendererPreference.isSupported && MetalRendererPreference.isEnabled ? .on : .off
+        toggle.toolTip = MetalRendererPreference.isSupported ? "Applies to new browser windows." : "Requires macOS 27 or later."
+        menu.addItem(toggle)
+        if open.count > 1 {
+            menu.addItem(.separator())
+            for session in open {
+                let name = session.profile?.name ?? session.window.title
+                let item = NSMenuItem(title: name + ": " + session.rendererDisplayName, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+    }
+
+    @MainActor @objc private func toggleMetalRendererAction(_ sender: Any?) {
+        guard MetalRendererPreference.isSupported else { return }
+        state.setMetalRendererEnabled(!MetalRendererPreference.isEnabled)
+        updateGraphicsMenu()
     }
 
     // MARK: - Actions
@@ -1185,12 +1247,22 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Bookmarks menu mirroring (NSMenuDelegate)
 
+    @MainActor @objc func menuWillOpen(_ menu: NSMenu) {
+        if menu === graphicsMenu { graphicsMenuOpen = true }
+    }
+
+    @MainActor @objc func menuDidClose(_ menu: NSMenu) {
+        if menu === graphicsMenu { graphicsMenuOpen = false; updateGraphicsMenu() }
+    }
+
     @MainActor @objc func menuNeedsUpdate(_ menu: NSMenu) {
         // Paint immediately from the key window's cache (no flicker on
         // reopen), then refresh from the guest for next time. A menu-bar
         // menu won't repaint after this returns, so the cache is also warmed
         // when the bridge connects — that's what makes the first open show.
-        if menu === bookmarksMenu {
+        if menu === graphicsMenu {
+            updateGraphicsMenu()
+        } else if menu === bookmarksMenu {
             rebuildBookmarksMenu()
             guard let session = keyWindowSession() else { return }
             Task { @MainActor in
@@ -2297,8 +2369,18 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 /// This is a plain Swift class (not NSObject) to avoid VZ dispatch source
 /// lifetime issues with ObjC ivar destruction.
 final class BrowserSession {
+    var rendererDisplayName: String {
+        guard let graphics = warmVM?.graphicsSession else { return "Software" }
+        if !graphics.isRendererRunning { return "GPU unavailable" }
+        return usesMetalRenderer ? "Metal" : "Starting GPU"
+    }
+
     let id = UUID()
     private var warmVM: VMPool.WarmVM?
+    var usesMetalRenderer: Bool {
+        guard !closing, let graphics = warmVM?.graphicsSession else { return false }
+        return graphics.isRendererRunning && graphics.backendName == "virgl" && graphics.deliveredFrameCount > 0
+    }
     let window: NSWindow
     private var vmView: VZVirtualMachineView?
     var onClosed: ((BrowserSession) -> Void)?
@@ -2343,6 +2425,7 @@ final class BrowserSession {
     private var cjkInputBridge: CJKInputBridge?
     private var gestureBridge: GestureBridge?
     private(set) var scrollBridge: PrecisionScrollBridge?
+    private var pointerBridge: GuestPointerBridge?
     private(set) var autoSuspend: VMAutoSuspend?
     private var traceWindow: NSWindow?
     private var traceRecordButton: NSButton?
@@ -2351,6 +2434,10 @@ final class BrowserSession {
     private var warpPulseTimer: Timer?
     private var effectsPanel: NSWindow?
     private var effectsAccessory: NSTitlebarAccessoryViewController?
+    private var rendererStatusTimer: Timer?
+    private var rendererStatusLabel: NSTextField?
+    private var rendererStatusIcon: NSImageView?
+    private var rendererStatusContainer: NSView?
     private var splitView: NSSplitView?
     private var drawerHost: NSView?
     fileprivate var hasFileTransfer = false
@@ -2378,11 +2465,35 @@ final class BrowserSession {
         // Non-native mode keeps the legacy behaviour where the guest sees
         // every key.
         vmView.capturesSystemKeys = !config.nativeChrome
-        vmView.automaticallyReconfiguresDisplay = true
+        vmView.automaticallyReconfiguresDisplay = warmVM.graphicsSession == nil
         self.vmView = vmView
+        MainActor.assumeIsolated {
+        if let graphics = warmVM.graphicsSession,
+           let gpuView = try? HostGPUFrameView(gpuFrame: vmView.bounds) {
+            gpuView.autoresizingMask = [.width, .height]
+            gpuView.guestDisplayScale = Double(VMConfig.resolvedDisplayScale())
+            gpuView.hiddenTopRows = config.nativeChromeInset
+            gpuView.displaySizeChanged = { [weak graphics] width, height in
+                graphics?.resizeDisplay(width: width, height: height)
+            }
+            vmView.addSubview(gpuView)
+            vmView.gpuFrameView = gpuView
+            graphics.observeCursor { [weak gpuView] cursor in
+                DispatchQueue.main.async { gpuView?.presentCursor(cursor) }
+            }
+            graphics.observeFrames { [weak gpuView] surface in
+                DispatchQueue.main.async {
+                    if let surface { try? gpuView?.present(surface) }
+                    else { gpuView?.discardFrame() }
+                }
+            }
+        }
+
+
+        }
 
         let windowWidth = CGFloat(config.displayWidth) / 2
-        let windowHeight = CGFloat(config.displayHeight)
+        let windowHeight = CGFloat(config.displayHeight) / (warmVM.graphicsSession == nil ? 1 : 2)
 
         // Wrap vmView in a drop target that accepts file drags from macOS.
         // The drop target — and the VZ scanout — span the FULL framebuffer,
@@ -2403,7 +2514,7 @@ final class BrowserSession {
         let cropperOrDropTarget: NSView
         let croppingCropper: NativeChromeCropper?
         if config.nativeChromeInset > 0 {
-            let dpr = max(CGFloat(VMConfig.detectDisplayScale()), 1)
+            let dpr = max(CGFloat(VMConfig.resolvedDisplayScale()), 1)
             let insetPts = CGFloat(config.nativeChromeInset) / dpr
 
             let cropper = NativeChromeCropper()
@@ -2504,6 +2615,7 @@ final class BrowserSession {
             window.sharingType = .none
         }
         self.window = window
+        MainActor.assumeIsolated { installRendererStatus() }
 
         // Filter macOS-generated key-repeat events targeting this VM
         // window. VZ's USB HID path forwards every keyDown — including
@@ -2857,6 +2969,7 @@ final class BrowserSession {
                 // All actions resolve through the app delegate.
                 if let profile {
                     tabModel.profileName = profile.name
+                    tabModel.profileID = profile.id
                     tabModel.profileColor = profile.color
                     let delegate = { NSApp.delegate as? GUIAppDelegate }
                     tabModel.profileIsManaged = delegate()?.state.profileManager.isManaged(profile.id) ?? false
@@ -3278,6 +3391,15 @@ final class BrowserSession {
                 dropTarget.onMagnify = { [weak bridge] delta, guestX, guestY in
                     bridge?.sendPinchZoom(magnification: delta, guestX: guestX, guestY: guestY)
                 }
+            }
+        }
+
+        if warmVM.graphicsSession != nil, let dev = linkSocketDevice {
+            MainActor.assumeIsolated {
+                let bridge = GuestPointerBridge(socketDevice: dev)
+                self.pointerBridge = bridge
+                vmView.pointerBridge = bridge
+                self.window.acceptsMouseMovedEvents = true
             }
         }
 
@@ -4184,6 +4306,53 @@ final class BrowserSession {
         drawerHost?.isHidden == false
     }
 
+    @MainActor private func installRendererStatus() {
+        guard warmVM?.graphicsSession != nil else { return }
+        let label = NSTextField(labelWithString: "GPU")
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.alignment = .center
+        label.frame = NSRect(x: 0, y: 0, width: 100, height: 22)
+        let accessory = NSTitlebarAccessoryViewController()
+        let icon = NSImageView(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+        icon.image = MetalRendererBadge.image()
+        icon.setAccessibilityLabel("Metal acceleration enabled")
+        let badge = NSStackView(views: [icon, label])
+        badge.orientation = .horizontal
+        badge.spacing = 4
+        badge.frame = NSRect(x: 0, y: 0, width: 100, height: 22)
+        accessory.view = badge
+        rendererStatusContainer = badge
+        rendererStatusIcon = icon
+        accessory.layoutAttribute = .trailing
+        window.addTitlebarAccessoryViewController(accessory)
+        rendererStatusLabel = label
+        updateRendererStatus()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, !self.closing else { timer.invalidate(); return }
+                self.updateRendererStatus()
+            }
+        }
+        rendererStatusTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @MainActor private func updateRendererStatus() {
+        guard let label = rendererStatusLabel else { return }
+        rendererStatusContainer?.isHidden = warmVM?.graphicsSession == nil
+        rendererStatusIcon?.isHidden = !usesMetalRenderer
+        label.isHidden = usesMetalRenderer
+        rendererStatusIcon?.toolTip = "Metal GPU acceleration is active for this window."
+        if let graphics = warmVM?.graphicsSession {
+            label.stringValue = !graphics.isRendererRunning ? "GPU unavailable" : usesMetalRenderer ? "Metal GPU" : "Starting GPU…"
+            label.toolTip = graphics.isRendererRunning ? "This window uses the Metal-backed renderer. Choose Use Metal Renderer in the GPU menu or Settings → Hardware for newly opened windows." : "The renderer stopped. Close and reopen this window to restart it."
+        } else {
+            label.stringValue = ""
+            label.isHidden = true
+            label.toolTip = nil
+        }
+    }
+
     func show() {
         window.center()
         let offset = CGFloat((BrowserSession.windowCount - 1) % 5) * 25
@@ -4241,6 +4410,8 @@ final class BrowserSession {
             // Before the CDP bridge: closes the direct wheel socket and
             // stops its reconnect loop, which would otherwise poll the
             // (stopped) pool forever from the retired session.
+            pointerBridge?.stop()
+            pointerBridge = nil
             scrollBridge?.stop()
             scrollBridge = nil
             cdpBridge?.stop()
@@ -5671,6 +5842,50 @@ final class NativeChromeCropper: NSView {
 /// wheels), whose clicky deltas the USB path already represents fine.
 final class PrecisionScrollVMView: VZVirtualMachineView {
     weak var scrollBridge: PrecisionScrollBridge?
+    weak var pointerBridge: GuestPointerBridge?
+    weak var gpuFrameView: HostGPUFrameView?
+    private var pointerButtons = 0
+    private var pointerTracking: NSTrackingArea?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        pointerBridge != nil || super.acceptsFirstMouse(for: event)
+    }
+
+
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTracking { removeTrackingArea(pointerTracking) }
+        guard pointerBridge != nil else { return }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        pointerTracking = area
+    }
+
+    private func sendPointer(_ event: NSEvent, button: Int = 0, down: Bool? = nil) -> Bool {
+        guard let bridge = pointerBridge else { return false }
+        guard inputReady else { return true }
+        if let down {
+            if down { pointerButtons |= button } else { pointerButtons &= ~button }
+        }
+        let p = convert(event.locationInWindow, from: nil)
+        let normalized = gpuFrameView?.normalizedGuestPoint(convert(p, to: gpuFrameView))
+            ?? (x: Double(p.x / max(bounds.width, 1)), y: Double(1 - p.y / max(bounds.height, 1)))
+        if down != nil, UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
+            print("[GPU pointer] window=\(window?.windowNumber ?? -1) bridge=\(ObjectIdentifier(bridge)) buttons=\(pointerButtons) t=\(ProcessInfo.processInfo.systemUptime) point=\(p) bounds=\(bounds) normalized=\(normalized) active=\(String(describing: gpuFrameView?.activeScanoutSize)) retained=\(gpuFrameView?.isHoldingResizeFrame ?? false) crop=\(gpuFrameView?.hiddenTopRows ?? 0)")
+        }
+        bridge.send(x: normalized.x, y: normalized.y, buttons: pointerButtons, immediately: down != nil)
+        return true
+    }
+
+    override func mouseMoved(with event: NSEvent) { if !sendPointer(event) { super.mouseMoved(with: event) } }
+    override func mouseDragged(with event: NSEvent) { if !sendPointer(event) { super.mouseDragged(with: event) } }
+    override func rightMouseDragged(with event: NSEvent) { if !sendPointer(event) { super.rightMouseDragged(with: event) } }
+    override func otherMouseDragged(with event: NSEvent) { if !sendPointer(event) { super.otherMouseDragged(with: event) } }
+    override func mouseUp(with event: NSEvent) { if !sendPointer(event, button: 1, down: false) { super.mouseUp(with: event) } }
+    override func rightMouseUp(with event: NSEvent) { if !sendPointer(event, button: 2, down: false) { super.rightMouseUp(with: event) } }
+    override func otherMouseUp(with event: NSEvent) { if !sendPointer(event, button: 4, down: false) { super.otherMouseUp(with: event) } }
+
 
     /// When true, the view declines first-responder status so the
     /// native-tabs address bar can win the focus race after ⌘T / ⌘L. The
@@ -5695,7 +5910,7 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
 
     override var acceptsFirstResponder: Bool {
         if declinesFirstResponder || !inputReady { return false }
-        return super.acceptsFirstResponder
+        return pointerBridge != nil || super.acceptsFirstResponder
     }
 
     override func resignFirstResponder() -> Bool {
@@ -5716,17 +5931,18 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
         // the guest before the native tab bar exists wedges focus handling.
         guard inputReady else { return }
         declinesFirstResponder = false
-        super.mouseDown(with: event)
+        window?.makeFirstResponder(self)
+        if !sendPointer(event, button: 1, down: true) { super.mouseDown(with: event) }
     }
 
     override func rightMouseDown(with event: NSEvent) {
         guard inputReady else { return }
-        super.rightMouseDown(with: event)
+        if !sendPointer(event, button: 2, down: true) { super.rightMouseDown(with: event) }
     }
 
     override func otherMouseDown(with event: NSEvent) {
         guard inputReady else { return }
-        super.otherMouseDown(with: event)
+        if !sendPointer(event, button: 4, down: true) { super.otherMouseDown(with: event) }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

@@ -335,6 +335,11 @@ if [ "$TARGET" = "sidecar" ]; then
     codesign --force --sign "$SIGN_ID" --options runtime "$MACOS_DIR/tmux"
     echo "Bundled tmux $(cat "$SCRIPT_DIR/vendor/tmux/VERSION" 2>/dev/null)."
 fi
+# The browser's sandboxed GPU renderer (a no-op unless built on SDK 27);
+# Sidecar draws no VM and doesn't carry it.
+if [ "$TARGET" != "sidecar" ]; then
+    bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$SIGN_ID"
+fi
 
 # Code sign with entitlements.
 # Virtualization.framework requires com.apple.security.virtualization.

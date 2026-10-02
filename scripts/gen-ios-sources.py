@@ -54,6 +54,7 @@ SHARED = [
     "FatClientController.swift",
     "FatClientConnect.swift",
     "AgentSessions.swift",      # session model/store + shared row/section views (sessions home)
+    "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)
     "AgentDelegation.swift",    # delegation records + store + notice text (the engine/MCP stay macOS-only)
     "SessionStageViews.swift",  # header / launch / rest / new-session screens (AppKit bits #if'd)
     "ConsolePresence.swift",  # console-seat arbitration; AppKit monitor #if'd out, iOS reports always-active

@@ -69,6 +69,16 @@ final class AppState: @unchecked Sendable {
     let profileManager: ProfileManager
     var selectedProfileID: UUID?
 
+    /// Preference: the profile a new window opens with when no browser
+    /// window is in front (launch, Dock click, ⌘N). Empty = the profile
+    /// used most recently. Set in Settings › General or the profile chip.
+    static let launchProfileKey = "launch.defaultProfileID"
+
+    var launchProfileID: UUID? {
+        get { UserDefaults.standard.string(forKey: Self.launchProfileKey).flatMap(UUID.init(uuidString:)) }
+        set { UserDefaults.standard.set(newValue?.uuidString ?? "", forKey: Self.launchProfileKey) }
+    }
+
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
     var onPoolReady: (() -> Void)?
@@ -437,7 +447,17 @@ final class AppState: @unchecked Sendable {
             "Install", comment: "Consent button of the new-postinstall-steps prompt"))
         alert.addButton(withTitle: NSLocalizedString(
             "Not Now", comment: "Decline button of the new-postinstall-steps prompt"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // A synchronous modal loop prevents the pool's MainActor startup task
+        // from resuming. Keep optional maintenance from blocking browser boot.
+        let response: NSApplication.ModalResponse
+        if let parent = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+            response = await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: parent) { continuation.resume(returning: $0) }
+            }
+        } else {
+            response = alert.runModal()
+        }
+        guard response == .alertFirstButtonReturn else { return }
 
         installReason = .update
         phase = .initializing(status: "Installing packages...", progress: nil)
@@ -513,6 +533,12 @@ final class AppState: @unchecked Sendable {
         guard s.endIndex != digitsEnd else { return msg }  // bare "%" — leave it
         while s.last == " " { s = s.dropLast() }
         return String(s)
+    }
+
+    func setMetalRendererEnabled(_ enabled: Bool) {
+        guard MetalRendererPreference.isSupported, MetalRendererPreference.isEnabled != enabled else { return }
+        MetalRendererPreference.isEnabled = enabled
+        restartPool()
     }
 
     /// Shut down the current pool and start a fresh one with updated config.

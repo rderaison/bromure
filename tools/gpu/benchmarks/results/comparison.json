@@ -1,0 +1,1145 @@
+{
+  "metadata": {
+    "date": "2026-10-01T10:48:06.619724+00:00",
+    "host": "Apple M5 Pro, 18 CPU cores, 64 GiB RAM, macOS 27.0.1 (26A434)",
+    "guest": "Same image403, Ubuntu 24.04 ARM64, Mesa 25.2.8, 9 vCPUs, 4 GiB RAM",
+    "browser": "Chrome 154.0.8037.57 on all three paths",
+    "workloadSHA256": "4a55951b219bccd0f342323bef1265ca4dd34fbd342f626089e8695147379807",
+    "trials": 5,
+    "statistic": "Median wall-clock batch time; lower is better",
+    "sourceBase": "bf277e4f + bounded 1-MiB 3D-submission fix and MLX 0.32.3 dependency alignment",
+    "thermalCheck": "pmset -g therm reported no recorded thermal/performance warnings"
+  },
+  "platforms": {
+    "bromure": {
+      "browser": "Chrome/154.0.8037.57",
+      "renderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)",
+      "gpuCompositing": "enabled",
+      "setup": {
+        "webgl2": true,
+        "renderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0)",
+        "gpuTimerAvailable": true,
+        "cases": [
+          {
+            "name": "draw_calls",
+            "width": 64,
+            "height": 64,
+            "iterations": 4,
+            "draws": 2048
+          },
+          {
+            "name": "720p_fill",
+            "width": 1280,
+            "height": 720,
+            "iterations": 32,
+            "draws": 64
+          },
+          {
+            "name": "1080p_shader",
+            "width": 1920,
+            "height": 1080,
+            "iterations": 128,
+            "draws": 24
+          }
+        ]
+      },
+      "trials": 5,
+      "summary": {
+        "draw_calls": {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "medianMs": 21.100000000002183,
+          "minMs": 19.200000000000728,
+          "maxMs": 21.299999999999272,
+          "medianDrawsPerSecond": 97061.61137439754,
+          "samplesMs": [
+            19.200000000000728,
+            21.299999999999272,
+            21.299999999999272,
+            21.100000000002183,
+            20.5
+          ]
+        },
+        "720p_fill": {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "medianMs": 32,
+          "minMs": 30.700000000000728,
+          "maxMs": 33.20000000000073,
+          "medianDrawsPerSecond": 2000.0,
+          "samplesMs": [
+            30.700000000000728,
+            31.80000000000109,
+            32,
+            33,
+            33.20000000000073
+          ]
+        },
+        "1080p_shader": {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "medianMs": 67.90000000000146,
+          "minMs": 66.79999999999927,
+          "maxMs": 68.70000000000073,
+          "medianDrawsPerSecond": 353.4609720176655,
+          "samplesMs": [
+            66.79999999999927,
+            68.70000000000073,
+            67.80000000000291,
+            68.29999999999927,
+            67.90000000000146
+          ]
+        }
+      },
+      "samples": [
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 19.200000000000728,
+          "drawsPerSecond": 106666.66666666263,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 30.700000000000728,
+          "drawsPerSecond": 2084.690553745879,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 66.79999999999927,
+          "drawsPerSecond": 359.2814371257524,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 31.80000000000109,
+          "drawsPerSecond": 2012.5786163521323,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 68.70000000000073,
+          "drawsPerSecond": 349.3449781659352,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 21.299999999999272,
+          "drawsPerSecond": 96150.23474178732,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 67.80000000000291,
+          "drawsPerSecond": 353.98230088494057,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 21.299999999999272,
+          "drawsPerSecond": 96150.23474178732,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 32,
+          "drawsPerSecond": 2000,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 21.100000000002183,
+          "drawsPerSecond": 97061.61137439754,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 33,
+          "drawsPerSecond": 1939.3939393939395,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 68.29999999999927,
+          "drawsPerSecond": 351.39092240117503,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 33.20000000000073,
+          "drawsPerSecond": 1927.7108433734518,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 67.90000000000146,
+          "drawsPerSecond": 353.4609720176655,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 20.5,
+          "drawsPerSecond": 99902.43902439025,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        }
+      ],
+      "method": "Offscreen RGBA8 WebGL2, antialiasing off, identical GLSL/draw counts/resolution, 8 warm-up draws per sample, alpha-blended draws prevent last-draw-only elimination; wall-clock batch time includes synchronous 1-pixel readback at batch end to force GPU completion. Compilation and allocation excluded. Includes browser/driver/readback overhead, not a pure GPU hardware timer.",
+      "guestInventory": {
+        "cpuCount": 9,
+        "virtioDevices": {
+          "/sys/bus/virtio/devices/virtio1/features": {
+            "deviceId": "0x0003",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio8/features": {
+            "deviceId": "0x0005",
+            "features": "1010000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio6/features": {
+            "deviceId": "0x0019",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio4/features": {
+            "deviceId": "0x0013",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio2/features": {
+            "deviceId": "0x0002",
+            "features": "0010001001000110000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio0/features": {
+            "deviceId": "0x0001",
+            "features": "0001010000000000100000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio9/features": {
+            "deviceId": "0x0010",
+            "features": "1000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio7/features": {
+            "deviceId": "0x0004",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio5/features": {
+            "deviceId": "0x0010",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio3/features": {
+            "deviceId": "0x001a",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          }
+        }
+      }
+    },
+    "apple_vz": {
+      "browser": "Chrome/154.0.8037.57",
+      "renderer": "ANGLE (Mesa, llvmpipe (LLVM 20.1.2 128 bits), OpenGL 4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.3)",
+      "gpuCompositing": "disabled_software",
+      "setup": {
+        "webgl2": true,
+        "renderer": "ANGLE (Mesa, llvmpipe (LLVM 20.1.2 128 bits), OpenGL 4.5)",
+        "gpuTimerAvailable": true,
+        "cases": [
+          {
+            "name": "draw_calls",
+            "width": 64,
+            "height": 64,
+            "iterations": 4,
+            "draws": 2048
+          },
+          {
+            "name": "720p_fill",
+            "width": 1280,
+            "height": 720,
+            "iterations": 32,
+            "draws": 64
+          },
+          {
+            "name": "1080p_shader",
+            "width": 1920,
+            "height": 1080,
+            "iterations": 128,
+            "draws": 24
+          }
+        ]
+      },
+      "trials": 5,
+      "summary": {
+        "draw_calls": {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "medianMs": 167.40000000000146,
+          "minMs": 143.89999999999964,
+          "maxMs": 171.20000000000437,
+          "medianDrawsPerSecond": 12234.169653524386,
+          "samplesMs": [
+            143.89999999999964,
+            167.40000000000146,
+            168.6999999999971,
+            166.90000000000146,
+            171.20000000000437
+          ]
+        },
+        "720p_fill": {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "medianMs": 963.3000000000011,
+          "minMs": 961.3000000000029,
+          "maxMs": 965.3000000000029,
+          "medianDrawsPerSecond": 66.43828506176676,
+          "samplesMs": [
+            963.3000000000011,
+            963.2000000000007,
+            965,
+            965.3000000000029,
+            961.3000000000029
+          ]
+        },
+        "1080p_shader": {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "medianMs": 3557.2000000000007,
+          "minMs": 3551,
+          "maxMs": 3568.2999999999975,
+          "medianDrawsPerSecond": 6.746879568199707,
+          "samplesMs": [
+            3554.9000000000015,
+            3557.2000000000007,
+            3568.2999999999975,
+            3551,
+            3560
+          ]
+        }
+      },
+      "samples": [
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 143.89999999999964,
+          "drawsPerSecond": 14232.105628909001,
+          "pixel": [
+            45,
+            179,
+            78,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 963.3000000000011,
+          "drawsPerSecond": 66.43828506176676,
+          "pixel": [
+            82,
+            71,
+            121,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 3554.9000000000015,
+          "drawsPerSecond": 6.751244760752761,
+          "pixel": [
+            118,
+            134,
+            203,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 963.2000000000007,
+          "drawsPerSecond": 66.44518272425245,
+          "pixel": [
+            82,
+            71,
+            121,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 3557.2000000000007,
+          "drawsPerSecond": 6.746879568199707,
+          "pixel": [
+            118,
+            134,
+            203,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 167.40000000000146,
+          "drawsPerSecond": 12234.169653524386,
+          "pixel": [
+            45,
+            179,
+            78,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 3568.2999999999975,
+          "drawsPerSecond": 6.725891881288013,
+          "pixel": [
+            118,
+            134,
+            203,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 168.6999999999971,
+          "drawsPerSecond": 12139.893301719238,
+          "pixel": [
+            45,
+            179,
+            78,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 965,
+          "drawsPerSecond": 66.32124352331606,
+          "pixel": [
+            82,
+            71,
+            121,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 166.90000000000146,
+          "drawsPerSecond": 12270.820850808761,
+          "pixel": [
+            45,
+            179,
+            78,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 965.3000000000029,
+          "drawsPerSecond": 66.30063192789787,
+          "pixel": [
+            82,
+            71,
+            121,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 3551,
+          "drawsPerSecond": 6.758659532526049,
+          "pixel": [
+            118,
+            134,
+            203,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 961.3000000000029,
+          "drawsPerSecond": 66.57651097472153,
+          "pixel": [
+            82,
+            71,
+            121,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 3560,
+          "drawsPerSecond": 6.741573033707865,
+          "pixel": [
+            118,
+            134,
+            203,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 171.20000000000437,
+          "drawsPerSecond": 11962.616822429602,
+          "pixel": [
+            45,
+            179,
+            78,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        }
+      ],
+      "method": "Offscreen RGBA8 WebGL2, antialiasing off, identical GLSL/draw counts/resolution, 8 warm-up draws per sample, alpha-blended draws prevent last-draw-only elimination; wall-clock batch time includes synchronous 1-pixel readback at batch end to force GPU completion. Compilation and allocation excluded. Includes browser/driver/readback overhead, not a pure GPU hardware timer.",
+      "guestInventory": {
+        "cpuCount": 9,
+        "virtioDevices": {
+          "/sys/bus/virtio/devices/virtio1/features": {
+            "deviceId": "0x0003",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio8/features": {
+            "deviceId": "0x0005",
+            "features": "1010000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio6/features": {
+            "deviceId": "0x0019",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio4/features": {
+            "deviceId": "0x0013",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio2/features": {
+            "deviceId": "0x0002",
+            "features": "0010001001000110000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio0/features": {
+            "deviceId": "0x0001",
+            "features": "0001010000000000100000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio7/features": {
+            "deviceId": "0x0004",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio5/features": {
+            "deviceId": "0x0010",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          },
+          "/sys/bus/virtio/devices/virtio3/features": {
+            "deviceId": "0x001a",
+            "features": "0000000000000000000000000000110010100000000000000000000000000000"
+          }
+        }
+      }
+    },
+    "native_macos": {
+      "browser": "Chrome/154.0.8037.57",
+      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5 Pro, Version 27.0.1 (Build 26A434))",
+      "gpuCompositing": "enabled",
+      "setup": {
+        "webgl2": true,
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5 Pro, Unspecified Version)",
+        "gpuTimerAvailable": true,
+        "cases": [
+          {
+            "name": "draw_calls",
+            "width": 64,
+            "height": 64,
+            "iterations": 4,
+            "draws": 2048
+          },
+          {
+            "name": "720p_fill",
+            "width": 1280,
+            "height": 720,
+            "iterations": 32,
+            "draws": 64
+          },
+          {
+            "name": "1080p_shader",
+            "width": 1920,
+            "height": 1080,
+            "iterations": 128,
+            "draws": 24
+          }
+        ]
+      },
+      "trials": 5,
+      "summary": {
+        "draw_calls": {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "medianMs": 13.100000001490116,
+          "minMs": 12.899999998509884,
+          "maxMs": 13.400000005960464,
+          "medianDrawsPerSecond": 156335.87784481232,
+          "samplesMs": [
+            13,
+            13.199999995529652,
+            13.100000001490116,
+            13.400000005960464,
+            12.899999998509884
+          ]
+        },
+        "720p_fill": {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "medianMs": 22.600000001490116,
+          "minMs": 22.5,
+          "maxMs": 29,
+          "medianDrawsPerSecond": 2831.8584068929295,
+          "samplesMs": [
+            22.5,
+            22.80000000447035,
+            29,
+            22.600000001490116,
+            22.600000001490116
+          ]
+        },
+        "1080p_shader": {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "medianMs": 63.399999998509884,
+          "minMs": 63,
+          "maxMs": 63.70000000298023,
+          "medianDrawsPerSecond": 378.5488959079508,
+          "samplesMs": [
+            63.400000005960464,
+            63.399999998509884,
+            63,
+            63.20000000298023,
+            63.70000000298023
+          ]
+        }
+      },
+      "samples": [
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 13,
+          "drawsPerSecond": 157538.46153846153,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 22.5,
+          "drawsPerSecond": 2844.4444444444443,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 63.400000005960464,
+          "drawsPerSecond": 378.54889586346485,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 1
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 22.80000000447035,
+          "drawsPerSecond": 2807.017543309283,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 63.399999998509884,
+          "drawsPerSecond": 378.5488959079508,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 13.199999995529652,
+          "drawsPerSecond": 155151.5152040592,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 2
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 63,
+          "drawsPerSecond": 380.95238095238096,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 13.100000001490116,
+          "drawsPerSecond": 156335.87784481232,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 29,
+          "drawsPerSecond": 2206.896551724138,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 3
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 13.400000005960464,
+          "drawsPerSecond": 152835.82082753937,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 22.600000001490116,
+          "drawsPerSecond": 2831.8584068929295,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 63.20000000298023,
+          "drawsPerSecond": 379.74683542513077,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 4
+        },
+        {
+          "name": "720p_fill",
+          "width": 1280,
+          "height": 720,
+          "iterations": 32,
+          "draws": 64,
+          "elapsedMs": 22.600000001490116,
+          "drawsPerSecond": 2831.8584068929295,
+          "pixel": [
+            84,
+            73,
+            88,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        },
+        {
+          "name": "1080p_shader",
+          "width": 1920,
+          "height": 1080,
+          "iterations": 128,
+          "draws": 24,
+          "elapsedMs": 63.70000000298023,
+          "drawsPerSecond": 376.76609103417815,
+          "pixel": [
+            99,
+            110,
+            182,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        },
+        {
+          "name": "draw_calls",
+          "width": 64,
+          "height": 64,
+          "iterations": 4,
+          "draws": 2048,
+          "elapsedMs": 12.899999998509884,
+          "drawsPerSecond": 158759.6899408194,
+          "pixel": [
+            46,
+            178,
+            79,
+            255
+          ],
+          "error": 0,
+          "trial": 5
+        }
+      ],
+      "method": "Offscreen RGBA8 WebGL2, antialiasing off, identical GLSL/draw counts/resolution, 8 warm-up draws per sample, alpha-blended draws prevent last-draw-only elimination; wall-clock batch time includes synchronous 1-pixel readback at batch end to force GPU completion. Compilation and allocation excluded. Includes browser/driver/readback overhead, not a pure GPU hardware timer."
+    }
+  }
+}

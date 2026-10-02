@@ -123,6 +123,18 @@ struct ProfileSettingsTests {
         #expect(s.locale == nil)
     }
 
+    @Test("Metal defaults on for older profiles and preserves explicit opt-out")
+    func metalRendererPreference() throws {
+        let legacy = try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8))
+        #expect(legacy.enableMetalRenderer)
+        #expect(legacy.toVMConfig().enableMetalRenderer)
+        var disabled = legacy
+        disabled.enableMetalRenderer = false
+        let restored = try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(disabled))
+        #expect(!restored.enableMetalRenderer)
+        #expect(!restored.toVMConfig().enableMetalRenderer)
+    }
+
     @Test("hasProxy requires both host and port")
     func hasProxy() {
         var s = ProfileSettings()

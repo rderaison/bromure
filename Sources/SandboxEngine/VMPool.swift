@@ -65,6 +65,8 @@ public final class VMPool {
         public var networkReady: Bool { networkDiagnosisBox.value == .ok }
         /// Network mode the VM was booted/swapped to: "nat" or an interface name for bridged.
         public var bootedNetworkMode: String = "nat"
+        public var requestedMetalRenderer = false
+        public var graphicsSession: (any HostGraphicsSession)? = nil
     }
 
     private var config: VMConfig
@@ -85,6 +87,7 @@ public final class VMPool {
     /// sets this false to boot whatever complete boot set is present. Default
     /// true preserves Web's behaviour.
     private let requireImageVersion: Bool
+    private let experimentalGPU: Bool
     private var warmVM: WarmVM?
     private var isWarming = false
     private var configListenerDelegate: ConfigListenerDelegate?
@@ -109,7 +112,8 @@ public final class VMPool {
     }
 
     public init(config: VMConfig, storageDir: URL? = nil, isolatePeers: Bool = true,
-                requireImageVersion: Bool = true, pinnedOctet: UInt8? = nil) {
+                requireImageVersion: Bool = true, pinnedOctet: UInt8? = nil,
+                experimentalGPU: Bool? = nil) {
         self.config = config
         let dir = storageDir ?? VMConfig.defaultStorageDirectory
         self.storageDir = dir
@@ -117,6 +121,7 @@ public final class VMPool {
         self.isolatePeers = isolatePeers
         self.requireImageVersion = requireImageVersion
         self.pinnedOctet = pinnedOctet
+        self.experimentalGPU = experimentalGPU ?? MetalRendererPreference.isEnabled
     }
 
     /// Pre-warm a VM by booting it to an idle shell prompt.
@@ -175,7 +180,8 @@ public final class VMPool {
     /// Boot a fresh VM with the specified network mode.
     /// - Parameter bridgedInterface: Interface name for bridged mode, or nil for NAT.
     /// - Returns: A booted WarmVM ready for claim.
-    private func bootVM(bridgedInterface: String?) async throws -> WarmVM {
+    private func bootVM(bridgedInterface: String?, requestedConfig: VMConfig? = nil) async throws -> WarmVM {
+        let config = requestedConfig ?? self.config
         let imageOK = requireImageVersion
             ? imageManager.baseImageExists       // files + version stamp
             : imageManager.hasBootFiles          // files only (reused image)
@@ -253,6 +259,23 @@ public final class VMPool {
             macAddress: mac
         )
 
+        var graphicsSession: (any HostGraphicsSession)?
+        let requestedMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
+            imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
+        if requestedMetal, #available(macOS 27.0, *) {
+            do {
+                let session = try await MacOS27GPUSession.create(
+                    width: config.displayWidth, height: config.displayHeight + config.nativeChromeInset)
+                vzConfig.customVirtioDevices = [session.configuration]
+                do { try vzConfig.validate() }
+                catch { session.stop(); vzConfig.customVirtioDevices = []; throw error }
+                graphicsSession = session
+                print("[VMPool] Sandboxed VirGL/Metal renderer selected")
+            } catch {
+                print("[VMPool] Experimental GPU unavailable; using software: \(error)")
+            }
+        }
+
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
@@ -304,7 +327,9 @@ public final class VMPool {
             serialWaiter: waiter,
             macAddress: mac,
             networkDiagnosisBox: diagnosisBox,
-            bootedNetworkMode: bootedNetworkMode
+            bootedNetworkMode: bootedNetworkMode,
+            requestedMetalRenderer: requestedMetal,
+            graphicsSession: graphicsSession
         )
     }
 
@@ -348,7 +373,7 @@ public final class VMPool {
             try? await warmUp()
         }
 
-        // Check if the profile needs a different network mode than the pool VM.
+        // Check whether the profile needs different networking or rendering than the pool VM.
         // If so, boot a dedicated VM with the right network from the start.
         // The pool VM is left for other profiles that match the global setting.
         let profileNetwork: String
@@ -366,10 +391,14 @@ public final class VMPool {
             profileBridgedIface = nil  // will use pool VM as-is
         }
 
-        if let warm = warmVM, profileNetwork != warm.bootedNetworkMode {
-            print("[VMPool] claim: profile needs \(profileNetwork) but pool has \(warm.bootedNetworkMode) — booting dedicated VM")
+        let profileWantsMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
+            imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
+        if let warm = warmVM,
+           profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer {
+            print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
             do {
-                let dedicated = try await bootVM(bridgedInterface: profileBridgedIface)
+                let dedicated = try await bootVM(bridgedInterface: profileBridgedIface,
+                                                 requestedConfig: config)
                 warmingMAC = nil
                 deflateBalloon(vm: dedicated.vm)
                 var warm = dedicated
@@ -513,6 +542,7 @@ public final class VMPool {
         // through the SOCKS forwarder). Takes precedence over the above in
         // config-agent, so the browser reaches the remote guest's dev server.
         if let pac = config.proxyPacBase64 { cfg["proxyPacB64"] = pac }
+        cfg["graphicsBackend"] = config.enableGPU ? (warm.graphicsSession?.backendName ?? "software") : "software"
         if !config.enableGPU { cfg["disableGPU"] = true }
         if !config.enableWebGL { cfg["disableWebGL"] = true }
         if config.enableGPU { cfg["gpuAccel"] = true }
@@ -686,6 +716,10 @@ public final class VMPool {
         //   defaults write io.bromure.app vm.extraChromeFlags -string "--foo --bar"
         //   defaults write io.bromure.app vm.chromeEnvExtra -string "LP_NUM_THREADS=8"
         var extraChromeFlags = UserDefaults.standard.string(forKey: "vm.extraChromeFlags") ?? ""
+        if warm.graphicsSession?.backendName == "virgl" {
+            // The Metal renderer exposes GLES; Chromium's desktop GL path needs a core profile.
+            extraChromeFlags = "--use-angle=gles " + extraChromeFlags
+        }
         // Software display compositing. The guest has no GPU: virtio-gpu
         // offers no 3D, so "GPU acceleration" runs Chromium's GL compositor
         // on llvmpipe (CPU). Measured while flinging a page (7 vCPUs, 2x
@@ -694,7 +728,7 @@ public final class VMPool {
         // ~90% with identical frame timing. Less CPU per frame is also
         // what keeps 120 Hz scrolling from dropping frames.
         // Escape hatch: defaults write io.bromure.app vm.gpuCompositing -bool YES
-        if config.enableGPU,
+        if config.enableGPU, warm.graphicsSession == nil,
            !(UserDefaults.standard.object(forKey: "vm.gpuCompositing") as? Bool ?? false) {
             extraChromeFlags = (extraChromeFlags + " --disable-gpu-compositing")
                 .trimmingCharacters(in: .whitespaces)
@@ -1002,6 +1036,7 @@ public final class VMPool {
                 }
             }
         }
+        warm.graphicsSession?.stop()
         warm.serialOutput.fileHandleForReading.readabilityHandler = nil
         try? warm.serialOutput.fileHandleForReading.close()
         try? warm.serialOutput.fileHandleForWriting.close()
