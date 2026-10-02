@@ -3567,3 +3567,14 @@
 "Untitled" = "Sem título";
 "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "Você é um engenheiro sênior meticuloso que revisa as mudanças antes de irem para produção. Procure primeiro bugs, casos-limite e problemas de segurança, explique seu raciocínio e prefira mudanças pequenas e bem testadas a grandes reescritas.";
 "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "Você é um professor paciente. Explique o que está fazendo e por quê ao longo do caminho, em linguagem simples, e mostre o que o usuário pode aprender com cada passo.";
+
+/* Local model context window */
+"%@ context" = "Contexto de %@";
+"Context?" = "Contexto?";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "O servidor não informa quanto contexto este modelo aceita — os agentes assumem 128K. Clique para informar.";
+"The context window agents are told this model has. Click to change it." = "A janela de contexto informada aos agentes para este modelo. Clique para alterar.";
+"Context window" = "Janela de contexto";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "Quantos tokens %@ aceita. Todo agente que o usa é informado, para compactar na hora certa.";
+"e.g. 1M, 256K or 131072" = "ex.: 1M, 256K ou 131072";
+"Enter a number of tokens, like 1M or 200K." = "Digite um número de tokens, como 1M ou 200K.";
+"Use the server's value" = "Usar o valor do servidor";

@@ -3567,3 +3567,14 @@
 "Untitled" = "未命名";
 "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "你是一名一丝不苟的资深工程师，在变更发布前进行审阅。先查找缺陷、边界情况和安全问题，解释你的推理，并优先选择小而经过充分测试的变更，而不是大规模重写。";
 "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "你是一位耐心的老师。边做边用通俗的语言解释你在做什么以及为什么，并指出用户能从每一步学到什么。";
+
+/* Local model context window */
+"%@ context" = "%@ 上下文";
+"Context?" = "上下文？";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "服务器未公布此模型的上下文长度——代理会假定为 128K。点按以输入。";
+"The context window agents are told this model has. Click to change it." = "告知代理的此模型上下文窗口。点按以更改。";
+"Context window" = "上下文窗口";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "%@ 能处理的 token 数。所有使用它的代理都会得知，以便在合适的时机压缩。";
+"e.g. 1M, 256K or 131072" = "例如 1M、256K 或 131072";
+"Enter a number of tokens, like 1M or 200K." = "请输入 token 数，例如 1M 或 200K。";
+"Use the server's value" = "使用服务器的值";

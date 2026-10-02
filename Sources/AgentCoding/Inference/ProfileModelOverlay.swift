@@ -67,6 +67,8 @@ public extension Profile {
         // `p` after the pass for the same reason.
         // A nil base = Anthropic itself, with its pinned models only.
         var gateway: (base: String?, models: [String: String])?
+        // omp on a custom server: the context window set for its model.
+        var ompContext: Int?
 
         // Resolve one agent: set its auth (+ return its local model id, if local).
         func applyAgent(tool: Tool, ompProvider: inout OmpProvider?, ompBaseURL: inout String?,
@@ -83,7 +85,10 @@ public extension Profile {
             if tool == .omp, let ref, case .provider(let prov) = ref.source,
                let op = prov.ompProvider, let cred = settings.credential(prov), cred.isUsable {
                 ompProvider = op
-                if op == .custom, let base = cred.baseURL, !base.isEmpty { ompBaseURL = base }
+                if op == .custom, let base = cred.baseURL, !base.isEmpty {
+                    ompBaseURL = base
+                    ompContext = ref.capabilities.contextWindow
+                }
                 if !ref.modelID.isEmpty { ompModel = ref.modelID }
             }
             if let ref, ref.isLocal {
@@ -189,6 +194,7 @@ public extension Profile {
             p.additionalTools[i].apiKey = key
             if let lid { p.additionalTools[i].localModelID = lid }
         }
+        p.ompContextWindow = ompContext
         p.claudeGatewayBaseURL = gateway?.base
         p.claudeGatewayModels = gateway?.models ?? [:]
         if let bedrock {
@@ -210,7 +216,10 @@ public extension Profile {
             // else the first local additional's.
             let localID = primaryLocalModel
                 ?? p.additionalTools.first { $0.authMode == .local }?.localModelID
-            if let localID { p.activeModelID = localID }
+            if let localID {
+                p.activeModelID = localID
+                p.localModelContextWindow = settings.localContextWindow(forModel: localID)
+            }
             if let lb = localServerBackend {
                 p.localEngineURL = lb.url
                 p.localEngineAPIKey = lb.key

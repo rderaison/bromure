@@ -3567,3 +3567,14 @@
 "Untitled" = "無題";
 "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "あなたはリリース前に変更をレビューする几帳面なシニアエンジニアです。まずバグ、エッジケース、セキュリティ上の問題を探し、理由を説明し、大きな書き直しよりも小さくて十分にテストされた変更を優先してください。";
 "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "あなたは辛抱強い先生です。作業しながら、何をなぜしているのかを平易な言葉で説明し、各ステップからユーザーが学べることを示してください。";
+
+/* Local model context window */
+"%@ context" = "コンテキスト %@";
+"Context?" = "コンテキスト?";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "サーバーはこのモデルのコンテキスト長を公開していません。エージェントは 128K と見なします。クリックして入力してください。";
+"The context window agents are told this model has. Click to change it." = "このモデルについてエージェントに伝えるコンテキストウィンドウです。クリックして変更します。";
+"Context window" = "コンテキストウィンドウ";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "%@ が扱えるトークン数です。このモデルを使うすべてのエージェントに伝えられ、適切なタイミングで圧縮されます。";
+"e.g. 1M, 256K or 131072" = "例: 1M、256K、131072";
+"Enter a number of tokens, like 1M or 200K." = "1M や 200K のようにトークン数を入力してください。";
+"Use the server's value" = "サーバーの値を使用";

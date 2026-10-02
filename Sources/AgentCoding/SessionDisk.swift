@@ -1168,7 +1168,8 @@ public final class SessionDisk {
                     reasoning: meta?.thinking == true || builtinThinking)
             } else if prov == .custom, let base = ompSpec.ompBaseURL,
                       !base.trimmingCharacters(in: .whitespaces).isEmpty {
-                yaml = Self.ompModelsYAML(base: base, model: modelName)
+                yaml = Self.ompModelsYAML(base: base, model: modelName,
+                                          contextWindow: profile.ompContextWindow)
             }
             if let yaml {
                 try yaml.write(to: tmp.appendingPathComponent("omp-models.yml"),
@@ -1927,6 +1928,7 @@ public final class SessionDisk {
     /// number for built-in models; the probed/cached server value for a
     /// custom engine. 128k when nothing better is known.
     static func localModelContext(profile: Profile) -> Int {
+        if let set = profile.localModelContextWindow, set > 0 { return set }
         guard let id = profile.activeModelID, !id.isEmpty else { return 128_000 }
         if profile.localEngineBaseURL != nil {
             return localModelMeta(profile: profile)?.context ?? 128_000

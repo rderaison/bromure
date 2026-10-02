@@ -3602,3 +3602,14 @@
 "Untitled" = "Untitled";
 "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites.";
 "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step.";
+
+/* Local model context window */
+"%@ context" = "%@ context";
+"Context?" = "Context?";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "The server doesn't say how much context this model takes — agents assume 128K. Click to enter it.";
+"The context window agents are told this model has. Click to change it." = "The context window agents are told this model has. Click to change it.";
+"Context window" = "Context window";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "How many tokens %@ can take. Every agent using it is told, so it compacts at the right time.";
+"e.g. 1M, 256K or 131072" = "e.g. 1M, 256K or 131072";
+"Enter a number of tokens, like 1M or 200K." = "Enter a number of tokens, like 1M or 200K.";
+"Use the server's value" = "Use the server's value";

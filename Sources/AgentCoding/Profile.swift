@@ -1381,6 +1381,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var localEngineURL: String?
     /// Optional bearer token `localEngineURL` requires (vLLM `--api-key`).
     public var localEngineAPIKey: String?
+    /// The local model's context window from the Models settings (entered or
+    /// probed) — set on the launch copy by the models overlay, never saved.
+    /// Wins over the server's advertised value and the 128K fallback.
+    public var localModelContextWindow: Int? = nil
+    /// The same for omp switched natively to a custom OpenAI-compatible
+    /// server (its own provider, not the local route). Launch copy only.
+    public var ompContextWindow: Int? = nil
 
     /// Per-workspace override of the global model settings. nil ⇒ this workspace
     /// inherits `ModelSettingsStore.shared` (the Preferences → Models config).

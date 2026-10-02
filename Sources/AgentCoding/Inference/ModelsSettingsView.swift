@@ -590,6 +590,26 @@ struct ModelsSettingsView: View {
                 .buttonStyle(.borderless)
                 .help(agent == nil ? (layer == nil ? "Clear" : "Inherit the global setting") : "Inherit Default")
             }
+            // A model on the user's own server: its context window, which
+            // the server may not advertise (then the agents assume 128K).
+            if let explicit, Self.takesContextWindow(explicit.source) {
+                ContextWindowControl(ref: explicit) { tokens in
+                    var r = explicit
+                    r.capabilities.contextWindow = tokens
+                    r.capabilitiesOverridden = tokens != nil
+                    assignRef(agent, tier, r)
+                    if tokens == nil { probeCapabilities(agent, tier) }
+                }
+            }
+        }
+    }
+
+    /// Sources whose context window can only come from the server or the
+    /// user (a catalog model's is known; a cloud provider's agents know theirs).
+    static func takesContextWindow(_ source: ModelRef.Source) -> Bool {
+        switch source {
+        case .localServer, .provider(.custom): return true
+        default: return false
         }
     }
 
@@ -1344,3 +1364,75 @@ private extension Array {
     }
 }
 #endif
+
+
+/// The context window of a model on the user's own server: what the server
+/// advertised, or what the user entered (passed to every agent using it).
+private struct ContextWindowControl: View {
+    let ref: ModelRef
+    let onSet: (Int?) -> Void
+    @State private var editing = false
+    @State private var text = ""
+
+    private var tokens: Int? { ref.capabilities.contextWindow.flatMap { $0 > 0 ? $0 : nil } }
+
+    var body: some View {
+        Button {
+            text = tokens.map(ModelCapabilities.formatTokens) ?? ""
+            editing = true
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: tokens == nil ? "exclamationmark.triangle.fill" : "text.word.spacing")
+                    .font(.system(size: 9))
+                Text(tokens.map { String(format: NSLocalizedString("%@ context", comment: "models: context window chip"),
+                                         ModelCapabilities.formatTokens($0)) }
+                     ?? NSLocalizedString("Context?", comment: "models: context window chip, unknown"))
+                    .font(.caption)
+            }
+            .foregroundStyle(tokens == nil ? Color.orange : Color.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(tokens == nil
+              ? NSLocalizedString("The server doesn't say how much context this model takes — agents assume 128K. Click to enter it.", comment: "models: context window")
+              : NSLocalizedString("The context window agents are told this model has. Click to change it.", comment: "models: context window"))
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(NSLocalizedString("Context window", comment: "models: context window"))
+                    .font(.headline)
+                Text(String(format: NSLocalizedString("How many tokens %@ can take. Every agent using it is told, so it compacts at the right time.", comment: "models: context window"),
+                            ref.modelID))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField(NSLocalizedString("e.g. 1M, 256K or 131072", comment: "models: context window"), text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(save)
+                if !text.trimmingCharacters(in: .whitespaces).isEmpty, ModelCapabilities.parseTokens(text) == nil {
+                    Text(NSLocalizedString("Enter a number of tokens, like 1M or 200K.", comment: "models: context window"))
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                HStack {
+                    if ref.capabilitiesOverridden {
+                        Button(NSLocalizedString("Use the server's value", comment: "models: context window")) {
+                            editing = false
+                            onSet(nil)
+                        }
+                    }
+                    Spacer()
+                    Button(NSLocalizedString("Cancel", comment: "")) { editing = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button(NSLocalizedString("Save", comment: ""), action: save)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(ModelCapabilities.parseTokens(text) == nil)
+                }
+            }
+            .padding(14)
+            .frame(width: 320)
+        }
+    }
+
+    private func save() {
+        guard let n = ModelCapabilities.parseTokens(text) else { return }
+        editing = false
+        onSet(n)
+    }
+}
