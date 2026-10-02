@@ -16,6 +16,7 @@ import subprocess
 import time
 
 STATE = Path('/run/bromure-multigpu')
+XORG_CONFIG = Path('/etc/X11/bromure-experimental-multigpu.conf')
 MESA = Path('/opt/bromure/mesa-virgl')
 
 
@@ -163,7 +164,14 @@ def prepare():
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chown(runtime, user.pw_uid, user.pw_gid)
     STATE.mkdir(mode=0o755, exist_ok=True)
-    (STATE / 'xorg.conf').write_text(xorg_config(devices))
+    config = xorg_config(devices)
+    (STATE / 'xorg.conf').write_text(config)
+    # Privileged Xorg accepts only a relative -config name in its trusted
+    # search directories. Keep the runtime copy for diagnostic collection.
+    XORG_CONFIG.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    XORG_CONFIG.write_text(config)
+    os.chown(XORG_CONFIG, 0, 0)
+    XORG_CONFIG.chmod(0o644)
     manifest = dict(version=1, experimental=True, topology='independent-x-screens', devices=devices)
     (STATE / 'displays.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print('BROMURE_MULTIGPU_TOPOLOGY ' + json.dumps(manifest), flush=True)
