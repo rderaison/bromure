@@ -227,7 +227,7 @@ class ControllerTests(unittest.TestCase):
     def test_focus_ack_requires_observation_and_failure_clears_cached_focus(self):
         self.attach()
         evidence = {'xWindow': 51, 'xFocus': 52, 'browserPID': 123, 'browserStartTicks': 42}
-        observer = unittest.mock.Mock(side_effect=[None, evidence])
+        observer = unittest.mock.Mock(side_effect=[dict(evidence, browserPID=999), evidence])
         self.controller.focus_observer = observer
         reply = self.controller.handle(dict(id=3, cmd='focus', windowId=10))
         self.assertTrue(reply['ok'], reply)

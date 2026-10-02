@@ -576,8 +576,8 @@ class Controller:
         ids = [target['id'] for target in targets]
         tid = tid or self.active.get(wid)
         tid = tid if tid in ids else ids[0]
-        self.call('Target.activateTarget', {'targetId': tid})
         self.focused_window, self.focus_evidence = None, None
+        self.call('Target.activateTarget', {'targetId': tid})
         processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
         browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
         if len(browser_pids) != 1:

@@ -178,6 +178,7 @@ def main():
             cookie_check(added[0], state)
             result['newTarget'] = added[0]['id']
         elif args.phase == 'check-closed':
+            assert args.window in {p['windowId'] for p in state['pages']}, 'window was not in initial fixture'
             assert args.window is not None and not selected and records, 'closed window remains or entire browser lost'
             assert all(any(p['id'] == old['id'] and p['windowId'] == old['windowId'] for p in records)
                        for old in state['pages'] if old['windowId'] != args.window), 'surviving original window lost'
