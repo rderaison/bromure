@@ -3189,8 +3189,6 @@
 "Open Local Network Settings" = "ローカルネットワーク設定を開く";
 
 /* Models: your environment (auto mode) */
-"Your environment" = "あなたの環境";
-"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "エージェントの安全チェックが知っておくべきこと：組織、信頼するリポジトリ、ドメイン、サービス。1 行に 1 つ。Claude の自動モードは、これを使って日常的な作業と危険な操作を見分けます。";
 "Applies to every workspace from its next launch." = "各ワークスペースの次回起動から適用されます。";
 
 /* Chat: scratch terminal (/term) */
@@ -3531,3 +3529,41 @@
 "The app's Switchboard picks the session best placed for it" = "アプリのスイッチボードが最適なセッションを選びます";
 "There's no workspace to run the Switchboard in." = "スイッチボードを実行するワークスペースがありません。";
 "picks the session best placed for it" = "最適なセッションを選びます";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "環境を説明する";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "エージェントの安全チェックが知っておくべきこと：組織、サーバーとその用途、信頼するリポジトリとドメイン、変更してよいもの。1 行に 1 つ。Claude の自動モードは、これを使って日常的な作業と危険な操作を見分けます。";
+"Variables" = "変数";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "このフォルダを信頼しますか？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · ダウンロード済み";
+"%@ · sent by the agent" = "%@ · エージェントが送信";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "マシン上のファイルを読み込めませんでした。ファイルがまだ存在し、マシンが起動しているか確認してください。";
+"Couldn't write the file here." = "ここにファイルを書き込めませんでした。";
+"Downloaded" = "ダウンロード済み";
+"Save As…" = "別名で保存…";
+"Save or Share" = "保存または共有";
+"Saved to %@" = "%@ に保存しました";
+"Sent by the agent" = "エージェントが送信";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "指示を追加";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "この指示で開始したセッションでは、エージェントのシステムプロンプトに追加されます。エージェントがどんな役割で、どう作業すべきかを記述してください（「あなたは…です」）。";
+"Careful reviewer" = "慎重なレビュアー";
+"Delete these instructions" = "この指示を削除";
+"Edit instructions…" = "指示を編集…";
+"Instructions" = "指示";
+"Instructions added to the agent's system prompt (“You are a…”)" = "エージェントのシステムプロンプトに追加される指示（「あなたは…です」）";
+"Instructions without a name or text are not kept." = "名前またはテキストのない指示は保存されません。";
+"New instructions" = "新しい指示";
+"No instructions" = "指示なし";
+"No instructions yet. Add some with +." = "まだ指示がありません。+ で追加してください。";
+"Teacher" = "先生";
+"The agent as it comes" = "そのままのエージェント";
+"Untitled" = "無題";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "あなたはリリース前に変更をレビューする几帳面なシニアエンジニアです。まずバグ、エッジケース、セキュリティ上の問題を探し、理由を説明し、大きな書き直しよりも小さくて十分にテストされた変更を優先してください。";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "あなたは辛抱強い先生です。作業しながら、何をなぜしているのかを平易な言葉で説明し、各ステップからユーザーが学べることを示してください。";

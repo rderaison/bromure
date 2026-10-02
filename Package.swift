@@ -25,8 +25,8 @@ let package = Package(
         // 3.31.4 raises its swift-syntax floor to 602..<604 (matches the Swift
         // 6.3 toolchain). After bumping, do a clean build — stale macro-plugin
         // artifacts from the previous swift-syntax otherwise fail to load.
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.31.5")),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.31.4" ..< "3.32.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.32.3")),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.32.3" ..< "3.33.0"),
         // File-explorer pane: rendered Markdown previews. (Syntax highlighting
         // is vendored — Sources/AgentCoding/Vendor/Highlightr — because the
         // upstream package's Bundle.module accessor breaks in relocated .app

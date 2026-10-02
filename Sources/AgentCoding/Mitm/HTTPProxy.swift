@@ -429,13 +429,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
                store.profileForBogusKey(apiKey) != nil {
                 leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
             }
+            // Claude with account features: its OAuth stand-in as Bearer.
+            if Self.isClaudeHost(host), let bearer = Self.bearerToken(inHeaderSection: hdr),
+               Self.isClaudeStandIn(bearer, profileID: profileID) {
+                leaks = leaks.filter { $0.header.lowercased() != "authorization" }
+            }
             // Codex / Grok / Kimi: bogus Bearer on their backends.
             let codexHost = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com"
             let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
                 || host == "x.ai" || host.hasSuffix(".x.ai")
             let kimiHost = KimiRegion.isSubscriptionHost(host)
             if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
-                let codexBogus = Self.codexSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
+                let codexBogus = Self.isCodexStandIn(bearer, profileID: profileID)
                 let grokBogus = Self.grokSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
                 let kimiBogus = Self.kimiSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
                 if codexBogus || grokBogus || kimiBogus {
@@ -564,6 +569,38 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     `claudeSubStaleAccess` carries the injected token to the post-
         //     relay 401 self-heal below.
         var claudeSubStaleAccess: String? = nil
+        // 5c'. …and with account features on, the machine holds an OAuth
+        //     stand-in (ClaudeStandIn) and sends it as Bearer to Anthropic's
+        //     and Claude's hosts: a value swap for the live token.
+        if !insecure, Self.isClaudeHost(host),
+           let provider = Self.claudeSubscriptionProvider, let (_, refresher) = provider(),
+           let headerSection = Self.rawHeaderSection(of: swap.modified),
+           let bearer = Self.bearerToken(inHeaderSection: headerSection),
+           Self.isClaudeStandIn(bearer, profileID: profileID) {
+            do {
+                let access = try await refresher.accessToken(for: profileID)
+                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
+                claudeSubStaleAccess = access
+                FileHandle.standardError.write(Data(
+                    "[mitm] swapped Claude OAuth stand-in for \(host)\(reqPath)\n".utf8))
+            } catch {
+                let rejected = (error as? ClaudeSubscriptionError)?.isRejection ?? false
+                let reply = rejected
+                    ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                        "type": "error",
+                        "error": ["type": "authentication_error",
+                                  "message": "Your Claude sign-in expired. Sign in again from Bromure (the workspace's sign-in card or Preferences → Models) — not with /login inside the VM."],
+                    ])
+                    : SignInCapture.response(status: 529, reason: "Overloaded", json: [
+                        "type": "error",
+                        "error": ["type": "overloaded_error",
+                                  "message": "Bromure couldn't renew the Claude sign-in just now; retrying."],
+                    ])
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                try tls.write(reply)
+                return
+            }
+        }
         if !insecure,
            host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
            let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
@@ -612,10 +649,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var codexSubStaleAccess: String? = nil
         if !insecure,
            host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
-           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
+           let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           store.profileForBogusKey(bearer) != nil {
+           Self.isCodexStandIn(bearer, profileID: profileID) {
             do {
                 let access = try await refresher.accessToken(for: profileID)
                 swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
@@ -723,6 +760,77 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     ])
                     FileHandle.standardError.write(Data(
                         "[mitm] Kimi stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
+                }
+                try tls.write(reply)
+                return
+            }
+        }
+
+        // 5c''. Claude stand-in refresh: answered here with the stand-in
+        //     again (the host keeps the real login fresh), never sent on.
+        if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
+           Self.isClaudeHost(host), reqPath.hasPrefix("/v1/oauth/token"),
+           let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
+           store.record(for: profileID) != nil,
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
+            let body = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let form = "?" + String(decoding: body, as: UTF8.self)
+            let grant = (json?["grant_type"] as? String) ?? Self.urlQueryParam("grant_type", inPath: form)
+            let sent = (json?["refresh_token"] as? String) ?? Self.urlQueryParam("refresh_token", inPath: form)
+            if grant == "refresh_token", let sent, ClaudeStandIn.isRefresh(sent) {
+                let reply: Data
+                do {
+                    _ = try await refresher.accessToken(for: profileID)
+                    reply = SignInCapture.response(status: 200, reason: "OK",
+                                                   json: ClaudeStandIn.refreshAnswer(ClaudeStandIn.mint(profileID: profileID)))
+                    FileHandle.standardError.write(Data(
+                        "[mitm] answered Claude stand-in refresh for \(profileID.uuidString.prefix(8))\n".utf8))
+                } catch {
+                    reply = SignInCapture.response(status: 400, reason: "Bad Request", json: [
+                        "error": "invalid_grant",
+                        "error_description": "Bromure could not refresh the Claude subscription on the host: \(error)",
+                    ])
+                }
+                try tls.write(reply)
+                return
+            }
+        }
+
+        // 5e'. Codex stand-in refresh. Codex refreshes when OpenAI turns its
+        //     token down (a 401) — which a stand-in the proxy didn't swap
+        //     used to cause — and a stand-in refresh token sent on to OpenAI
+        //     came back "Your access token could not be refreshed. Please
+        //     log out and sign in again." Answered here instead, like Kimi's:
+        //     the host refreshes the real login and Codex gets fresh stand-ins.
+        if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
+           host == "auth.openai.com", reqPath.hasPrefix("/oauth/token"),
+           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
+           store.record(for: profileID) != nil,
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
+            let body = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let form = "?" + String(decoding: body, as: UTF8.self)
+            let grant = (json?["grant_type"] as? String) ?? Self.urlQueryParam("grant_type", inPath: form)
+            let sent = (json?["refresh_token"] as? String) ?? Self.urlQueryParam("refresh_token", inPath: form)
+            if grant == "refresh_token", let sent, SubscriptionFakeMint.isCodexRefreshFake(sent) {
+                let reply: Data
+                do {
+                    _ = try await refresher.accessToken(for: profileID)
+                    guard let fresh = store.record(for: profileID),
+                          let standIn = CodexStandIn.mint(fresh, profileID: profileID)
+                    else { throw CodexSubscriptionError.noCredential }
+                    store.registerBogusKey(standIn.access, for: profileID)
+                    reply = SignInCapture.response(status: 200, reason: "OK", json: CodexStandIn.refreshAnswer(standIn))
+                    FileHandle.standardError.write(Data(
+                        "[mitm] answered Codex stand-in refresh for \(profileID.uuidString.prefix(8)) (host refreshed the real credential)\n".utf8))
+                } catch {
+                    reply = SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                        "error": "invalid_grant",
+                        "error_description": "Bromure could not refresh the Codex subscription on the host: \(error)",
+                    ])
+                    FileHandle.standardError.write(Data(
+                        "[mitm] Codex stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
                 }
                 try tls.write(reply)
                 return
@@ -1834,6 +1942,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let serverFD = serverTLS.pumpFD
         // `upstreamFD` is the connect fd from above — same fd TLSClientStream wraps.
 
+        // Streaming to or from a model provider keeps the tab "working".
+        let beatPID = profileID
+        let isModelHost = TraceLevel.aiHosts.contains { host.lowercased().contains($0) }
+        let beat = ActivityBeat(fire: isModelHost ? { Self.liveActivity?(beatPID) } : nil)
         await withTaskGroup(of: Void.self) { group in
             let server = serverTLS
             let upstream = upstreamTLS
@@ -1841,13 +1953,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 Self.pumpDirection(
                     readFD: serverFD, readNB: { try server.readNB(maxBytes: 16 * 1024) },
                     writeFD: upstreamFD, writeNB: { try upstream.writeNB($0) },
-                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0) })
+                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) })
             }
             group.addTask {   // upstream → client
                 Self.pumpDirection(
                     readFD: upstreamFD, readNB: { try upstream.readNB(maxBytes: 16 * 1024) },
                     writeFD: serverFD, writeNB: { try server.writeNB($0) },
-                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0) })
+                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); beat.tick($0) })
             }
             await group.next()
             group.cancelAll()
@@ -1867,6 +1979,42 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                clientBytes: clientBytes,
                                upstreamBytes: upstreamBytes,
                                statusCode: statusCode)
+    }
+
+    /// A model provider's WebSocket carrying traffic: the agent is working.
+    /// Codex talks to OpenAI over one socket kept open for the whole session,
+    /// so a turn writes no new request records — and its tab read "Ready"
+    /// while it streamed. Set by the app to the same "working" signal the
+    /// request path drives.
+    nonisolated(unsafe) static var liveActivity: (@Sendable (UUID) -> Void)?
+
+    /// At most one activity signal every couple of seconds per socket.
+    final class ActivityBeat: @unchecked Sendable {
+        private let lock = NSLock()
+        private var last = Date.distantPast
+        private let fire: (() -> Void)?
+        init(fire: (() -> Void)?) { self.fire = fire }
+        /// A chunk of relayed frames. A lone ping or pong — a socket kept
+        /// alive while idle — isn't work.
+        func tick(_ chunk: Data) {
+            guard fire != nil, !Self.isKeepAlive(chunk) else { return }
+            tick()
+        }
+
+        static func isKeepAlive(_ chunk: Data) -> Bool {
+            guard let first = chunk.first, chunk.count < 64 else { return false }
+            let opcode = first & 0x0F
+            return opcode == 0x9 || opcode == 0xA
+        }
+
+        func tick() {
+            guard let fire else { return }
+            lock.lock()
+            let due = Date().timeIntervalSince(last) >= 2
+            if due { last = Date() }
+            lock.unlock()
+            if due { fire() }
+        }
     }
 
     /// One direction of the non-blocking WebSocket relay. Drains everything
@@ -2518,6 +2666,31 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Extract a query-string parameter from a request path
     /// (`/?query=SELECT+1&database=x` → "SELECT 1"). Percent- and
     /// `+`-decoded. nil if the path has no query string or no such key.
+    /// Anthropic's API and Claude's own hosts (claude.ai, platform.claude.com).
+    static func isClaudeHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "api.anthropic.com" || h.hasSuffix(".anthropic.com")
+            || h == "claude.ai" || h.hasSuffix(".claude.ai") || h.hasSuffix(".claude.com") || h == "claude.com"
+    }
+
+    /// Claude's OAuth stand-in, from a workspace that has a Claude login.
+    static func isClaudeStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard ClaudeStandIn.isAccess(bearer),
+              let (store, _) = claudeSubscriptionProvider?() else { return false }
+        return store.record(for: profileID) != nil
+    }
+
+    /// A Codex stand-in for this workspace: one the host registered, or one
+    /// it minted any time (its Bromure-marked signature) for a workspace that
+    /// has a Codex login — the registry is in memory, and a machine that
+    /// outlives an app restart (or a host-side refresh) still holds an older
+    /// stand-in. Only ever resolved to THIS connection's workspace's login.
+    static func isCodexStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard let (store, _) = codexSubscriptionProvider?() else { return false }
+        if store.profileForBogusKey(bearer) != nil { return true }
+        return SubscriptionFakeMint.isJWTFake(bearer) && store.record(for: profileID) != nil
+    }
+
     static func urlQueryParam(_ name: String, inPath path: String) -> String? {
         guard let q = path.firstIndex(of: "?") else { return nil }
         let query = path[path.index(after: q)...]

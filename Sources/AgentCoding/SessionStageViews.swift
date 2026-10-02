@@ -45,14 +45,57 @@ struct DroppedFile {
             return DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)
         }
         if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            // The drag's own format (public.jpeg…), not whatever "an image"
+            // resolves to first — the bytes as they were.
+            let typeID = p.registeredTypeIdentifiers.first { UTType($0)?.conforms(to: .image) == true }
+                ?? UTType.image.identifier
             let data: Data? = await withCheckedContinuation { cont in
-                p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { d, _ in
+                p.loadDataRepresentation(forTypeIdentifier: typeID) { d, _ in
                     cont.resume(returning: d)
                 }
             }
             guard let data, data.count <= maxBytes else { return nil }
-            return DroppedFile(name: "pasted-image.png", data: data, isImage: true)
+            return DroppedFile(name: imageName(suggested: p.suggestedName, data: data, typeID: typeID),
+                               data: data, isImage: true)
         }
+        return nil
+    }
+
+    /// A name for image data dropped without a file: the name the drag
+    /// suggests ("whatisthis") when it has one, with the extension the BYTES
+    /// call for — it used to be "pasted-image.png" for everything, a JPEG
+    /// included. "pasted-image" only when nothing better is known.
+    static func imageName(suggested: String?, data: Data, typeID: String) -> String {
+        let ext = imageExtension(of: data)
+            ?? UTType(typeID)?.preferredFilenameExtension
+            ?? "png"
+        var base = (suggested ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+        if !base.isEmpty, let dot = base.lastIndex(of: "."),
+           UTType(filenameExtension: String(base[base.index(after: dot)...]))?.conforms(to: .image) == true {
+            base = String(base[..<dot])   // "photo.png" suggested for JPEG bytes → "photo.jpg"
+        }
+        if base.isEmpty { base = "pasted-image" }
+        return base + "." + ext
+    }
+
+    /// The image format the bytes are in, by their signature.
+    static func imageExtension(of data: Data) -> String? {
+        let b = [UInt8](data.prefix(16))
+        func has(_ sig: [UInt8], at o: Int = 0) -> Bool {
+            b.count >= o + sig.count && Array(b[o..<o + sig.count]) == sig
+        }
+        if has([0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if has([0x89, 0x50, 0x4E, 0x47]) { return "png" }
+        if has([0x47, 0x49, 0x46, 0x38]) { return "gif" }
+        if has([0x52, 0x49, 0x46, 0x46]), has([0x57, 0x45, 0x42, 0x50], at: 8) { return "webp" }
+        if has([0x49, 0x49, 0x2A, 0x00]) || has([0x4D, 0x4D, 0x00, 0x2A]) { return "tiff" }
+        if has(Array("ftyp".utf8), at: 4) {
+            let brand = String(decoding: b.count >= 12 ? b[8..<12] : [], as: UTF8.self)
+            if ["heic", "heix", "mif1", "msf1", "hevc"].contains(brand) { return "heic" }
+            if brand == "avif" { return "avif" }
+        }
+        if has([0x42, 0x4D]) { return "bmp" }
         return nil
     }
 
@@ -1188,6 +1231,9 @@ struct NewSessionView: View {
     let assignNickname: ((UUID, String) -> Void)?
     /// The last few agent + machine + folder combinations, one click each.
     let recentStarts: [RecentStart]
+    /// Instructions to add to the agent's system prompt (nil: a server too
+    /// old to apply them — no chip).
+    let instructionStore: InstructionPresetStore?
 
     struct RecentStart: Hashable {
         let profileID: UUID
@@ -1228,6 +1274,8 @@ struct NewSessionView: View {
     @State private var repoURL: String = ""
     @State private var derivedFolder: String?
     @State private var message = ""
+    /// The instructions picked for this session (nil: none).
+    @State private var instructionsID: UUID?
     /// The greeting, one of a rotation: picked when the screen comes up
     /// and kept while it's on show. Each is its own key, so every
     /// language phrases it in its own way.
@@ -1314,8 +1362,10 @@ struct NewSessionView: View {
          readyTools: ((Profile) -> Set<Profile.Tool>)? = nil,
          peerMentions: ((UUID) -> [PeerMention])? = nil,
          assignNickname: ((UUID, String) -> Void)? = nil,
-         recentStarts: [RecentStart] = []) {
+         recentStarts: [RecentStart] = [],
+         instructionStore: InstructionPresetStore? = nil) {
         self.recentStarts = recentStarts
+        self.instructionStore = instructionStore
         self.profiles = profiles
         self.runningIDs = runningIDs
         self.recentFolders = recentFolders
@@ -1405,7 +1455,8 @@ struct NewSessionView: View {
         onStart(AgentSessionRequest(
             profileID: profileID, tool: tool, cwd: effectiveFolder,
             cloneURL: place == .repository ? repoURL.trimmingCharacters(in: .whitespaces) : nil,
-            openingMessage: message, attachments: attachments))
+            openingMessage: message, attachments: attachments,
+            instructions: instructionStore?.preset(instructionsID)?.text))
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -1633,6 +1684,10 @@ struct NewSessionView: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .popover(isPresented: $wherePopover, arrowEdge: .bottom) { whereEditor.platformCompactPopover() }
+
+                if let instructionStore {
+                    InstructionsChip(store: instructionStore, selection: $instructionsID)
+                }
                 }
 
                 Spacer(minLength: 8)
@@ -2564,6 +2619,104 @@ private struct ChipStrip<Content: View>: View {
 
 /// A choice riding along the composer's bottom edge: what it is now, a
 /// chevron, a popover to change it.
+/// The instructions added to the agent's system prompt: none, one of the
+/// presets, or the editor to manage them.
+private struct InstructionsChip: View {
+    @ObservedObject var store: InstructionPresetStore
+    @Binding var selection: UUID?
+    @State private var popover = false
+    @State private var editing = false
+
+    private var picked: InstructionPreset? { store.preset(selection) }
+
+    var body: some View {
+        ComposerChip(help: NSLocalizedString("Instructions added to the agent's system prompt (“You are a…”)", comment: "new session chip"),
+                     action: { popover.toggle() }) {
+            Image(systemName: "person.text.rectangle")
+                .font(.system(size: 11))
+                .foregroundStyle(picked == nil ? .secondary : Color.accentColor)
+            Text(picked?.name ?? NSLocalizedString("No instructions", comment: "new session instructions chip"))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 160)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .popover(isPresented: $popover, arrowEdge: .bottom) { list.platformCompactPopover() }
+        .sheet(isPresented: $editing) {
+            InstructionPresetEditor(store: store, initial: selection) { editing = false }
+        }
+        // A preset deleted (here or on another device) can't stay picked.
+        .onChange(of: store.presets) { _, list in
+            if let s = selection, !list.contains(where: { $0.id == s }) { selection = nil }
+        }
+    }
+
+    private var list: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                row(title: NSLocalizedString("No instructions", comment: "new session instructions chip"),
+                    detail: NSLocalizedString("The agent as it comes", comment: "new session instructions"),
+                    selected: picked == nil) { selection = nil }
+                ForEach(store.presets) { p in
+                    row(title: p.name, detail: p.text, selected: p.id == selection) { selection = p.id }
+                }
+                Divider().padding(.vertical, 4)
+                Button {
+                    popover = false
+                    editing = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 13))
+                            .frame(width: 22)
+                        Text(NSLocalizedString("Edit instructions…", comment: "new session instructions"))
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(6)
+        }
+        .frame(width: 320)
+        .frame(maxHeight: 420)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func row(title: String, detail: String, selected: Bool, pick: @escaping () -> Void) -> some View {
+        Button {
+            pick()
+            popover = false
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                if selected {
+                    Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(selected ? Color.accentColor.opacity(0.14) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct ComposerChip<Content: View>: View {
     let help: String
     let action: () -> Void

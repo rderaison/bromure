@@ -222,21 +222,26 @@ final class ProfileEditorController {
         if state.selectedProfileID == id {
             state.selectedProfileID = state.profileManager.allProfiles.first?.id
         }
+        if state.launchProfileID == id {
+            state.launchProfileID = nil  // back to the last-used profile
+        }
         state.profileVersion += 1
     }
 }
 
 // MARK: - New profile form
 
-private struct NewProfileForm: View {
-    @State private var name = ""
+struct NewProfileForm: View {
+    @State private var name: String
     @State private var color: ProfileColor?
     let onCreate: (String, ProfileColor?) -> Void
     let onCancel: () -> Void
 
-    init(initialColor: ProfileColor?,
+    init(initialName: String = "",
+         initialColor: ProfileColor?,
          onCreate: @escaping (String, ProfileColor?) -> Void,
          onCancel: @escaping () -> Void) {
+        _name = State(initialValue: initialName)
         _color = State(initialValue: initialColor)
         self.onCreate = onCreate
         self.onCancel = onCancel

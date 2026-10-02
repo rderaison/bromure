@@ -341,6 +341,7 @@ final class GetAppSettingCommand: NSScriptCommand {
         case "automation.port":   return String(d.integer(forKey: key))
         case "automation.bindAddress": return d.string(forKey: key) ?? "127.0.0.1"
         case "phishingAnalysis.serverURL": return d.string(forKey: key) ?? PhishingAnalysisBridge.defaultServerBaseURL.absoluteString
+        case AppState.launchProfileKey: return d.string(forKey: key) ?? ""
         default:
             scriptErrorNumber = errOSAScriptError
             scriptErrorString = "Unknown app setting: \(key)"
@@ -376,6 +377,18 @@ final class SetAppSettingCommand: NSScriptCommand {
             case "automation.port":     d.set(Int(value) ?? 9222, forKey: key)
             case "automation.bindAddress": d.set(value, forKey: key)
             case "phishingAnalysis.serverURL": d.set(value, forKey: key)
+            case AppState.launchProfileKey:
+                // A profile name or UUID; empty = the last-used profile.
+                if value.isEmpty {
+                    d.set("", forKey: key)
+                } else if let profile = (NSApp.delegate as? GUIAppDelegate)?.state.profileManager.allProfiles
+                            .first(where: { $0.id.uuidString == value || $0.name == value }) {
+                    d.set(profile.id.uuidString, forKey: key)
+                } else {
+                    scriptErrorNumber = errOSAScriptError
+                    scriptErrorString = "Profile not found: \(value)"
+                    return nil
+                }
             default:
                 scriptErrorNumber = errOSAScriptError
                 scriptErrorString = "Unknown app setting: \(key)"

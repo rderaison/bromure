@@ -1,0 +1,107 @@
+---
+title: "Bromure — User Manual"
+description: "The complete user manual for Bromure 5.0.0: installation, browser windows and profiles, the profile and app settings reference, files, camera, session recording, the security model, enterprise management, and automation."
+order: 0
+---
+
+# Bromure — User Manual
+
+Welcome to the official user manual for **Bromure**, the macOS web browser that runs every window inside its own disposable Linux virtual machine. Web pages never run on your Mac: each window gets a fresh VM, started from a clean image, and closing the window destroys it along with everything it touched. When you want a browser that remembers your sign-ins, a persistent profile keeps just your browsing data on a separate, optionally encrypted disk.
+
+This manual documents version **5.0.0**. It requires macOS 14 (Sonoma) or later on Apple Silicon.
+
+> **New to Bromure?** Start with [Installation & First Run](02-installation.mdx), then follow the [Quick Start](03-quick-start.mdx). Read [Concepts & Architecture](04-concepts.mdx) when you want the full picture. Use everything else as reference.
+
+## Table of contents
+
+### Getting started
+
+| Chapter | What it covers |
+|---|---|
+| [1. Introduction](01-introduction.mdx) | What Bromure is, why every window runs in its own disposable VM, the main features, who it's for, and how it relates to Bromure Agentic Coding. |
+| [2. Installation & First Run](02-installation.mdx) | System requirements, installing the app, the first-run setup window, how the browser image is downloaded, updated and rebuilt, app updates, storage locations, and uninstalling. |
+| [3. Quick Start](03-quick-start.mdx) | From first launch to everyday use: your first window, a persistent profile, opening links from other apps, and what closing a window destroys and keeps. |
+| [4. Concepts & Architecture](04-concepts.mdx) | Host and guest, one VM per window and the pre-warmed VM, the base image and APFS clones, ephemeral and persistent profiles, what persists, host–guest services and vsock ports, NAT and bridged networking, and idle suspend. |
+
+### Everyday use
+
+| Chapter | What it covers |
+|---|---|
+| [5. The Browser Window](05-browser-window.mdx) | The native tab bar, the profile chip, the site-info popover, the titlebar buttons, the menus, keyboard shortcuts, trackpad and drag and drop, printing, idle windows, and the alerts for closing, restoring, and quitting. |
+| [6. Profiles](06-profiles.mdx) | Creating, editing and deleting profiles; Private Browsing and New Private Window; one window per persistent profile; managed profiles; restoring tabs; links from other apps and the link chooser; Send Link to Other Session; where profiles are stored. |
+| [9. Files & Downloads](09-files-downloads.mdx) | The file drawer, uploading with the file picker and drag and drop, downloads, VirusTotal scanning and blocking, and where transferred files are kept. |
+| [10. Camera & Effects](10-camera-effects.mdx) | Sharing your webcam, microphone and speaker, choosing devices and quality, and the camera effects: city and time, name badge, logo, and face swap. |
+| [11. Session Recording](11-session-recording.mdx) | Capture levels, the record button, the Session Recording window, the Flow view, JSON and SQLite exports, Open Trace…, saving on close, and recording enforced by an organization. |
+
+### Settings reference
+
+| Chapter | What it covers |
+|---|---|
+| [7. Profile Settings](07-profile-settings/index.mdx) | How to open a profile's settings window, its eleven categories, Save and Cancel, when a running window needs a restart, and read-only managed profiles. |
+| [8. App Settings](08-app-settings/index.mdx) | The Settings window (⌘,), its eight panes, when changes take effect, and where settings are stored. |
+
+The profile settings reference has one page per category, in the window's order:
+
+- [General](07-profile-settings/general.mdx) — name, browser, Retain Browsing Data, window color, home page, language, comments.
+- [Performance](07-profile-settings/performance.mdx) — GPU acceleration, WebGL, zero-copy rasterization, smooth scrolling, strict site isolation.
+- [Media](07-profile-settings/media.mdx) — audio and volume, webcam and microphone sharing, device choice, webcam quality and effects.
+- [File Transfer](07-profile-settings/file-transfer.mdx) — uploads, downloads, and VirusTotal scanning.
+- [Host Isolation](07-profile-settings/host-isolation.mdx) — native tabs, shared clipboard, keyboard-layout matching, macOS passkeys and passwords, printing.
+- [Network Isolation](07-profile-settings/network-isolation.mdx) — NAT or a bridged interface, local-network isolation, allowed outgoing ports.
+- [Privacy & Safety](07-profile-settings/privacy-safety.mdx) — malware-site blocking, AI phishing detection, screen-capture blocking, Send Link to Other Session, user agent.
+- [Extensions](07-profile-settings/extensions.mdx) — enabling extensions, uBlock Origin Lite and Privacy Badger, custom Chrome Web Store extensions.
+- [VPN & Ads](07-profile-settings/vpn-ads.mdx) — Cloudflare WARP, WireGuard, IKEv2, OpenVPN, where VPN secrets are stored, ad blocking.
+- [Enterprise](07-profile-settings/enterprise.mdx) — Google Workspace (Chrome Enterprise) enrollment, HTTP proxy, root certificates.
+- [Advanced](07-profile-settings/advanced.mdx) — allowing automation, session recording level, encrypting browsing data.
+
+The app settings reference has one page per pane:
+
+- [General](08-app-settings/general.mdx) — Default Profile for Links.
+- [Hardware](08-app-settings/hardware.mdx) — memory, CPU cores, Energy Mode, kernel boot options.
+- [Input](08-app-settings/input.mdx) — keyboard layout, natural scrolling, Use Command as Control.
+- [Display](08-app-settings/display.mdx) — scale factor and appearance.
+- [Network](08-app-settings/network.mdx) — NAT or bridged, network interface, DNS servers, phishing analysis server.
+- [Automation](08-app-settings/automation.mdx) — the automation server, its port and bind address, API reference, MCP configuration.
+- [Managed Profile](08-app-settings/managed-profile.mdx) — enrolling, enrollment cards, sync status, unenrolling.
+- [Storage](08-app-settings/storage.mdx) — disk usage, storage location, deleting the base image.
+
+### Security & enterprise
+
+| Chapter | What it covers |
+|---|---|
+| [12. Privacy & Security](12-privacy-security.mdx) | The security model end to end: what each VM isolates, what a window can share with your Mac, network limits, how saved data is protected, what leaves your Mac and when, and VPNs and ad blocking. |
+| [13. Enterprise](13-enterprise.mdx) | Enrolling a Mac (in the app or from the command line), how managed profiles are delivered and verified, what administrators control — client certificates, enforced recording, corporate websites, Chrome Enterprise — sync, and unenrolling. |
+
+### Automation
+
+| Chapter | What it covers |
+|---|---|
+| [14. Automation](14-automation.mdx) | The automation server's HTTP API and CDP proxy, the MCP server and its tools, AppleScript commands and keys, and the `bromure` command-line tool. |
+
+### Reference
+
+| Chapter | What it covers |
+|---|---|
+| [15. Troubleshooting](15-troubleshooting.mdx) | Network issues and Repair Network, the VM Services window, setup errors, disk space, kernel options, recreating the image, VPN connection failures, and logs. |
+| [16. Glossary](16-glossary.mdx) | Definitions of the terms used in Bromure and in this manual. |
+| [17. Appendix](17-appendix.mdx) | Reference tables: keyboard shortcuts, file and folder locations, keychain items, vsock ports, network endpoints, and defaults keys. |
+
+## Conventions used in this manual
+
+- **Bold** text names an on-screen control or label exactly as the app shows it in English — a button, menu item, toggle, category or pane (for example, **New Private Window** or **Retain Browsing Data**).
+- `Monospace` text is a command, file path, defaults key, port or literal value (for example, `~/Library/Application Support/Bromure` or `automation.port`).
+- A path such as **File › New Window With Profile** is a menu path: the menu, then each submenu or item in order. **Settings › Network** means the Network pane of the Settings window; a profile's **General** category means that category of the profile's settings window.
+- A **window** and a **session** are the same thing seen from two sides: one browser window and the Linux VM behind it. Menus and alerts often say *browser session*.
+- Keyboard shortcuts use the macOS symbols: ⌘ Command, ⌥ Option, ⌃ Control, ⇧ Shift, ⏎ Return, ⎋ Escape.
+- Screenshots show the English interface with a demo profile named **Work**. The app is localized, so your screens follow your macOS language.
+- Notes, tips, and warnings appear as callouts:
+
+> **Note:** Background information worth knowing.
+
+> **Tip:** A shortcut or recommended practice.
+
+> **Warning:** Something that can lose data or weaken a protection if you get it wrong.
+
+## Where else to look
+
+Downloads, release notes and enterprise information are at [bromure.io](https://bromure.io). For questions this manual doesn't answer, [Troubleshooting](15-troubleshooting.mdx) collects diagnostic procedures, and the [Glossary](16-glossary.mdx) defines the vocabulary.

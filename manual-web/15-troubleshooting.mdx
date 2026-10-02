@@ -1,0 +1,186 @@
+---
+title: "Troubleshooting"
+description: "Diagnose and fix the problems you are most likely to meet: setup errors, windows that won't open, network issues and Repair Network, VPN connection failures, disk space, kernel options, recreating the base image, automation and enrollment problems, the VM Services window, and where Bromure writes its log."
+order: 15
+---
+
+# Troubleshooting
+
+This chapter is organized by symptom. Each entry gives the likely cause and the steps to fix it. Start with [Diagnostic tools](#diagnostic-tools), which the entries below refer to, then go to the section that matches what you see.
+
+Because every Bromure window starts from a clean copy of the base image, many problems disappear when you close the window and open a new one. When a problem comes back in every new window, the cause is usually in the app settings, the base image, or your Mac's network, which is what most entries below deal with.
+
+## Diagnostic tools
+
+### The VM Services window
+
+**View › VM Services** opens a window that shows, for every open browser window, the state of each channel between your Mac and its VM. It refreshes every second. Each window is a card named after its profile; with no windows open, it says "No active sessions".
+
+Each service shows its virtual-socket port and a state:
+
+- **Connected** (green) — the service inside the VM is talking to your Mac.
+- **Listening** (orange) — your Mac is waiting for the VM side, which hasn't connected yet or has disconnected.
+- **Disabled** — the profile doesn't use this service. Disabled services are folded under "*n* disabled".
+
+| Service | Port | Connected when |
+|---|---|---|
+| File Transfer | 5100 | The profile allows uploads or downloads. |
+| Credentials | 5201 | Passkeys or passwords from macOS are on. |
+| Link Sender | 5300 | **Send Link to Other Session** is on. |
+| Webcam | 5400 | The webcam is shared. |
+| Keyboard Layout | 5006 | **Match Keyboard Layout** is on. |
+| CJK Input | 5007 | A Chinese, Japanese or Korean input method is active. |
+| CDP Automation | 5200 | The browser's DevTools endpoint is reachable (automation or native tabs). |
+| File Picker | 5600 | A page's upload dialog can use the macOS file picker. |
+| WARP VPN, WireGuard VPN, IKEv2 VPN, OpenVPN | 5700, 5701, 5702, 5704 | The profile uses that VPN and its agent is running. |
+| Network Refresh | 5703 | The VM can renew its network lease when your Mac's network changes. |
+| Shell | 5800 | Development builds only. |
+| Native Tab Bar | 5810 | **Native Tabs** is on. |
+| HTTP Trace | 5900 | Session recording is on. |
+| Phishing Analysis | 5950 | **AI Phishing Detection** is on. |
+
+A feature that doesn't work in one window, such as a clipboard that doesn't paste or a VPN button that stays grey, often shows up here as a service stuck in **Listening**. Close the window and open a new one; if the service stays in **Listening** in new windows too, recreate the base image (see [Recreating the base image](#recreating-the-base-image)).
+
+### Setup details
+
+While the base image installs, **Show Details** in the setup window reveals the steps and the console output. If setup fails, the error pane has **Copy Details**, which copies the error message and the console output to the clipboard: paste it into a bug report.
+
+### Bromure's log
+
+Bromure writes its diagnostic messages to standard output. It doesn't keep a log file, so to see them, quit Bromure and start it from Terminal:
+
+```bash
+/Applications/Bromure.app/Contents/MacOS/bromure
+```
+
+Messages then scroll in the Terminal window while you reproduce the problem. Lines are prefixed with the component that wrote them, such as `[VMPool]`, `[Automation]`, `[AutomationServer]`, `[URL]` or `[managed]`. Quitting Bromure from its menu also ends the Terminal command.
+
+## Setup and the base image
+
+### Setup stops with "Something went wrong"
+
+The setup window shows **Setup stopped**, **Something went wrong** and "The browser image couldn't be installed. Check your connection and try again.", followed by the specific error.
+
+1. Check that your Mac is online and can reach `dl.bromure.io`.
+2. Click **Try Again**.
+3. If the download keeps failing, Bromure builds the image locally instead, which takes about 10 minutes.
+
+Two errors have their own messages:
+
+- **"Not enough disk space (*n* MB available). Free up space and try again."** Free at least a few gigabytes (see [Disk space](#disk-space)) and click **Try Again**.
+- **"Couldn't set up networking. Bromure tries again when your network changes, or click Try Again."** macOS couldn't give the VM a network. Bromure retries by itself when your network changes (for example when you join Wi-Fi). If you use a VPN client or security software, see [The browser can't reach the internet](#the-browser-cant-reach-the-internet).
+
+### Recreating the base image
+
+A damaged image, or one missing packages, can be replaced without touching your profiles. Choose **File › Recreate Base Image…** and confirm with **Recreate**: "This will close all browser windows, delete the current base image, and rebuild it from scratch. This may take several minutes." Your profiles and their saved data are kept.
+
+**Settings › Storage › Delete Base Image & Reset…** does the same in two steps: it deletes the image and brings back the setup window, where **Get Started** installs a new one. See [Storage](08-app-settings/storage.mdx).
+
+Changing **Keyboard Layout** or **Natural Scrolling** in **Settings › Input** also rebuilds the image.
+
+### "Your browser image is over a month old"
+
+Bromure suggests a fresh image every 30 days so you get the latest security updates for Linux and the browser. **Download Latest** installs it while your open windows keep running; your profiles and their data are kept. **Not Now** asks again in 30 days, and **Never ask me again** stops the reminders. See [Installation](02-installation.mdx).
+
+### "New packages are recommended to be installed"
+
+A new version of Bromure can recommend packages for the image, for example Google Chrome or Cloudflare WARP. Click **Install** to add them (a few minutes; open windows keep running) or **Not Now**. Features that depend on them, such as the **Google Chrome** browser choice or **Cloudflare WARP**, don't work until they are installed.
+
+## A window won't open
+
+### "Cannot open browser"
+
+**Cannot open browser** — "Too many browser sessions are open. Close some windows and try again." appears whenever Bromure fails to start a VM for a window, not only when many windows are open. Check, in order:
+
+1. **Memory.** Each window is a VM with the memory set in **Settings › Hardware**. Close some windows, or lower **Memory**.
+2. **Disk space.** A window needs at least 1 GB free on your startup disk for its temporary disk. See [Disk space](#disk-space).
+3. **Kernel options.** If you changed **Kernel Boot Options**, see the next entry.
+4. **The image.** If none of the above applies, [recreate the base image](#recreating-the-base-image).
+
+### Windows stopped opening after changing kernel options
+
+An invalid entry in **Settings › Hardware › Kernel Boot Options** stops every VM from booting. Open **Settings › Hardware** and click **Reset to Default**, which restores `arm64.nosme`. Keep that default on Apple M4 Macs: removing it can make VMs crash.
+
+## Network problems
+
+### "Network Issue" with Repair Network
+
+In NAT mode, Bromure checks each VM's network as it starts. If the VM got no address, or has one but no traffic flows, it shows **Network Issue**, explaining that "macOS's shared networking stack (vmnet) may be wedged", and offers:
+
+- **Repair Network** — restarts the macOS services behind shared networking (`com.apple.NetworkSharing`, and the DHCP server `com.apple.bootpd` when the VM got no address). macOS asks for your administrator password. Bromure then discards the broken VM and opens the window again.
+- **Continue Anyway** — opens the window as it is. Pages won't load.
+- **Cancel** — doesn't open the window.
+
+If you cancel the password prompt or the repair fails, Bromure shows **Network Repair Cancelled** ("The repair was cancelled or failed. Try again from the menu."). Open a new window to be offered the repair again. If it keeps happening after a successful repair, restart your Mac, or switch to Bridged mode (below).
+
+### The browser can't reach the internet
+
+VPN clients, firewalls and endpoint-security software on your Mac sometimes break the shared networking that NAT mode relies on, or the DNS the VM uses. Try, in order:
+
+1. **DNS Servers.** In **Settings › Network**, enter public resolvers such as `1.1.1.1, 8.8.8.8` and open a new window. This works only in NAT mode.
+2. **Bridged mode.** In **Settings › Network**, choose **Bridged** and select your Wi-Fi or Ethernet adapter under **Network Interface**. The VM then joins your network directly. **Isolate from Local Network** and **Restrict Outgoing Ports** don't apply in Bridged mode.
+3. **The profile's own settings.** A profile can override the network mode (**Network Interface** in [Network Isolation](07-profile-settings/network-isolation.mdx)). **Restrict Outgoing Ports** blocks every port not in its list; make sure `443` and `80` are included.
+
+In Bridged mode, if the VM gets no address from your router, Bromure warns **Network Issue**: "The VM could not obtain an IP address via DHCP. Browsing will not work in this session." Some networks don't hand out addresses to additional devices; use NAT on those.
+
+### Local devices are reachable when they shouldn't be
+
+**Isolate from Local Network** works only in NAT mode. If the app or the profile uses Bridged mode, the VM is on your network like any other device. See [Network Isolation](07-profile-settings/network-isolation.mdx).
+
+## VPN connection failures
+
+The VPN button in the window's title bar shows the tunnel's state in its tooltip: **Connected**, **Connecting…**, **Disconnected**, or an error.
+
+- **"VPN Connection Failed"** appears as a sheet on the window with the reason reported by the VPN client. Check the configuration in [VPN & Ads](07-profile-settings/vpn-ads.mdx): server address, credentials, certificate and passphrase for IKEv2; the pasted `.conf` or `.ovpn` file for WireGuard and OpenVPN.
+- **"VPN: WARP not installed in this VM"** (red, disabled button) means the Cloudflare WARP package isn't in the image. Accept the **New packages are recommended** prompt, or [recreate the base image](#recreating-the-base-image).
+- **WARP and memory.** WARP needs at least 2 GB of VM memory. Bromure offers to raise **Memory** when you choose WARP; if you declined, set it in **Settings › Hardware**.
+- **No VPN button at all.** The profile has no VPN selected, or it has an **HTTP Proxy** set in its [Enterprise](07-profile-settings/enterprise.mdx) settings: a proxy turns the VPN and ad blocking off.
+- **The tunnel connects but pages don't load.** If the profile uses **Restrict Outgoing Ports**, the VPN endpoint's port is allowed automatically, but the sites you visit still need theirs, usually `80` and `443`.
+
+To reconnect, click the VPN button to disconnect, then again to connect, or close the window and open a new one.
+
+## Disk space
+
+Bromure needs space for:
+
+- **The base image** in `~/Library/Application Support/Bromure/`. **Settings › Storage** shows its size.
+- **One temporary disk per open window**, a copy-on-write clone of the image in your temporary folder that grows with what the window writes, including downloads, and is deleted when the window closes. Bromure refuses to start a window with less than 1 GB free.
+- **Persistent profiles**, up to 1 GB each, in `~/Library/Application Support/Bromure/profiles/`.
+
+To reclaim space, close windows you don't need, delete persistent profiles you no longer use (**File › Delete Profile…**), or use **Delete Browsing Data…** in a profile's [General](07-profile-settings/general.mdx) settings. Before uninstalling Bromure, **Settings › Storage › Delete Base Image & Reset…** removes the image. See [Installation](02-installation.mdx) for uninstalling completely.
+
+## Automation problems
+
+| Symptom | Cause and fix |
+|---|---|
+| `curl http://127.0.0.1:9222/health` fails to connect. | **Enable Automation** is off, Bromure isn't running, or another program already uses the port. Check **Settings › Automation**; if the port is taken, choose another **API Port**, then turn **Enable Automation** off and on. Launch Bromure from Terminal to see `[AutomationServer] ERROR: bind failed …` if the port is in use. |
+| A profile is missing from `GET /profiles`. | Its **Allow Automation** setting is off. Turn it on in the profile's [Advanced](07-profile-settings/advanced.mdx) settings. |
+| `POST /sessions` returns `{"error": "Failed to create session"}`. | The profile name is misspelled, it doesn't allow automation, or Bromure is still setting up. Check `GET /profiles`, and that the setup window isn't showing. |
+| The CDP proxy returns `502 Bad Gateway`. | The browser in that window isn't ready yet, or the window was closed. Wait a few seconds and retry. |
+| MCP tools fail with "Connect failed" or list no profiles. | The automation server is off, or the MCP server points at the wrong port: pass `--api-url` if you changed **API Port**. |
+| `bromure_get_trace` returns nothing. | Session recording is off for the profile. Set a **Session Recording** level in its Advanced settings and open a new window. |
+
+See [Automation](14-automation.mdx).
+
+## Enrollment problems
+
+- **Enrollment fails.** The error appears in red next to **Enroll**. Codes are single-use: ask your administrator for a new one if yours was already used. If your organization runs its own control plane, check **Server URL (optional)**.
+- **"Sync failed: …"** in **Settings › Managed Profile.** Bromure couldn't reach the control plane. Check your connection and click **Sync Now**.
+- **"Enrolled — no profiles assigned."** The enrollment worked, but your administrator hasn't assigned you a profile yet.
+
+See [Enterprise](13-enterprise.mdx).
+
+## Reporting a bug
+
+Include:
+
+- the Bromure version (**Bromure › About Bromure**) and your macOS version and Mac model,
+- what you did and what happened, with the exact text of any alert,
+- for setup problems, the output copied with **Copy Details**,
+- for window problems, a screenshot of **View › VM Services** and the log from launching Bromure in Terminal while you reproduce the problem.
+
+## Related chapters
+
+- [Installation](02-installation.mdx) — setup, image updates, and uninstalling.
+- [App Settings](08-app-settings/index.mdx) — Hardware, Network and Storage.
+- [Concepts](04-concepts.mdx) — how windows, VMs and the base image fit together.

@@ -15,7 +15,7 @@ case "$TARGET" in
         SDEF_FILE="$SOURCE_DIR/Bromure.sdef"
         RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
         ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
-        ICON_COMPOSER=""
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/Bromure.icon"
         ;;
     bromure-ac)
         PRODUCT_NAME="bromure-ac"
@@ -308,6 +308,8 @@ PLIST
         echo "Bundled ghostty resources (native terminal surfaces)."
     fi
 fi
+
+bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$SIGN_ID"
 
 # Code sign with entitlements.
 # Virtualization.framework requires com.apple.security.virtualization.

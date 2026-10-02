@@ -3192,8 +3192,6 @@
 "Open Local Network Settings" = "打開區域網路設定";
 
 /* Models: your environment (auto mode) */
-"Your environment" = "你的環境";
-"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "代理程式的安全檢查需要知道的資訊：你的組織，以及你信任的儲存庫、網域和服務。每行一項。Claude 的自動模式據此區分日常工作與有風險的操作。";
 "Applies to every workspace from its next launch." = "從每個工作區下次啟動時生效。";
 
 /* Chat: scratch terminal (/term) */
@@ -3534,3 +3532,41 @@
 "The app's Switchboard picks the session best placed for it" = "App 的總機會挑選最合適的工作階段";
 "There's no workspace to run the Switchboard in." = "沒有可執行總機的工作區。";
 "picks the session best placed for it" = "挑選最合適的工作階段";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "描述你的環境";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "代理程式的安全檢查需要知道的資訊：你的組織、你的伺服器及其用途、你信任的儲存庫和網域、哪些內容可以安全變更。每行一項。Claude 的自動模式據此區分日常工作與有風險的操作。";
+"Variables" = "變數";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "信任此檔案夾？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · 已下載";
+"%@ · sent by the agent" = "%@ · 由代理程式傳送";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "無法讀取機器上的檔案——檔案是否仍在，機器是否正在執行？";
+"Couldn't write the file here." = "無法在此處寫入檔案。";
+"Downloaded" = "已下載";
+"Save As…" = "儲存為…";
+"Save or Share" = "儲存或分享";
+"Saved to %@" = "已儲存到 %@";
+"Sent by the agent" = "由代理程式傳送";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "加入指令";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "當工作階段以這些指令啟動時，會加入代理程式的系統提示詞。描述代理程式應扮演的角色以及工作方式——「你是一名……」。";
+"Careful reviewer" = "細心的審閱者";
+"Delete these instructions" = "刪除這些指令";
+"Edit instructions…" = "編輯指令…";
+"Instructions" = "指令";
+"Instructions added to the agent's system prompt (“You are a…”)" = "加入代理程式系統提示詞的指令（「你是一名……」）";
+"Instructions without a name or text are not kept." = "沒有名稱或文字的指令不會被保留。";
+"New instructions" = "新指令";
+"No instructions" = "無指令";
+"No instructions yet. Add some with +." = "還沒有指令。用 + 加入。";
+"Teacher" = "老師";
+"The agent as it comes" = "原樣的代理程式";
+"Untitled" = "未命名";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "你是一名一絲不苟的資深工程師，在變更發布前進行審閱。先尋找錯誤、邊界情況和安全問題，解釋你的推理，並優先選擇小而經過充分測試的變更，而非大規模重寫。";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "你是一位耐心的老師。邊做邊用淺白的語言解釋你在做什麼以及為什麼，並指出使用者能從每一步學到什麼。";

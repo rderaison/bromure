@@ -3224,8 +3224,6 @@
 "Open Local Network Settings" = "Open Local Network Settings";
 
 /* Models: your environment (auto mode) */
-"Your environment" = "Your environment";
-"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions.";
 "Applies to every workspace from its next launch." = "Applies to every workspace from its next launch.";
 
 /* Chat: scratch terminal (/term) */
@@ -3566,3 +3564,41 @@
 "The app's Switchboard picks the session best placed for it" = "The app's Switchboard picks the session best placed for it";
 "There's no workspace to run the Switchboard in." = "There's no workspace to run the Switchboard in.";
 "picks the session best placed for it" = "picks the session best placed for it";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "Describe your environment";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions.";
+"Variables" = "Variables";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "Trust this folder?";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ of %@";
+"%@ · downloaded" = "%@ · downloaded";
+"%@ · sent by the agent" = "%@ · sent by the agent";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "Couldn't read the file on the machine — is it still there, and is the machine running?";
+"Couldn't write the file here." = "Couldn't write the file here.";
+"Downloaded" = "Downloaded";
+"Save As…" = "Save As…";
+"Save or Share" = "Save or Share";
+"Saved to %@" = "Saved to %@";
+"Sent by the agent" = "Sent by the agent";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "Add instructions";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”.";
+"Careful reviewer" = "Careful reviewer";
+"Delete these instructions" = "Delete these instructions";
+"Edit instructions…" = "Edit instructions…";
+"Instructions" = "Instructions";
+"Instructions added to the agent's system prompt (“You are a…”)" = "Instructions added to the agent's system prompt (“You are a…”)";
+"Instructions without a name or text are not kept." = "Instructions without a name or text are not kept.";
+"New instructions" = "New instructions";
+"No instructions" = "No instructions";
+"No instructions yet. Add some with +." = "No instructions yet. Add some with +.";
+"Teacher" = "Teacher";
+"The agent as it comes" = "The agent as it comes";
+"Untitled" = "Untitled";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites.";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step.";

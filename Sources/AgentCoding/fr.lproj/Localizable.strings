@@ -3189,8 +3189,6 @@
 "Open Local Network Settings" = "Ouvrir les réglages Réseau local";
 
 /* Models: your environment (auto mode) */
-"Your environment" = "Votre environnement";
-"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "Ce que les contrôles de sécurité de vos agents doivent savoir : votre organisation, les dépôts, domaines et services auxquels vous faites confiance. Un par ligne. Le mode auto de Claude s’en sert pour distinguer le travail courant des actions risquées.";
 "Applies to every workspace from its next launch." = "S’applique à chaque espace de travail dès son prochain lancement.";
 
 /* Chat: scratch terminal (/term) */
@@ -3531,3 +3529,41 @@
 "The app's Switchboard picks the session best placed for it" = "Le Standard de l’app choisit la session la mieux placée";
 "There's no workspace to run the Switchboard in." = "Aucun espace de travail où exécuter le Standard.";
 "picks the session best placed for it" = "choisit la session la mieux placée";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "Décrivez votre environnement";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "Ce que les contrôles de sécurité de vos agents doivent savoir de votre monde : votre organisation, vos serveurs et leur rôle, les dépôts et domaines auxquels vous faites confiance, ce qu’il est sûr de modifier. Un fait par ligne. Le mode auto de Claude s’en sert pour distinguer le travail courant des actions risquées.";
+"Variables" = "Variables";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "Faire confiance à ce dossier ?";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ sur %@";
+"%@ · downloaded" = "%@ · téléchargé";
+"%@ · sent by the agent" = "%@ · envoyé par l’agent";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "Impossible de lire le fichier sur la machine — est-il toujours là, et la machine est-elle démarrée ?";
+"Couldn't write the file here." = "Impossible d’écrire le fichier ici.";
+"Downloaded" = "Téléchargé";
+"Save As…" = "Enregistrer sous…";
+"Save or Share" = "Enregistrer ou partager";
+"Saved to %@" = "Enregistré dans %@";
+"Sent by the agent" = "Envoyé par l’agent";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "Ajouter des instructions";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "Ajoutées au prompt système de l’agent quand une session démarre avec elles. Décrivez qui doit être l’agent et comment il doit travailler — « Tu es un… ».";
+"Careful reviewer" = "Relecteur minutieux";
+"Delete these instructions" = "Supprimer ces instructions";
+"Edit instructions…" = "Modifier les instructions…";
+"Instructions" = "Instructions";
+"Instructions added to the agent's system prompt (“You are a…”)" = "Instructions ajoutées au prompt système de l’agent (« Tu es un… »)";
+"Instructions without a name or text are not kept." = "Les instructions sans nom ou sans texte ne sont pas conservées.";
+"New instructions" = "Nouvelles instructions";
+"No instructions" = "Aucune instruction";
+"No instructions yet. Add some with +." = "Aucune instruction pour l’instant. Ajoutez-en avec +.";
+"Teacher" = "Professeur";
+"The agent as it comes" = "L’agent tel quel";
+"Untitled" = "Sans titre";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "Tu es un ingénieur senior méticuleux qui relit les modifications avant leur mise en production. Cherche d’abord les bugs, les cas limites et les problèmes de sécurité, explique ton raisonnement, et préfère de petites modifications bien testées aux grandes réécritures.";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "Tu es un professeur patient. Explique ce que tu fais et pourquoi au fur et à mesure, en langage simple, et signale ce que l’utilisateur peut apprendre de chaque étape.";

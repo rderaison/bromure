@@ -646,6 +646,7 @@ final class RemoteHostController {
         if let kube = snapshot["kubeClusters"] as? [String: Any] { applyKubeClusters(kube) }
         applySessions(snapshot["agentSessions"] as? [[String: Any]])
         applyRooms(snapshot["agentRooms"] as? [[String: Any]])
+        applyInstructionPresets(snapshot["instructionPresets"] as? [[String: Any]])
         applyDelegations(snapshot["delegations"] as? [[String: Any]])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
@@ -1129,6 +1130,19 @@ final class RemoteHostController {
     let roomStore = AgentRoomStore(mirror: true)
     private(set) var supportsRooms = false
 
+    /// The server's session-instructions presets. nil until a server that
+    /// applies them answers (an older one: no instructions chip).
+    @ObservationIgnored private(set) lazy var instructionStore = InstructionPresetStore { [weak self] list in
+        self?.send("POST", "/instruction-presets", body: ["presets": InstructionPresetStore.wire(list)])
+    }
+    private(set) var supportsInstructions = false
+
+    private func applyInstructionPresets(_ list: [[String: Any]]?) {
+        guard let list else { supportsInstructions = false; return }
+        supportsInstructions = true
+        instructionStore.applyMirror(InstructionPresetStore.fromWire(list))
+    }
+
     private func applyRooms(_ list: [[String: Any]]?) {
         guard let list else { supportsRooms = false; return }
         supportsRooms = true
@@ -1176,9 +1190,11 @@ final class RemoteHostController {
     /// POST /sessions/start — the new session's id once the server has it.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
                       cloneURL: String?, message: String?,
-                      attachments: [DroppedFile] = [], room: UUID? = nil) async -> UUID? {
+                      attachments: [DroppedFile] = [], room: UUID? = nil,
+                      instructions: String? = nil) async -> UUID? {
         let host = self.host
         var body: [String: Any] = ["profile": profileID.uuidString, "tool": tool.rawValue, "cwd": cwd]
+        if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
         if let room { body["room"] = room.uuidString }
         if let cloneURL, !cloneURL.isEmpty { body["cloneURL"] = cloneURL }
         if let message, !message.isEmpty { body["message"] = message }
@@ -4407,7 +4423,8 @@ final class RemoteHostWindow: NSWindow {
                 Task { @MainActor in
                     guard let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
                                                         cloneURL: req.cloneURL, message: req.openingMessage,
-                                                        attachments: req.attachments, room: room),
+                                                        attachments: req.attachments, room: room,
+                                                        instructions: req.instructions),
                           let self else { return }
                     // Started from a room: back to its grid, where it launches.
                     if let room, c.roomStore.room(room) != nil { self.showRoom(room); return }
@@ -4430,7 +4447,8 @@ final class RemoteHostWindow: NSWindow {
                                               workspace: { c.profile(for: $0)?.name ?? "" })
             },
             assignNickname: { [weak c] sid, nick in c?.sessionCommand(sid, "nickname", body: ["nickname": nick]) },
-            recentStarts: NewSessionView.RecentStart.from(c.sessionStore.sessions, profiles: c.profiles))
+            recentStarts: NewSessionView.RecentStart.from(c.sessionStore.sessions, profiles: c.profiles),
+            instructionStore: c.supportsInstructions ? c.instructionStore : nil)
         showSessionOverlay(view)
     }
 
@@ -4987,6 +5005,12 @@ final class RemoteHostWindow: NSWindow {
                 "shownWorkspace": shownWorkspace?.uuidString ?? "",
                 "shownWindowIndex": shownWindowIndex ?? -1,
                 "beautified": mountedBeautifiedHost != nil,
+                "chat": beautifiedModel.map { m -> [String: Any] in
+                    var st = m.debugHistoryState()
+                    st["prompts"] = BeautifiedSessionModel.userPrompts(in: m.items)
+                    st["working"] = m.working
+                    return st
+                } ?? [:],
                 "filePaneOpen": filePaneOpen,
                 "sessions": controller.sessionStore.sessions.map {
                     ["id": $0.id.uuidString, "title": $0.title, "tool": $0.tool.rawValue,

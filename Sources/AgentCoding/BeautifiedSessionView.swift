@@ -1075,6 +1075,34 @@ final class BeautifiedSessionModel: ObservableObject {
         rebuild()
         setWorking(provider.isWorking() || seedHolds())
         reconcileQueued()
+        if !background { await backfillContinuity() }
+    }
+
+    /// A first read is a byte window from the file's end — 1.5 MB over a
+    /// fat-client tunnel, which a couple of tool-heavy turns fill — so a
+    /// new or re-read conversation could open on its last exchange alone,
+    /// everything before it behind "Load earlier conversation". Keep the
+    /// last few prompts in view: fetch earlier history until it holds
+    /// `continuityPrompts` of the user's, or `continuityBytes`.
+    private func backfillContinuity() async {
+        for _ in 0..<8 {
+            guard canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
+                  held.data.count < Self.continuityBytes,
+                  Self.userPrompts(in: parsedItems) < Self.continuityPrompts
+            else { return }
+            await loadEarlier()
+            guard let now = buffers[path], now.base < held.base else { return }   // no progress
+        }
+    }
+    nonisolated static let continuityPrompts = 5
+    /// 12 MB (scaled down with `BROMURE_TRANSCRIPT_HISTORY_BYTES`, so the E2E
+    /// "load earlier" checks still find something to load).
+    nonisolated static let continuityBytes = initialHistoryBytes / 2
+    nonisolated static func userPrompts(in items: [TranscriptItem]) -> Int {
+        items.reduce(0) { n, item in
+            if case .userText = item.kind { return n + 1 }
+            return n
+        }
     }
 
     /// Bank one read into the per-file history: append when it continues
@@ -1235,6 +1263,11 @@ final class BeautifiedSessionModel: ObservableObject {
         // happens to carry a needle is the conversation, not a banner. The
         // transcript holds the same words in that case.
         if let f = newFailure, transcriptEchoes(f.detail) { newFailure = nil }
+        // A failed sign-in means the model can't answer at all: once it has
+        // answered since the latest prompt, any auth wording on screen is
+        // something it printed or ran (a grep through this very detector
+        // raised the card), not the agent's state.
+        if newFailure?.kind == .auth, SessionFailure.modelAnswered(since: parsedItems) { newFailure = nil }
         guard newPrompt != prompt || newFailure != failure else { return }
         let wasLogin = prompt?.kind == .login
         withAnimation(.easeOut(duration: 0.2)) {
@@ -2810,6 +2843,23 @@ struct SessionFailure: Equatable {
         detect(tail: terminalTail(screen))
     }
 
+    /// Whether the model has answered since the user's latest prompt — a
+    /// call, a thought, or text that isn't itself an auth error (Claude logs
+    /// "API Error: 401 …" as an assistant message).
+    static func modelAnswered(since items: [TranscriptItem]) -> Bool {
+        for item in items.reversed() {
+            switch item.kind {
+            case .userText: return false
+            case .toolUse, .thinking, .question, .todo: return true
+            case .assistantText(let t):
+                let low = t.lowercased()
+                if !authNeedles.contains(where: { low.contains($0) }) { return true }
+            default: continue
+            }
+        }
+        return false
+    }
+
     /// Scan a pre-split terminal tail (shared with `TerminalScan`, which splits
     /// once). Bottom-up: the lowest matching line is the current state.
     static func detect(tail: [String]) -> SessionFailure? {
@@ -2915,6 +2965,9 @@ struct TerminalPrompt: Equatable {
         "trust the files in this", "do you trust", "trust this folder",
         "trust this directory", "trust this workspace", "is this a project you created",
         "yes, i trust this folder", "trust the authors of", "quick safety check",
+        // Codex's onboarding ("You are running Codex in … allow Codex to work
+        // in this folder without asking for approval").
+        "allow codex to work in this folder", "you are running codex in",
     ]
 
     static func detect(inScreen screen: String, agent: String? = nil) -> TerminalPrompt? {
@@ -2971,10 +3024,21 @@ struct TerminalPrompt: Equatable {
             let isFile: (Substring) -> Bool = { $0.hasSuffix(".log") || $0.contains("/logs/") }
             let folder = trimmed.first(where: { $0.hasPrefix("/") && !$0.contains(" ") && !isFile($0[...]) })
                 ?? trimmed.joined(separator: " ").split(separator: " ")
-                    .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") })
+                    .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") || $0.hasPrefix("/Users/") })
                     .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,:;)")) }
                 ?? NSLocalizedString("this folder", comment: "prompt")
             let claudePicker = low.contains("yes, i trust this folder")
+            // Any other agent's trust dialog — Codex, Kimi, Grok, Oh My Pi,
+            // whatever each version words it as — is answered from its own
+            // numbered options: a card that only knew exact phrasings sat
+            // there "waiting for the agent's trust dialog" with nothing to click.
+            if !claudePicker, let menu = liveMenu(trimmed, after: -1) {
+                let asked = pickerTitle(trimmed, before: menu.firstOffset)
+                return TerminalPrompt(kind: .picker, detail: folder,
+                                      title: asked.isEmpty
+                                          ? NSLocalizedString("Trust this folder?", comment: "prompt") : asked,
+                                      options: menu.options, selectedOption: menu.selected)
+            }
             let codexPicker = low.contains("yes, continue")
             // Kimi's picker defaults to "Trust this folder" (Enter picks it).
             let kimiPicker = low.contains("don't trust") && low.contains("trust this folder")
@@ -2990,19 +3054,19 @@ struct TerminalPrompt: Equatable {
         // relays the user's pick — it never answers on its own.
         let permissionNeedles = ["do you want to proceed", "requires confirmation",
                                  "don't ask again", "do you want to make this edit",
-                                 "do you want to create", "do you want to allow"]
+                                 "do you want to create", "do you want to allow",
+                                 // Codex's approvals.
+                                 "would you like to run the following command",
+                                 "would you like to make the following edits",
+                                 "would you like to grant", "allow command?", "approve this"]
         if let mark = trimmed.lastIndex(where: { l in permissionNeedles.contains { l.lowercased().contains($0) } }) {
             // Options at or below the question — never a numbered list
             // further up the transcript.
             let from = trimmed[..<mark].lastIndex(where: { $0.isEmpty || Self.boxRule($0) }) ?? max(0, mark - 12)
-            let optionLines = trimmed.enumerated().filter { $0.offset > from && loginOption($0.element) != nil }
-            let options = optionLines.compactMap { loginOption($0.element) }
-            if options.count >= 2, options.map(\.index) == Array(1...options.count),
-               let first = optionLines.first {
-                let selected = optionLines.first { unboxed($0.element).hasPrefix("❯") }
-                    .flatMap { loginOption($0.element)?.index }
-                let title = pickerTitle(trimmed, before: first.offset)
-                let context = trimmed[max(0, first.offset - 10)..<first.offset]
+            if let menu = liveMenu(trimmed, after: from) {
+                let (options, selected, first) = (menu.options, menu.selected, menu.firstOffset)
+                let title = pickerTitle(trimmed, before: first)
+                let context = trimmed[max(0, first - 10)..<first]
                     .map(unboxed)
                     .filter { !$0.isEmpty && $0 != title && $0.contains(where: \.isLetter) }
                 return TerminalPrompt(kind: .picker, detail: context.joined(separator: "\n"),
@@ -3036,6 +3100,25 @@ struct TerminalPrompt: Equatable {
 
     /// The dialog's title: the nearest question above the options, else the
     /// nearest line of prose — never a bullet, box art, or the footer.
+    /// The numbered options of a dialog that is up RIGHT NOW: 1…n below
+    /// `after`, one of them under the selection cursor, and at the bottom
+    /// of the screen (a footer and the box's edge may follow). A numbered
+    /// list in the agent's own reply has no cursor and scrolls up — it was
+    /// being offered as a dialog to answer.
+    static func liveMenu(_ lines: [String], after from: Int)
+        -> (options: [LoginOption], selected: Int?, firstOffset: Int)? {
+        let optionLines = lines.enumerated().filter { $0.offset > from && loginOption($0.element) != nil }
+        let options = optionLines.compactMap { loginOption($0.element) }
+        guard options.count >= 2, options.map(\.index) == Array(1...options.count),
+              let first = optionLines.first, let last = optionLines.last else { return nil }
+        let cursor = optionLines.first { l in ["❯", "›", ">"].contains { unboxed(l.element).hasPrefix($0) } }
+        guard let cursor else { return nil }
+        // After the options: only a footer, blank lines, box edges.
+        let below = lines[(last.offset + 1)...].filter { !unboxed($0).isEmpty && !boxRule($0) }
+        guard below.count <= 3 else { return nil }
+        return (options, loginOption(cursor.element)?.index, first.offset)
+    }
+
     /// A line without the dialog box drawn around it ("│ ❯ 1. Yes   │").
     private static func unboxed(_ line: String) -> String {
         line.trimmingCharacters(in: CharacterSet(charactersIn: " │┃|"))
@@ -3062,7 +3145,7 @@ struct TerminalPrompt: Equatable {
     /// "❯ 1. Claude account with subscription · Pro, Max…" → (1, "Claude account
     /// with subscription"). The part after " · " is a tagline we drop.
     private static func loginOption(_ line: String) -> LoginOption? {
-        let s = unboxed(line).drop(while: { $0 == "❯" || $0 == " " })
+        let s = unboxed(line).drop(while: { $0 == "❯" || $0 == "›" || $0 == ">" || $0 == " " })
         guard let dot = s.firstIndex(of: "."),
               let n = Int(s[s.startIndex..<dot]), (1...9).contains(n) else { return nil }
         var label = s[s.index(after: dot)...].trimmingCharacters(in: .whitespaces)

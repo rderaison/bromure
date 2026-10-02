@@ -130,6 +130,10 @@ final class ACAutomationServer {
     var onListDelegations: (() -> [[String: Any]])?
     /// Rooms of sessions, for the fat client's mirror.
     var onListAgentRooms: (() -> [[String: Any]])?
+    /// Session instructions presets: listed in /state, replaced whole by
+    /// POST /instruction-presets {presets: [...]}.
+    var onListInstructionPresets: (() -> [[String: Any]])?
+    var onSetInstructionPresets: (([[String: Any]]) -> Void)?
     /// POST /agent-rooms/{action} (id nil) or /agent-rooms/{id}/{action}.
     var onAgentRoomCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
@@ -1085,6 +1089,14 @@ final class ACAutomationServer {
                 self.onAgentSessionCommand?(nil, "switchboard", bodyJSON) ?? ["error": "no handler"]
             }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", "/instruction-presets"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard let list = bodyJSON["presets"] as? [[String: Any]] else {
+                sendResponse(fd: fd, status: 400, body: ["error": "presets required"]); return
+            }
+            DispatchQueue.main.sync { self.onSetInstructionPresets?(list) }
+            sendResponse(fd: fd, status: 200, body: ["ok": true])
 
         case ("POST", "/agent-sessions/start"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
@@ -2205,6 +2217,7 @@ final class ACAutomationServer {
             if let sessions = self.onListAgentSessions?() { d["agentSessions"] = sessions }
             if let delegations = self.onListDelegations?() { d["delegations"] = delegations }
             if let rooms = self.onListAgentRooms?() { d["agentRooms"] = rooms }
+            if let presets = self.onListInstructionPresets?() { d["instructionPresets"] = presets }
             return d
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil

@@ -91,10 +91,18 @@ final class AgentSessionEngine {
                              openingMessage: message?.nonEmpty)
         s.role = req.role
         s.roomID = req.roomID
+        s.instructions = req.instructions?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         s.launchingSince = Date()
         store.upsert(s)
-        BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))")
-        launch(s.id, prompt: message ?? "", flags: "", attachments: req.attachments, remotely: remotely)
+        BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))"
+                     + (s.instructions == nil ? "" : " with instructions"))
+        // Grok has no way to take them for an interactive session: they open
+        // its first message instead (the session's own message stays clean).
+        var prompt = message ?? ""
+        if req.tool == .grok, let text = s.instructions {
+            prompt = Self.openingWithInstructions(text, message: prompt)
+        }
+        launch(s.id, prompt: prompt, flags: "", attachments: req.attachments, remotely: remotely)
         return s.id
     }
 
@@ -314,6 +322,11 @@ final class AgentSessionEngine {
         store.mutate(id) { $0.needsSignIn = nil; $0.lastError = nil }
         BACDebug.log("sessions", "relaunch “\(s.title)” after sign-in")
         Task { [weak self] in
+            // Codex reads its login from a file the host writes at boot: put
+            // the fresh stand-in in before it starts again, or it comes back
+            // on the stale one and asks to sign in all over.
+            if s.tool == .codex { await delegate.pushCodexAuth(profileID: s.profileID) }
+            if s.tool == .claude { await delegate.pushClaudeStandIn(profileID: s.profileID) }
             if let w = s.windowIndex {
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,
@@ -549,7 +562,25 @@ final class AgentSessionEngine {
             let baseline = await self.tabBaseline(profileID: s.profileID, delegate: delegate)
             let display = s.title
             self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
-            let allFlags = [flags, Self.roleFlags(for: s)].filter { !$0.isEmpty }.joined(separator: " ")
+            // The session's instructions, from a file rewritten on every
+            // launch (a resume gives them again). Before the resume flags:
+            // Codex resumes through a subcommand.
+            var instructionFlags = ""
+            if let text = s.instructions?.nonEmpty {
+                let path = Self.instructionsGuestPath(s.id)
+                let dir = (path as NSString).deletingLastPathComponent
+                let body = Data(Self.instructionsFile(text, tool: s.tool).utf8).base64EncodedString()
+                if (try? await delegate.guestFileOp(profileID: s.profileID, op: ["op": "mkdir", "path": dir], timeout: 15)) != nil,
+                   (try? await delegate.guestFileOp(profileID: s.profileID,
+                                                    op: ["op": "write", "path": path, "data": body], timeout: 15)) != nil {
+                    instructionFlags = Self.instructionFlags(tool: s.tool, text: text, path: path,
+                                                             resuming: !flags.isEmpty)
+                } else {
+                    BACDebug.log("sessions", "“\(s.title)”: couldn't write its instructions to \(path)")
+                }
+            }
+            let allFlags = [instructionFlags, flags, Self.roleFlags(for: s)]
+                .filter { !$0.isEmpty }.joined(separator: " ")
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: s.profileID.uuidString, action: "agent-tab",
                 args: [guestPath, display, s.tool.rawValue, prompt, allFlags] + self.backgroundArg(id)) else {
@@ -740,8 +771,70 @@ final class AgentSessionEngine {
     /// each other's — else the tool's own "the latest".
     /// Flags a session's role adds to every launch of its agent (the
     /// Switchboard's MCP config), on top of any resume flags.
+    /// Where a session's instructions live in its machine.
+    static func instructionsGuestPath(_ id: UUID) -> String {
+        "/home/ubuntu/.bromure/instructions/\(id.uuidString).md"
+    }
+
+    /// The instructions file for `tool`: the text itself, or for Kimi an
+    /// agent file that keeps its default prompt (`${base_prompt}`) and adds
+    /// the text after it (the body is a template: a literal "${" is broken up).
+    static func instructionsFile(_ text: String, tool: Profile.Tool) -> String {
+        guard tool == .kimi else { return text + "\n" }
+        return "---\ndescription: Session instructions from Bromure\n---\n${base_prompt}\n\n"
+            + text.replacingOccurrences(of: "${", with: "$ {") + "\n"
+    }
+
+    /// The launch flags that add the instructions to the agent's system
+    /// prompt. Never a space in them: the launcher word-splits flags.
+    /// Claude and Oh My Pi read the file; Codex takes the text as a config
+    /// value; Kimi takes an agent file, on a fresh start only (it can't be
+    /// combined with a resume). Grok: none — see `openingWithInstructions`.
+    static func instructionFlags(tool: Profile.Tool, text: String, path: String, resuming: Bool) -> String {
+        switch tool {
+        case .claude: return "--append-system-prompt-file \(path)"
+        case .omp:    return "--append-system-prompt \(path)"
+        case .codex:  return "-c developer_instructions=" + tomlSpacelessString(text)
+        case .kimi:   return resuming ? "" : "--agent-file \(path)"
+        case .grok:   return ""
+        }
+    }
+
+    /// A TOML basic string with everything but letters, digits and a few
+    /// safe marks escaped (`\uXXXX`): no spaces for the launcher to split
+    /// on, nothing for the shell to glob.
+    static func tomlSpacelessString(_ s: String) -> String {
+        var out = "\""
+        for u in s.unicodeScalars {
+            if u.isASCII, u.properties.isAlphabetic || ("0"..."9").contains(Character(u)) || "-_.,:".unicodeScalars.contains(u) {
+                out.unicodeScalars.append(u)
+            } else if u.value <= 0xFFFF {
+                out += String(format: "\\u%04X", u.value)
+            } else {
+                out += String(format: "\\U%08X", u.value)
+            }
+        }
+        return out + "\""
+    }
+
+    /// Grok's first message when the session has instructions.
+    static func openingWithInstructions(_ text: String, message: String) -> String {
+        // Agent-facing, like the rest of what the agent is told: not localized.
+        let body = "Instructions for this whole session:\n\n" + text
+        return message.isEmpty ? body : body + "\n\n---\n\n" + message
+    }
+
     static func roleFlags(for s: AgentSession) -> String {
-        s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : ""
+        [s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : "", autonomyFlags(for: s.tool)]
+            .filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// How an agent runs in a workspace: on its own, the VM (and the host's
+    /// egress policy) being the sandbox. Claude gets there through its auto
+    /// mode (settings.json); Codex has no such mode — without this it asked
+    /// to approve every command, and its own sandbox fought the VM's.
+    static func autonomyFlags(for tool: Profile.Tool) -> String {
+        tool == .codex ? "--dangerously-bypass-approvals-and-sandbox" : ""
     }
 
     /// `sharedFolder`: another session works in the same folder. With no

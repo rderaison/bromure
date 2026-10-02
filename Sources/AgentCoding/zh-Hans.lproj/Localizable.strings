@@ -3189,8 +3189,6 @@
 "Open Local Network Settings" = "打开本地网络设置";
 
 /* Models: your environment (auto mode) */
-"Your environment" = "你的环境";
-"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "代理的安全检查需要了解的信息：你的组织，以及你信任的仓库、域名和服务。每行一条。Claude 的自动模式据此区分日常工作和有风险的操作。";
 "Applies to every workspace from its next launch." = "从每个工作区下次启动时生效。";
 
 /* Chat: scratch terminal (/term) */
@@ -3531,3 +3529,41 @@
 "The app's Switchboard picks the session best placed for it" = "应用的总机会挑选最合适的会话";
 "There's no workspace to run the Switchboard in." = "没有可运行总机的工作区。";
 "picks the session best placed for it" = "挑选最合适的会话";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "描述你的环境";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "代理的安全检查需要了解的信息：你的组织、你的服务器及其用途、你信任的仓库和域名、哪些内容可以安全更改。每行一条。Claude 的自动模式据此区分日常工作和有风险的操作。";
+"Variables" = "变量";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "信任此文件夹？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · 已下载";
+"%@ · sent by the agent" = "%@ · 由代理发送";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "无法读取机器上的文件——文件是否仍在，机器是否正在运行？";
+"Couldn't write the file here." = "无法在此处写入文件。";
+"Downloaded" = "已下载";
+"Save As…" = "存储为…";
+"Save or Share" = "存储或共享";
+"Saved to %@" = "已存储到 %@";
+"Sent by the agent" = "由代理发送";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "添加指令";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "当会话以这些指令启动时，会添加到代理的系统提示词中。描述代理应扮演的角色以及工作方式——“你是一名……”。";
+"Careful reviewer" = "细致的审阅者";
+"Delete these instructions" = "删除这些指令";
+"Edit instructions…" = "编辑指令…";
+"Instructions" = "指令";
+"Instructions added to the agent's system prompt (“You are a…”)" = "添加到代理系统提示词中的指令（“你是一名……”）";
+"Instructions without a name or text are not kept." = "没有名称或文本的指令不会被保留。";
+"New instructions" = "新指令";
+"No instructions" = "无指令";
+"No instructions yet. Add some with +." = "还没有指令。用 + 添加。";
+"Teacher" = "老师";
+"The agent as it comes" = "原样的代理";
+"Untitled" = "未命名";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "你是一名一丝不苟的资深工程师，在变更发布前进行审阅。先查找缺陷、边界情况和安全问题，解释你的推理，并优先选择小而经过充分测试的变更，而不是大规模重写。";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "你是一位耐心的老师。边做边用通俗的语言解释你在做什么以及为什么，并指出用户能从每一步学到什么。";

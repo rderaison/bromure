@@ -19,7 +19,7 @@ public final class LinuxImageManager {
     /// the xtradeb PPA as a native deb, and glibc means Cloudflare WARP
     /// (and soon official Google Chrome) install as normal debs — the
     /// gcompat/resolv-stub compat layer is gone.
-    public static let imageVersion = "403"
+    public static let imageVersion = "500"
 
     /// Human description of the image — surfaces in
     /// browser-img-catalog.json (via `bromure init-foss-image`'s
@@ -52,6 +52,26 @@ public final class LinuxImageManager {
         return fm.fileExists(atPath: linuxDiskURL.path)
             && fm.fileExists(atPath: linuxKernelURL.path)
             && fm.fileExists(atPath: linuxInitrdURL.path)
+    }
+
+    /// Written after a local build or postinstall validates the guest graphics contract.
+    public var graphicsCapabilitiesURL: URL {
+        storageDir.appendingPathComponent("graphics-capabilities.json")
+    }
+
+    public var supportsExperimentalVirgl: Bool {
+        guard hasBootFiles, let data = try? Data(contentsOf: graphicsCapabilitiesURL) else { return false }
+        guard Self.validGraphicsCapabilities(data),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["pointerProtocolVersion"] as? Int == 1 && json["pointerPort"] as? Int == 5821
+    }
+
+    static func validGraphicsCapabilities(_ data: Data) -> Bool {
+        guard data.count <= 8192,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["configVersion"] as? Int == 1,
+              let backends = json["graphicsBackends"] as? [String] else { return false }
+        return backends.contains("software") && backends.contains("virgl")
     }
 
     /// Whether a valid Linux base image exists and matches the current image version.
@@ -94,6 +114,8 @@ public final class LinuxImageManager {
     ) async throws {
         let fm = FileManager.default
         try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
+
+        try? fm.removeItem(at: graphicsCapabilitiesURL)
 
         // 1. Download Alpine netboot kernel and initramfs
         let netbootKernel = storageDir.appendingPathComponent("netboot-vmlinuz")
@@ -181,6 +203,11 @@ public final class LinuxImageManager {
             imageUUID: nil,
             version: Self.imageVersion,
             appliedStepUUIDs: postinstallSteps.map(\.uuid)))
+
+        if let setup = Self.resourceBundle.url(forResource: "vm-setup", withExtension: nil) {
+            let contract = try Data(contentsOf: setup.appendingPathComponent("configs/graphics-capabilities.json"))
+            try contract.write(to: graphicsCapabilitiesURL, options: .atomic)
+        }
 
         progress(.message("Linux image created at \(linuxDiskURL.path)"))
     }
@@ -310,8 +337,10 @@ public final class LinuxImageManager {
         let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
         inputStream.source = VZHostAudioInputStreamSource()
 
-        audio.streams = [outputStream, inputStream]
-        vzConfig.audioDevices = [audio]
+        audio.streams = UserDefaults.standard.bool(forKey: "vm.gpuTestOutputOnlySoundDevice")
+            ? [outputStream] : [outputStream, inputStream]
+        // Developer acceptance can omit sound hardware to isolate VZ stalls.
+        vzConfig.audioDevices = UserDefaults.standard.bool(forKey: "vm.gpuTestOmitSoundDevice") ? [] : [audio]
 
         // Input
         vzConfig.keyboards = [VZUSBKeyboardConfiguration()]

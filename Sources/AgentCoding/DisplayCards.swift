@@ -18,16 +18,23 @@ import AVKit
 enum DisplayRequest: Equatable {
     case media(path: String, title: String?, caption: String?)
     case chart(spec: String, title: String?, caption: String?)
+    /// A file handed to the user to download (`send_file`).
+    case file(path: String, note: String?)
 
     /// A display-MCP call, whatever the agent calls MCP tools
     /// (`mcp__display__show_chart`, `display__show_chart`, `display.show_chart`…).
     static func parse(name: String, detail: String) -> DisplayRequest? {
         let n = name.lowercased()
-        let media = n.hasSuffix("show_media"), chart = n.hasSuffix("show_chart")
-        guard media || chart, n.contains("display") || n == "show_media" || n == "show_chart",
+        let media = n.hasSuffix("show_media"), chart = n.hasSuffix("show_chart"), send = n.hasSuffix("send_file")
+        guard media || chart || send,
+              n.contains("display") || n == "show_media" || n == "show_chart" || n == "send_file",
               let d = detail.data(using: .utf8),
               let input = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
         else { return nil }
+        if send {
+            guard let path = input["path"] as? String, path.hasPrefix("/") else { return nil }
+            return .file(path: path, note: (input["note"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+        }
         let title = (input["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let caption = (input["caption"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         if media {
@@ -44,10 +51,16 @@ enum DisplayRequest: Equatable {
     }
 
     var title: String? {
-        switch self { case .media(_, let t, _), .chart(_, let t, _): return t }
+        switch self {
+        case .media(_, let t, _), .chart(_, let t, _): return t
+        case .file(let path, _): return (path as NSString).lastPathComponent
+        }
     }
     var caption: String? {
-        switch self { case .media(_, _, let c), .chart(_, _, let c): return c }
+        switch self {
+        case .media(_, _, let c), .chart(_, _, let c): return c
+        case .file(_, let note): return note
+        }
     }
 }
 
@@ -57,11 +70,68 @@ enum DisplayRequest: Equatable {
 /// one through the fat client, …), in chunks. nil = too big or unreadable.
 struct DisplayFileReader {
     let read: (_ path: String, _ maxBytes: Int) async -> Data?
+    /// The guest file op underneath (downloads stream through it).
+    var op: (([String: Any]) async -> [String: Any]?)? = nil
+
+    /// The file's size on the machine, or nil when it can't be read.
+    func size(_ path: String) async -> Int64? {
+        // One byte: the guest reads a full chunk for a length of 0.
+        guard let op, let r = await op(["op": "read", "path": path, "offset": 0, "length": 1]),
+              r["error"] == nil else { return nil }
+        return (r["size"] as? Int64) ?? (r["size"] as? Int).map(Int64.init) ?? (r["size"] as? Double).map { Int64($0) }
+    }
+
+    /// Stream a file off the machine into `dest`, a chunk at a time — any
+    /// size, never whole in memory — reporting (done, total). Written next
+    /// to `dest` and moved in place at the end, so a cancelled or failed
+    /// download leaves nothing half-written under the real name.
+    func download(_ path: String, to dest: URL,
+                  progress: @escaping @MainActor (Int64, Int64) -> Void) async throws {
+        guard let op else { throw DownloadError.unavailable }
+        let partial = dest.deletingLastPathComponent()
+            .appendingPathComponent("." + dest.lastPathComponent + ".bromure-download")
+        FileManager.default.createFile(atPath: partial.path, contents: nil)
+        guard let out = try? FileHandle(forWritingTo: partial) else { throw DownloadError.cantWrite }
+        var done: Int64 = 0
+        do {
+            while true {
+                try Task.checkCancellation()
+                guard let r = await op(["op": "read", "path": path, "offset": done, "length": 6 * 1024 * 1024]) else {
+                    throw DownloadError.unavailable
+                }
+                if let e = r["error"] as? String { throw DownloadError.guest(e) }
+                let data = (r["data"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data()
+                try out.write(contentsOf: data)
+                done += Int64(data.count)
+                let total = (r["size"] as? Int64) ?? (r["size"] as? Int).map(Int64.init) ?? done
+                await progress(done, total)
+                if (r["eof"] as? Bool) ?? true || data.isEmpty { break }
+            }
+            try out.close()
+            if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
+            try FileManager.default.moveItem(at: partial, to: dest)
+        } catch {
+            try? out.close()
+            try? FileManager.default.removeItem(at: partial)
+            throw error
+        }
+    }
+
+    enum DownloadError: LocalizedError {
+        case unavailable, cantWrite, guest(String)
+        var errorDescription: String? {
+            switch self {
+            case .unavailable: return NSLocalizedString("Couldn't read the file on the machine — is it still there, and is the machine running?", comment: "download")
+            case .cantWrite: return NSLocalizedString("Couldn't write the file here.", comment: "download")
+            case .guest(let e): return e
+            }
+        }
+    }
 
     /// Over a guest file op (`read {path, offset, length}` → base64 `data`,
     /// `eof`), 6 MB a call — the size the Files pane downloads with.
     static func chunked(_ op: @escaping ([String: Any]) async -> [String: Any]?) -> DisplayFileReader {
-        DisplayFileReader { path, maxBytes in
+        DisplayFileReader(read: { path, maxBytes in
             var out = Data()
             let chunk = 6 * 1024 * 1024
             while true {
@@ -72,7 +142,7 @@ struct DisplayFileReader {
                 let eof = (r["eof"] as? Bool) ?? true
                 if eof || (r["data"] as? String ?? "").isEmpty { return out }
             }
-        }
+        }, op: op)
     }
 }
 
@@ -139,6 +209,14 @@ struct DisplayCard: View {
     #endif
 
     var body: some View {
+        if case .file(let path, let note) = request {
+            FileDownloadCard(path: path, note: note)
+        } else {
+            visualCard
+        }
+    }
+
+    private var visualCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
@@ -174,6 +252,7 @@ struct DisplayCard: View {
     private var kindName: String {
         switch request {
         case .chart: return NSLocalizedString("Chart", comment: "display card")
+        case .file: return NSLocalizedString("File", comment: "display card")
         case .media(let path, _, _):
             return DisplayMediaKind(path: path) == .video
                 ? NSLocalizedString("Video", comment: "display card")
@@ -216,6 +295,7 @@ struct DisplayCard: View {
     private var icon: String {
         switch request {
         case .chart: return "chart.xyaxis.line"
+        case .file: return "arrow.down.doc"
         case .media(let path, _, _): return DisplayMediaKind(path: path) == .video ? "film" : "photo"
         }
     }
@@ -227,6 +307,8 @@ struct DisplayCard: View {
             ChartView(spec: spec, fill: expanded)
         case .media(let path, _, _):
             MediaView(path: path, expanded: expanded)
+        case .file(let path, let note):
+            FileDownloadCard(path: path, note: note)
         }
     }
 
@@ -236,6 +318,220 @@ struct DisplayCard: View {
         #else
         poppedOut = true
         #endif
+    }
+}
+
+// MARK: Sent files (send_file)
+
+/// One download's progress, held outside the view so it survives the chat's
+/// lazy list recycling the row (and a second card for the same file shows the
+/// same state).
+@MainActor
+final class DisplayDownloads: ObservableObject {
+    static let shared = DisplayDownloads()
+
+    enum State: Equatable {
+        case idle
+        case running(done: Int64, total: Int64)
+        case done(URL)
+        case failed(String)
+    }
+    @Published private(set) var states: [String: State] = [:]
+    @Published private(set) var sizes: [String: Int64] = [:]
+    private var tasks: [String: Task<Void, Never>] = [:]
+
+    func state(_ key: String) -> State { states[key] ?? .idle }
+
+    func loadSize(_ path: String, reader: DisplayFileReader) async {
+        guard sizes[path] == nil, let n = await reader.size(path) else { return }
+        sizes[path] = n
+    }
+
+    func start(_ key: String, path: String, to dest: URL, reader: DisplayFileReader) {
+        guard tasks[key] == nil else { return }
+        states[key] = .running(done: 0, total: sizes[path] ?? 0)
+        tasks[key] = Task { [weak self] in
+            do {
+                try await reader.download(path, to: dest) { done, total in
+                    self?.states[key] = .running(done: done, total: total)
+                }
+                self?.states[key] = .done(dest)
+            } catch is CancellationError {
+                self?.states[key] = .idle
+            } catch {
+                self?.states[key] = .failed(error.localizedDescription)
+            }
+            self?.tasks[key] = nil
+        }
+    }
+
+    func cancel(_ key: String) { tasks[key]?.cancel() }
+
+    /// A free name in `folder`: "report.zip", then "report 2.zip", …
+    nonisolated static func uniqueURL(in folder: URL, name: String) -> URL {
+        let ext = (name as NSString).pathExtension
+        let stem = (name as NSString).deletingPathExtension
+        var url = folder.appendingPathComponent(name)
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = folder.appendingPathComponent(ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)")
+            n += 1
+        }
+        return url
+    }
+}
+
+/// A file the agent sent: its name and size, and the way to get it onto this
+/// device — streamed off the machine in chunks, so any size works.
+struct FileDownloadCard: View {
+    let path: String
+    let note: String?
+    @Environment(\.displayFileReader) private var reader
+    @ObservedObject private var downloads = DisplayDownloads.shared
+
+    private var name: String { (path as NSString).lastPathComponent }
+    private var key: String { path }
+    private var state: DisplayDownloads.State { downloads.state(key) }
+    private var isArchive: Bool {
+        let low = name.lowercased()
+        return [".zip", ".tar", ".tgz", ".gz", ".xz", ".bz2", ".7z", ".zst"].contains { low.hasSuffix($0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: isArchive ? "doc.zipper" : "doc.fill")
+                    .font(.system(size: 22))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                actions
+            }
+            if case .running(let done, let total) = state {
+                if total > 0 {
+                    ProgressView(value: Double(min(done, total)), total: Double(total))
+                } else {
+                    ProgressView().progressViewStyle(.linear)
+                }
+            }
+            if let note {
+                Text(note)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(12)
+        .transcriptCard()
+        .task(id: path) {
+            if let reader { await downloads.loadSize(path, reader: reader) }
+        }
+    }
+
+    private var subtitle: String {
+        let size = downloads.sizes[path].map(Self.bytes)
+        switch state {
+        case .idle:
+            if reader?.op == nil {
+                return NSLocalizedString("This window can't read files from that machine.", comment: "download")
+            }
+            return size.map { String(format: NSLocalizedString("%@ · sent by the agent", comment: "download"), $0) }
+                ?? NSLocalizedString("Sent by the agent", comment: "download")
+        case .running(let done, let total):
+            return total > 0
+                ? String(format: NSLocalizedString("%@ of %@", comment: "download"), Self.bytes(done), Self.bytes(total))
+                : Self.bytes(done)
+        case .done(let url):
+            #if os(macOS)
+            return String(format: NSLocalizedString("Saved to %@", comment: "download"),
+                          (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath)
+            #else
+            _ = url
+            return size.map { String(format: NSLocalizedString("%@ · downloaded", comment: "download"), $0) }
+                ?? NSLocalizedString("Downloaded", comment: "download")
+            #endif
+        case .failed(let why):
+            return why
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        HStack(spacing: 6) {
+            switch state {
+            case .idle:
+                if let reader, reader.op != nil {
+                    #if os(macOS)
+                    Button(NSLocalizedString("Save As…", comment: "download")) { saveAs(reader) }
+                        .controlSize(.small)
+                    #endif
+                    Button(NSLocalizedString("Download", comment: "download")) { download(reader) }
+                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent)
+                }
+            case .running:
+                Button(NSLocalizedString("Cancel", comment: "download")) { downloads.cancel(key) }
+                    .controlSize(.small)
+            case .done(let url):
+                #if os(macOS)
+                Button(NSLocalizedString("Show in Finder", comment: "download")) {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+                .controlSize(.small)
+                Button(NSLocalizedString("Open", comment: "download")) { NSWorkspace.shared.open(url) }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                #else
+                ShareLink(item: url) {
+                    Label(NSLocalizedString("Save or Share", comment: "download"), systemImage: "square.and.arrow.up")
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                #endif
+            case .failed:
+                if let reader {
+                    Button(NSLocalizedString("Try Again", comment: "download")) { download(reader) }
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    private func download(_ reader: DisplayFileReader) {
+        #if os(macOS)
+        let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        #else
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Bromure Downloads", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        #endif
+        downloads.start(key, path: path, to: DisplayDownloads.uniqueURL(in: folder, name: name), reader: reader)
+    }
+
+    #if os(macOS)
+    private func saveAs(_ reader: DisplayFileReader) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = name
+        panel.canCreateDirectories = true
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        downloads.start(key, path: path, to: url, reader: reader)
+    }
+    #endif
+
+    static func bytes(_ n: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: n, countStyle: .file)
     }
 }
 
@@ -573,6 +869,8 @@ enum DisplayWindows {
         case .media(let path, let t, _):
             title = t ?? (path as NSString).lastPathComponent
             content = AnyView(MediaView(path: path, expanded: true).padding(8))
+        case .file:
+            return
         }
         let root = VStack(spacing: 0) {
             content

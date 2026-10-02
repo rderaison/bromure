@@ -130,7 +130,7 @@ struct BromureAC: ParsableCommand {
         // Hidden verification hook for the UX surfaces (command palette,
         // Security Overview, machine menu, grouped session list), rendered
         // with sample data — standalone, no servers or VMs.
-        //   bromure-ac __shot-ui <palette|overview|machinemenu|groups> [out.png] [--dark]
+        //   bromure-ac __shot-ui <palette|overview|machinemenu|groups|environment> [out.png] [--dark]
         if filtered.first == "__shot-ui" {
             let args = Array(filtered.dropFirst())
             let which = args.first ?? "palette"
@@ -210,6 +210,29 @@ struct BromureAC: ParsableCommand {
             switch which {
             case let w where w.hasPrefix("hub-"):
                 (view, size) = AutomationHubPreview.view(w)
+            case "slash":
+                // The "/" palette with Bromure's /term on top of the agent's.
+                size = NSSize(width: 620, height: 330)
+                let cmds = [BeautifiedSessionModel.termCommand]
+                    + SlashCommandCatalog.builtIn(for: "claude").prefix(5)
+                view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
+                    SlashCommandPalette(commands: Array(cmds), agentName: "Claude Code", highlighted: 0,
+                                        onPick: { _ in }, onHover: { _ in })
+                        .padding(20) })
+            case "environment":
+                // Preferences → Environment: the description (its example
+                // showing), then the variables.
+                size = NSSize(width: 680, height: 470)
+                view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
+                    VStack(alignment: .leading, spacing: 18) {
+                        AgentEnvironmentEditor(text: .constant(""))
+                        Divider()
+                        Text("Variables").font(.headline)
+                        Text("Plain `KEY=VALUE` pairs exported into every shell in the VM.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(22) })
             case "palette":
                 let items: [PaletteItem] = [
                     PaletteItem(section: .actions, title: "New Session", icon: "plus", shortcut: "⌘N") {},
@@ -1984,6 +2007,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         AgentSessionEngine(store: agentSessionStore, delegate: self)
     /// Rooms: named sets of sessions, each with a Switchboard of its own.
     let agentRoomStore = AgentRoomStore()
+    /// Instructions a new session can add to its agent's system prompt.
+    let instructionPresetStore = InstructionPresetStore()
     /// Delegations between sessions: one agent handing work to another.
     let delegationStore = DelegationStore()
     private(set) lazy var delegationEngine: DelegationEngine = {
@@ -2192,6 +2217,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // animated "thinking" dots.
             e.traceStore.onConversationActivity = { [weak self] pid in
                 self?.noteAgentActivity(pid)
+            }
+            // A model WebSocket streaming (Codex's whole session is one).
+            HTTPMitmConnection.liveActivity = { pid in
+                DispatchQueue.main.async { [weak self] in self?.noteAgentActivity(pid) }
             }
             e.traceStore.onConversationResult = { [weak self] pid, host, status in
                 self?.switchboardEngine.noteAPIResult(profileID: pid, host: host, status: status)
@@ -4641,6 +4670,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.agentRoomStore.rooms.compactMap(Self.codableToDict) ?? []
             }
         }
+        server.onListInstructionPresets = { [weak self] in
+            MainActor.assumeIsolated {
+                InstructionPresetStore.wire(self?.instructionPresetStore.presets ?? [])
+            }
+        }
+        server.onSetInstructionPresets = { [weak self] list in
+            MainActor.assumeIsolated {
+                self?.instructionPresetStore.replace(InstructionPresetStore.fromWire(list))
+            }
+        }
         server.onAgentRoomCommand = { [weak self] id, action, body in
             MainActor.assumeIsolated {
                 self?.roomCommand(id, action, body) ?? ["error": "no app"]
@@ -4678,7 +4717,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
                         openingMessage: body["message"] as? String,
-                        attachments: attachments, roomID: room), remotely: true)
+                        attachments: attachments, roomID: room,
+                        instructions: body["instructions"] as? String), remotely: true)
                     return ["ok": true, "id": sid.uuidString]
                 case (nil, "switchboard"):
                     // The Switchboard, started (or woken) for a client that
@@ -5778,7 +5818,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// against the new network. Every Reboot goes through here.
     @MainActor func rebootMachine(_ id: Profile.ID, force: Bool, remoteInitiated: Bool) async -> [String: Any] {
         guard let session = runningSessions[id] else { return ["ok": false, "error": "VM not running"] }
-        let profile = session.profile
+        // Boot the workspace as SAVED, not the copy the running session was
+        // launched from: a reboot is how an edit that needs one (shared
+        // folders, memory…) takes effect, and relaunching the old copy left
+        // the folders as they were until a Shut Down + Start.
+        let profile = currentProfile(id) ?? session.profile
         let wasAttached = isAttached(id)
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
@@ -5807,6 +5851,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // /state uptime reset — this covers a browser open on the host itself.
         if up { unifiedWindow?.rebootBrowser(for: id) }
         return ["ok": up, "workspace": profile.name, "mode": force ? "hard" : "soft"]
+    }
+
+    /// A workspace as currently saved (the editor's last save), or nil.
+    func currentProfile(_ id: Profile.ID) -> Profile? {
+        profiles.first { $0.id == id }
     }
 
     /// Docker-style 12-char short id for a profile: the UUID's hex with dashes
@@ -11307,6 +11356,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let spec = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"], !spec.isEmpty
         else { return }
         FatClientLog.log("autoOpen: spec=\(spec)")
+        // "peer:<name>": one of this account's servers, reached through
+        // bromure.io (direct or relayed) the way the connect window dials it.
+        if spec.hasPrefix("peer:") {
+            let name = String(spec.dropFirst(5))
+            Task { @MainActor [weak self] in
+                guard let cp = ControlPlaneClient.current() else {
+                    FatClientLog.log("autoOpen: not signed in to bromure.io"); return
+                }
+                do {
+                    let servers = try await cp.client.listDevices(bearer: cp.bearer).filter { !$0.isSelf && !$0.revoked }
+                    FatClientLog.log("autoOpen: bromure.io servers: \(servers.map(\.displayName))")
+                    guard let s = servers.first(where: { $0.displayName.caseInsensitiveCompare(name) == .orderedSame })
+                    else { return }
+                    self?.openRemoteHost(RemoteConnectModel.peerHost(for: s))
+                } catch {
+                    FatClientLog.log("autoOpen: directory failed: \(error)")
+                }
+            }
+            return
+        }
         let hosts = RemoteHostStore.shared.hosts
         FatClientLog.log("autoOpen: \(hosts.count) configured host(s): \(hosts.map(\.name))")
         let targets: [RemoteHost]
@@ -13273,7 +13342,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Detached (window-less, e.g. a remote/TUI session): clean teardown +
             // fresh window-less boot. Take the queued remedy BEFORE the
             // teardown — handleSessionStopped clears the remedy queue.
-            let profile = runningSessions[profileID]?.profile
+            let profile = currentProfile(profileID) ?? runningSessions[profileID]?.profile
             let remedy = pendingBootRemedies.removeValue(forKey: profileID)
             handleSessionStopped(profileID: profileID)
             if let profile {
@@ -13664,7 +13733,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// disk + base image version are unchanged across a reboot.
     @MainActor
     private func relaunchVM(in win: SessionPane) {
-        let profile = win.profile
+        // As saved (see rebootMachine): the pane's copy can predate an edit.
+        let profile = currentProfile(win.profile.id) ?? win.profile
         // Cancel the outgoing sandbox's outbox poller explicitly. A
         // dropped Task keeps running in Swift — without this the old
         // poller would keep racing the new one on the same shared
@@ -14341,9 +14411,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// of calling `profile.makeTokenPlan` directly at session-launch sites.
     private func sessionTokenPlan(for profile: Profile, salt: Data) -> SessionTokenPlan {
         let available = mitmEngine?.claudeSubscriptionStore.hasCredential(for: profile.id) ?? false
-        let plan = profile.makeTokenPlan(salt: salt, claudeSubscriptionAvailable: available)
+        var plan = profile.makeTokenPlan(salt: salt, claudeSubscriptionAvailable: available)
         if let bogus = plan.claudeSubscriptionBogusKey {
             mitmEngine?.claudeSubscriptionStore.registerBogusKey(bogus, for: profile.id)
+            // Account features on: an OAuth stand-in instead of the API key.
+            if ClaudeStandIn.isEnabled {
+                plan.claudeOAuthStandIn = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profile.id))
+            }
         }
         return plan
     }
@@ -14359,22 +14433,60 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// host-side virtiofs home (legacy model); ext4-model launches pass the
     /// home-seed `files/` staging dir instead (the guest agent copies it in).
     func seedCodexAuthFile(for profile: Profile, homeRoot: URL? = nil) {
+        guard profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .subscription }),
+              let data = codexStandInAuth(for: profile.id) else { return }
+        let dir = (homeRoot ?? store.homeDirectory(for: profile))
+            .appendingPathComponent(".codex", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("auth.json")
+        try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+    }
+
+    /// A signed-in Codex, straight into a RUNNING machine: the stand-in
+    /// `~/.codex/auth.json` is otherwise written only at boot, so a session
+    /// relaunched after its sign-in started on the stale (or missing) file
+    /// and Codex asked to log out and sign in again. Returns whether it wrote.
+    @discardableResult
+    func pushCodexAuth(profileID: UUID) async -> Bool {
+        guard let data = codexStandInAuth(for: profileID) else { return false }
+        let b64 = data.base64EncodedString()
+        let out = try? await guestExec(
+            profileID: profileID,
+            command: "mkdir -p ~/.codex && umask 077 && echo \(b64) | base64 -d > ~/.codex/auth.json.tmp "
+                + "&& mv -f ~/.codex/auth.json.tmp ~/.codex/auth.json && echo ok",
+            timeout: 15)
+        return out?.contains("ok") == true
+    }
+
+    /// Claude with account features, into a RUNNING machine: its OAuth
+    /// stand-in (`~/.claude/.credentials.json`), written at boot otherwise.
+    @discardableResult
+    func pushClaudeStandIn(profileID: UUID) async -> Bool {
+        guard ClaudeStandIn.isEnabled,
+              mitmEngine?.claudeSubscriptionStore.hasCredential(for: profileID) == true else { return false }
+        let b64 = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profileID)).base64EncodedString()
+        let out = try? await guestExec(
+            profileID: profileID,
+            command: "mkdir -p ~/.claude && chmod 700 ~/.claude && umask 077 && echo \(b64) | base64 -d > ~/.claude/.credentials.json.tmp "
+                + "&& mv -f ~/.claude/.credentials.json.tmp ~/.claude/.credentials.json && echo ok",
+            timeout: 15)
+        return out?.contains("ok") == true
+    }
+
+    /// The stand-in `~/.codex/auth.json` for a workspace's Codex login — the
+    /// bogus tokens registered with the proxy — or nil when there's no login.
+    func codexStandInAuth(for profileID: UUID) -> Data? {
         guard let engine = mitmEngine,
-              profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .subscription }),
-              let real = engine.codexSubscriptionStore.record(for: profile.id) else { return }
-        let saltA = Data("codex-bogus-access:\(profile.id)".utf8)
-        let saltR = Data("codex-bogus-refresh:\(profile.id)".utf8)
-        let saltI = Data("codex-bogus-id:\(profile.id)".utf8)
-        guard let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.accessToken, salt: saltA),
-              let bogusID = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.idToken, salt: saltI) else {
+              let real = engine.codexSubscriptionStore.record(for: profileID) else { return nil }
+        guard let standIn = CodexStandIn.mint(real, profileID: profileID) else {
             FileHandle.standardError.write(Data(
                 "[codex-sub] seed skipped — stored tokens aren't JWT-shaped\n".utf8))
-            return
+            return nil
         }
-        let bogusRefresh = SubscriptionFakeMint.mintCodexRefreshFake(real: real.refreshToken, salt: saltR)
-        engine.codexSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
+        let bogusAccess = standIn.access, bogusID = standIn.id, bogusRefresh = standIn.refresh
+        engine.codexSubscriptionStore.registerBogusKey(bogusAccess, for: profileID)
 
         var tokens: [String: Any] = [
             "id_token": bogusID, "access_token": bogusAccess, "refresh_token": bogusRefresh,
@@ -14387,15 +14499,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "tokens": tokens,
             "last_refresh": ISO8601DateFormatter().string(from: Date()),
         ]
-        let dir = (homeRoot ?? store.homeDirectory(for: profile))
-            .appendingPathComponent(".codex", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("auth.json")
-        if let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted]) {
-            try? data.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
-        }
+        return try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted])
     }
 
     /// Grok subscription mode: write a bogus `~/.grok/auth.json` into the

@@ -31,6 +31,8 @@ struct AgentSessionRequest {
     var role: String? = nil
     /// The room the new session joins (nil = none).
     var roomID: UUID? = nil
+    /// Added to the agent's system prompt (nil = none).
+    var instructions: String? = nil
 }
 
 /// A worktree session's branch, as the last check read it.
@@ -304,6 +306,9 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// The room it belongs to (Rooms: a named set of sessions with a
     /// Switchboard of its own). nil = not in a room.
     var roomID: UUID?
+    /// Added to the agent's system prompt on every launch, resumes
+    /// included (picked on the New session screen). nil = none.
+    var instructions: String?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -384,6 +389,14 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
             cut = String(cut[..<sp])
         }
         return cut.trimmingCharacters(in: .punctuationCharacters) + "…"
+    }
+
+    /// Whether `title` is one Bromure made up for `s` — the generic
+    /// "<Agent> in <folder>", or its first request — rather than the agent's
+    /// own name for the conversation or the user's.
+    static func isPlaceholderTitle(_ title: String, of s: AgentSession, firstPrompt: String?) -> Bool {
+        title.isEmpty || title == defaultTitle(tool: s.tool, cwd: s.cwd)
+            || (firstPrompt.map { title == AgentSession.title(fromMessage: $0) } ?? false)
     }
 
     /// "Claude Code in clock" — for sessions nobody named.
@@ -475,6 +488,21 @@ final class AgentSessionStore {
         if let i = sessions.firstIndex(where: { $0.id == s.id }) { sessions[i] = s }
         else { sessions.insert(s, at: 0) }
         save()
+    }
+
+    /// Better names for sessions still called "<Agent> in <folder>": the
+    /// agent's own title for the conversation (Claude generates one), else
+    /// its first request. Never over a name the user gave, or one the agent
+    /// chose; a first-request title gives way to the agent's once it exists.
+    func adoptTranscriptTitles(_ ids: [UUID], lookup: (UUID) -> (agentTitle: String?, firstPrompt: String?)?) {
+        for id in ids {
+            guard let s = session(id), s.userTitled != true, let found = lookup(id) else { continue }
+            guard AgentSession.isPlaceholderTitle(s.title, of: s, firstPrompt: found.firstPrompt) else { continue }
+            let better = found.agentTitle
+                ?? found.firstPrompt.map { AgentSession.title(fromMessage: $0) }
+            guard let better, !better.isEmpty, better != s.title else { continue }
+            mutate(id) { $0.title = better }
+        }
     }
 
     func mutate(_ id: UUID, _ change: (inout AgentSession) -> Void) {

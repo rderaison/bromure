@@ -1,0 +1,112 @@
+---
+title: "Quick Start"
+description: "From the first launch to everyday use: open your first browser window, create a persistent profile, make links from other apps open in Bromure, and close a window knowing what is destroyed and what is kept."
+order: 3
+---
+
+# Quick Start
+
+This chapter walks you through your first few minutes with Bromure: finishing setup, browsing in your first window, creating a profile that remembers your sign-ins, sending links from other apps to Bromure, and closing a window. It uses the defaults wherever it can. Every screen you meet here has a full chapter later, and links along the way point to them.
+
+## Before you begin
+
+You need a Mac with Apple Silicon running macOS 14 or later, with Bromure installed in `/Applications`. See [Installation & First Run](02-installation.mdx) if you haven't installed it yet.
+
+Keep one idea in mind as you go: **every Bromure window is its own Linux virtual machine**. What happens in a window stays in that window's VM, and closing the window deletes the VM. Profiles decide what a window starts with and what, if anything, it keeps.
+
+## Step 1: Run first-time setup
+
+Open Bromure. The first time, the setup window appears instead of a browser.
+
+1. On the **Welcome** pane, click **Get Started**.
+2. Wait while Bromure downloads the browser image and personalizes it for your Mac. The rail on the left moves through **Download**, **Install**, **Personalize** and **Launch**; the large percentage shows overall progress. It usually takes a few minutes, depending on your connection.
+3. When the pane reads **Almost there**, Bromure is starting its first VM. The setup window then closes by itself.
+
+If setup stops with **Something went wrong**, check your internet connection and free disk space (at least 8 GB), then click **Try Again**. [Installation & First Run](02-installation.mdx#first-run-the-setup-window) describes every pane.
+
+## Step 2: Browse in your first window
+
+When setup finishes, your first browser window opens, titled **Bromure — Private Browsing**. **Private Browsing** is the profile Bromure creates for you: it keeps nothing between windows — no cookies, no history, no cache — and shares only the clipboard with your Mac.
+
+The window works like any Mac browser:
+
+- The **address field** in the tab bar reads **Search or enter URL**. Type an address and press Return, or type words to search with Google.
+- ⌘T opens a new tab, ⌘W closes the current tab, and ⌘L selects the address field. ⌘[ and ⌘] go back and forward.
+- The **profile chip** at the left of the tab bar shows which profile the window belongs to.
+- Click the icon at the left of the address field to see whether the connection is secure and to inspect the site's certificate.
+
+Everything you do here happens inside the window's Linux VM, not on your Mac. [The Browser Window](05-browser-window.mdx) explains every control and shortcut.
+
+> **Tip:** Open more private windows with **File › New Private Window** (⇧⌘N). Each one is a separate VM, so they don't share cookies with each other either.
+
+## Step 3: Create a persistent profile
+
+For sites you sign in to every day, you want a browser that remembers you. Create a **persistent profile**:
+
+<p align="center">
+  <img src="images/new-profile.en.jpg" width="320" alt="The New Profile window: a name field containing Work, a Color pop-up set to Blue, and Cancel and Create buttons" />
+</p>
+
+1. Choose **File › New Profile…**, or click the profile chip and choose **New Profile…**.
+2. In the **New Profile** window, type a name — for example `Work` — in **Profile Name**.
+3. Pick a **Color**. Bromure suggests one that no other profile uses. The color draws a thin border around the profile's windows, so you can tell them apart at a glance.
+4. Click **Create**.
+
+Bromure creates the profile and opens its settings window, **Profile Settings — Work**, on the **General** category. New profiles start with **Retain Browsing Data** on — that is what makes the profile persistent — and with the shared clipboard, **Send Link to Other Session**, and macOS passkeys and passwords turned on.
+
+<p align="center">
+  <img src="images/profile-general.en.jpg" width="600" alt="The Profile Settings — Work window on its General category (the sidebar lists General, Performance, Media, File Transfer, Host Isolation, Network Isolation, Privacy & Safety, Extensions, VPN & Ads, Enterprise and Advanced; Cancel and Save at the bottom): Profile Name Work, Browser Chromium, Retain Browsing Data checked, and Window Color Blue, with the Home Page setting starting below" />
+</p>
+
+5. Optionally change the **Home Page** — the page each new window of this profile opens with — or anything else. [Profile Settings](07-profile-settings/index.mdx) describes every category.
+6. Click **Save**.
+
+Now open a window in the new profile. Either choose **File › New Window With Profile › New Work Window**, or click the profile chip in any window and choose **Work**. The first time, Bromure creates the profile's small data disk; the window then opens on the profile's home page, with a blue border.
+
+Sign in to a site in this window. Your sign-in will still be there the next time you open a **Work** window.
+
+> **Note:** A persistent profile can have only one window at a time, because its data disk can only be attached to one VM. Opening it again brings its existing window to the front. Use tabs within that window. Private profiles can have any number of windows.
+
+## Step 4: Open links from other apps in Bromure
+
+To make links you click in Mail, Messages, Slack or any other app open in Bromure:
+
+1. Open **System Settings › Desktop & Dock**.
+2. Set **Default web browser** to **Bromure**.
+
+Now click a link in another app. Because you have more than one profile (or other browsers installed), Bromure asks **Choose where to open this link** — "Which application should open …?" — with a pop-up menu listing your profiles, then your other browsers under **Other browsers**, and the full address underneath. Pick **Work** and click **Open**. If a Work window is already open, the link opens there; otherwise a new Work window opens on that link.
+
+Choosing another browser, such as Safari, hands the link to that browser instead. This is useful for a trusted site you'd rather open outside Bromure.
+
+If you always want links to go to the same profile, skip the question: open **Bromure › Settings…** (⌘,), select **General**, and set **Default Profile for Links** to the profile you want. Set it back to **Ask Every Time** to see the chooser again. See [Profiles](06-profiles.mdx).
+
+## Step 5: Close a window
+
+Close the Private Browsing window with ⌘W on its last tab, or by clicking the window's close button. Bromure asks:
+
+> **Close this browser?**
+> All browsing data in this window will be permanently lost. This cannot be undone.
+
+Click **Close**. If you tick **Remember my decision**, Bromure stops asking for windows of this profile.
+
+What happens next depends on the profile:
+
+| | Private Browsing (or any profile with **Retain Browsing Data** off) | Work (a persistent profile) |
+|---|---|---|
+| The window's VM | Shut down and deleted | Shut down and deleted |
+| Cookies, history, cache, passwords | Deleted with the VM | Kept on the profile's data disk |
+| Bookmarks and open tabs | Deleted with the VM | Kept; Bromure offers to restore your tabs next time |
+| Downloads you didn't save to your Mac | Deleted | Deleted |
+| Anything a page installed or changed in the system | Deleted | Deleted |
+
+The next time you open a **Work** window, Bromure asks **Restore previous tabs?** — "This profile has data from a previous session. Would you like to restore your open tabs?" Click **Restore** to reopen them or **Start Fresh** to start at the home page; tick **Remember my decision** to stop being asked.
+
+Closing the last window doesn't quit Bromure. Click its Dock icon to open a new window in your most recently used profile (or the one you chose under **Settings › General › Open New Windows With**), or quit with ⌘Q. If windows are still open when you quit, Bromure asks **Quit Bromure?** first, because their data will be lost.
+
+## Where to go next
+
+- [Concepts & Architecture](04-concepts.mdx) — how windows, VMs, images and profiles fit together.
+- [The Browser Window](05-browser-window.mdx) — every control, menu and shortcut.
+- [Profiles](06-profiles.mdx) — managing profiles, links, and restoring tabs.
+- [Profile Settings](07-profile-settings/index.mdx) — sharing the clipboard, files, camera and microphone; network isolation; VPNs and ad blocking.
+- [Files & Downloads](09-files-downloads.mdx) — getting files in and out of a window safely.

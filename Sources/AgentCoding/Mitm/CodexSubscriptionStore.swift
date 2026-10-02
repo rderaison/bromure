@@ -19,6 +19,35 @@ import Foundation
 /// refresh endpoint `auth.openai.com/oauth/token`, client_id
 /// `app_EMoamEEZ73f0CkXaXp7hrann`, `grant_type=refresh_token`.
 
+/// The stand-in tokens a workspace's Codex holds for the login the host
+/// keeps: JWT-shaped with the real claims, a far-future expiry and a
+/// Bromure-marked signature (`SubscriptionFakeMint.isJWTFake`), plus a
+/// marked refresh token (`isCodexRefreshFake`). Minted the same way at boot
+/// (the seeded ~/.codex/auth.json), after a sign-in, and when the proxy
+/// answers a stand-in refresh.
+public enum CodexStandIn {
+    public struct Tokens: Equatable { public let access, id, refresh: String }
+
+    public static func mint(_ real: CodexSubscriptionRecord, profileID: UUID) -> Tokens? {
+        let saltA = Data("codex-bogus-access:\(profileID)".utf8)
+        let saltR = Data("codex-bogus-refresh:\(profileID)".utf8)
+        let saltI = Data("codex-bogus-id:\(profileID)".utf8)
+        guard let access = SubscriptionFakeMint.mintNoRefreshJWTFake(realJWT: real.accessToken, salt: saltA),
+              let id = SubscriptionFakeMint.mintNoRefreshJWTFake(realJWT: real.idToken, salt: saltI)
+        else { return nil }
+        return Tokens(access: access, id: id,
+                      refresh: SubscriptionFakeMint.mintCodexRefreshFake(real: real.refreshToken, salt: saltR))
+    }
+
+    /// What Codex hears back from a refresh it sent with a stand-in: fresh
+    /// stand-ins (the host has refreshed the real login). Codex writes them
+    /// to its auth.json and carries on.
+    public static func refreshAnswer(_ t: Tokens) -> [String: Any] {
+        ["access_token": t.access, "id_token": t.id, "refresh_token": t.refresh,
+         "token_type": "Bearer", "expires_in": 10 * 365 * 24 * 3600]
+    }
+}
+
 public struct CodexSubscriptionRecord: Codable, Sendable, Equatable {
     public var accessToken: String      // JWT (eyJ…)
     public var refreshToken: String     // rt_…

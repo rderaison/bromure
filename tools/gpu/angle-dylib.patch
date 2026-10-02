@@ -1,0 +1,15 @@
+diff --git a/Source/ThirdParty/ANGLE/src/common/system_utils.cpp b/Source/ThirdParty/ANGLE/src/common/system_utils.cpp
+index 83beb4af..eb924ed2 100644
+--- a/Source/ThirdParty/ANGLE/src/common/system_utils.cpp
++++ b/Source/ThirdParty/ANGLE/src/common/system_utils.cpp
+@@ -219,8 +219,8 @@ void *OpenSystemLibraryAndGetError(const char *libraryName,
+                                    std::string *errorOut)
+ {
+ #if defined(ANGLE_PLATFORM_MACOS)
+-    std::string frameworkPath = std::string(libraryName) + ".framework/Versions/Current/" + std::string(libraryName);
+-    return OpenSystemLibraryWithExtensionAndGetError(frameworkPath.c_str(), SearchType::SystemDir, errorOut);
++    std::string libraryPath = "@rpath/lib" + std::string(libraryName) + ".dylib";
++    return OpenSystemLibraryWithExtensionAndGetError(libraryPath.c_str(), SearchType::SystemDir, errorOut);
+ #elif defined(ANGLE_PLATFORM_IOS_FAMILY)
+     std::string frameworkPath = std::string(libraryName) + ".framework/" + std::string(libraryName);
+     return OpenSystemLibraryWithExtensionAndGetError(frameworkPath.c_str(), SearchType::SystemDir, errorOut);
