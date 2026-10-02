@@ -58,6 +58,8 @@ Host → guest:
   {"cmd":"back","id":"T"}
   {"cmd":"forward","id":"T"}
   {"cmd":"mouse_park"}    # cursor left the visible area; clear hover state
+  {"cmd":"query_history","request_id":"R","query":"exa","limit":8}
+  # Replies history_suggestions with same request_id/query, status, items.
 
 Started from xinitrc when NATIVE_CHROME=1.
 """
@@ -77,6 +79,7 @@ import sys
 import threading
 import time
 from urllib.parse import urlparse, urljoin
+from pathlib import Path
 
 # Hard gate on whether printing is honoured. Set from chrome-env at agent
 # launch (xinitrc sources chrome-env into its env, which propagates through
@@ -935,10 +938,100 @@ def _history_snapshot():
             return {"recently_closed": [], "recently_visited": []}
 
 
+def query_chromium_history(query, limit=8):
+    """Read Chromium's own history, without opening a page or modifying it.
+
+    The profile path is launch configuration, never an RPC argument. Reads
+    include committed WAL records (do not use immutable=1 on a live database).
+    A busy/large/missing database yields an explicit empty response; callers
+    must not retain suggestions for an earlier query after that response.
+    """
+    if (not isinstance(query, str) or len(query) > 512
+            or any(ord(c) < 32 for c in query)
+            or type(limit) is not int or not 1 <= limit <= 10):
+        return 'invalid', []
+    needle = query.strip().casefold()
+    if not needle:
+        return 'ok', []
+    deadline = time.monotonic() + 0.100
+    conn = None
+    try:
+        path = Path(_chromium_profile_dir()) / 'Default' / 'History'
+        conn = sqlite3.connect(path.absolute().as_uri() + '?mode=ro',
+                               uri=True, timeout=0.020)
+        conn.execute('PRAGMA query_only=ON')
+        conn.execute('PRAGMA trusted_schema=OFF')
+        conn.execute('PRAGMA cache_size=-512')
+        conn.execute('PRAGMA temp_store=MEMORY')
+        # Bound even an exceptionally fast machine's full-table scan. Do not
+        # materialize the table, copy the database, or keep a stale cache.
+        steps = [0]
+        def budget():
+            steps[0] += 500
+            return steps[0] > 2_000_000 or time.monotonic() >= deadline
+        conn.set_progress_handler(budget, 500)
+        conn.create_function('history_fold', 1,
+                             lambda text: text.casefold() if isinstance(text, str) else '')
+        rows = conn.execute('''
+            SELECT url, substr(title, 1, 512) FROM urls
+            WHERE hidden=0 AND length(url) BETWEEN 1 AND 8192
+              AND (title IS NULL OR length(title)<=16384)
+              AND (url LIKE 'http://%' OR url LIKE 'https://%')
+              AND (instr(history_fold(url), ?) > 0
+                   OR instr(history_fold(title), ?) > 0)
+            ORDER BY CASE
+              WHEN instr(history_fold(url), ?)=1 THEN 0
+              WHEN instr(history_fold(url), 'https://' || ?)=1
+                OR instr(history_fold(url), 'http://' || ?)=1
+                OR instr(history_fold(url), 'https://www.' || ?)=1
+                OR instr(history_fold(url), 'http://www.' || ?)=1 THEN 1
+              ELSE 2 END,
+              typed_count DESC, last_visit_time DESC, visit_count DESC, url ASC
+            LIMIT ?
+        ''', (needle, needle, needle, needle, needle, needle, needle, limit))
+        items = []
+        encoded_bytes = 0
+        for url, title in rows:
+            try:
+                parsed = urlparse(url)
+                safe = (parsed.scheme in ('http', 'https') and parsed.hostname
+                        and parsed.username is None and parsed.password is None
+                        and not any(ord(c) < 32 or ord(c) == 127 for c in url))
+            except ValueError:
+                safe = False
+            if not safe:
+                continue
+            item = {'url': url, 'title': title or url[:512]}
+            encoded_bytes += len(json.dumps(item).encode('utf-8'))
+            if encoded_bytes > 24 * 1024:
+                break
+            items.append(item)
+        return 'ok', items
+    except (sqlite3.Error, OSError, ValueError):
+        # No database path, query text, or browsing data in diagnostic logs.
+        return ('timeout' if time.monotonic() >= deadline else 'unavailable'), []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def handle_history_query(msg, link):
+    request_id = msg.get('request_id')
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+        return
+    query = msg.get('query')
+    status, items = query_chromium_history(query, msg.get('limit', 8))
+    link.send({'event': 'history_suggestions', 'request_id': request_id,
+               'query': query if isinstance(query, str) and len(query) <= 512 else '',
+               'status': status, 'items': items})
+
+
 def handle_cmd(msg, targets_by_id, link):
     cmd = msg.get("cmd")
     tid = msg.get("id")
-    if cmd == "activate" and _is_safe_id(tid):
+    if cmd == 'query_history':
+        handle_history_query(msg, link)
+    elif cmd == "activate" and _is_safe_id(tid):
         cdp_simple_post(f"/json/activate/{tid}")
         _set_active(tid)
     elif cmd == "close" and _is_safe_id(tid):
@@ -1209,6 +1302,11 @@ def main():
         log(f"initial target seed failed: {e}")
 
     def on_cmd(msg):
+        # Profile-global read: no CDP refresh, window activation, or shared
+        # controller lock is required in either native-window architecture.
+        if msg.get('cmd') == 'query_history':
+            handle_history_query(msg, link)
+            return
         if _shared is None:
             handle_cmd(msg, targets_by_id, link)
             return
