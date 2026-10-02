@@ -27,6 +27,31 @@ MAX_OUTPUT_PIXELS = 33554432
 SAFE_INTEGER = (1 << 53) - 1
 MAX_FRAME = 65536
 PORT = 5832
+CHROME_PAGES = {'newtab', 'new-tab-page', 'history', 'bookmarks', 'downloads',
+                'settings', 'gpu', 'version', 'policy'}
+
+
+def navigation_url(value):
+    """Explicit navigation policy for the opt-in controller/tab commands.
+
+    The legacy tab agent has a favicon scheme filter, not a navigation
+    allow-list. Do not silently apply this experimental policy to old VMs.
+    """
+    if (not isinstance(value, str) or not value or len(value.encode('utf-8')) > 8192 or
+            value != value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError('invalid navigation URL')
+    parsed = urlparse(value)
+    if parsed.scheme in ('http', 'https'):
+        if not parsed.hostname or any(char.isspace() for char in parsed.hostname) or '\\' in parsed.netloc:
+            raise ValueError('invalid web URL host')
+        parsed.port  # Validate the port before Chromium receives the URL.
+        return value
+    if parsed.scheme == 'about' and parsed.path == 'blank' and not parsed.netloc:
+        return value
+    if (parsed.scheme == 'chrome' and parsed.hostname in CHROME_PAGES and
+            parsed.username is None and parsed.password is None and parsed.port is None):
+        return value
+    raise ValueError('unsupported navigation URL scheme or browser page')
 
 
 def cdp_call(ws_url, method, params, timeout=3):
@@ -469,6 +494,7 @@ class Controller:
         return tid
 
     def new_tab(self, wid, url):
+        url = navigation_url(url)
         self.refresh()
         self.focus(wid)
         result = self.call('Target.createTarget', {'url': url, 'newWindow': False})
@@ -494,9 +520,7 @@ class Controller:
             rows, _ = validate_topology(request.get('topology'))
             if not any(row['scanout'] == index and row['enabled'] for row in rows):
                 raise ValueError('requested scanout must be enabled')
-            url = request.get('url', 'about:blank')
-            if not isinstance(url, str) or len(url.encode('utf-8')) > 8192:
-                raise ValueError('invalid URL')
+            url = navigation_url(request.get('url', 'about:blank'))
             if cmd == 'attachPrimary':
                 if wid is None:
                     if len(self.groups) != 1:

@@ -1080,7 +1080,7 @@ def handle_cmd(msg, targets_by_id, link):
         t = _target_for(tid, targets_by_id)
         if not t:
             log(f"navigate: target {tid} not found; falling back to new tab")
-            new_tid = create_new_tab(url)
+            new_tid = (_shared.new_tab(msg['windowId'], url) if _shared is not None else create_new_tab(url))
             if new_tid:
                 _set_active(new_tid, ttl=_NEW_TAB_TRUST_TTL)
             return
@@ -1216,6 +1216,15 @@ def main():
             try:
                 _shared.refresh()
                 cmd, tid, wid = msg.get('cmd'), msg.get('id'), msg.get('windowId')
+                if cmd in ('new', 'navigate'):
+                    from shared_windows import navigation_url
+                    msg = dict(msg, url=navigation_url(msg.get('url') or 'about:blank'))
+                if tid is not None:
+                    if tid not in _shared.target_windows:
+                        raise ValueError('unknown target; refusing ambiguous window fallback')
+                    if wid is None:
+                        wid = _shared.target_windows[tid]
+                        msg = dict(msg, windowId=wid)
                 if cmd in ('new', 'close_active', 'key_chord', 'mouse_park') and wid is None:
                     raise ValueError('shared window command requires windowId')
                 if wid is not None:

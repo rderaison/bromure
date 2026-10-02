@@ -23,6 +23,18 @@ def output(index, x, y=0, width=1920, height=1252):
 
 
 class Tests(unittest.TestCase):
+    def test_navigation_policy(self):
+        for url in ('about:blank', 'about:blank#section', 'https://example.com/a%20b',
+                    'http://127.0.0.1:8080/', 'http://[::1]:8080/', 'chrome://history/',
+                    'chrome://bookmarks/', 'chrome://gpu', 'chrome://newtab/'):
+            self.assertEqual(shared.navigation_url(url), url)
+        for url in ('javascript:alert(1)', 'data:text/html,test', 'file:///etc/passwd',
+                    'chrome://crash/', 'chrome-untrusted://new-tab-page/', 'https://',
+                    'https://example.com:invalid/', 'https://exa mple.com/',
+                    'java\nscript:alert(1)', ' https://example.com', 'about:config',
+                    'https://example.com/' + 'x' * 8192, None, 42):
+            with self.subTest(url=str(url)[:60]), self.assertRaises(ValueError):
+                shared.navigation_url(url)
     def test_explicit_opt_in_and_profile_experiment_exclusion(self):
         self.assertFalse(shared.enabled('quiet ro'))
         self.assertTrue(shared.enabled('quiet bromure.shared_windows=16 ro'))
@@ -207,6 +219,19 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.handle(dict(id=4, cmd='list', expectedScanouts=16))['ok'])
         with self.assertRaises(ValueError):
             self.controller.handle(dict(id=3, cmd='list'))
+
+    def test_invalid_url_precedes_layout_and_browser_mutation(self):
+        self.attach()
+        before_modes, before_calls = len(self.mutations), len(self.calls)
+        reply = self.controller.handle(dict(id=3, cmd='create', scanout=1,
+                                            topology=self.layout(), url='javascript:alert(1)'))
+        self.assertFalse(reply['ok'])
+        self.assertEqual(len(self.mutations), before_modes)
+        self.assertFalse(any(method == 'Target.createTarget' for method, _ in self.calls[before_calls:]))
+        before_calls = len(self.calls)
+        with self.assertRaises(ValueError):
+            self.controller.new_tab(10, 'file:///etc/passwd')
+        self.assertEqual(len(self.calls), before_calls)
 
     def test_partial_failure_reports_actual_geometry_and_created_window(self):
         self.attach()
