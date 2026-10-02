@@ -13,6 +13,7 @@ public struct TabInfo: Identifiable, Equatable, Sendable {
     public let id: String
     public var title: String
     public var url: String
+    public var windowID: Int?
     public var active: Bool
     public var faviconPNG: Data?
     /// Whether this tab currently has at least one active getUserMedia
@@ -27,6 +28,7 @@ public struct TabInfo: Identifiable, Equatable, Sendable {
         title: String = "",
         url: String = "",
         active: Bool = false,
+        windowID: Int? = nil,
         faviconPNG: Data? = nil,
         usingCamera: Bool = false,
         usingMicrophone: Bool = false
@@ -34,6 +36,7 @@ public struct TabInfo: Identifiable, Equatable, Sendable {
         self.id = id
         self.title = title
         self.url = url
+        self.windowID = windowID
         self.active = active
         self.faviconPNG = faviconPNG
         self.usingCamera = usingCamera
@@ -60,6 +63,35 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     private var currentConn: VZVirtioSocketConnection?
     private var readSource: DispatchSourceRead?
     private var pending = Data()
+    private var transportParent: TabBridge?
+    private let scopedChildren = NSHashTable<TabBridge>.weakObjects()
+    private var allTabs: [TabInfo] = []
+    public private(set) var windowID: Int?
+
+    public func scope(to windowID: Int) {
+        self.windowID = windowID
+        publishTabs()
+    }
+
+    public init(parent: TabBridge, windowID: Int) {
+        self.transportParent = parent.transportParent ?? parent
+        self.windowID = windowID
+        super.init()
+        transportParent?.scopedChildren.add(self)
+        tabs = transportParent?.allTabs.filter { $0.windowID == windowID } ?? []
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.onTabsChanged?(self.tabs)
+            if self.transportParent?.currentFD ?? -1 >= 0 { self.onConnected?() }
+        }
+    }
+
+    private func publishTabs() {
+        tabs = windowID.map { wid in allTabs.filter { $0.windowID == wid } } ?? allTabs
+        for child in scopedChildren.allObjects {
+            child.tabs = allTabs.filter { $0.windowID == child.windowID }
+        }
+    }
 
     /// Commands issued before the guest's tab-agent has connected. The
     /// window opens as soon as the VM is claimed, but on a cold boot
@@ -84,6 +116,8 @@ public final class TabBridge: NSObject, @unchecked Sendable {
 
     /// Fires when the guest first connects (i.e. Chromium is up).
     public var onConnected: (() -> Void)?
+    /// One shared VM owner orders window focus before native chrome commands.
+    public var commandGate: ((Int, @escaping () -> Void) -> Void)?
 
     /// Fires when the guest bounces a browser-chrome keyboard shortcut back to
     /// the host. While the VM holds keyboard focus the VZ view forwards every
@@ -117,6 +151,12 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     }
 
     public func stop() {
+        if let parent = transportParent {
+            parent.scopedChildren.remove(self); transportParent = nil; tabs = []; return
+        }
+        let replies = pendingSuggestions.values.map(\.reply)
+        pendingSuggestions.removeAll()
+        replies.forEach { $0([]) }
         tbLog("[TabBridge] stop")
         readSource?.cancel()
         readSource = nil
@@ -124,7 +164,7 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         currentFD = -1
         queuedCommands = []
         socketDevice?.removeSocketListener(forPort: Self.vsockPort)
-        tabs = []
+        allTabs = []; publishTabs()
     }
 
     // MARK: - Host → guest commands
@@ -163,6 +203,7 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     /// Returns `nil` on timeout or guest error. The PDF bytes never touch
     /// disk on the guest; they fly straight back over vsock to the host.
     public func printTab(id: String) async -> Data? {
+        if let parent = transportParent { return await parent.printTab(id: id) }
         let requestId = UUID().uuidString
         return await withCheckedContinuation { cont in
             pendingPrintRequests[requestId] = { data in cont.resume(returning: data) }
@@ -199,6 +240,7 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     /// `Bookmarks` JSON). Returns `nil` on timeout, or when the profile has
     /// no bookmarks file yet. 5 s timeout mirrors the certificate path.
     public func fetchBookmarks() async -> BookmarkTree? {
+        if let parent = transportParent { return await parent.fetchBookmarks() }
         let requestId = UUID().uuidString
         return await withCheckedContinuation { cont in
             pendingBookmarkRequests[requestId] = { tree in cont.resume(returning: tree) }
@@ -250,11 +292,27 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         public let recentlyVisited: [HistoryEntry]
     }
 
+    private var pendingSuggestions: [String: (query: String, reply: ([HistoryEntry]) -> Void)] = [:]
+
+    public func historySuggestions(query: String) async -> [HistoryEntry] {
+        if let parent = transportParent { return await parent.historySuggestions(query: query) }
+        guard currentFD >= 0, !query.isEmpty, query.utf8.count <= 512, pendingSuggestions.count < 32 else { return [] }
+        let id = UUID().uuidString
+        return await withCheckedContinuation { continuation in
+            pendingSuggestions[id] = (query, { continuation.resume(returning: $0) })
+            writeCommand(["cmd": "query_history", "request_id": id, "query": query, "limit": 8])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.pendingSuggestions.removeValue(forKey: id)?.reply([])
+            }
+        }
+    }
+
     private var pendingHistoryRequests: [String: (HistoryLists?) -> Void] = [:]
 
     /// Fetch the guest's session history (recorded by tab-agent into a SQLite
     /// DB under Chromium's profile). Returns `nil` on timeout.
     public func fetchHistory() async -> HistoryLists? {
+        if let parent = transportParent { return await parent.fetchHistory() }
         let requestId = UUID().uuidString
         return await withCheckedContinuation { cont in
             pendingHistoryRequests[requestId] = { lists in cont.resume(returning: lists) }
@@ -286,6 +344,7 @@ public final class TabBridge: NSObject, @unchecked Sendable {
     /// etc.). Internally fans out via vsock and correlates the response
     /// against a UUID; a 5 s timeout keeps the continuation from hanging.
     public func fetchCertificate(origin: String) async -> CertChain {
+        if let parent = transportParent { return await parent.fetchCertificate(origin: origin) }
         let requestId = UUID().uuidString
         return await withCheckedContinuation { cont in
             pendingCertRequests[requestId] = { certs in cont.resume(returning: certs) }
@@ -350,6 +409,7 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         }
         src.activate()
         onConnected?()
+        for child in scopedChildren.allObjects { child.onConnected?() }
 
         // Flush anything the host asked for while the agent was still
         // booting (⌘T right after the window opened, an early navigate…).
@@ -377,7 +437,7 @@ public final class TabBridge: NSObject, @unchecked Sendable {
             let cam = obj["using_camera"] as? Bool ?? false
             let mic = obj["using_microphone"] as? Bool ?? false
             upsert(id: id, title: title, url: url, active: active,
-                   usingCamera: cam, usingMicrophone: mic)
+                   usingCamera: cam, usingMicrophone: mic, windowID: obj["windowId"] as? Int)
         case "remove":
             guard let id = obj["id"] as? String else { return }
             remove(id: id)
@@ -408,6 +468,14 @@ public final class TabBridge: NSObject, @unchecked Sendable {
             if let cb = pendingBookmarkRequests.removeValue(forKey: id) {
                 cb(parsed)
             }
+        case "history_suggestions":
+            guard let id = obj["request_id"] as? String,
+                  let request = pendingSuggestions.removeValue(forKey: id) else { return }
+            guard obj["query"] as? String == request.query, obj["status"] as? String == "ok" else { request.reply([]); return }
+            request.reply(Array(Self.parseHistoryEntries(obj["items"] as? [[String: Any]] ?? []).filter {
+                let url = URL(string: $0.url)
+                return ["http", "https"].contains(url?.scheme?.lowercased() ?? "") && url?.host != nil && url?.user == nil && url?.password == nil
+            }.prefix(8)))
         case "history":
             guard let id = obj["request_id"] as? String else { return }
             let closed = Self.parseHistoryEntries(obj["recently_closed"] as? [[String: Any]] ?? [])
@@ -419,7 +487,9 @@ public final class TabBridge: NSObject, @unchecked Sendable {
             // A browser-chrome chord Openbox grabbed in the guest and bounced
             // back because the VM had keyboard focus. Run the host action.
             if let key = obj["key"] as? String, !key.isEmpty {
-                onShortcut?(key)
+                let wid = obj["windowId"] as? Int
+                if windowID == nil || wid == windowID { onShortcut?(key) }
+                for child in scopedChildren.allObjects where child.windowID == wid { child.onShortcut?(key) }
             }
         default:
             tbLog("[TabBridge] unknown event: \(event ?? "nil")")
@@ -432,18 +502,20 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         url: String,
         active: Bool,
         usingCamera: Bool,
-        usingMicrophone: Bool
+        usingMicrophone: Bool,
+        windowID: Int?
     ) {
-        var updated = tabs
+        var updated = allTabs
         if let idx = updated.firstIndex(where: { $0.id == id }) {
             updated[idx].title = title
             updated[idx].url = url
             updated[idx].active = active
+            updated[idx].windowID = windowID
             updated[idx].usingCamera = usingCamera
             updated[idx].usingMicrophone = usingMicrophone
         } else {
             updated.append(TabInfo(
-                id: id, title: title, url: url, active: active,
+                id: id, title: title, url: url, active: active, windowID: windowID,
                 usingCamera: usingCamera, usingMicrophone: usingMicrophone
             ))
         }
@@ -451,27 +523,38 @@ public final class TabBridge: NSObject, @unchecked Sendable {
         // is focused, and if another was previously marked active we clear
         // it rather than rendering two highlighted tabs.
         if active {
-            for i in updated.indices where updated[i].id != id {
+            for i in updated.indices where updated[i].id != id && updated[i].windowID == windowID {
                 if updated[i].active { updated[i].active = false }
             }
         }
-        tabs = updated
+        allTabs = updated; publishTabs()
     }
 
     private func remove(id: String) {
-        tabs.removeAll { $0.id == id }
+        allTabs.removeAll { $0.id == id }; publishTabs()
     }
 
     private func setFavicon(id: String, data: Data) {
-        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
-        var updated = tabs
+        guard let idx = allTabs.firstIndex(where: { $0.id == id }) else { return }
+        var updated = allTabs
         updated[idx].faviconPNG = data
-        tabs = updated
+        allTabs = updated; publishTabs()
     }
 
     // MARK: - Wire send
 
     private func send(_ obj: [String: Any]) {
+        var obj = obj
+        if let windowID, obj["windowId"] == nil { obj["windowId"] = windowID }
+        if let parent = transportParent { onWillSend?(); parent.send(obj); return }
+        if let id = obj["windowId"] as? Int, let commandGate {
+            commandGate(id) { [weak self] in self?.writeCommand(obj) }
+            return
+        }
+        writeCommand(obj)
+    }
+
+    private func writeCommand(_ obj: [String: Any]) {
         guard currentFD >= 0 else {
             tbLog("[TabBridge] queueing send (no guest yet): \(obj)")
             if queuedCommands.count < Self.maxQueuedCommands {

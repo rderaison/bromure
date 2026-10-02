@@ -658,12 +658,24 @@ final class AppState: @unchecked Sendable {
 
     /// Build a VMConfig from a profile's settings (merges with app-wide hardware settings).
     func buildConfig(for profile: Profile) -> VMConfig {
-        profile.settings.toVMConfig(profileID: profile.id)
+        sharedWindowConfig(profile.settings.toVMConfig(profileID: profile.id))
     }
 
     /// Build a default VMConfig when no profile is selected.
     func buildDefaultConfig() -> VMConfig {
-        ProfileSettings().toVMConfig()
+        sharedWindowConfig(ProfileSettings().toVMConfig())
+    }
+
+    private func sharedWindowConfig(_ original: VMConfig) -> VMConfig {
+        var config = original
+        if #available(macOS 27.0, *), config.enableMetalRenderer,
+           MetalRendererPreference.isEnabled, imageManager.supportsSharedWindows {
+            config.sharedWindowScanoutCount = 16
+            if !config.extraKernelOptions.split(separator: " ").contains(where: { $0.hasPrefix("bromure.shared_windows=") }) {
+                config.extraKernelOptions += " bromure.shared_windows=16"
+            }
+        }
+        return config
     }
 
     /// Close all sessions, delete the base image, and rebuild with new settings.

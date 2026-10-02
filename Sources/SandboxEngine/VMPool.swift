@@ -42,7 +42,14 @@ public final class VMPool {
     public static var webcamResolutionProbe: ((_ cameraID: String?, _ quality: WebcamQuality) -> (width: Int, height: Int))?
 
     /// A pre-warmed VM ready to be shown to the user.
+    public final class RetirementState {
+        fileprivate var task: Task<Void, Never>?
+        fileprivate var completed = false
+    }
+
     public struct WarmVM {
+        public let retirement = RetirementState()
+        @MainActor public var resourcesReleased: Bool { retirement.completed }
         public let vm: VZVirtualMachine
         public let ephemeralDisk: EphemeralDisk
         public let serialInput: Pipe
@@ -93,6 +100,7 @@ public final class VMPool {
     private let requireImageVersion: Bool
     private let experimentalGPU: Bool
     private var warmVM: WarmVM?
+    private var shutdownRequested = false
     private var isWarming = false
     private var configListenerDelegate: ConfigListenerDelegate?
     private var configListenerCleanup: (() -> Void)?
@@ -134,7 +142,7 @@ public final class VMPool {
     /// The guest xinitrc waits up to 120s for `/tmp/bromure/chrome-ready`, which is
     /// written later by `applyConfig(_:to:)` when the user claims the VM.
     public func warmUp() async throws {
-        guard !isWarming, warmVM == nil else { return }
+        guard !shutdownRequested, !isWarming, warmVM == nil else { return }
         isWarming = true
         defer { isWarming = false }
 
@@ -150,6 +158,11 @@ public final class VMPool {
         }
 
         let warm = try await bootVM(bridgedInterface: bridgedIface)
+        if shutdownRequested {
+            _ = await Self.releaseResources(warm)
+            warmingMAC = nil
+            return
+        }
         warmVM = warm
         warmingMAC = nil  // Now tracked by warmVM.macAddress
 
@@ -367,6 +380,7 @@ public final class VMPool {
         profileDiskKey: String? = nil,
         restoreSession: Bool = false
     ) async -> WarmVM? {
+        guard !shutdownRequested else { return nil }
         // If no pre-warmed VM is available, warm up on demand.
         // If another task is already warming up, wait for it to finish.
         if warmVM == nil {
@@ -385,8 +399,7 @@ public final class VMPool {
         // Paused is valid (pool suspends after 30s idle).
         if let warm = warmVM, warm.vm.state != .running && warm.vm.state != .paused {
             print("[VMPool] claim: discarding dead warm VM (state=\(warm.vm.state.rawValue))")
-            if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
-            try? warm.ephemeralDisk.destroy()
+            _ = await Self.releaseResources(warm)
             warmVM = nil
             try? await warmUp()
         }
@@ -421,6 +434,10 @@ public final class VMPool {
                 let dedicated = try await bootVM(bridgedInterface: profileBridgedIface,
                                                  requestedConfig: config)
                 warmingMAC = nil
+                guard !shutdownRequested else {
+                    _ = await Self.releaseResources(dedicated)
+                    return nil
+                }
                 deflateBalloon(vm: dedicated.vm)
                 var warm = dedicated
                 warm = applyNetworkFiltering(warm: warm, config: config)
@@ -432,6 +449,10 @@ public final class VMPool {
                     }
                 }
                 await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: profileImageDir != nil, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
+                guard !shutdownRequested else {
+                    _ = await Self.releaseResources(warm)
+                    return nil
+                }
                 print("[VMPool] claim: dedicated VM ready")
                 // Schedule pool replacement
                 scheduleWarmUp(delay: .seconds(3))
@@ -458,13 +479,15 @@ public final class VMPool {
                 print("[VMPool] Resumed pre-warmed VM for claim")
             } catch {
                 print("[VMPool] Failed to resume pre-warmed VM: \(error)")
-                if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
-                try? warm.ephemeralDisk.destroy()
-                warm.networkFilter?.stop()
+                _ = await Self.releaseResources(warm)
                 return nil
             }
         }
 
+        guard !shutdownRequested else {
+            _ = await Self.releaseResources(warm)
+            return nil
+        }
         // Deflate balloon — give all memory back before running the browser
         deflateBalloon(vm: warm.vm)
         print("[VMPool] claim: balloon deflated")
@@ -489,6 +512,10 @@ public final class VMPool {
 
         await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: profileImageDir != nil, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
         print("[VMPool] claim: config applied, returning VM")
+        guard !shutdownRequested else {
+            _ = await Self.releaseResources(warm)
+            return nil
+        }
         return warm
     }
 
@@ -1032,7 +1059,7 @@ public final class VMPool {
         warmVM = nil
         suspendTimer?.invalidate()
         suspendTimer = nil
-        await Self.tearDown(warm)
+        _ = await Self.releaseResources(warm)
     }
 
     /// Tear down a WarmVM that was already handed out via `claim()` (so it's
@@ -1040,31 +1067,51 @@ public final class VMPool {
     /// must be discarded — e.g. user cancelled or the network was wedged
     /// and we're about to repair + re-claim.
     public func retire(_ warm: WarmVM) async {
-        await Self.tearDown(warm)
+        _ = await Self.releaseResources(warm)
     }
 
-    private static func tearDown(_ warm: WarmVM) async {
-        if let mac = warm.macAddress {
-            MACAddressPool.shared.release(mac)
-        }
-        // Detach the shared VMNetSwitch port / close the proxy socketpairs and
-        // free the DHCP lease. Explicit because relying on NetworkFilter.deinit
-        // leaks a socketpair + switch port per VM (see fullCleanup). Idempotent.
-        warm.networkFilter?.stop()
-        if warm.vm.state == .running || warm.vm.state == .paused {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                DispatchQueue.main.async {
-                    warm.vm.stop { _ in cont.resume() }
+    /// All copies of WarmVM share this owner. Timeout leaves the task alive;
+    /// it reaps resources only after an explicit terminal VZ state.
+    public static func releaseResources(_ warm: WarmVM) async -> Bool {
+        let state = warm.retirement
+        if state.completed { return true }
+        if state.task == nil {
+            state.task = Task { @MainActor in
+                var stopRequested = false
+                while warm.vm.state != .stopped && warm.vm.state != .error {
+                    if !stopRequested && (warm.vm.state == .running || warm.vm.state == .paused) {
+                        stopRequested = true
+                        DispatchQueue.main.async {
+                            warm.vm.stop { error in
+                                if let error {
+                                    print("[VMPool] Stop failed; retaining ownership: \(error)")
+                                }
+                            }
+                        }
+                    }
+                    try? await Task.sleep(for: .milliseconds(50))
                 }
+                if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
+                warm.networkFilter?.stop()
+                warm.graphicsSessions.forEach { $0.stop() }
+                warm.serialOutput.fileHandleForReading.readabilityHandler = nil
+                warm.serialInput.fileHandleForWriting.readabilityHandler = nil
+                try? warm.serialOutput.fileHandleForReading.close()
+                try? warm.serialOutput.fileHandleForWriting.close()
+                try? warm.serialInput.fileHandleForReading.close()
+                try? warm.serialInput.fileHandleForWriting.close()
+                try? warm.ephemeralDisk.destroy()
+                state.completed = true
+                state.task = nil
             }
         }
-        warm.graphicsSessions.forEach { $0.stop() }
-        warm.serialOutput.fileHandleForReading.readabilityHandler = nil
-        try? warm.serialOutput.fileHandleForReading.close()
-        try? warm.serialOutput.fileHandleForWriting.close()
-        try? warm.serialInput.fileHandleForReading.close()
-        try? warm.serialInput.fileHandleForWriting.close()
-        try? warm.ephemeralDisk.destroy()
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        while !state.completed && ProcessInfo.processInfo.systemUptime < deadline {
+            do { try await Task.sleep(for: .milliseconds(50)) }
+            catch { return false } // The independent retirement owner keeps running.
+        }
+        if !state.completed { print("[VMPool] Cleanup timed out; owner will reap after VM stops") }
+        return state.completed
     }
 
     /// Shut down the pool and clean up.
@@ -1072,11 +1119,9 @@ public final class VMPool {
         suspendTimer?.invalidate()
         suspendTimer = nil
 
-        // Release any in-flight MAC from a warmUp() that hasn't finished yet.
-        if let mac = warmingMAC {
-            MACAddressPool.shared.release(mac)
-            warmingMAC = nil
-        }
+        // An in-flight boot retains its lease; warmUp retires its result rather
+        // than publishing it after shutdown. Never release a bare boot MAC.
+        shutdownRequested = true
 
         if let warm = warmVM {
             // Release DHCP lease so vmnet reclaims the address
@@ -1084,27 +1129,7 @@ public final class VMPool {
                 warm.serialInput.fileHandleForWriting.write(Data("udhcpc -R -i eth0 2>/dev/null\n".utf8))
                 try? await Task.sleep(for: .milliseconds(500))
             }
-            // Release MAC address back to the pool
-            if let mac = warm.macAddress {
-                MACAddressPool.shared.release(mac)
-            }
-            if warm.vm.state == .running || warm.vm.state == .paused {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    DispatchQueue.main.async {
-                        warm.vm.stop { _ in cont.resume() }
-                    }
-                }
-            }
-            warm.serialOutput.fileHandleForReading.readabilityHandler = nil
-            warm.serialInput.fileHandleForWriting.readabilityHandler = nil
-            try? warm.serialOutput.fileHandleForReading.close()
-            try? warm.serialOutput.fileHandleForWriting.close()
-            try? warm.serialInput.fileHandleForReading.close()
-            try? warm.serialInput.fileHandleForWriting.close()
-            try? warm.ephemeralDisk.destroy()
-            // Detach the switch port / close proxy socketpairs (see tearDown).
-            warm.networkFilter?.stop()
-            warmVM = nil
+            if await Self.releaseResources(warm) { warmVM = nil }
         }
     }
 

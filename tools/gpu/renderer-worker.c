@@ -23,15 +23,22 @@ void renderer_worker_fence(uint32_t fence) { retired_fence = fence; }
 static int wait_for_gpu(uint32_t token, uint32_t context)
 {
     if (virgl_renderer_create_fence((int)token, context)) return 0;
-    struct timespec start, now, interval = {0, 1000000};
+    struct timespec start, now, interval = {0, 50000};
     clock_gettime(CLOCK_MONOTONIC, &start);
-    do {
+    for (;;) {
         virgl_renderer_poll();
         if (retired_fence == token) return 1;
-        nanosleep(&interval, NULL);
         clock_gettime(CLOCK_MONOTONIC, &now);
-    } while (now.tv_sec - start.tv_sec < 5);
-    return 0;
+        int64_t elapsed = (int64_t)(now.tv_sec - start.tv_sec) * 1000000000 +
+                          now.tv_nsec - start.tv_nsec;
+        if (elapsed >= 5000000000LL) return 0;
+        // Most Metal fences complete well below a millisecond. A fixed 1ms
+        // sleep serializes that delay into every fenced guest command. Poll
+        // briefly at lower latency, then back off for genuinely long work.
+        interval.tv_nsec = elapsed < 1000000 ? 50000 :
+                           elapsed < 5000000 ? 250000 : 1000000;
+        nanosleep(&interval, NULL);
+    }
 }
 static uint32_t load32(const uint8_t *p)
 { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -84,6 +91,7 @@ int run_renderer_worker(int output_fd)
     struct iovec backing[MAX_RESOURCES] = {0};
     uint64_t total_backing = 0;
     uint64_t gpu_limit = 1073741824, staging_limit = 1073741824, resource_limit = 268435456;
+    uint64_t texture_pixel_limit = 33554432;
     uint64_t physical_memory = 8589934592; size_t memory_size = sizeof(physical_memory);
     if (sysctlbyname("hw.memsize", &physical_memory, &memory_size, NULL, 0)) physical_memory = 8589934592;
     // Both pools are bounded by one eighth of host RAM, with a 1 GiB floor.
@@ -210,7 +218,7 @@ int run_renderer_worker(int output_fd)
             if (!args.width || args.width > max_width || !args.height || args.height > 8192 ||
                 !args.depth || args.depth > 256 || !args.array_size || args.array_size > 256 ||
                 args.last_level > 13 || args.nr_samples > 8 || args.flags & ~1u ||
-                (args.target != 0 && (uint64_t)args.width * args.height * args.depth * args.array_size > 33554432)) break;
+                (args.target != 0 && (uint64_t)args.width * args.height * args.depth * args.array_size > texture_pixel_limit)) break;
             // Account common browser formats by storage size. A worst-case
             // fallback bounds other formats; only mipmapped resources double.
             uint32_t texel_bytes = 32;
@@ -404,7 +412,8 @@ int run_renderer_worker(int output_fd)
         case 0xffff0022: { // Trusted composite root budget; does not alter connectors.
             if (length != 32 || flags || context) break;
             uint32_t width = load32(request + 24), height = load32(request + 28);
-            if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > 33554432) break;
+            uint64_t maximum_pixels = type == 0xffff0022 ? 67108864 : 33554432;
+            if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > maximum_pixels) break;
             uint64_t pixels = (uint64_t)width * height, quantum = 268435456;
             uint64_t wanted_gpu = (pixels * 64 + quantum - 1) / quantum * quantum;
             uint64_t wanted_staging = (pixels * 48 + quantum - 1) / quantum * quantum;
@@ -415,7 +424,11 @@ int run_renderer_worker(int output_fd)
             // Preserve capacity while shrinking; resources release naturally.
             if (wanted_gpu > gpu_limit) gpu_limit = wanted_gpu;
             if (wanted_staging > staging_limit) staging_limit = wanted_staging;
-            if (pixels > 16777216) resource_limit = 536870912;
+            if (pixels > 16777216 && resource_limit < 536870912) resource_limit = 536870912;
+            if (type == 0xffff0022 && pixels > 33554432) {
+                resource_limit = 1073741824;
+                if (pixels > texture_pixel_limit) texture_pixel_limit = pixels;
+            }
             if (type == 0xffff0020) {
                 scanouts[0].display_width = width; scanouts[0].display_height = height;
                 scanouts[0].enabled = 1;
@@ -462,7 +475,7 @@ int run_renderer_worker(int output_fd)
                 if (right > root_width) root_width = right;
                 if (bottom > root_height) root_height = bottom;
             }
-            if ((uint64_t)root_width * root_height > 33554432) break;
+            if ((uint64_t)root_width * root_height > texture_pixel_limit) break;
             struct scanout_state *s = &scanouts[index];
             s->display_x = x; s->display_y = y; s->display_width = width; s->display_height = height;
             s->enabled = enabled;

@@ -14,7 +14,7 @@ public final class SharedWindowControllerBridge {
     public init(socketDevice: VZVirtioSocketDevice) { device = socketDevice }
 
     public func request(_ command: String, fields: [String: Any] = [:]) async throws -> [String: Any] {
-        guard ["attachPrimary", "list", "create", "resize", "close", "focus"].contains(command),
+        guard ["attachPrimary", "list", "create", "resize", "close", "focus", "shutdown"].contains(command),
               !busy, nextID <= 9_007_199_254_740_991, fields["id"] == nil, fields["cmd"] == nil else {
             throw Self.failure("Invalid or overlapping shared-window request")
         }
@@ -25,7 +25,11 @@ public final class SharedWindowControllerBridge {
         guard data.count <= 65536 else { throw Self.failure("Shared-window request exceeds limit") }
         data.append(10)
         let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
-            device.connect(toPort: Self.vsockPort) { result in continuation.resume(with: result) }
+            let pending = PendingConnection(continuation)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                pending.finish(.failure(Self.failure("Shared-window connection timed out")))
+            }
+            device.connect(toPort: Self.vsockPort) { result in pending.finish(result) }
         }
         let reply: [String: Any] = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -39,6 +43,23 @@ public final class SharedWindowControllerBridge {
         if let epoch, epoch != currentEpoch { throw Self.failure("Shared-window controller restarted; reconciliation required") }
         epoch = currentEpoch
         return reply
+    }
+
+    /// Connection callbacks can arrive after timeout. Resume once and release
+    /// late connections without ever sending a mutation on them.
+    private final class PendingConnection: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<VZVirtioSocketConnection, Error>?
+        init(_ continuation: CheckedContinuation<VZVirtioSocketConnection, Error>) {
+            self.continuation = continuation
+        }
+        func finish(_ result: Result<VZVirtioSocketConnection, Error>) {
+            lock.lock()
+            let current = continuation
+            continuation = nil
+            lock.unlock()
+            current?.resume(with: result)
+        }
     }
 
     nonisolated private static func exchange(_ data: Data, id: Int,

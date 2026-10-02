@@ -78,6 +78,10 @@ public final class VMAutoSuspend {
 
     /// Called when the VM is suspended or resumed. Bool = isSuspended.
     public var onStateChanged: ((Bool) -> Void)?
+    /// Shared-browser owners supply all currently visible windows of this VM.
+    public var windowsProvider: (() -> [NSWindow])?
+    private var ownedWindows: [NSWindow] { windowsProvider?() ?? window.map { [$0] } ?? [] }
+    private var anyWindowIsKey: Bool { ownedWindows.contains { $0.isKeyWindow } }
 
     public init(
         vm: VZVirtualMachine,
@@ -101,13 +105,21 @@ public final class VMAutoSuspend {
         // Observe window focus changes
         let nc = NotificationCenter.default
         focusObservers.append(
-            nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.handleWindowFocused() }
+            nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let candidate = note.object as? NSWindow,
+                          self.ownedWindows.contains(where: { $0 === candidate }) else { return }
+                    self.handleWindowFocused()
+                }
             }
         )
         focusObservers.append(
-            nc.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.handleWindowUnfocused() }
+            nc.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let candidate = note.object as? NSWindow,
+                          self.ownedWindows.contains(where: { $0 === candidate }) else { return }
+                    self.handleWindowUnfocused()
+                }
             }
         )
 
@@ -203,7 +215,7 @@ public final class VMAutoSuspend {
         } else {
             // Gate opened — start accumulating idle time from now if the
             // window is already backgrounded.
-            if let window, !window.isKeyWindow {
+            if !ownedWindows.isEmpty, !anyWindowIsKey {
                 idleStart = Date()
                 lastPacketCount = networkFilter?.packetCount ?? 0
             }
@@ -250,7 +262,7 @@ public final class VMAutoSuspend {
         let packetsThisTick = currentPacketCount &- lastPacketCount
         lastPacketCount = currentPacketCount
         let allowed = suspensionAllowed(mode: mode, lpm: lpm)
-        let isKey = window.isKeyWindow
+        let isKey = anyWindowIsKey
         let mediaActive = isWebcamStreaming || isMicrophoneEnabled
         let trafficActive = packetsThisTick > Self.activityPacketThreshold
 

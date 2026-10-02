@@ -956,6 +956,8 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         self.profilesSubmenu = profilesMenu
         fileMenu.addItem(profilesItem)
         fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: NSLocalizedString("Manage Profiles…", comment: ""),
+                         action: #selector(manageProfilesAction(_:)), keyEquivalent: "")
         fileMenu.addItem(withTitle: NSLocalizedString("New Profile\u{2026}", comment: ""),
                          action: #selector(newProfileAction(_:)),
                          keyEquivalent: "")
@@ -1142,6 +1144,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// ⌘N: another window of the front window's profile; with no browser
     /// window in front, the start-up profile.
     @MainActor @objc func newWindowAction(_ sender: Any?) {
+        if let owner = keyWindowSession()?.sharedOwner ?? sessions.last(where: { !$0.closing })?.sharedOwner {
+            owner.createWindow()
+            return
+        }
         if let profile = keyWindowSession()?.profile
             ?? sessions.last(where: { !$0.closing })?.profile
             ?? startupProfile() {
@@ -1154,6 +1160,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// ⇧⌘N: a fresh ephemeral VM.
     @MainActor @objc func newPrivateWindowAction(_ sender: Any?) {
         if let profile = privateProfile() {
+            if let owner = sessions.first(where: { $0.profile?.id == profile.id && !$0.closing })?.sharedOwner {
+                owner.createWindow(); return
+            }
             openWindow(forProfileID: profile.id)
         } else {
             openNewBrowser()
@@ -1188,6 +1197,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard let profile = keyWindowSession()?.profile ?? startupProfile() else { return }
         profileEditor.presentSettings(for: profile)
     }
+
+    @MainActor func hasProfileResourcesInUse(_ id: UUID) -> Bool {
+        if state.isLaunching { return true } // A launch may already hold a profile disk before its session exists.
+        return (sessions + retiredSessions).contains { $0.profile?.id == id && !$0.hasReleasedVMResources }
+    }
+
+    @MainActor @objc func manageProfilesAction(_ sender: Any?) { profileEditor.presentPicker() }
 
     @MainActor @objc func deleteProfileAction(_ sender: Any?) {
         guard let profile = keyWindowSession()?.profile ?? startupProfile() else { return }
@@ -1602,8 +1618,20 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
             }
+            session.enableWindowSizeMemory()
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
+            if (warm.graphicsSession?.outputCapacity ?? 1) > 1 {
+                do {
+                    try session.startSharedWindows { [weak self] child in
+                        guard let self else { return }
+                        child.enableWindowSizeMemory()
+                        self.sessions.append(child)
+                        self.state.sessionCount = self.sessions.count
+                        self.refreshProfileMenus()
+                    }
+                } catch { print("[shared-window] Failed to initialize owner: \(error)") }
+            }
             session.show()
             self.refreshProfileMenus()
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
@@ -1627,10 +1655,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             return
         }
 
-        // Persistent profiles can only have one session (they can't share the filesystem).
-        // If one is already running, focus its window instead of starting a new VM.
-        if profile.isPersistent,
-           let existing = sessions.first(where: { $0.profile?.id == profile.id && !$0.closing }) {
+        // A shared-window profile owns one VM, including private profiles.
+        // Persistent legacy profiles also retain their exclusive disk owner.
+        if let existing = sessions.first(where: { $0.profile?.id == profile.id && !$0.closing }),
+           profile.isPersistent || existing.hasSharedWindowOwner {
             existing.window.makeKeyAndOrderFront(nil)
             if existing.window.isMiniaturized { existing.window.deminiaturize(nil) }
             if let url = initialURL {
@@ -1736,8 +1764,20 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
             }
+            session.enableWindowSizeMemory()
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
+            if (warm.graphicsSession?.outputCapacity ?? 1) > 1 {
+                do {
+                    try session.startSharedWindows { [weak self] child in
+                        guard let self else { return }
+                        child.enableWindowSizeMemory()
+                        self.sessions.append(child)
+                        self.state.sessionCount = self.sessions.count
+                        self.refreshProfileMenus()
+                    }
+                } catch { print("[shared-window] Failed to initialize owner: \(error)") }
+            }
             session.show()
             self.refreshProfileMenus()
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
@@ -2183,7 +2223,8 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         session.onOpenInProfile = { [weak self] url in
             self?.handleOpenInProfile(url: url)
         }
-        self.sessions.append(session)
+        session.enableWindowSizeMemory()
+            self.sessions.append(session)
         self.state.sessionCount = self.sessions.count
         session.show()
         self.refreshProfileMenus()
@@ -2368,28 +2409,367 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 /// A single browser window backed by a VM.
 /// This is a plain Swift class (not NSObject) to avoid VZ dispatch source
 /// lifetime issues with ObjC ivar destruction.
+/// Owns the browser and VM independently of any one visible window.
+@MainActor
+final class SharedBrowserVMOwner {
+    private let root: BrowserSession
+    private let warm: VMPool.WarmVM
+    private let controller: SharedWindowControllerBridge
+    private var outputs: [Int: String] = [:]
+    private var windows: [Int: BrowserSession] = [:]
+    private var closingWindows: Set<Int> = []
+    private var sizes: [Int: (width: Int, height: Int)] = [:]
+    private var rectangles: [Int: CGRect] = [:]
+    private var operations: [(motion: Int?, body: () async -> Void)] = []
+    private var draining = false
+    private var prepared = false
+    private var supportsTerminalShutdown = false
+    private var focusedID: Int?
+    private var resizeTask: Task<Void, Never>?
+    private var terminated = false
+    var onWindowCreated: ((BrowserSession) -> Void)?
+    var presentationSession: BrowserSession? {
+        let visible = windows.filter { !closingWindows.contains($0.key) && !$0.value.closing }.map(\.value)
+        return visible.first(where: { $0.window.isKeyWindow }) ?? visible.first
+    }
+    var presentationWindow: NSWindow? { presentationSession?.window }
+
+    init(root: BrowserSession, warm: VMPool.WarmVM, socket: VZVirtioSocketDevice) {
+        self.root = root; self.warm = warm
+        controller = SharedWindowControllerBridge(socketDevice: socket)
+        windows[0] = root
+        sizes[0] = (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
+        root.sharedOwner = self
+        root.autoSuspend?.windowsProvider = { [weak self] in
+            guard let self else { return [] }
+            return self.windows.filter { !self.closingWindows.contains($0.key) && !$0.value.closing }.map { $0.value.window }
+        }
+    }
+
+    func begin() {
+        enqueue { [self] in
+            do { try await prepare() } catch { report(error) }
+        }
+    }
+
+    private func enqueue(coalescingMotion id: Int? = nil, _ operation: @escaping () async -> Void) {
+        if let id, operations.last?.motion == id { operations[operations.count - 1] = (id, operation) }
+        else { operations.append((id, operation)) }
+        guard !draining else { return }
+        draining = true
+        Task { @MainActor in
+            while !operations.isEmpty {
+                root.autoSuspend?.resumeForAPIRequest()
+                await operations.removeFirst().body()
+            }
+            draining = false
+        }
+    }
+
+    private func requireOK(_ reply: [String: Any]) throws {
+        guard reply["ok"] as? Bool == true else {
+            throw NSError(domain: "BromureSharedWindows", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: String(describing: reply["error"] ?? "Guest rejected shared-window operation")])
+        }
+    }
+
+    func prepare() async throws {
+        guard !prepared else { return }
+        let capacity = warm.graphicsSession?.outputCapacity ?? 1
+        guard capacity > 1 else { throw NSError(domain: "BromureSharedWindows", code: 3) }
+        var listing: [String: Any] = [:]
+        let deadline = ProcessInfo.processInfo.systemUptime + 45
+        repeat {
+            do { listing = try await controller.request("list", fields: ["expectedScanouts": capacity, "rootPixelLimit": 67108864]) }
+            catch {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw error }
+                try await Task.sleep(for: .milliseconds(250))
+                continue
+            }
+            if listing["ok"] as? Bool == true, let rows = listing["windows"] as? [[String: Any]], !rows.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(250))
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        try requireOK(listing)
+        supportsTerminalShutdown = listing["shutdownProtocolVersion"] as? Int == 1
+        guard listing["rootPixelLimit"] as? Int == 67108864 else { throw NSError(domain: "BromureSharedWindows", code: 10) }
+        guard let connectors = listing["outputs"] as? [[String: Any]], connectors.count == capacity,
+              let rows = listing["windows"] as? [[String: Any]], rows.count == 1,
+              let primary = rows[0]["windowId"] as? Int else { throw NSError(domain: "BromureSharedWindows", code: 4) }
+        for row in connectors {
+            guard let index = row["scanout"] as? Int, let name = row["output"] as? String,
+                  (0..<capacity).contains(index), outputs[index] == nil else { throw NSError(domain: "BromureSharedWindows", code: 5) }
+            outputs[index] = name
+        }
+        root.sharedWindowID = primary
+        let topology = try await publishTopology()
+        try requireOK(try await controller.request("attachPrimary", fields: ["windowId": primary, "scanout": 0, "topology": topology]))
+        root.tabBridge?.scope(to: primary)
+        root.tabBridge?.commandGate = { [weak self] id, action in self?.forward(id: id, needsFocus: true, action: action) }
+        installInput(root, index: 0)
+        prepared = true
+    }
+
+    private func publishTopology() async throws -> [[String: Any]] {
+        guard #available(macOS 27.0, *), let gpu = warm.graphicsSession as? MacOS27GPUSession else {
+            throw NSError(domain: "BromureSharedWindows", code: 6)
+        }
+        var geometry: [MacOS27GPUSession.OutputGeometry] = []
+        var topology: [[String: Any]] = []
+        var x = 0, y = 0, rowHeight = 0
+        var nextRectangles: [Int: CGRect] = [:]
+        for index in 0..<gpu.outputCapacity {
+            let active = sizes[index] != nil && !closingWindows.contains(index)
+            let size = sizes[index] ?? (width: 128, height: 128)
+            let scale = max(VMConfig.resolvedDisplayScale(), 1)
+            let width = max(64, size.width / 8 * 8), height = max(64, size.height / scale * scale)
+            if active && x + width > 8192 { y += rowHeight; x = 0; rowHeight = 0 }
+            let px = active ? x : 0, py = active ? y : 0
+            geometry.append(.init(index: index, x: px, y: py, width: width, height: height, enabled: active))
+            var row: [String: Any] = ["scanout": index, "output": outputs[index]!, "x": px, "y": py,
+                                      "width": width, "height": height, "enabled": active]
+            if active, let id = windows[index]?.sharedWindowID { row["windowId"] = id }
+            topology.append(row)
+            if active {
+                nextRectangles[index] = CGRect(x: px, y: py, width: width, height: height)
+                x += width; rowHeight = max(rowHeight, height)
+            }
+        }
+        try await gpu.publishOutputs(geometry)
+        rectangles = nextRectangles
+        return topology
+    }
+
+    func createWindow(url: String = "about:blank") {
+        enqueue { [self] in
+            guard !terminated else { return }
+            do {
+                try await prepare()
+                guard !terminated, let index = (0..<outputs.count).first(where: { windows[$0] == nil }) else {
+                    throw NSError(domain: "BromureSharedWindows", code: 7, userInfo: [NSLocalizedDescriptionKey: "No free display output"])
+                }
+                sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
+                let topology = try await publishTopology()
+                let reply = try await controller.request("create", fields: ["scanout": index, "url": url, "topology": topology])
+                try requireOK(reply)
+                guard let id = reply["windowId"] as? Int, #available(macOS 27.0, *),
+                      let gpu = warm.graphicsSession as? MacOS27GPUSession,
+                      let graphics = gpu.outputSession(index: index, onResize: { [weak self] w, h in self?.resize(index: index, width: w, height: h) }) else {
+                    throw NSError(domain: "BromureSharedWindows", code: 8)
+                }
+                let child = BrowserSession(warmVM: warm, config: root.sessionConfig, profile: root.profile,
+                                           serviceRoot: root, sharedWindowID: id, graphicsOverride: graphics)
+                child.sharedOwner = self
+                child.onClosed = root.onClosed
+                child.onOpenInProfile = root.onOpenInProfile
+                windows[index] = child
+                installInput(child, index: index)
+                onWindowCreated?(child)
+                child.show()
+            } catch { report(error) }
+        }
+    }
+
+    private func installInput(_ session: BrowserSession, index: Int) {
+        guard let view = session.vmView as? PrecisionScrollVMView else { return }
+        view.gpuFrameView?.displayHeightAlignment = max(VMConfig.resolvedDisplayScale(), 1)
+        view.gpuFrameView?.displaySizeChanged = { [weak self] width, height in self?.resize(index: index, width: width, height: height) }
+        if let frame = view.gpuFrameView {
+            let scale = max(VMConfig.resolvedDisplayScale(), 1)
+            resize(index: index, width: Int(frame.bounds.width * frame.guestDisplayScale) / 8 * 8,
+                   height: Int(frame.bounds.height * frame.guestDisplayScale) / scale * scale)
+        }
+        let target: () -> String? = { [weak session] in session?.nativeTabBar?.model.activeTab?.id }
+        let gate: (@escaping () -> Void) -> Void = { [weak self, weak session] action in
+            guard let self, let id = session?.sharedWindowID else { return }
+            self.forward(id: id, needsFocus: true, action: action)
+        }
+        session.cjkInputBridge?.targetProvider = target
+        session.cjkInputBridge?.deliveryGate = gate
+        session.gestureBridge?.targetProvider = target
+        session.gestureBridge?.deliveryGate = gate
+        view.pointerCoordinateTransform = { [weak self] x, y in
+            guard let self, let rect = self.rectangles[index] else { return (x: 0, y: 0) }
+            let rootWidth = self.rectangles.values.map(\.maxX).max() ?? 1
+            let rootHeight = self.rectangles.values.map(\.maxY).max() ?? 1
+            return (x: (rect.minX + x * rect.width) / rootWidth, y: (rect.minY + y * rect.height) / rootHeight)
+        }
+        view.inputForwarder = { [weak self, weak session] needsFocus, action in
+            guard let self, let session, let id = session.sharedWindowID else { return }
+            self.forward(id: id, needsFocus: needsFocus, action: action)
+        }
+    }
+
+    func windowFocused(_ session: BrowserSession) {
+        focusedID = nil
+        guard let id = session.sharedWindowID else { return }
+        forward(id: id, needsFocus: true, action: {})
+    }
+
+    private func forward(id: Int, needsFocus: Bool, action: @escaping () -> Void) {
+        enqueue(coalescingMotion: needsFocus ? nil : id) { [self] in
+            guard !terminated, windows.contains(where: { !closingWindows.contains($0.key) && $0.value.sharedWindowID == id && !$0.value.closing }) else { return }
+            do {
+                if needsFocus && focusedID != id {
+                    focusedID = nil
+                    try requireOK(try await controller.request("focus", fields: ["windowId": id]))
+                    focusedID = id
+                }
+                action()
+            } catch { report(error) }
+        }
+    }
+
+    func resize(index: Int, width: Int, height: Int) {
+        guard windows[index] != nil, !closingWindows.contains(index), !terminated else { return }
+        sizes[index] = (width, height)
+        resizeTask?.cancel()
+        resizeTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            guard let self else { return }
+            self.enqueue {
+                do {
+                    guard !self.terminated,
+                          let pair = self.windows.sorted(by: { $0.key < $1.key }).first(where: { !self.closingWindows.contains($0.key) }),
+                          let id = pair.value.sharedWindowID else { return }
+                    let topology = try await self.publishTopology()
+                    try self.requireOK(try await self.controller.request("resize", fields: ["scanout": pair.key, "windowId": id, "topology": topology]))
+                } catch { self.report(error) }
+            }
+        }
+    }
+
+    func close(_ session: BrowserSession) {
+        guard let index = windows.first(where: { $0.value === session })?.key else { return }
+        closingWindows.insert(index)
+        if windows.keys.allSatisfy({ closingWindows.contains($0) }) { root.markVMResourcesClosing() }
+        enqueue { [self] in
+            guard let index = windows.first(where: { $0.value === session })?.key else { return }
+            if windows.keys.allSatisfy({ closingWindows.contains($0) }) {
+                root.markVMResourcesClosing()
+                terminated = true; resizeTask?.cancel()
+                await stopBrowser()
+                windows.removeAll(); closingWindows.removeAll(); sizes.removeAll(); focusedID = nil
+                session.closeSharedView(); session.sharedOwner = nil
+                root.sharedOwner = nil; root.closing = false
+                await root.teardown()
+                return
+            }
+            do {
+                if let id = session.sharedWindowID {
+                    sizes[index] = nil
+                    let topology = try await publishTopology()
+                    do {
+                        try requireOK(try await controller.request("close", fields: ["windowId": id, "topology": topology]))
+                    } catch {
+                        // A lost reply can follow a completed target close. Observe
+                        // actual state before completing the topology; never replay close.
+                        let listing = try await controller.request("list")
+                        try requireOK(listing)
+                        guard let rows = listing["windows"] as? [[String: Any]],
+                              !rows.contains(where: { $0["windowId"] as? Int == id }),
+                              let survivor = windows.first(where: { $0.key != index && !$0.value.closing }),
+                              let survivorID = survivor.value.sharedWindowID else { throw error }
+                        try requireOK(try await controller.request("resize", fields: [
+                            "scanout": survivor.key, "windowId": survivorID, "topology": topology]))
+                    }
+                }
+                windows[index] = nil; closingWindows.remove(index); focusedID = nil
+                session.closeSharedView()
+                session.sharedOwner = nil
+                if windows.isEmpty {
+                    terminated = true; resizeTask?.cancel()
+                    root.closing = false
+                    root.sharedOwner = nil
+                    await root.teardown()
+                }
+            } catch { report(error) }
+        }
+    }
+
+    func shutdown() async {
+        root.markVMResourcesClosing()
+        await withCheckedContinuation { continuation in
+            enqueue { [self] in
+                guard !terminated else { continuation.resume(); return }
+                root.markVMResourcesClosing()
+                terminated = true; resizeTask?.cancel()
+                await stopBrowser()
+                for session in windows.values { session.closeSharedView(); session.sharedOwner = nil }
+                windows.removeAll()
+                root.sharedOwner = nil; root.closing = false
+                await root.teardown()
+                continuation.resume()
+            }
+        }
+    }
+
+    private func stopBrowser() async {
+        guard prepared, warm.vm.state == .running else { return }
+        if !supportsTerminalShutdown {
+            // Compatibility with the earlier private controller: close each
+            // known window once, without replaying a lost mutation response.
+            for id in windows.values.compactMap(\.sharedWindowID) {
+                do { _ = try await controller.request("close", fields: ["windowId": id]) }
+                catch { print("[shared-window] Legacy browser close ended: \(error)"); break }
+            }
+            return
+        }
+        do {
+            let reply: [String: Any]
+            do { reply = try await controller.request("shutdown") }
+            catch {
+                // Reconcile a lost response by observing the terminal state.
+                // Never issue Browser.close again after an uncertain outcome.
+                reply = try await controller.request("list")
+            }
+            try requireOK(reply)
+            guard reply["terminal"] as? Bool == true,
+                  reply["shutdownRequested"] as? Bool == true,
+                  reply["exited"] as? Bool == true,
+                  let browser = reply["browser"] as? [String: Any] else {
+                throw NSError(domain: "BromureSharedWindows", code: 11,
+                              userInfo: [NSLocalizedDescriptionKey: "Chromium exit was not observed"])
+            }
+            print("BROMURE_SHARED_BROWSER_EXIT \(browser)")
+        } catch { print("[shared-window] Browser shutdown could not be verified: \(error)") }
+    }
+
+    private func report(_ error: Error) {
+        print("[shared-window] \(error)")
+        let alert = NSAlert(); alert.messageText = "Shared browser window"; alert.informativeText = error.localizedDescription
+        if let window = windows.values.first(where: { !$0.closing })?.window { alert.beginSheetModal(for: window) }
+    }
+}
+
 final class BrowserSession {
     var rendererDisplayName: String {
-        guard let graphics = warmVM?.graphicsSession else { return "Software" }
+        guard let graphics = (graphicsOverride ?? warmVM?.graphicsSession) else { return "Software" }
         if !graphics.isRendererRunning { return "GPU unavailable" }
         return usesMetalRenderer ? "Metal" : "Starting GPU"
     }
 
     let id = UUID()
-    private var warmVM: VMPool.WarmVM?
+    fileprivate var warmVM: VMPool.WarmVM?
+    fileprivate var graphicsOverride: HostGraphicsSession?
+    fileprivate var serviceRoot: BrowserSession?
+    fileprivate var sharedOwner: SharedBrowserVMOwner?
+    fileprivate var sharedWindowID: Int?
+    fileprivate let sessionConfig: VMConfig
     var usesMetalRenderer: Bool {
-        guard !closing, let graphics = warmVM?.graphicsSession else { return false }
+        guard !closing, let graphics = (graphicsOverride ?? warmVM?.graphicsSession) else { return false }
         return graphics.isRendererRunning && graphics.backendName == "virgl" && graphics.deliveredFrameCount > 0
     }
     let window: NSWindow
-    private var vmView: VZVirtualMachineView?
+    fileprivate var vmView: VZVirtualMachineView?
     var onClosed: ((BrowserSession) -> Void)?
     var onOpenInProfile: ((URL) -> Void)?
     fileprivate var closing = false
+    private var vmCleanupStarted = false
     /// `closing` for other files (the profile editor refuses to delete a
     /// profile whose window is still up).
     var isClosing: Bool { closing }
     fileprivate var confirmed = false
+    fileprivate var remembersWindowSize = false
     private static var windowCount = 0
     private var delegateHelper: SessionDelegateHelper?
     private var fileTransferBridge: FileTransferBridge?
@@ -2407,7 +2787,7 @@ final class BrowserSession {
     private var networkRefreshBridge: NetworkRefreshBridge?
     private(set) var cdpBridge: CDPBridge?
     private(set) var tabBridge: TabBridge?
-    private var nativeTabBar: NativeTabBarChrome?
+    fileprivate var nativeTabBar: NativeTabBarChrome?
     private var nativeChromeKeyMonitor: Any?
     private var nativeChromeFlagsMonitor: Any?
     private var nativeChromeKeyUpMonitor: Any?
@@ -2422,8 +2802,8 @@ final class BrowserSession {
     private var cloudTraceUploader: CloudTraceUploader?
     fileprivate var cloudTraceEnforced: Bool = false
     private var keyboardBridge: KeyboardBridge?
-    private var cjkInputBridge: CJKInputBridge?
-    private var gestureBridge: GestureBridge?
+    fileprivate var cjkInputBridge: CJKInputBridge?
+    fileprivate var gestureBridge: GestureBridge?
     private(set) var scrollBridge: PrecisionScrollBridge?
     private var pointerBridge: GuestPointerBridge?
     private(set) var autoSuspend: VMAutoSuspend?
@@ -2449,8 +2829,12 @@ final class BrowserSession {
     private var webcamEffects: WebcamEffects
     private var webcamDeviceID: String?
 
-    init(warmVM: VMPool.WarmVM, config: VMConfig, profile: Profile? = nil, virusTotalAPIKey: String? = nil, blockThreats: Bool = false, blockUnscannable: Bool = false) {
+    init(warmVM: VMPool.WarmVM, config: VMConfig, profile: Profile? = nil, virusTotalAPIKey: String? = nil, blockThreats: Bool = false, blockUnscannable: Bool = false, serviceRoot: BrowserSession? = nil, sharedWindowID: Int? = nil, graphicsOverride: HostGraphicsSession? = nil) {
         self.warmVM = warmVM
+        self.sessionConfig = config
+        self.serviceRoot = serviceRoot
+        self.sharedWindowID = sharedWindowID
+        self.graphicsOverride = graphicsOverride
         self.profile = profile
         self.isNativeChrome = config.nativeChrome
         self.webcamEffects = config.webcamEffects
@@ -2468,7 +2852,7 @@ final class BrowserSession {
         vmView.automaticallyReconfiguresDisplay = warmVM.graphicsSession == nil
         self.vmView = vmView
         MainActor.assumeIsolated {
-        if let graphics = warmVM.graphicsSession,
+        if let graphics = graphicsOverride ?? warmVM.graphicsSession,
            let gpuView = try? HostGPUFrameView(gpuFrame: vmView.bounds) {
             gpuView.autoresizingMask = [.width, .height]
             gpuView.guestDisplayScale = Double(VMConfig.resolvedDisplayScale())
@@ -2542,14 +2926,17 @@ final class BrowserSession {
         // If file transfer is enabled, set up the bridge and show drawer alongside VM
         var contentView: NSView = cropperOrDropTarget
         if config.enableFileTransfer {
-            if let socketDevices = warmVM.vm.socketDevices as? [VZVirtioSocketDevice],
-               let socketDevice = socketDevices.first {
+            if let serviceRoot {
+                self.fileDrawerModel = serviceRoot.fileDrawerModel
+            } else if let socketDevices = warmVM.vm.socketDevices as? [VZVirtioSocketDevice],
+                      let socketDevice = socketDevices.first {
                 let bridge = MainActor.assumeIsolated { FileTransferBridge(socketDevice: socketDevice) }
                 let model = MainActor.assumeIsolated { FileDrawerModel(virusTotalAPIKey: virusTotalAPIKey, blockThreats: blockThreats, blockUnscannable: blockUnscannable) }
                 MainActor.assumeIsolated { model.attach(bridge: bridge) }
                 self.fileTransferBridge = bridge
                 self.fileDrawerModel = model
-
+            }
+            if let model = self.fileDrawerModel {
                 let drawerView = FileDrawerView(model: model)
                 let hostView = NSHostingView(rootView: drawerView)
                 hostView.setFrameSize(NSSize(width: 280, height: windowHeight))
@@ -2601,6 +2988,9 @@ final class BrowserSession {
             backing: .buffered,
             defer: false
         )
+
+        // Session/VM ownership outlives an individual shared window close.
+        window.isReleasedWhenClosed = false
 
         if let profile {
             window.title = String(format: NSLocalizedString("Bromure — %@", comment: ""), profile.name)
@@ -2661,21 +3051,27 @@ final class BrowserSession {
             return nil
         }()
 
+        if serviceRoot == nil {
         // Credential bridge — when passkeys or passwords are enabled
         if (config.enablePasskeys || config.enablePasswords), let dev = linkSocketDevice {
             let credBridge = MainActor.assumeIsolated {
                 let bridge = CredentialBridge(socketDevice: dev, window: window)
+                bridge.windowProvider = { [weak self] in
+                    guard let self else { return nil }
+                    return self.sharedOwner?.presentationWindow ?? (self.closing ? nil : self.window)
+                }
                 bridge.enablePasskeys = config.enablePasskeys
                 bridge.enablePasswords = config.enablePasswords
                 bridge.onKillSession = { [weak self] in
                     guard let self else { return }
                     self.confirmed = true
-                    self.window.close()
+                    if let owner = self.sharedOwner { Task { await owner.shutdown() } }
+                    else { self.window.close() }
                 }
                 if config.enablePasswords {
                     bridge.onConnectICloudPasswords = { [weak self] in
                         let delegate = NSApp.delegate as? GUIAppDelegate
-                        return await delegate?.getOrConnectICloudPasswords(window: self?.window)
+                        return await delegate?.getOrConnectICloudPasswords(window: self?.sharedOwner?.presentationWindow ?? self?.window)
                     }
                 }
                 return bridge
@@ -2836,9 +3232,13 @@ final class BrowserSession {
         }
 
         // Set up CDP bridge for automation (Puppeteer/Playwright access).
-        if config.enableAutomation, let dev = linkSocketDevice {
+        if config.enableAutomation || (warmVM.graphicsSession?.outputCapacity ?? 1) > 1, let dev = linkSocketDevice {
             let bridge = MainActor.assumeIsolated { CDPBridge(socketDevice: dev) }
             self.cdpBridge = bridge
+        }
+
+        } else {
+            self.cdpBridge = serviceRoot?.cdpBridge
         }
 
         // Native-chrome mode: hide Chromium's tab strip + omnibox (guest runs
@@ -2847,7 +3247,12 @@ final class BrowserSession {
         if config.nativeChrome, let dev = linkSocketDevice {
             MainActor.assumeIsolated {
                 let tabModel = NativeTabBarModel()
-                let bridge = TabBridge(socketDevice: dev)
+                let bridge: TabBridge
+                if let parent = serviceRoot?.tabBridge, let sharedWindowID {
+                    bridge = TabBridge(parent: parent, windowID: sharedWindowID)
+                } else {
+                    bridge = TabBridge(socketDevice: dev)
+                }
                 self.tabBridge = bridge
 
                 // Gate guest input until the tab manager is up (see
@@ -2915,6 +3320,9 @@ final class BrowserSession {
                 tabModel.onReload   = { [weak bridge] id in bridge?.reload(id: id) }
                 tabModel.onBack     = { [weak bridge] id in bridge?.back(id: id) }
                 tabModel.onForward  = { [weak bridge] id in bridge?.forward(id: id) }
+                tabModel.fetchHistorySuggestions = { [weak bridge] query in
+                    await bridge?.historySuggestions(query: query) ?? []
+                }
                 tabModel.fetchCertificate = { [weak bridge] origin in
                     guard let bridge else { return [] }
                     return await bridge.fetchCertificate(origin: origin)
@@ -2976,6 +3384,7 @@ final class BrowserSession {
                     let pid = profile.id
                     tabModel.profileEntries = { delegate()?.profileMenuEntries(current: pid) ?? [] }
                     tabModel.onOpenProfile = { id in delegate()?.openWindow(forProfileID: id) }
+                    tabModel.onManageProfiles = { delegate()?.profileEditor.presentPicker() }
                     tabModel.onNewProfile = { delegate()?.profileEditor.presentNewProfile() }
                     tabModel.onEditProfile = { delegate()?.profileEditor.presentSettings(forProfileID: pid) }
                     tabModel.onDeleteProfile = { delegate()?.profileEditor.confirmDelete(profileID: pid) }
@@ -3226,6 +3635,7 @@ final class BrowserSession {
             }
         }
 
+        if serviceRoot == nil {
         // Network refresh bridge (vsock port 5703) — always attached so the
         // guest agent has something to connect to. Registered with the host
         // NWPathMonitor watcher only in bridged mode, where DHCP renewal on
@@ -3375,6 +3785,8 @@ final class BrowserSession {
             self.keyboardBridge = MainActor.assumeIsolated { KeyboardBridge(socketDevice: dev) }
         }
 
+        }
+
         // Set up CJK input bridge for native macOS IME composition.
         if let dev = linkSocketDevice, let vmView = self.vmView {
             let bridge = MainActor.assumeIsolated { CJKInputBridge(socketDevice: dev) }
@@ -3396,7 +3808,7 @@ final class BrowserSession {
 
         if warmVM.graphicsSession != nil, let dev = linkSocketDevice {
             MainActor.assumeIsolated {
-                let bridge = GuestPointerBridge(socketDevice: dev)
+                let bridge = serviceRoot?.pointerBridge ?? GuestPointerBridge(socketDevice: dev)
                 self.pointerBridge = bridge
                 vmView.pointerBridge = bridge
                 self.window.acceptsMouseMovedEvents = true
@@ -3412,7 +3824,7 @@ final class BrowserSession {
         // Kill switch: defaults write io.bromure.app vm.precisionScroll -bool NO
         if let dev = linkSocketDevice,
            UserDefaults.standard.object(forKey: "vm.precisionScroll") as? Bool ?? true {
-            let bridge = MainActor.assumeIsolated { PrecisionScrollBridge(socketDevice: dev) }
+            let bridge = MainActor.assumeIsolated { PrecisionScrollBridge(socketDevice: dev, targetScoped: (warmVM.graphicsSession?.outputCapacity ?? 1) > 1) }
             self.scrollBridge = bridge
             MainActor.assumeIsolated {
                 vmView.scrollBridge = bridge
@@ -3441,6 +3853,7 @@ final class BrowserSession {
         // Auto-suspend on idle — whether idle actually triggers a suspend is
         // decided by the user's Energy Mode setting, read live each tick so
         // the user can flip modes in Settings without restarting sessions.
+        if serviceRoot == nil {
         self.autoSuspend = MainActor.assumeIsolated {
             VMAutoSuspend(
                 vm: warmVM.vm,
@@ -3453,10 +3866,24 @@ final class BrowserSession {
             )
         }
 
+        }
+
         let helper = SessionDelegateHelper(session: self)
         self.delegateHelper = helper
-        warmVM.vm.delegate = helper
+        if serviceRoot == nil { warmVM.vm.delegate = helper }
         window.delegate = helper
+    }
+
+    @MainActor func createSharedWindow() { sharedOwner?.createWindow() }
+
+    @MainActor func startSharedWindows(onWindowCreated: @escaping (BrowserSession) -> Void) throws {
+        guard let warm = warmVM, (warm.graphicsSession?.outputCapacity ?? 1) > 1,
+              let socket = warm.vm.socketDevices.first as? VZVirtioSocketDevice else {
+            throw NSError(domain: "BromureSharedWindows", code: 9)
+        }
+        let owner = SharedBrowserVMOwner(root: self, warm: warm, socket: socket)
+        owner.onWindowCreated = onWindowCreated
+        owner.begin()
     }
 
     /// Run a native-chrome browser shortcut (⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘]). Called
@@ -4228,6 +4655,7 @@ final class BrowserSession {
     }
 
     fileprivate func fullCleanup() async {
+        vmCleanupStarted = true
         // 0. Sync and unmount persistent profile disk before killing the VM
         if let profile, profile.isPersistent {
             let mountPoint = "/home/chrome/.\(profile.id.uuidString)"
@@ -4247,40 +4675,12 @@ final class BrowserSession {
         if serialWrite("doas udhcpc -R -i eth0 2>/dev/null") {
             try? await Task.sleep(for: .milliseconds(500))
         }
-        // 0.6. Release MAC address back to the pool for reuse
-        if let mac = warmVM?.macAddress {
-            MACAddressPool.shared.release(mac)
-        }
         // 1. Disconnect delegates so VZ doesn't call back into us
         warmVM?.vm.delegate = nil
-        // 2. Stop VM on the main dispatch queue (VZ requirement)
-        if let vm = warmVM?.vm, vm.state == .running || vm.state == .paused {
-            nonisolated(unsafe) let vm = vm
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                DispatchQueue.main.async {
-                    vm.stop { _ in cont.resume() }
-                }
-            }
+        if let warm = warmVM, !(await VMPool.releaseResources(warm)) {
+            print("[shared-window] VM cleanup remains owned until terminal state")
+            return
         }
-        // 3. Now safe to close pipes — VZ no longer has active dispatch sources
-        if let vm = warmVM {
-            vm.serialOutput.fileHandleForReading.readabilityHandler = nil
-            vm.serialInput.fileHandleForWriting.readabilityHandler = nil
-            try? vm.serialOutput.fileHandleForReading.close()
-            try? vm.serialOutput.fileHandleForWriting.close()
-            try? vm.serialInput.fileHandleForReading.close()
-            try? vm.serialInput.fileHandleForWriting.close()
-            try? vm.ephemeralDisk.destroy()
-        }
-        // 3.5. Tear down host-side networking: detach the shared VMNetSwitch
-        // port, free the DHCP lease, and close the proxy socketpairs. This must
-        // be explicit — `NetworkFilter` otherwise only cleans up in `deinit`,
-        // which is delayed indefinitely because the retired (kept-alive) VM's
-        // VZ attachment keeps the filter referenced. Without it every closed
-        // session leaks a socketpair + switch port, and a Finder/launchd-
-        // launched app (256-fd soft limit) exhausts descriptors mid-run, after
-        // which `socketpair()` fails and vmnet setup breaks. Idempotent.
-        warmVM?.networkFilter?.stop()
         // 4. Release VZ resources
         warmVM = nil
     }
@@ -4367,16 +4767,100 @@ final class BrowserSession {
 
         // Auto-open drawer when a file arrives from the guest
         if let model = fileDrawerModel {
-            model.onFileFromGuest = { [weak self] in
-                if let self, self.drawerHost?.isHidden == true {
-                    self.toggleDrawer()
+            model.onFileFromGuest = { [weak owner = sharedOwner, weak self] in
+                Task { @MainActor in
+                    let session = owner?.presentationSession ?? self
+                    if let session, !session.closing, session.drawerHost?.isHidden == true {
+                        session.toggleDrawer()
+                    }
                 }
             }
         }
 
     }
 
+    @MainActor fileprivate func closeSharedView() {
+        closing = true
+        window.orderOut(nil)
+        rendererStatusTimer?.invalidate(); rendererStatusTimer = nil
+        cjkInputBridge?.stop(); cjkInputBridge = nil
+        scrollBridge?.stop(); scrollBridge = nil
+        gestureBridge = nil
+        if serviceRoot != nil { tabBridge?.stop(); tabBridge = nil; graphicsOverride?.stop(); graphicsOverride = nil }
+        for monitor in [nativeChromeKeyMonitor, nativeChromeFlagsMonitor, nativeChromeKeyUpMonitor, keyRepeatFilterMonitor].compactMap({ $0 }) { NSEvent.removeMonitor(monitor) }
+        nativeChromeKeyMonitor = nil; nativeChromeFlagsMonitor = nil; nativeChromeKeyUpMonitor = nil; keyRepeatFilterMonitor = nil
+        detachView()
+        if serviceRoot != nil { warmVM = nil }
+        onClosed?(self)
+    }
+
+    @MainActor func checkNativeHistoryCompletion(_ prefix: String) async throws -> String {
+        window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .seconds(2)) // Capture the field after window activation updates its active pill.
+        guard let model = nativeTabBar?.model,
+              let fetch = model.fetchHistorySuggestions else { throw NSError(domain: "HistoryCompletion", code: 1) }
+        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        while await fetch(prefix).isEmpty {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw NSError(domain: "HistoryCompletion", code: 2) }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        guard let field = model.addressField, field.window === window else { throw NSError(domain: "HistoryCompletion", code: 5) }
+        window.makeKeyAndOrderFront(nil)
+        guard window.makeFirstResponder(field) else { throw NSError(domain: "HistoryCompletion", code: 6) }
+        field.selectText(nil)
+        guard let editor = field.currentEditor() as? NSTextView else { throw NSError(domain: "HistoryCompletion", code: 3) }
+        editor.insertText(prefix, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+        try await Task.sleep(for: .seconds(2))
+        let selected = editor.selectedRange()
+        print("BROMURE_HISTORY_FIELD_RESULT editing=\(model.editingAddress) text=\(editor.string) selection=\(selected)")
+        guard model.addressField === field, field.window === window, field.currentEditor() === editor,
+              model.editingAddress, editor.string.hasPrefix(prefix), selected.location == (prefix as NSString).length, selected.length > 0,
+              selected.location + selected.length == (editor.string as NSString).length else {
+            throw NSError(domain: "HistoryCompletion", code: 4)
+        }
+        return editor.string
+    }
+
+    @MainActor func enableWindowSizeMemory() {
+        let defaults = UserDefaults.standard
+        let width = defaults.double(forKey: "browser.lastWindowWidth")
+        let height = defaults.double(forKey: "browser.lastWindowHeight")
+        if width.isFinite, height.isFinite, width >= 800, height >= 600 {
+            let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
+            window.setContentSize(NSSize(width: min(width, visible.width), height: min(height, max(600, visible.height - 50))))
+        }
+        remembersWindowSize = true
+    }
+
+    func closeConfirmedWindow() {
+        confirmed = true
+        window.performClose(nil)
+    }
+
+    @MainActor var hasReleasedVMResources: Bool {
+        if warmVM?.resourcesReleased == true { warmVM = nil }
+        return warmVM == nil
+    }
+    var isCleaningUpVMResources: Bool { vmCleanupStarted }
+    fileprivate func markVMResourcesClosing() { vmCleanupStarted = true }
+    var hasSharedWindowOwner: Bool { sharedOwner != nil }
+    func shutdownSharedWindows() async { await sharedOwner?.shutdown() }
+    @MainActor func waitForClosingVMResources() async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        while vmCleanupStarted && !hasReleasedVMResources {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw NSError(domain: "BromureSharedWindows", code: 12,
+                              userInfo: [NSLocalizedDescriptionKey: "VM cleanup did not complete"])
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     func teardown() async {
+        if let owner = sharedOwner {
+            await owner.shutdown()
+            return
+        }
         guard !closing else { return }
         closing = true
         await MainActor.run {
@@ -4613,7 +5097,9 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
 
     private func handleVMStopped() {
         Task { @MainActor [weak session] in
-            guard let session, !session.closing else { return }
+            guard let session else { return }
+            if let owner = session.sharedOwner { await owner.shutdown(); return }
+            guard !session.closing else { return }
             session.closing = true
             session.window.orderOut(nil)
             session.detachView()
@@ -4624,6 +5110,19 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
     }
 
     // MARK: - NSWindowDelegate
+
+    func windowDidResize(_ notification: Notification) {
+        guard let session, session.remembersWindowSize,
+              !session.window.styleMask.contains(.fullScreen),
+              let size = session.window.contentView?.bounds.size, size.width >= 800, size.height >= 600 else { return }
+        UserDefaults.standard.set(size.width, forKey: "browser.lastWindowWidth")
+        UserDefaults.standard.set(size.height, forKey: "browser.lastWindowHeight")
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let session else { return }
+        MainActor.assumeIsolated { session.sharedOwner?.windowFocused(session) }
+    }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let session else { return true }
@@ -4639,8 +5138,14 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
             return false
         }
         let alert = NSAlert()
-        alert.messageText = NSLocalizedString("Close this browser?", comment: "")
-        alert.informativeText = NSLocalizedString("All browsing data in this window will be permanently lost. This cannot be undone.", comment: "")
+        alert.messageText = NSLocalizedString(session.hasSharedWindowOwner ? "Close this window?" : "Close this browser?", comment: "")
+        if session.hasSharedWindowOwner {
+            alert.informativeText = NSLocalizedString(session.profile?.isPersistent == true
+                ? "Other windows for this profile stay open. Your saved browsing data is kept."
+                : "Other windows for this profile stay open. Temporary browsing data is erased when its last window closes.", comment: "")
+        } else {
+            alert.informativeText = NSLocalizedString("All browsing data in this window will be permanently lost. This cannot be undone.", comment: "")
+        }
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Close", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
@@ -4662,6 +5167,10 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
 
     func windowWillClose(_ notification: Notification) {
         guard let session, !session.closing else { return }
+        if let owner = session.sharedOwner {
+            MainActor.assumeIsolated { owner.close(session) }
+            return
+        }
         session.closing = true
         // Hide immediately so the user doesn't see a blank window during cleanup.
         session.window.orderOut(nil)
@@ -5844,6 +6353,10 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
     weak var scrollBridge: PrecisionScrollBridge?
     weak var pointerBridge: GuestPointerBridge?
     weak var gpuFrameView: HostGPUFrameView?
+    /// A shared VM maps output-local coordinates into its full X root.
+    var pointerCoordinateTransform: ((Double, Double) -> (x: Double, y: Double))?
+    /// The owner serializes focus acknowledgment before forwarding input.
+    var inputForwarder: ((Bool, @escaping () -> Void) -> Void)?
     private var pointerButtons = 0
     private var pointerTracking: NSTrackingArea?
 
@@ -5874,9 +6387,37 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
         if down != nil, UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
             print("[GPU pointer] window=\(window?.windowNumber ?? -1) bridge=\(ObjectIdentifier(bridge)) buttons=\(pointerButtons) t=\(ProcessInfo.processInfo.systemUptime) point=\(p) bounds=\(bounds) normalized=\(normalized) active=\(String(describing: gpuFrameView?.activeScanoutSize)) retained=\(gpuFrameView?.isHoldingResizeFrame ?? false) crop=\(gpuFrameView?.hiddenTopRows ?? 0)")
         }
-        bridge.send(x: normalized.x, y: normalized.y, buttons: pointerButtons, immediately: down != nil)
+        let buttons = pointerButtons
+        let send = { [weak self] in
+            guard let self else { return }
+            let rootPoint = self.pointerCoordinateTransform?(normalized.x, normalized.y) ?? normalized
+            bridge.send(x: rootPoint.x, y: rootPoint.y, buttons: buttons, immediately: down != nil)
+        }
+        if let inputForwarder { inputForwarder(down != nil || buttons != 0, send) } else { send() }
         return true
     }
+
+    override func keyDown(with event: NSEvent) {
+        guard inputReady else { return }
+        if let inputForwarder { inputForwarder(true) { [weak self] in self?.forwardKeyDown(event) } }
+        else { super.keyDown(with: event) }
+    }
+
+    override func keyUp(with event: NSEvent) {
+        guard inputReady else { return }
+        if let inputForwarder { inputForwarder(true) { [weak self] in self?.forwardKeyUp(event) } }
+        else { super.keyUp(with: event) }
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        guard inputReady else { return }
+        if let inputForwarder { inputForwarder(true) { [weak self] in self?.forwardFlagsChanged(event) } }
+        else { super.flagsChanged(with: event) }
+    }
+
+    private func forwardFlagsChanged(_ event: NSEvent) { super.flagsChanged(with: event) }
+    private func forwardKeyDown(_ event: NSEvent) { super.keyDown(with: event) }
+    private func forwardKeyUp(_ event: NSEvent) { super.keyUp(with: event) }
 
     override func mouseMoved(with event: NSEvent) { if !sendPointer(event) { super.mouseMoved(with: event) } }
     override func mouseDragged(with event: NSEvent) { if !sendPointer(event) { super.mouseDragged(with: event) } }

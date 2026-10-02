@@ -37,6 +37,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     private var connection: VZVirtioSocketConnection?
     private var readSource: DispatchSourceRead?
     private weak var window: NSWindow?
+    public var windowProvider: (() -> NSWindow?)?
 
     /// Whether passkey (WebAuthn) requests are enabled.
     public var enablePasskeys: Bool = true
@@ -233,7 +234,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     }
 
     private func offerKillSession() {
-        guard let window else { return }
+        guard let window = windowProvider?() ?? window else { return }
         let alert = NSAlert()
         alert.messageText = "Suspicious credential requests"
         alert.informativeText = "The VM has made repeated credential requests that you declined. This may indicate the VM is compromised.\n\nWould you like to close this browser session?"
@@ -250,7 +251,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     // MARK: - Passkey Create
 
     private func handlePasskeyCreate(_ json: [String: Any], requestId: String) {
-        guard let window else {
+        guard let window = windowProvider?() ?? window else {
             sendError(requestId: requestId, type: "passkey_create_response", error: "no_window")
             return
         }
@@ -309,7 +310,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     // MARK: - Passkey Get
 
     private func handlePasskeyGet(_ json: [String: Any], requestId: String) {
-        guard let window else {
+        guard let window = windowProvider?() ?? window else {
             sendError(requestId: requestId, type: "passkey_get_response", error: "no_window")
             return
         }
@@ -535,7 +536,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
     // MARK: - Password Save (user approval required)
 
     private func handlePasswordSave(_ json: [String: Any], requestId: String) {
-        guard let window else {
+        guard let window = windowProvider?() ?? window else {
             sendError(requestId: requestId, type: "password_save_response", error: "no_window")
             return
         }

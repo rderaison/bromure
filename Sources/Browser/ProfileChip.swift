@@ -114,6 +114,7 @@ struct ProfileChip: View {
                 Divider()
             }
 
+            Button(NSLocalizedString("Manage Profiles…", comment: "")) { model.onManageProfiles?() }
             Button(NSLocalizedString("New Profile\u{2026}", comment: "")) {
                 model.onNewProfile?()
             }

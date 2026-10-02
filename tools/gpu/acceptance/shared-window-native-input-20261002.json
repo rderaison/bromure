@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-02",
+  "guestSource": "dda356c4",
+  "hostBuildLog": "/private/tmp/bromure-shared-native-build-9.log",
+  "runLog": "/private/tmp/bromure-shared-native-input.log",
+  "runLogSHA256": "96c503fea5e5fbecb2eb66dbe28bdedbec138b83a50b7f753c7dbc073199d979",
+  "image": "private v8, derived from image500 plus candidate Mesa fixes and shared-window guest scripts",
+  "browserPID": 797,
+  "browserStartTicks": 268,
+  "nativeWindows": 2,
+  "acceptance": {
+    "sharedCookieAndLocalStorage": true,
+    "oneBrowserProcess": true,
+    "hostPointerDownUpClick": true,
+    "hostTypingIsolated": [
+      "a",
+      "b"
+    ],
+    "pageScopedWheelScrollPixels": [
+      240,
+      240
+    ],
+    "sharedWindowErrors": 0
+  },
+  "limitations": [
+    "Scripted native NSEvents, not physical input",
+    "Ephemeral browser user-data-dir; restart persistence untested",
+    "IME, pinch, drag, profile isolation and lifecycle remain separate acceptance",
+    "Later lifecycle trial failed during first Page.navigate; does not invalidate this run or establish overall readiness"
+  ]
+}

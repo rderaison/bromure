@@ -157,6 +157,31 @@ class WorkerTests(unittest.TestCase):
                 self.assertTrue(1073741824 <= staging <= 2147483648)
                 self.assertEqual(resource, 536870912)
 
+    def test_composite_root_requires_trusted_gate_and_preserves_ceilings(self):
+        replies = self.exchange([
+            command(0xffff0021, struct.pack("<I", 2)),
+            command(0xffff0020, struct.pack("<II", 8192, 8192)),
+            command(0xffff0024, struct.pack("<6I", 0, 4096, 8192, 1, 0, 0)),
+            command(0xffff0024, struct.pack("<6I", 1, 4096, 8192, 1, 4096, 0)),
+            command(0xffff0022, struct.pack("<II", 8192, 8192)),
+            command(0xffff0024, struct.pack("<6I", 1, 4096, 8192, 1, 4096, 0)),
+            command(0x204, struct.pack("<12I", 31, 2, 1, 1, 8192, 8192, 1, 1, 0, 0, 0, 0)),
+            command(0xffff0030),
+            command(0xffff0020, struct.pack("<II", 6016, 3384)),
+            command(0xffff0030),
+            command(0x102, struct.pack("<II", 31, 0)),
+            command(0xffff0030),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies],
+                         [0x1100, 0x1205, 0x1100, 0x1205] + [0x1100] * 8)
+        self.assertEqual(struct.unpack_from("<Q", replies[7], 32)[0], 268435456)
+        for index in (7, 9):
+            gpu, staging, resource = struct.unpack_from("<QQQ", replies[index], 64)
+            self.assertLessEqual(gpu, 4294967296)
+            self.assertLessEqual(staging, 2147483648)
+            self.assertEqual(resource, 1073741824)
+        self.assertEqual(struct.unpack_from("<Q", replies[-1], 32)[0], 0)
+
     def test_browser_resource_count(self):
         # Real page browsing needs >256 small live resources, well below 1 GiB.
         commands = [command(0x204, struct.pack("<12I", i, 0, 64, 16,

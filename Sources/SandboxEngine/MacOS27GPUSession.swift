@@ -163,6 +163,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         for output in outputs {
             guard output.x >= 0, output.y >= 0, output.width >= 64, output.height >= 64,
                   output.width <= 8192, output.height <= 8192, output.width % 8 == 0,
+                  output.width * output.height <= 33554432,
                   output.x <= 8192 - output.width, output.y <= 8192 - output.height else {
                 throw Self.failure("Invalid output geometry")
             }
@@ -177,7 +178,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
                 }
             }
         }
-        guard rootWidth > 0, rootHeight > 0, rootWidth * rootHeight <= 33554432 else {
+        guard rootWidth > 0, rootHeight > 0, rootWidth * rootHeight <= 67108864 else {
             throw Self.failure("Output topology exceeds root budget")
         }
         let root = (rootWidth, rootHeight)

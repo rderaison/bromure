@@ -23,6 +23,7 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private var importedFrameGeneration: UInt64 = 0
     private var diagnosticSnapshotCount = 0
     public var guestDisplayScale: Double = 1
+    public var displayHeightAlignment: Int = 1
     public var hiddenTopRows = 0
     public var displaySizeChanged: ((Int, Int) -> Void)? {
         didSet { schedulePendingDisplayResize() }
@@ -358,7 +359,8 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         // GTF high-refresh modes use 8-pixel horizontal character cells. Request
         // that effective width explicitly, so paint acknowledgments are exact.
         let width = Int(min(max(bounds.width * guestDisplayScale, 64), 8192)) / 8 * 8
-        let height = Int(min(max(bounds.height * guestDisplayScale, 64), 8192))
+        let alignment = max(1, min(displayHeightAlignment, 8))
+        let height = Int(min(max(bounds.height * guestDisplayScale, 64), 8192)) / alignment * alignment
         if let last = lastDisplaySize, last.0 == width, last.1 == height { return }
         lastDisplaySize = (width, height)
         // Xorg can clear the old framebuffer before binding the new dimensions.
