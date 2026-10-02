@@ -206,7 +206,7 @@ def collect_report(browser):
     # Additive marker: older/software images without this protocol stay valid.
     if isinstance(capabilities, dict) and "sharedWindowProtocolVersion" in capabilities:
         for path in ("/usr/local/bin/shared_windows.py", "/usr/local/bin/tab-agent.py",
-                     "/usr/local/bin/cdp-agent.py"):
+                     "/usr/local/bin/cdp-agent.py", "/usr/local/bin/cjk-input-agent.py"):
             report["guestFiles"][path] = os.access(path, os.X_OK)
     if isinstance(capabilities, dict) and "pointerProtocolVersion" in capabilities:
         report["guestFiles"]["/usr/local/bin/pointer-agent.py"] = os.access(
