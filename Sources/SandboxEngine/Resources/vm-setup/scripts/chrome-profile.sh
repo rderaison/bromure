@@ -7,6 +7,10 @@ if [ -z "$DISPLAY" ]; then
     else
       echo 'Experimental multi-GPU preparation failed; see /tmp/bromure/multigpu-prepare.log' > /tmp/startx.log
     fi
+    # The experimental host owns VM lifetime. Keep the failed session's logs
+    # and root diagnostic channel available until its final window closes.
+    echo 'BROMURE_MULTIGPU_XORG_STOPPED: logs retained in /tmp/startx.log' > /dev/hvc0
+    sleep infinity
   else
     startx > /tmp/startx.log 2>&1
   fi
