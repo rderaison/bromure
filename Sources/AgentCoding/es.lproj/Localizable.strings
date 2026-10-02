@@ -3611,3 +3611,6 @@
 "Your customize script failed — the current image is kept. See %@" = "Tu script de personalización falló: se conserva la imagen actual. Consulta %@";
 "%@ says" = "%@ dice";
 "The agent" = "El agente";
+"Ask %@ to Merge into %@" = "Pedir a %@ que fusione en %@";
+"Ask %@ to Merge" = "Pedir a %@ que fusione";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "Pide al agente que la hizo que fusione su rama donde trabajó; la tarjeta pasa a Hecho cuando informe. Mantén pulsado para fusionar con squash, abrir una pull request u otra rama.";

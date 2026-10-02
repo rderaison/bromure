@@ -539,12 +539,19 @@ struct ReviewView: View {
             }
             .buttonStyle(.plain)
             if noteOpen {
-                ScrollView {
+                // As tall as its text, scrolling only past the cap.
+                ViewThatFits(in: .vertical) {
                     MarkdownBlocks(text: note.text, compact: true)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    ScrollView {
+                        MarkdownBlocks(text: note.text, compact: true)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 .frame(maxHeight: 220)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.indigo.opacity(0.06)))
             }

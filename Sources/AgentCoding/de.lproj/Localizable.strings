@@ -3609,3 +3609,6 @@
 "Your customize script failed — the current image is kept. See %@" = "Ihr Anpassungsskript ist fehlgeschlagen – das aktuelle Image bleibt erhalten. Siehe %@";
 "%@ says" = "%@ sagt";
 "The agent" = "Der Agent";
+"Ask %@ to Merge into %@" = "%@ bitten, in %@ zu mergen";
+"Ask %@ to Merge" = "%@ bitten zu mergen";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "Bittet den Agenten, der die Aufgabe erledigt hat, seinen Branch dort zu mergen, wo er gearbeitet hat; die Karte wird erledigt, sobald er Bescheid gibt. Gedrückt halten für Squash, Pull-Request und andere Branches.";

@@ -1824,12 +1824,18 @@ struct TaskEditorSheet: View {
                   systemImage: "text.bubble")
                 .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(.indigo)
-            ScrollView {
+            ViewThatFits(in: .vertical) {
                 MarkdownBlocks(text: text, compact: true)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollView {
+                    MarkdownBlocks(text: text, compact: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .frame(maxHeight: 180)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.indigo.opacity(0.06)))

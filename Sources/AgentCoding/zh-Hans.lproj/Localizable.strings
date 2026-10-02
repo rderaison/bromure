@@ -3609,3 +3609,6 @@
 "Your customize script failed — the current image is kept. See %@" = "你的自定义脚本运行失败——已保留当前镜像。请查看 %@";
 "%@ says" = "%@ 说";
 "The agent" = "代理";
+"Ask %@ to Merge into %@" = "请 %@ 合并到 %@";
+"Ask %@ to Merge" = "请 %@ 合并";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "请完成任务的代理在其工作的地方合并它的分支；它回报后卡片即标记为完成。按住可选择压缩合并、拉取请求或其他分支。";
