@@ -16,6 +16,7 @@ final class RendererCommandProcessor {
     private var cursorResources: [UInt32: (width: Int, height: Int, format: UInt32)] = [:]
     private var rejectedCommandCount = 0
     private var bufferSizes: [UInt32: Int] = [:]
+    private var scanoutResources: [UInt32: UInt32] = [:]
     private var uploadedBytes: UInt64 = 0
     private var uploadRequests: UInt64 = 0
     var backingUploadStatistics: (bytes: UInt64, requests: UInt64) { (uploadedBytes, uploadRequests) }
@@ -60,7 +61,14 @@ final class RendererCommandProcessor {
     }
 
     @available(macOS 27.0, *)
-    init(client: MacOS27RendererClient, onFrame: @escaping (IOSurface) -> Void) throws {
+    convenience init(client: MacOS27RendererClient, onFrame: @escaping (IOSurface) -> Void) throws {
+        try self.init(client: client, onDisplayFrame: { index, surface in
+            if index == 0 { onFrame(surface) }
+        })
+    }
+
+    @available(macOS 27.0, *)
+    init(client: MacOS27RendererClient, onDisplayFrame: @escaping (UInt32, IOSurface) -> Void) throws {
         stopTransport = { client.stop() }
         transport = { [weak self] command in
             dispatchPrecondition(condition: .notOnQueue(.main))
@@ -100,7 +108,10 @@ final class RendererCommandProcessor {
                     }
                 }
             }
-            if let surface { onFrame(surface) }
+            if let surface {
+                let output: UInt32 = get32(command, at: 0) == 0xffff0023 ? get32(command, at: 24) : 0
+                onDisplayFrame(output, surface)
+            }
             return response
         }
         do {
@@ -116,12 +127,28 @@ final class RendererCommandProcessor {
         } catch { stop(); throw error }
     }
 
-    func setDisplay(width: UInt32, height: UInt32) throws {
+    func setDisplay(width: UInt32, height: UInt32, rootOnly: Bool = false) throws {
         var command = Data(repeating: 0, count: 32)
-        put32(0xffff0020, at: 0, into: &command)
+        put32(rootOnly ? 0xffff0022 : 0xffff0020, at: 0, into: &command)
         put32(width, at: 24, into: &command); put32(height, at: 28, into: &command)
         let response = try request(command)
         guard get32(response, at: 0) == 0x1100 else { throw failure("Display initialization failed") }
+    }
+
+    func setScanoutCount(_ count: UInt32) throws {
+        guard count >= 1, count <= 16 else { throw failure("Invalid scanout count") }
+        var command = Data(repeating: 0, count: 28)
+        put32(0xffff0021, at: 0, into: &command); put32(count, at: 24, into: &command)
+        guard get32(try request(command), at: 0) == 0x1100 else { throw failure("Scanout initialization failed") }
+    }
+
+    func setOutput(index: UInt32, width: UInt32, height: UInt32, x: UInt32, y: UInt32, enabled: Bool) throws {
+        var command = Data(repeating: 0, count: 48)
+        put32(0xffff0024, at: 0, into: &command); put32(index, at: 24, into: &command)
+        put32(width, at: 28, into: &command); put32(height, at: 32, into: &command)
+        put32(enabled ? 1 : 0, at: 36, into: &command)
+        put32(x, at: 40, into: &command); put32(y, at: 44, into: &command)
+        guard get32(try request(command), at: 0) == 0x1100 else { throw failure("Output geometry rejected") }
     }
 
     deinit { stop() }
@@ -151,7 +178,7 @@ final class RendererCommandProcessor {
         guard response.count == 24, get32(response, at: 0) == 0x1100 else {
             throw failure("Renderer reset failed")
         }
-        backing.removeAll(); cursorResources.removeAll(); bufferSizes.removeAll()
+        backing.removeAll(); cursorResources.removeAll(); bufferSizes.removeAll(); scanoutResources.removeAll()
     }
 
     func forward(_ snapshot: Data,
@@ -259,6 +286,27 @@ final class RendererCommandProcessor {
             }
         }
         if type == 0x102, get32(response, at: 0) == 0x1100 { cursorResources.removeValue(forKey: get32(snapshot, at: 24)) }
+        if get32(response, at: 0) == 0x1100 {
+            if type == 0x103, snapshot.count == 48 {
+                let index = get32(snapshot, at: 40), resource = get32(snapshot, at: 44)
+                if resource == 0 { scanoutResources.removeValue(forKey: index) }
+                else { scanoutResources[index] = resource }
+            } else if type == 0x102, snapshot.count == 32 {
+                let resource = get32(snapshot, at: 24)
+                scanoutResources = scanoutResources.filter { $0.value != resource }
+            } else if type == 0x104, snapshot.count == 48 {
+                let resource = get32(snapshot, at: 40)
+                // Each output is a crop of the same root framebuffer. The XPC
+                // protocol carries one surface per reply, so snapshot other outputs
+                // serially after the successful flush; output zero is in that reply.
+                for index in scanoutResources.keys.sorted() where index != 0 && scanoutResources[index] == resource {
+                    var capture = Data(repeating: 0, count: 28)
+                    put32(0xffff0023, at: 0, into: &capture); put32(index, at: 24, into: &capture)
+                    guard get32(try request(capture), at: 0) == 0x1100 else { throw failure("Output capture failed") }
+                }
+            }
+        }
+
         return response
     }
 

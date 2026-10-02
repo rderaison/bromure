@@ -35,6 +35,50 @@ class WorkerTests(unittest.TestCase):
             output = output[4 + length:]
         return replies
 
+    def test_shared_scanout_metadata_and_binding_lifetime(self):
+        # Two crops of ONE texture, not two GPUs or Chrome profiles.
+        replies = self.exchange([
+            command(0xffff0021, struct.pack("<I", 2)),
+            command(0xffff0024, struct.pack("<6I", 0, 64, 64, 1, 0, 0)),
+            command(0xffff0024, struct.pack("<6I", 1, 64, 64, 1, 64, 0)),
+            command(0x100),
+            command(0x101, struct.pack("<4I", 9, 1, 128, 64)),
+            command(0x103, struct.pack("<6I", 0, 0, 64, 64, 0, 9)),
+            command(0x103, struct.pack("<6I", 64, 0, 64, 64, 1, 9)),
+            command(0xffff0023, struct.pack("<I", 1)),
+            command(0xffff0021, struct.pack("<I", 1)),  # count fixed while live
+            command(0x102, struct.pack("<II", 9, 0)),
+            command(0xffff0023, struct.pack("<I", 1)), # unref clears binding
+            command(0xffff0001),
+            command(0x100), # reset preserves connector metadata
+            command(0xffff0024, struct.pack("<6I", 1, 64, 64, 0, 64, 0)),
+            command(0x100),
+            command(0x103, struct.pack("<6I", 0, 0, 64, 64, 2, 9)),
+        ])
+        kinds = [struct.unpack_from("<I", r)[0] for r in replies]
+        self.assertEqual(kinds, [0x1100, 0x1100, 0x1100, 0x1101, 0x1100,
+                                0x1100, 0x1100, 0x1100, 0x1205, 0x1100,
+                                0x1100, 0x1100, 0x1101, 0x1100, 0x1101, 0x1202])
+        for reply in (replies[3], replies[12]):
+            self.assertEqual(struct.unpack_from("<5I", reply, 24), (0, 0, 64, 64, 1))
+            self.assertEqual(struct.unpack_from("<5I", reply, 48), (64, 0, 64, 64, 1))
+        self.assertEqual(struct.unpack_from("<I", replies[14], 64)[0], 0)
+
+    def test_shared_scanout_invalid_geometry_preserves_previous_state(self):
+        replies = self.exchange([
+            command(0xffff0021, struct.pack("<I", 16)),
+            command(0xffff0024, struct.pack("<6I", 15, 64, 64, 1, 64, 0)),
+            command(0xffff0024, struct.pack("<6I", 15, 64, 64, 1, 8192, 0)),
+            command(0xffff0024, struct.pack("<6I", 0, 8192, 8192, 1, 0, 0)),
+            command(0xffff0021, struct.pack("<I", 17)),
+            command(0xffff0023, struct.pack("<I", 16)),
+            command(0x100),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies],
+                         [0x1100, 0x1100, 0x1205, 0x1205, 0x1205, 0x1202, 0x1101])
+        self.assertEqual(struct.unpack_from("<5I", replies[-1], 24 + 15 * 24), (64, 0, 64, 64, 1))
+        self.assertEqual(struct.unpack_from("<I", replies[-1], 40)[0], 0)
+
     def test_capsets_and_partial_reads(self):
         replies = self.exchange([command(0x108, struct.pack("<II", index, 0))
                                  for index in (0, 1)], split=True)

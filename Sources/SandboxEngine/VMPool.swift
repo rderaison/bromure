@@ -269,14 +269,16 @@ public final class VMPool {
             imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
         if requestedMetal, #available(macOS 27.0, *) {
             do {
-                guard (1...16).contains(config.experimentalGPUCount) else {
+                guard (1...16).contains(config.experimentalGPUCount), (1...16).contains(config.sharedWindowScanoutCount),
+                      config.sharedWindowScanoutCount == 1 || config.experimentalGPUCount == 1 else {
                     throw SandboxError.vmStartFailed("Experimental GPU count must be 1 through 16")
                 }
                 var sessions: [MacOS27GPUSession] = []
                 do {
                     for _ in 0..<config.experimentalGPUCount {
                         sessions.append(try await MacOS27GPUSession.create(
-                            width: config.displayWidth, height: config.displayHeight + config.nativeChromeInset))
+                            width: config.displayWidth, height: config.displayHeight + config.nativeChromeInset,
+                            scanoutCount: config.sharedWindowScanoutCount))
                     }
                     vzConfig.customVirtioDevices = sessions.map { $0.configuration }
                     try vzConfig.validate()
@@ -412,7 +414,8 @@ public final class VMPool {
         if let warm = warmVM,
            profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer ||
             (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
-             config.experimentalGPUCount != warm.graphicsSessions.count) {
+             config.experimentalGPUCount != warm.graphicsSessions.count) ||
+            (profileWantsMetal && config.sharedWindowScanoutCount != (warm.graphicsSession?.outputCapacity ?? 1)) {
             print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
             do {
                 let dedicated = try await bootVM(bridgedInterface: profileBridgedIface,

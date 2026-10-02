@@ -68,7 +68,7 @@ public final class MacOS27RendererClient {
                 if let error { finish(.failure(error)); return }
                 guard let response, response.count >= 24, response.count <= 65536,
                       Self.validReply(response, request: snapshot), Self.validSurface(surface),
-                      surface == nil || [UInt32(0x103), 0x104, 0xffff0003].contains(Self.word(snapshot, 0)) else {
+                      surface == nil || [UInt32(0x103), 0x104, 0xffff0003, 0xffff0023].contains(Self.word(snapshot, 0)) else {
                     finish(.failure(Self.failure("Malformed renderer reply"))); return
                 }
                 finish(.success(Reply(command: response, surface: surface)))

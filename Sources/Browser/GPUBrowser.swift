@@ -13,6 +13,7 @@ struct GPUBrowser: ParsableCommand {
     @Option(name: .long) var displayScale: Int = 2
     @Option(name: .customLong("simultaneous-vms")) var simultaneousVMs: Int = 1
     @Option(name: .long) var guestProbe: String?
+    @Option(name: .long) var sharedScanouts: Int = 1
     @Option(name: .long) var chromeFlags: String?
     @Option(name: .long) var saveUpdatedImage: String?
     @Flag(name: .long) var requireGPUCheck = false
@@ -39,6 +40,7 @@ struct GPUBrowser: ParsableCommand {
     @Option(name: .long) var url: String = "chrome://gpu"
 
     func validate() throws {
+        guard (1...16).contains(sharedScanouts) else { throw ValidationError("Scanouts must be 1 through 16") }
         guard (1...2).contains(displayScale) else { throw ValidationError("Invalid display scale") }
         guard (64...4096).contains(resizeWidth), (64...4096).contains(resizeHeight) else { throw ValidationError("Invalid resize dimensions") }
         guard (1...4).contains(simultaneousVMs) else { throw ValidationError("Simultaneous VMs must be between 1 and 4") }
@@ -87,6 +89,8 @@ struct GPUBrowser: ParsableCommand {
         var config = VMConfig()
         if let stressVcpus { config.cpuCount = max(1, min(stressVcpus, 12)) }
         if withoutAudio { config.enableAudio = false }
+        config.sharedWindowScanoutCount = sharedScanouts
+        if sharedScanouts > 1 { config.extraKernelOptions += " bromure.shared_windows=16" }
         config.homePage = url
         config.enableGPU = true
         config.enableWebGL = true
@@ -127,6 +131,12 @@ struct GPUBrowser: ParsableCommand {
         let session = BrowserSession(warmVM: warm, config: config)
         if saveUpdatedImage != nil { warm.vm.delegate = nil }
         session.show()
+        let sharedTask: Task<SharedWindowProof?, Error>? = sharedScanouts > 1 ? Task { @MainActor in
+            try await Task.sleep(for: .seconds(14))
+            guard #available(macOS 27.0, *) else { throw ValidationError("Shared windows require macOS 27") }
+            return try await SharedWindowProof.run(warm: warm)
+        } : nil
+
         if frameTrace || stressCheck { print("[GPU browser] Test window id: \(session.window.windowNumber)") }
         var additional: [(VMPool, VMPool.WarmVM, BrowserSession)] = []
         for vmIndex in 1..<simultaneousVMs {
@@ -231,6 +241,8 @@ struct GPUBrowser: ParsableCommand {
             NSApplication.shared.updateWindows()
             try await Task.sleep(for: .milliseconds(2))
         }
+        let sharedProof = try await sharedTask?.value
+        defer { sharedProof?.close() }
         let menuOK: Bool
         if menuCheck {
             let delegate = GUIAppDelegate(state: AppState(previewStorage: FileManager.default.temporaryDirectory.appendingPathComponent("bromure-menu-check-" + UUID().uuidString)))
@@ -244,6 +256,7 @@ struct GPUBrowser: ParsableCommand {
         let frames = warm.graphicsSession?.deliveredFrameCount ?? 0
         var accepted = true
         for task in acceptanceTasks { let passed = await task.value; accepted = accepted && passed }
+        try sharedProof?.verifySecondOutputColor()
         print("[GPU browser] Frames delivered: \(frames)")
         print("[GPU browser] Cursor images: \(warm.graphicsSession?.deliveredCursorCount ?? 0), cursor moves: \(warm.graphicsSession?.cursorMoveCount ?? 0)")
         func cursorImages(in view: NSView) -> Int {
