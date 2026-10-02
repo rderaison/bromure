@@ -1381,6 +1381,54 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var localEngineURL: String?
     /// Optional bearer token `localEngineURL` requires (vLLM `--api-key`).
     public var localEngineAPIKey: String?
+    /// The local model's context window from the Models settings (entered or
+    /// probed) — set on the launch copy by the models overlay, never saved.
+    /// Wins over the server's advertised value and the 128K fallback.
+    public var localModelContextWindow: Int? = nil
+    /// The same for omp switched natively to a custom OpenAI-compatible
+    /// server (its own provider, not the local route). Launch copy only.
+    public var ompContextWindow: Int? = nil
+    /// The providers configured in Settings → Models that omp isn't on, so
+    /// its model picker still offers them (the assigned one stays the
+    /// default). Launch copy only.
+    public var ompExtraProviders: [OmpExtraProvider] = []
+
+    /// One provider omp can switch to besides its own.
+    public struct OmpExtraProvider: Equatable, Sendable {
+        public var provider: ModelProvider
+        /// The real key (swapped in on `host` only); empty for a keyless server.
+        public var apiKey: String
+        /// OpenAI-compatible base URL (an entry in omp's models.yml); nil for
+        /// a provider omp reaches natively from its key's env var.
+        public var baseURL: String?
+        /// The model ids offered for an OpenAI-compatible one.
+        public var models: [String]
+
+        public init(provider: ModelProvider, apiKey: String, baseURL: String?, models: [String]) {
+            self.provider = provider
+            self.apiKey = apiKey
+            self.baseURL = baseURL
+            self.models = models
+        }
+
+        /// The env var omp reads its key from.
+        public var envVar: String {
+            if baseURL == nil, let op = provider.ompProvider { return op.apiKeyEnvVar }
+            return "BROMURE_OMP_\(provider.rawValue.uppercased())_API_KEY"
+        }
+        /// Where its key is swapped in.
+        public var host: String? {
+            if let baseURL { return URL(string: baseURL)?.host?.lowercased() }
+            return provider.ompProvider?.apiHost
+        }
+        /// Its provider name in omp's models.yml.
+        public var yamlName: String { "bromure-\(provider.rawValue)" }
+        /// The provider as omp names it (its own slug for a native one).
+        public var ompSlug: String {
+            if baseURL == nil, let op = provider.ompProvider { return op.rawValue }
+            return yamlName
+        }
+    }
 
     /// Per-workspace override of the global model settings. nil ⇒ this workspace
     /// inherits `ModelSettingsStore.shared` (the Preferences → Models config).
@@ -4240,6 +4288,11 @@ public final class ProfileStore {
             hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
             hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
+            // A turn the API refused (auth, quota, overload) fires StopFailure,
+            // not Stop: without it the tab sat "working" forever. A refused
+            // turn is the user's to fix — needs you. (Grok runs these hooks
+            // too and has the same event.)
+            hooks["StopFailure"] = hookCmd("needsInput") + othersUnder("StopFailure")
             settings["hooks"] = hooks
 
             let data = try JSONSerialization.data(withJSONObject: settings,
@@ -4337,14 +4390,67 @@ public final class ProfileStore {
             # types over). Only a real prompt is needsInput; idle is done;
             # anything else (auth_success, elicitation bookkeeping, quota
             # notices) says nothing about the turn.
+            # Grok runs these same hooks (it loads ~/.claude/settings.json)
+            # but spells the field notificationType; without it every grok
+            # notification, idle included, read as a dialog.
             if [ "$signal" = "needsInput" ] && [ -n "$hook_json" ]; then
-              ntype=$(printf '%s' "$hook_json" | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+              ntype=$(printf '%s' "$hook_json" | sed -n 's/.*"notification_\{0,1\}[tT]ype"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
               case "$ntype" in
                 "") ;;
                 permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) ;;
                 idle_prompt) signal="done" ;;
                 *) exit 0 ;;
               esac
+            fi
+            # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
+            # agent-tool-<idx>.jsonl — the call's id, tool, command and the
+            # agent's pid, written BEFORE the tool runs. The host ties the
+            # processes and network flows that follow to the call
+            # (NetworkLineage). Every agent spells it its own way (Grok's
+            # camelCase + a snake alias, Kimi's tool_call_id); python3
+            # normalizes. Only on a PreToolUse — other events skip it cheaply.
+            if [ -n "$hook_json" ] && printf '%s' "$hook_json" | grep -q '"hook_event_name"[[:space:]]*:[[:space:]]*"PreToolUse"'; then
+              printf '%s' "$hook_json" | BROMURE_TOOL_OUT="$d/agent-tool-$idx.jsonl" BROMURE_HOOK_PPID="$PPID" \
+                python3 -c '
+            import json, os, sys, time
+            try:
+                e = json.load(sys.stdin)
+            except Exception:
+                sys.exit(0)
+            def proc(pid, f):
+                try:
+                    return open("/proc/%d/%s" % (pid, f), "rb").read()
+                except Exception:
+                    return b""
+            # The agent: the first ancestor that is not the shell running the hook.
+            pid = int(os.environ.get("BROMURE_HOOK_PPID") or 0)
+            for _ in range(6):
+                comm = proc(pid, "comm").decode(errors="replace").strip()
+                if pid <= 1 or comm not in ("sh", "bash", "dash", "zsh"):
+                    break
+                stat = proc(pid, "stat").decode(errors="replace")
+                pid = int(stat.rsplit(")", 1)[-1].split()[1]) if ")" in stat else 0
+            argv = proc(pid, "cmdline").replace(b"\0", b" ").decode(errors="replace").lower()
+            agent = next((a for a in ("claude", "codex", "kimi", "grok", "omp") if a in argv), "")
+            if not agent:
+                agent = "grok" if os.environ.get("GROK_HOOK_EVENT") else \
+                    ("kimi" if str(e.get("client_type", "")).startswith("kimi") else "")
+            inp = e.get("tool_input") or e.get("toolInput") or {}
+            cmd = inp.get("command") if isinstance(inp, dict) else None
+            if isinstance(cmd, list):
+                cmd = " ".join(str(c) for c in cmd)
+            line = {
+                "agent": agent,
+                "tool_use_id": e.get("tool_use_id") or e.get("toolUseId") or e.get("tool_call_id") or "",
+                "tool": e.get("tool_name") or e.get("toolName") or "",
+                "command": (cmd if isinstance(cmd, str) else json.dumps(inp, sort_keys=True))[:4000],
+                "session_id": e.get("session_id") or e.get("sessionId") or "",
+                "pid": pid,
+                "ts": time.time(),
+            }
+            with open(os.environ["BROMURE_TOOL_OUT"], "a") as f:
+                f.write(json.dumps(line, separators=(",", ":")) + "\n")
+            ' 2>/dev/null || true
             fi
             # "start" (SessionStart) says nothing about the turn — it's only
             # here to record the transcript below before the first prompt.
@@ -4418,9 +4524,32 @@ public final class ProfileStore {
                   /* status reporting must never break a turn */
                 }
               };
-              pi.on("turn_start", () => { report("working"); });
-              pi.on("tool_call", () => { report("working"); });
-              pi.on("turn_end", () => { report("done"); });
+              // agent_start / agent_end bracket the whole run of one prompt.
+              // turn_end fires after EVERY model step — including the one
+              // that only asks for a tool — so it read "done" while the tool
+              // ran (verified on omp 18.2.8).
+              pi.on("agent_start", () => { report("working"); });
+              // The call itself, Claude-hook shaped, for the tool-call lineage
+              // line agent-status.sh writes (agent-tool-<win>.jsonl).
+              pi.on("tool_call", (event: any) => {
+                if (!pane) return;
+                const payload = JSON.stringify({
+                  hook_event_name: "PreToolUse",
+                  tool_name: event?.toolName ?? event?.name ?? "",
+                  tool_use_id: event?.toolCallId ?? event?.id ?? "",
+                  tool_input: event?.input ?? event?.args ?? event?.arguments ?? {},
+                  session_id: event?.sessionId ?? "",
+                });
+                const b64 = Buffer.from(payload).toString("base64");
+                const cmd = "echo " + b64 + " | base64 -d | TMUX='" + tmux + "' TMUX_PANE='" + pane +
+                  "' /home/ubuntu/.bromure/agent-status.sh working";
+                try {
+                  Promise.resolve(pi.exec("sh", ["-c", cmd])).catch(() => {});
+                } catch {
+                  /* status reporting must never break a turn */
+                }
+              });
+              pi.on("agent_end", () => { report("done"); });
               pi.on("session_shutdown", () => { report("done"); });
             }
             """#
@@ -5042,21 +5171,110 @@ public final class ProfileStore {
         # --hook or the sidebar dot never updates for MITM-blind providers
         # (z.ai/Ollama/custom). The hook reports working/done per tab via
         # agent-status.sh.
+        # The overlay the models.yml merge below composed (the staged one +
+        # the providers the user added in omp), else the staged one.
         if [ -r /mnt/bromure-meta/omp-config.yml ]; then
+            _bromure_omp_config() {
+                if [ -r "$HOME/.omp/agent/bromure-overlay.yml" ]; then
+                    printf '%s' "$HOME/.omp/agent/bromure-overlay.yml"
+                else
+                    printf '%s' /mnt/bromure-meta/omp-config.yml
+                fi
+            }
             if [ -r "$HOME/.omp/agent/hooks/agent-status.ts" ]; then
-                omp() { command omp --config /mnt/bromure-meta/omp-config.yml --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
+                omp() { command omp --config "$(_bromure_omp_config)" --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
             else
-                omp() { command omp --config /mnt/bromure-meta/omp-config.yml "$@"; }
+                omp() { command omp --config "$(_bromure_omp_config)" "$@"; }
             fi
         fi
     fi
 
-    # omp custom / local provider: install the staged models.yml so omp knows
-    # the OpenAI-compatible endpoint + model. (The default Anthropic provider
-    # needs none — it uses ANTHROPIC_API_KEY directly.)
-    if [ -r /mnt/bromure-meta/omp-models.yml ]; then
+    # omp's models.yml: swap in Bromure's providers (the block between the
+    # bromure-managed markers in the staged file) and keep every provider
+    # the user added in omp itself. Nothing staged: Bromure's block goes, so
+    # a provider removed from Settings → Models doesn't linger. A file an
+    # older Bromure wrote whole holds nothing of the user's.
+    if [ -r /mnt/bromure-meta/omp-models.yml ] || [ -f "$HOME/.omp/agent/models.yml" ] \\
+       || [ -r /mnt/bromure-meta/omp-config.yml ]; then
         mkdir -p "$HOME/.omp/agent"
-        cp /mnt/bromure-meta/omp-models.yml "$HOME/.omp/agent/models.yml"
+        python3 - "$HOME/.omp/agent/models.yml" /mnt/bromure-meta/omp-models.yml \\
+            /mnt/bromure-meta/omp-config.yml "$HOME/.omp/agent/bromure-overlay.yml" <<'BROMURE_OMP_MODELS' 2>/dev/null || true
+    import os, sys
+    dest, staged = sys.argv[1], sys.argv[2]
+    NL = chr(10)
+    BEGIN, END = "# >>> bromure-managed", "# <<< bromure-managed"
+    def read(path):
+        try:
+            with open(path) as f:
+                return f.read().splitlines()
+        except OSError:
+            return None
+    mine, theirs = read(dest), read(staged)
+    block, inside = [], False
+    for line in theirs or []:
+        if line.strip().startswith(BEGIN):
+            inside = True
+        if inside:
+            block.append(line)
+        if line.strip().startswith(END):
+            inside = False
+    out, skip = [], False
+    for line in mine or []:
+        t = line.strip()
+        if t.startswith(BEGIN):
+            skip = True
+            continue
+        if t.startswith(END):
+            skip = False
+            continue
+        if not skip:
+            out.append(line)
+    if out and out[0].startswith("# Generated by Bromure AC"):
+        out = []
+    if block:
+        at = next((i for i, l in enumerate(out) if l.rstrip() in ("providers:", "providers: {}")), None)
+        if at is None:
+            out.append("providers:")
+            at = len(out) - 1
+        out[at] = "providers:"
+        out[at + 1:at + 1] = block
+    body = NL.join(out).strip(NL)
+    if body.strip() in ("", "providers:"):
+        if mine is not None:
+            os.remove(dest)
+    elif out != mine:
+        tmp = dest + ".bromure-tmp"
+        with open(tmp, "w") as f:
+            f.write(body + NL)
+        os.replace(tmp, dest)
+    # The providers the user defined (outside Bromure's block), enabled in
+    # the overlay next to Bromure's: its enabledModels otherwise hides them.
+    overlay_src, overlay_dest = sys.argv[3], sys.argv[4]
+    users, indent, under = [], None, False
+    for line in out:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        lead = len(line) - len(line.lstrip())
+        if lead == 0:
+            under = line.rstrip() == "providers:"
+            continue
+        if under and line.rstrip().endswith(":"):
+            if indent is None:
+                indent = lead
+            if lead == indent:
+                users.append(line.strip()[:-1].strip(chr(34) + chr(39)))
+    overlay = read(overlay_src)
+    if overlay is None:
+        if os.path.exists(overlay_dest):
+            os.remove(overlay_dest)
+    else:
+        if users and "enabledModels:" in overlay:
+            at = overlay.index("enabledModels:") + 1
+            overlay[at:at] = ["  - " + chr(34) + name + "/*" + chr(34) for name in users]
+        with open(overlay_dest + ".bromure-tmp", "w") as f:
+            f.write(NL.join(overlay) + NL)
+        os.replace(overlay_dest + ".bromure-tmp", overlay_dest)
+    BROMURE_OMP_MODELS
     fi
 
     # Stay in $HOME (~ubuntu) on shell start. Shared folders are

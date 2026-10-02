@@ -678,6 +678,12 @@ final class SessionPane {
             else { return }
             delegate.agentSessionStore.setNeedsSignIn(s.id, needs)
         }
+        m.recordedFailureAppeared = { [weak self] in
+            guard let self, let delegate = self.acDelegate,
+                  self.model.tabs.first(where: { $0.index == windowIndex })?.agentStatus == .working
+            else { return }
+            delegate.setTabAgentStatus(self.profile.id, index: windowIndex, .needsInput)
+        }
         m.openProviderSettings = { [weak self] in
             guard let self else { return }
             self.acDelegate?.sidebarEditProfile(self.profile.id)

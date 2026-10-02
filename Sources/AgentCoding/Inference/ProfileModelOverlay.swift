@@ -67,6 +67,8 @@ public extension Profile {
         // `p` after the pass for the same reason.
         // A nil base = Anthropic itself, with its pinned models only.
         var gateway: (base: String?, models: [String: String])?
+        // omp on a custom server: the context window set for its model.
+        var ompContext: Int?
 
         // Resolve one agent: set its auth (+ return its local model id, if local).
         func applyAgent(tool: Tool, ompProvider: inout OmpProvider?, ompBaseURL: inout String?,
@@ -83,7 +85,10 @@ public extension Profile {
             if tool == .omp, let ref, case .provider(let prov) = ref.source,
                let op = prov.ompProvider, let cred = settings.credential(prov), cred.isUsable {
                 ompProvider = op
-                if op == .custom, let base = cred.baseURL, !base.isEmpty { ompBaseURL = base }
+                if op == .custom, let base = cred.baseURL, !base.isEmpty {
+                    ompBaseURL = base
+                    ompContext = ref.capabilities.contextWindow
+                }
                 if !ref.modelID.isEmpty { ompModel = ref.modelID }
             }
             if let ref, ref.isLocal {
@@ -189,6 +194,8 @@ public extension Profile {
             p.additionalTools[i].apiKey = key
             if let lid { p.additionalTools[i].localModelID = lid }
         }
+        p.ompContextWindow = ompContext
+        p.ompExtraProviders = Self.ompExtraProviders(settings, besides: p.allToolSpecs.first { $0.tool == .omp })
         p.claudeGatewayBaseURL = gateway?.base
         p.claudeGatewayModels = gateway?.models ?? [:]
         if let bedrock {
@@ -210,7 +217,10 @@ public extension Profile {
             // else the first local additional's.
             let localID = primaryLocalModel
                 ?? p.additionalTools.first { $0.authMode == .local }?.localModelID
-            if let localID { p.activeModelID = localID }
+            if let localID {
+                p.activeModelID = localID
+                p.localModelContextWindow = settings.localContextWindow(forModel: localID)
+            }
             if let lb = localServerBackend {
                 p.localEngineURL = lb.url
                 p.localEngineAPIKey = lb.key
@@ -223,6 +233,45 @@ public extension Profile {
             p.modelRouting = .cloud
         }
         return p
+    }
+
+    /// Every provider in the settings omp could also use, besides the one
+    /// it's on: those it speaks natively (its key's env var), and the
+    /// OpenAI-compatible ones with a model assigned somewhere (an entry in
+    /// its models.yml). Subscriptions are left out — omp takes API keys only.
+    static func ompExtraProviders(_ settings: ModelSettings, besides omp: ToolSpec?) -> [OmpExtraProvider] {
+        let current: ModelProvider? = omp.flatMap {
+            $0.authMode == .token ? ModelProvider.from(omp: $0.effectiveOmpProvider) : nil
+        }
+        let refs = Array(settings.tiers.values) + settings.agentTiers.values.flatMap { Array($0.values) }
+        var out: [OmpExtraProvider] = []
+        for cred in settings.providers where cred.isUsable && cred.provider != current {
+            let key = (cred.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            switch cred.provider {
+            case .bedrock: continue
+            case .custom, .openrouter, .moonshot:
+                let base: String?
+                if cred.provider == .custom {
+                    base = cred.baseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    guard !key.isEmpty else { continue }
+                    base = cred.provider.openAICompatibleBase.map { $0 + "/v1" }
+                }
+                guard let base, !base.isEmpty else { continue }
+                var models: [String] = []
+                for r in refs {
+                    if case .provider(cred.provider) = r.source, !r.modelID.isEmpty, !models.contains(r.modelID) {
+                        models.append(r.modelID)
+                    }
+                }
+                guard !models.isEmpty else { continue }
+                out.append(OmpExtraProvider(provider: cred.provider, apiKey: key, baseURL: base, models: models))
+            default:
+                guard cred.provider.ompProvider != nil, !key.isEmpty else { continue }
+                out.append(OmpExtraProvider(provider: cred.provider, apiKey: key, baseURL: nil, models: []))
+            }
+        }
+        return out
     }
 
     /// The agents that would start with credentials in hand — what the

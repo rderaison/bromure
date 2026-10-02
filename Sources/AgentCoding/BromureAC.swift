@@ -461,9 +461,23 @@ struct Init: ParsableCommand {
                                visibility: .hidden))
     var storageDir: String?
 
+    @Option(name: .long,
+            help: "A shell script to run as root inside the image after Bromure's setup (traced; log in ~/Library/Logs/BromureAC/base-image-customize.log). Default: the one set in Rebuild Base Image, if any.")
+    var customizeScript: String?
+
     func run() throws {
         let storageDirURL = storageDir.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let imageManager = try makeImageManager(storageDir: storageDirURL)
+        if let path = customizeScript {
+            guard let text = try? String(contentsOfFile: (path as NSString).expandingTildeInPath, encoding: .utf8) else {
+                throw ValidationError("Can't read the customize script at \(path).")
+            }
+            imageManager.customizeScript = text
+        } else {
+            let saved = BaseImageCustomize.load()
+            imageManager.customizeScript = saved.script
+            if let problem = saved.problem { FileHandle.standardError.write(Data("[init] \(problem)\n".utf8)) }
+        }
         // With a custom storage dir, scope the catalog cache there too —
         // a pipeline test must not pollute (or read) the real app's
         // cached catalog in Application Support.
@@ -1831,20 +1845,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The MITM proxy saw a model *conversation* request for this VM. The proxy
     /// can't attribute traffic to a specific tab, so this is the per-VM fallback
-    /// for the agents WITHOUT reliable per-tab hooks (Codex/Grok/omp): flip
-    /// their tabs to .working and re-arm a timer to drop them back to .done.
-    /// Claude and Kimi tabs are left to their own per-window hooks (accurate per
-    /// tab), so a Claude call never flips a sibling Codex tab — and the 4s timer
-    /// can't mark a hook-driven tab .done mid-run.
+    /// for agents WITHOUT per-tab status hooks: flip their tabs to .working and
+    /// re-arm a timer to drop them back to .done after 4 s of quiet.
     ///
-    /// omp is deliberately NOT listed: it ALSO ships a turn hook
-    /// (~/.omp/agent/hooks/agent-status.ts, loaded via `--hook`) that drives its
-    /// dot per-tab through agent-status.sh → setTabAgentStatus — but that path is
-    /// independent of this set. Keeping omp OFF the list preserves the MITM
-    /// fallback for MITM-visible providers (Ollama/Anthropic) as a backstop,
-    /// while the hook covers the provider-agnostic case (z.ai/custom) where the
-    /// traffic heuristic is blind. Both agree on working/done, so they cooperate.
-    static let hookDrivenAgents: Set<String> = ["claude", "kimi"]
+    /// Every agent Bromure ships now reports through its own hooks, so the
+    /// fallback only covers an agent it doesn't know. The heuristic can't tell
+    /// a long command (no model traffic for minutes) from an idle agent, and
+    /// its 4-second .done stomped the hooks' .working — a Codex/omp tab read
+    /// "Ready" through every test run. The hooks:
+    ///   - claude: ~/.claude/settings.json (Profile.prepareHomeDirectory)
+    ///   - grok:   loads the same ~/.claude/settings.json hooks
+    ///   - kimi:   `[[hooks]]` in its config (SessionDisk.kimiHooksTOML)
+    ///   - codex:  `[[hooks.*]]` + pre-seeded trust in ~/.codex/config.toml
+    ///             (agentd `_seed_codex_hooks`)
+    ///   - omp:    the --hook module ~/.omp/agent/hooks/agent-status.ts
+    static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp"]
 
     func noteAgentActivity(_ id: Profile.ID) {
         setNonClaudeAgentTabs(id, .working)
@@ -1863,11 +1878,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// transition).
     private func setNonClaudeAgentTabs(_ id: Profile.ID, _ status: AgentStatus) {
         guard let pane = pane(for: id) else { return }
-        for tab in pane.model.tabs {
-            guard let kind = BromureIcons.agentKind(forLabel: tab.shownLabel),
-                  !Self.hookDrivenAgents.contains(kind) else { continue }
+        for (tab, kind) in agentTabs(of: pane) where !Self.hookDrivenAgents.contains(kind) {
             if status == .done && tab.agentStatus != .working { continue }
             tab.agentStatus = status
+        }
+    }
+
+    /// The pane's agent tabs with the tool each runs. The tab's own labels
+    /// can't say: an agent launched from .bashrc never becomes tmux's
+    /// foreground program, so the window is named "bash", and a session tab
+    /// shows its @display title ("Fix the login page"). The session record
+    /// knows; the labels are the fallback for a tab no session owns.
+    private func agentTabs(of pane: SessionPane) -> [(TabsModel.Tab, String)] {
+        var sessionTools: [Int: String] = [:]
+        for s in agentSessionStore.sessions where s.profileID == pane.profile.id && !s.hasEnded {
+            if let w = s.windowIndex { sessionTools[w] = s.tool.rawValue }
+        }
+        return pane.model.tabs.compactMap { tab in
+            (sessionTools[tab.index] ?? pane.agentHints[tab.index]
+                ?? BromureIcons.agentKind(forLabel: tab.label)
+                ?? BromureIcons.agentKind(forLabel: tab.shownLabel)).map { (tab, $0) }
+        }
+    }
+
+    /// The provider refused a model call outright (401/402/403) for this VM.
+    /// Codex fires no hook for a failed turn — only the prompt's — so its tab
+    /// sat "working" forever; a refused sign-in or an empty balance is the
+    /// user's to fix. The other agents report it themselves (StopFailure).
+    /// Per VM, like all proxy signals: every Codex tab that is mid-turn shares
+    /// the refused credential.
+    func noteModelCallRefused(_ id: Profile.ID, status: Int) {
+        guard [401, 402, 403].contains(status), let pane = pane(for: id) else { return }
+        for (tab, kind) in agentTabs(of: pane) where kind == "codex" && tab.agentStatus == .working {
+            setTabAgentStatus(id, index: tab.index, .needsInput)
         }
     }
 
@@ -2387,6 +2430,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             e.traceStore.onConversationResult = { [weak self] pid, host, status in
                 self?.switchboardEngine.noteAPIResult(profileID: pid, host: host, status: status)
+                self?.noteModelCallRefused(pid, status: status)
             }
             // Detailed HTTP logs → analytics.bromure.io/session_events,
             // same wire shape + admin view as the Web browser. Enrollment-
@@ -3152,6 +3196,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // the new "Models" pane opens pre-populated. Idempotent once configured.
         ModelSettingsStore.shared.seedIfEmpty(from: profiles + [store.loadTemplate()])
         migrateBedrockWorkspaces()
+        migrateLegacyOmpWorkspaces()
         installLiveModelRefresh()
         provisionKimiRecordsIfNeeded()
         NotificationCenter.default.addObserver(
@@ -4332,7 +4377,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // What session reconcile sees per workspace.
                     return ["entries": (self.unifiedWindow?.listModel.entries ?? []).map {
                         ["name": $0.name, "rosterLive": $0.model.rosterLive,
-                         "tabs": $0.model.tabs.map { "\($0.index):\($0.display ?? "")" }]
+                         "tabs": $0.model.tabs.map { "\($0.index):\($0.display ?? "")" },
+                         // label = the tmux window name (foreground program), status = the dot.
+                         "status": $0.model.tabs.map { "\($0.index):\($0.label):\($0.agentStatus)" }]
                     }]
                 case "files-state":
                     guard let m = self.unifiedWindow?.fileExplorerModel else { return ["error": "no window"] }
@@ -7044,6 +7091,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         initProgress.reset()
         armLocalNetworkWarning()
         ensureInstallWindow()
+        // The user's customize script, read now: it rides every full build
+        // (a rebuild, an image update) so their tools survive it.
+        let customize = BaseImageCustomize.load()
+        imageManager.customizeScript = customize.script
+        if let problem = customize.problem { initProgress.noteHostProgress(problem) }
         // Driven by the wizard, the install runs inside its Install step (the
         // rail keeps the user oriented); the standalone installer view is for
         // rebuilds and CLI-started installs.
@@ -8495,19 +8547,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc func rebuildBaseImageAction(_ sender: Any?) {
-        let alert = NSAlert()
-        alert.messageText = "Update the base image?"
-        alert.informativeText = "Downloads the latest prebuilt image (or re-runs the full local installer, ~5–10 min) and re-applies the recommended packages. Existing workspaces' disks aren't touched — on next launch each one's drift prompt will offer to reset to the new base."
-        alert.addButton(withTitle: "Download Prebuilt")
-        alert.addButton(withTitle: "Rebuild Locally")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            startInit(force: true)
-        case .alertSecondButtonReturn:
-            startInit(force: true, buildLocal: true)
-        default:
-            break
+        switch RebuildBaseImageWindow.run() {
+        case .download: startInit(force: true)
+        case .local:    startInit(force: true, buildLocal: true)
+        case nil:       break
         }
     }
 
@@ -8776,6 +8819,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             } catch {
                 FileHandle.standardError.write(Data(
                     "[models] couldn't save the Bedrock override for \(p.name): \(error)\n".utf8))
+            }
+        }
+        if changed { profiles = store.loadAll() }
+    }
+
+    /// Pre-5.0 omp custom servers still on a workspace's agent (issue #36):
+    /// moved into that workspace's model override, where they're visible
+    /// and removable. Idempotent — the agent no longer carries one after.
+    @MainActor
+    private func migrateLegacyOmpWorkspaces() {
+        let global = ModelSettingsStore.shared.settings
+        var changed = false
+        for p in profiles {
+            guard let moved = p.migratedLegacyOmpCustom(global: global) else { continue }
+            do {
+                try store.save(moved)
+                changed = true
+                InferenceLog.shared.record(
+                    "[models] \(p.name): moved omp's custom server into the workspace's model settings")
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[models] couldn't move omp's custom server for \(p.name): \(error)\n".utf8))
             }
         }
         if changed { profiles = store.loadAll() }
@@ -15105,5 +15170,277 @@ private extension JSONEncoder {
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         return e
+    }
+}
+
+
+// MARK: - Base image customize script (issue #34)
+
+/// A script of the user's, run as root inside the base image after
+/// Bromure's setup and the agent installs — so every workspace created or
+/// reset from the image has their toolchain. Set up from File → Rebuild
+/// Base Image only (a power-user option); applied on every full build.
+enum BaseImageCustomize {
+    static let enabledKey = "image.customizeScript.enabled"
+    static let pathKey = "image.customizeScript.path"
+
+    /// The script to run (nil: off), or why it couldn't be read.
+    static func load(defaults: UserDefaults = .standard) -> (script: String?, problem: String?) {
+        guard defaults.bool(forKey: enabledKey) else { return (nil, nil) }
+        let path = (defaults.string(forKey: pathKey) ?? "").trimmingCharacters(in: .whitespaces)
+        guard !path.isEmpty else { return (nil, nil) }
+        guard let text = try? String(contentsOfFile: (path as NSString).expandingTildeInPath, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, String(format: NSLocalizedString("Your customize script (%@) can't be read — the image is built without it.", comment: "base image customize"), path))
+        }
+        return (text, nil)
+    }
+}
+
+/// File → Rebuild Base Image: how to get the new image, and the power
+/// user's customize script. A window of its own (run modally from the
+/// menu), not an alert.
+enum RebuildBaseImageWindow {
+    enum Method { case download, local }
+
+    @MainActor
+    static func run() -> Method? {
+        var chosen: Method?
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 480),
+                           styleMask: [.titled, .closable, .fullSizeContentView],
+                           backing: .buffered, defer: false)
+        win.titlebarAppearsTransparent = true
+        win.titleVisibility = .hidden
+        win.isMovableByWindowBackground = true
+        win.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: RebuildBaseImageView(
+            onStart: { m in chosen = m; NSApp.stopModal() },
+            onCancel: { NSApp.stopModal() }))
+        win.contentView = host
+        win.setContentSize(host.fittingSize)
+        win.center()
+        // Closing with the red button is a cancel.
+        let close = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: win, queue: .main) { _ in NSApp.stopModal() }
+        NSApp.runModal(for: win)
+        NotificationCenter.default.removeObserver(close)
+        win.orderOut(nil)
+        return chosen
+    }
+}
+
+struct RebuildBaseImageView: View {
+    let onStart: (RebuildBaseImageWindow.Method) -> Void
+    let onCancel: () -> Void
+
+    @State private var method: RebuildBaseImageWindow.Method = .download
+    @AppStorage(BaseImageCustomize.enabledKey) private var customize = false
+    @AppStorage(BaseImageCustomize.pathKey) private var path = ""
+    @State private var showCustomize = UserDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+                .padding(.horizontal, 24)
+                .padding(.top, 28)
+                .padding(.bottom, 18)
+            VStack(spacing: 10) {
+                methodCard(.download,
+                           icon: "arrow.down.circle.fill",
+                           title: NSLocalizedString("Download prebuilt", comment: "rebuild base image"),
+                           detail: NSLocalizedString("The latest published image, then the recommended packages. A few minutes.", comment: "rebuild base image"),
+                           badge: NSLocalizedString("Recommended", comment: "rebuild base image"))
+                methodCard(.local,
+                           icon: "hammer.circle.fill",
+                           title: NSLocalizedString("Rebuild locally", comment: "rebuild base image"),
+                           detail: NSLocalizedString("Built from scratch on this Mac with the full installer. About 10 minutes.", comment: "rebuild base image"),
+                           badge: nil)
+            }
+            .padding(.horizontal, 24)
+            Label(NSLocalizedString("Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts.", comment: "rebuild base image"),
+                  systemImage: "checkmark.shield")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 24)
+                .padding(.top, 12)
+            customizeSection
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+            Spacer(minLength: 20)
+            Divider()
+            HStack {
+                Spacer()
+                Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .controlSize(.large)
+                Button(method == .download
+                       ? NSLocalizedString("Download & Update", comment: "rebuild base image")
+                       : NSLocalizedString("Rebuild", comment: "rebuild base image")) { onStart(method) }
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+        }
+        .frame(width: 540)
+        .background(.background)
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 14) {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(LinearGradient(colors: [Color.accentColor, Color.accentColor.opacity(0.7)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 48, height: 48)
+                .overlay(Image(systemName: "shippingbox.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white))
+                .shadow(color: Color.accentColor.opacity(0.35), radius: 8, y: 3)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(NSLocalizedString("Update the base image", comment: "rebuild base image"))
+                    .font(.system(size: 19, weight: .semibold))
+                Text(NSLocalizedString("New workspaces start from this image: the system, the coding agents and their tools.", comment: "rebuild base image"))
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func methodCard(_ m: RebuildBaseImageWindow.Method, icon: String, title: String,
+                            detail: String, badge: String?) -> some View {
+        let selected = method == m
+        return Button { method = m } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 24))
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .frame(width: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(title).font(.system(size: 13.5, weight: .semibold))
+                        if let badge {
+                            Text(badge)
+                                .font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    Text(detail)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17))
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary.opacity(0.5))
+            }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(selected ? Color.accentColor.opacity(0.08) : Color.primary.opacity(0.035)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(selected ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.08),
+                              lineWidth: selected ? 1.5 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.15), value: method)
+    }
+
+    // MARK: Customize (power users)
+
+    private var customizeSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) { showCustomize.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .rotationEffect(.degrees(showCustomize ? 90 : 0))
+                    Text(NSLocalizedString("Customize the image", comment: "rebuild base image"))
+                        .font(.system(size: 12.5, weight: .semibold))
+                    if customize, !path.isEmpty {
+                        Text(NSLocalizedString("On", comment: "rebuild base image: customize script on"))
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(Color.green.opacity(0.18)))
+                            .foregroundStyle(.green)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if showCustomize {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "terminal.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(LinearGradient(colors: [Color(white: 0.28), Color(white: 0.12)],
+                                                     startPoint: .top, endPoint: .bottom)))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(path.isEmpty
+                                 ? NSLocalizedString("No script chosen", comment: "base image customize")
+                                 : (path as NSString).lastPathComponent)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(path.isEmpty ? .secondary : .primary)
+                            if !path.isEmpty {
+                                Text(((path as NSString).deletingLastPathComponent as NSString).abbreviatingWithTildeInPath)
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                        Toggle("", isOn: $customize)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .disabled(path.isEmpty)
+                            .help(NSLocalizedString("Run my customize script after Bromure's setup", comment: "base image customize"))
+                    }
+                    HStack(spacing: 8) {
+                        Button(path.isEmpty
+                               ? NSLocalizedString("Choose Script…", comment: "base image customize")
+                               : NSLocalizedString("Change…", comment: "base image customize"), action: choose)
+                        if FileManager.default.fileExists(atPath: UbuntuImageManager.customizeLogURL.path) {
+                            Button(NSLocalizedString("Last Log", comment: "base image customize")) {
+                                NSWorkspace.shared.open(UbuntuImageManager.customizeLogURL)
+                            }
+                        }
+                        Spacer()
+                    }
+                    .controlSize(.small)
+                    Text(NSLocalizedString("Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept.", comment: "base image customize"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.035)))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = NSLocalizedString("Choose the shell script to run inside the base image", comment: "base image customize")
+        if panel.runModal() == .OK, let url = panel.url {
+            path = url.path
+            customize = true
+        }
     }
 }

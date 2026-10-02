@@ -3567,3 +3567,43 @@
 "Untitled" = "Sans titre";
 "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "Tu es un ingénieur senior méticuleux qui relit les modifications avant leur mise en production. Cherche d’abord les bugs, les cas limites et les problèmes de sécurité, explique ton raisonnement, et préfère de petites modifications bien testées aux grandes réécritures.";
 "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "Tu es un professeur patient. Explique ce que tu fais et pourquoi au fur et à mesure, en langage simple, et signale ce que l’utilisateur peut apprendre de chaque étape.";
+
+/* Local model context window */
+"%@ context" = "Contexte %@";
+"Context?" = "Contexte ?";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "Le serveur n’indique pas la taille de contexte de ce modèle — les agents supposent 128K. Cliquez pour la saisir.";
+"The context window agents are told this model has. Click to change it." = "La fenêtre de contexte annoncée aux agents pour ce modèle. Cliquez pour la modifier.";
+"Context window" = "Fenêtre de contexte";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "Combien de tokens %@ peut prendre. Chaque agent qui l’utilise en est informé, pour compacter au bon moment.";
+"e.g. 1M, 256K or 131072" = "p. ex. 1M, 256K ou 131072";
+"Enter a number of tokens, like 1M or 200K." = "Saisissez un nombre de tokens, comme 1M ou 200K.";
+"Use the server's value" = "Utiliser la valeur du serveur";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "Ouvrez la page de connexion et approuvez l’accès.";
+"Approve the sign-in in your browser; it should show this code:" = "Approuvez la connexion dans votre navigateur ; il doit afficher ce code :";
+"Open the sign-in page and check that it shows this code:" = "Ouvrez la page de connexion et vérifiez qu’elle affiche ce code :";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "Votre script de personnalisation (%@) est illisible — l’image est construite sans lui.";
+"Run my customize script after Bromure's setup" = "Exécuter mon script de personnalisation après l’installation de Bromure";
+"No script chosen" = "Aucun script choisi";
+"Last Log" = "Dernier journal";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "S’exécute en root dans l’image de base après l’installation des agents, à chaque reconstruction ou mise à jour de l’image : tout espace de travail créé ou réinitialisé ensuite dispose de ce qu’il installe. Tracé avec bash -x ; la sortie est enregistrée dans ~/Library/Logs/BromureAC/base-image-customize.log. En cas d’échec, l’image actuelle est conservée.";
+"Choose the shell script to run inside the base image" = "Choisissez le script shell à exécuter dans l’image de base";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "Télécharger l’image prête";
+"The latest published image, then the recommended packages. A few minutes." = "La dernière image publiée, puis les paquets recommandés. Quelques minutes.";
+"Recommended" = "Recommandé";
+"Rebuild locally" = "Reconstruire localement";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "Construite de zéro sur ce Mac avec l’installateur complet. Environ 10 minutes.";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Vos espaces de travail ne sont pas modifiés — chacun propose de se réinitialiser sur la nouvelle image à son prochain démarrage.";
+"Download & Update" = "Télécharger et mettre à jour";
+"Rebuild" = "Reconstruire";
+"Update the base image" = "Mettre à jour l’image de base";
+"New workspaces start from this image: the system, the coding agents and their tools." = "Les nouveaux espaces de travail partent de cette image : le système, les agents de code et leurs outils.";
+"Customize the image" = "Personnaliser l’image";
+"Choose Script…" = "Choisir un script…";
+"Change…" = "Modifier…";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "S’exécute en root dans l’image après l’installation des agents, à chaque reconstruction ou mise à jour : les espaces de travail nouveaux ou réinitialisés disposent de ce qu’il installe. Tracé avec bash -x dans ~/Library/Logs/BromureAC/base-image-customize.log. En cas d’échec, l’image actuelle est conservée.";
+"Your customize script failed — the current image is kept. See %@" = "Votre script de personnalisation a échoué — l’image actuelle est conservée. Voir %@";

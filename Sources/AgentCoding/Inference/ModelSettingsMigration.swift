@@ -121,6 +121,61 @@ public extension Profile {
     }
 }
 
+public extension Profile {
+    /// A workspace whose omp still carries the pre-5.0 custom server
+    /// (`ompProvider == .custom` + base URL + model on the agent itself):
+    /// nothing in the UI showed it any more, yet every launch staged it
+    /// (issue #36). Moved into the workspace's model override — the custom
+    /// provider, and omp's model when nothing else gives omp one — where
+    /// it can be seen, edited and removed, then cleared from the agent.
+    /// nil: nothing to move, or the override already names another custom
+    /// server (left alone).
+    func migratedLegacyOmpCustom(global: ModelSettings) -> Profile? {
+        let isPrimary = tool == .omp
+        guard let spec = allToolSpecs.first(where: { $0.tool == .omp }),
+              spec.effectiveOmpProvider == .custom,
+              let base = spec.ompBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines), !base.isEmpty
+        else { return nil }
+        func norm(_ s: String?) -> String {
+            var u = (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            while u.hasSuffix("/") { u.removeLast() }
+            if u.hasSuffix("/v1") { u.removeLast(3) }
+            return u
+        }
+        let inherits = modelOverride?.inheritsGlobal ?? true
+        var layer = modelOverride?.settings ?? ModelSettings()
+        let key = spec.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let own = layer.credential(.custom) {
+            guard norm(own.baseURL) == norm(base) else { return nil }
+        } else if !(inherits && norm(global.credential(.custom)?.baseURL) == norm(base)) {
+            // Not already the server everyone uses: this workspace's own.
+            layer.providers.append(ProviderCredential(provider: .custom,
+                                                      apiKey: (key ?? "").isEmpty ? nil : key,
+                                                      baseURL: base))
+        }
+        let model = spec.ompModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let ompHasModel = layer.ref(for: .omp, tier: .medium) != nil
+            || (inherits && global.ref(for: .omp, tier: .medium) != nil)
+        if !model.isEmpty, !ompHasModel {
+            layer.agentTiers[.omp] = [.medium: ModelRef(source: .provider(.custom), modelID: model)]
+        }
+        var p = self
+        p.modelOverride = ModelOverride(inheritsGlobal: inherits, settings: layer,
+                                        excludedProviders: modelOverride?.excludedProviders ?? [])
+        // The agent no longer carries it — nor the key, which now sits on the
+        // provider (left on the agent, it would pass for an Anthropic key).
+        if isPrimary {
+            p.ompProvider = nil; p.ompBaseURL = nil; p.ompModel = nil; p.apiKey = nil
+        } else if let i = p.additionalTools.firstIndex(where: { $0.tool == .omp }) {
+            p.additionalTools[i].ompProvider = nil
+            p.additionalTools[i].ompBaseURL = nil
+            p.additionalTools[i].ompModel = nil
+            p.additionalTools[i].apiKey = nil
+        }
+        return p
+    }
+}
+
 public extension ModelSettingsStore {
     /// True when nothing has been configured yet — the signal to migrate.
     var isEmpty: Bool {

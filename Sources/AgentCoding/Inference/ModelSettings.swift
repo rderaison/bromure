@@ -286,6 +286,30 @@ public struct ModelCapabilities: Codable, Equatable, Sendable {
         self.inputs = inputs
     }
 
+    /// "1M", "128k", "200,000", "131072" → tokens; nil for anything else.
+    public static func parseTokens(_ raw: String) -> Int? {
+        var s = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            .replacingOccurrences(of: ",", with: "").replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        if s.hasSuffix("tokens") { s = String(s.dropLast(6)) }
+        var scale = 1.0
+        if s.hasSuffix("m") { scale = 1_000_000; s.removeLast() }
+        else if s.hasSuffix("k") { scale = 1_000; s.removeLast() }
+        guard let n = Double(s), n > 0 else { return nil }
+        let tokens = Int((n * scale).rounded())
+        return tokens >= 1_000 ? tokens : nil
+    }
+
+    /// 1000000 → "1M", 131072 → "131K", 128000 → "128K".
+    public static func formatTokens(_ n: Int) -> String {
+        if n >= 1_000_000, n % 100_000 == 0 {
+            let m = Double(n) / 1_000_000
+            return m == m.rounded() ? "\(Int(m))M" : String(format: "%.1fM", m)
+        }
+        if n >= 1_000 { return "\(Int((Double(n) / 1_000).rounded()))K" }
+        return "\(n)"
+    }
+
     /// True when at least one field is known (so the UI can show "not probed").
     public var isKnown: Bool { contextWindow != nil || reasoning != nil || inputs != nil }
     public var acceptsImages: Bool { inputs?.contains(.image) ?? false }
@@ -408,6 +432,16 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     /// default.
     public func ref(for agent: ModelAgent, tier: ModelTier) -> ModelRef? {
         agentTiers[agent]?[tier] ?? tiers[tier]
+    }
+
+    /// The context window set for a model the agents reach locally (a
+    /// custom server's, entered by the user when the server doesn't
+    /// advertise it, or probed): the first assignment of `modelID` that
+    /// carries one. nil when none does.
+    public func localContextWindow(forModel modelID: String) -> Int? {
+        let refs = Array(tiers.values) + agentTiers.values.flatMap { Array($0.values) }
+        return refs.first { $0.isLocal && $0.modelID == modelID && ($0.capabilities.contextWindow ?? 0) > 0 }?
+            .capabilities.contextWindow
     }
 
     /// The tiers an agent effectively runs with (overrides merged onto default).

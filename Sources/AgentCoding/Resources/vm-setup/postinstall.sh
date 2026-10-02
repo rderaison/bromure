@@ -162,15 +162,19 @@ run_step() {
     log "BEGIN step $name"
     local t0=$SECONDS
     local i
-    for i in 1 2 3; do
+    # The user's customize script runs once: it's theirs, it may not be
+    # safe to repeat, and a failure there is real, not a flaky mirror.
+    local tries=3
+    case "$file" in *-customize.sh) tries=1 ;; esac
+    for i in $(seq 1 "$tries"); do
         if bash -e "$file"; then
             log "END   step $name (took $((SECONDS - t0))s)"
             return 0
         fi
-        log "retry $i/3 failed: $name"
-        sleep 3
+        log "attempt $i/$tries failed: $name"
+        if [ "$i" -lt "$tries" ]; then sleep 3; fi
     done
-    printf 'SANDBOX_POSTINSTALL_FAILED: step failed after 3 attempts: %s\n' "$name"
+    printf 'SANDBOX_POSTINSTALL_FAILED: step failed after %s attempt(s): %s\n' "$tries" "$name"
     exit 1
 }
 

@@ -468,6 +468,28 @@ public extension Profile {
             }
         }
 
+        // omp's other providers: each key swapped on its own host only.
+        for extra in ompExtraProviders where !extra.apiKey.isEmpty {
+            guard let host = extra.host, !host.isEmpty,
+                  !entries.contains(where: { e in
+                      if case .cloudAPIKey(let h) = e.purpose { return h == host && e.realValue == extra.apiKey }
+                      return false
+                  })
+            else { continue }
+            let prefix: String
+            switch extra.provider {
+            case .anthropic: prefix = "sk-ant-api03-brm-"
+            case .xai:       prefix = "xai-brm-"
+            default:         prefix = "sk-brm-"
+            }
+            entries.append(.init(
+                realValue: extra.apiKey,
+                fakeValue: SessionTokenPlan.deriveFake(prefix: prefix, real: extra.apiKey, salt: salt),
+                purpose: .cloudAPIKey(host: host),
+                consentCredentialID: nil,
+                consentDisplayName: "\(extra.provider.displayName) API key"))
+        }
+
         for entry in manualTokens where entry.isUsable {
             let real = entry.realValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if real.isEmpty { continue }

@@ -60,6 +60,80 @@ struct OmpAgentTests {
         #expect(rc.contains("$HOME/.omp/agent/models.yml"))
     }
 
+    /// The models.yml merge the guest runs at each shell start, lifted out
+    /// of the rendered .bashrc and run against a scratch home.
+    private func runModelsMerge(rc: String, mine: String?, staged: String?,
+                                overlay: String? = nil, composed: UnsafeMutablePointer<String?>? = nil) throws -> String? {
+        let lines = rc.components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.contains("<<'BROMURE_OMP_MODELS'") })
+        let end = try #require(lines[(start + 1)...].firstIndex { $0 == "BROMURE_OMP_MODELS" })
+        let script = lines[(start + 1)..<end].joined(separator: "\n")
+        let dir = try tempDir()
+        let dest = dir.appendingPathComponent("models.yml"), stagedURL = dir.appendingPathComponent("staged.yml")
+        if let mine { try mine.write(to: dest, atomically: true, encoding: .utf8) }
+        if let staged { try staged.write(to: stagedURL, atomically: true, encoding: .utf8) }
+        let overlaySrc = dir.appendingPathComponent("omp-config.yml"), overlayDest = dir.appendingPathComponent("bromure-overlay.yml")
+        if let overlay { try overlay.write(to: overlaySrc, atomically: true, encoding: .utf8) }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.arguments = ["-c", script, dest.path, stagedURL.path, overlaySrc.path, overlayDest.path]
+        let err = Pipe(); proc.standardError = err
+        try proc.run(); proc.waitUntilExit()
+        let diag = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        #expect(proc.terminationStatus == 0, Comment(rawValue: diag))
+        composed?.pointee = try? String(contentsOf: overlayDest, encoding: .utf8)
+        return try? String(contentsOf: dest, encoding: .utf8)
+    }
+
+    @Test("omp's picker offers every provider: its own, Settings → Models' others, and the user's (issue #37)")
+    func enabledModelsCoverEveryProvider() throws {
+        let overlay = SessionDisk.ompConfigOverlay(authMode: .token, provider: .custom, modelName: "big",
+                                                   extraProviders: ["zai", "bromure-openrouter", "bromure"])
+        #expect(overlay.contains("  - \"bromure/*\"\n  - \"zai/*\"\n  - \"bromure-openrouter/*\"\n"))
+        #expect(overlay.components(separatedBy: "\"bromure/*\"").count == 2)   // not twice
+        #expect(overlay.contains("modelRoles:\n  default: bromure/big"))         // still the default
+        // On the machine, the providers the user added in omp join them.
+        let rc = try renderBashrc(tool: .omp)
+        let user = "providers:\n  mine:\n    api: openai-completions\n  \"theirs\":\n    api: openai-completions\n"
+        var composed: String?
+        _ = try runModelsMerge(rc: rc, mine: user,
+                               staged: SessionDisk.ompModelsYAML(base: "http://x/v1", model: "big"),
+                               overlay: overlay, composed: &composed)
+        let c = try #require(composed)
+        #expect(c.contains("  - \"mine/*\"") && c.contains("  - \"theirs/*\"") && c.contains("  - \"zai/*\""))
+        #expect(!c.contains("bromure-managed"))
+        // No staged overlay any more: the composed one goes too.
+        var gone: String? = "x"
+        _ = try runModelsMerge(rc: rc, mine: user, staged: nil, overlay: nil, composed: &gone)
+        #expect(gone == nil)
+    }
+
+    @Test("models.yml: Bromure's block is swapped in, the user's own providers survive")
+    func modelsYAMLMerge() throws {
+        let rc = try renderBashrc(tool: .omp)
+        let staged = SessionDisk.ompModelsYAML(base: "http://10.0.0.5:8888/v1", model: "big")
+        let user = "providers:\n  mine:\n    api: openai-completions\n    baseUrl: \"http://me\"\n"
+        // First launch next to the user's own file: both providers.
+        let merged = try #require(try runModelsMerge(rc: rc, mine: user, staged: staged))
+        #expect(merged.contains("  mine:") && merged.contains("  bromure:"))
+        #expect(merged.components(separatedBy: "providers:").count == 2)
+        // Next launch with another model: Bromure's block is replaced, not stacked.
+        let again = try #require(try runModelsMerge(
+            rc: rc, mine: merged, staged: SessionDisk.ompModelsYAML(base: "http://10.0.0.5:8888/v1", model: "bigger")))
+        #expect(again.contains("bigger") && !again.contains("\"big\""))
+        #expect(again.components(separatedBy: SessionDisk.ompManagedBegin).count == 2)
+        #expect(again.contains("  mine:"))
+        // Nothing staged any more (removed in Settings → Models): only the user's left.
+        let removed = try #require(try runModelsMerge(rc: rc, mine: again, staged: nil))
+        #expect(!removed.contains("bromure") && removed.contains("  mine:"))
+        // A file an older Bromure wrote whole (issue #36): dropped, not kept forever.
+        let legacy = "# Generated by Bromure AC; do not edit.\nproviders:\n  bromure:\n    baseUrl: \"http://old\"\n"
+        #expect(try runModelsMerge(rc: rc, mine: legacy, staged: nil) == nil)
+        // No file of the user's yet: just Bromure's.
+        let fresh = try #require(try runModelsMerge(rc: rc, mine: nil, staged: staged))
+        #expect(fresh.hasPrefix("providers:\n  " + SessionDisk.ompManagedBegin))
+    }
+
     @Test("bashrc merges the browser/user MCP into omp's user config folder")
     func bashrcWiresBrowserMCP() throws {
         // omp reads user-scope MCP from ~/.omp/agent/mcp.json (NOT ~/.claude.json),
