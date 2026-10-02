@@ -2501,12 +2501,23 @@ final class SharedBrowserVMOwner {
             outputs[index] = name
         }
         root.sharedWindowID = primary
-        let topology = try await publishTopology()
-        try requireOK(try await controller.request("attachPrimary", fields: ["windowId": primary, "scanout": 0, "topology": topology]))
+        try await whileSharedDesktopResizes {
+            let topology = try await publishTopology()
+            try requireOK(try await controller.request("attachPrimary", fields: ["windowId": primary, "scanout": 0, "topology": topology]))
+        }
         root.tabBridge?.scope(to: primary)
         root.tabBridge?.commandGate = { [weak self] id, action in self?.forward(id: id, needsFocus: true, action: action) }
         installInput(root, index: 0)
         prepared = true
+    }
+
+    private func whileSharedDesktopResizes<T>(_ operation: @MainActor () async throws -> T) async rethrows -> T {
+        let frames = windows.filter { !closingWindows.contains($0.key) }.values.compactMap {
+            ($0.vmView as? PrecisionScrollVMView)?.gpuFrameView
+        }
+        let tokens = frames.map { ($0, $0.beginSharedDesktopResize()) }
+        defer { for (frame, token) in tokens { frame.endSharedDesktopResize(token) } }
+        return try await operation()
     }
 
     private func publishTopology() async throws -> [[String: Any]] {
@@ -2548,8 +2559,10 @@ final class SharedBrowserVMOwner {
                     throw NSError(domain: "BromureSharedWindows", code: 7, userInfo: [NSLocalizedDescriptionKey: "No free display output"])
                 }
                 sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
-                let topology = try await publishTopology()
-                let reply = try await controller.request("create", fields: ["scanout": index, "url": url, "topology": topology])
+                let reply = try await whileSharedDesktopResizes {
+                    let topology = try await publishTopology()
+                    return try await controller.request("create", fields: ["scanout": index, "url": url, "topology": topology])
+                }
                 try requireOK(reply)
                 guard let id = reply["windowId"] as? Int, #available(macOS 27.0, *),
                       let gpu = warm.graphicsSession as? MacOS27GPUSession,
@@ -2631,8 +2644,10 @@ final class SharedBrowserVMOwner {
                     guard !self.terminated,
                           let pair = self.windows.sorted(by: { $0.key < $1.key }).first(where: { !self.closingWindows.contains($0.key) }),
                           let id = pair.value.sharedWindowID else { return }
-                    let topology = try await self.publishTopology()
-                    try self.requireOK(try await self.controller.request("resize", fields: ["scanout": pair.key, "windowId": id, "topology": topology]))
+                    try await self.whileSharedDesktopResizes {
+                        let topology = try await self.publishTopology()
+                        try self.requireOK(try await self.controller.request("resize", fields: ["scanout": pair.key, "windowId": id, "topology": topology]))
+                    }
                 } catch { self.report(error) }
             }
         }
@@ -2657,20 +2672,22 @@ final class SharedBrowserVMOwner {
             do {
                 if let id = session.sharedWindowID {
                     sizes[index] = nil
-                    let topology = try await publishTopology()
-                    do {
-                        try requireOK(try await controller.request("close", fields: ["windowId": id, "topology": topology]))
-                    } catch {
-                        // A lost reply can follow a completed target close. Observe
-                        // actual state before completing the topology; never replay close.
-                        let listing = try await controller.request("list")
-                        try requireOK(listing)
-                        guard let rows = listing["windows"] as? [[String: Any]],
-                              !rows.contains(where: { $0["windowId"] as? Int == id }),
-                              let survivor = windows.first(where: { $0.key != index && !$0.value.closing }),
-                              let survivorID = survivor.value.sharedWindowID else { throw error }
-                        try requireOK(try await controller.request("resize", fields: [
-                            "scanout": survivor.key, "windowId": survivorID, "topology": topology]))
+                    try await whileSharedDesktopResizes {
+                        let topology = try await publishTopology()
+                        do {
+                            try requireOK(try await controller.request("close", fields: ["windowId": id, "topology": topology]))
+                        } catch {
+                            // A lost reply can follow a completed target close. Observe
+                            // actual state before completing the topology; never replay close.
+                            let listing = try await controller.request("list")
+                            try requireOK(listing)
+                            guard let rows = listing["windows"] as? [[String: Any]],
+                                  !rows.contains(where: { $0["windowId"] as? Int == id }),
+                                  let survivor = windows.first(where: { $0.key != index && !$0.value.closing }),
+                                  let survivorID = survivor.value.sharedWindowID else { throw error }
+                            try requireOK(try await controller.request("resize", fields: [
+                                "scanout": survivor.key, "windowId": survivorID, "topology": topology]))
+                        }
                     }
                 }
                 windows[index] = nil; closingWindows.remove(index); focusedID = nil
