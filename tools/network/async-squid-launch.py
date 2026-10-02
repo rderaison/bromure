@@ -29,6 +29,14 @@ def opted_in(cmdline):
     return bool(values)
 
 
+def diagnostics_opted_in(cmdline):
+    values = [s.split('=', 1)[1] for s in cmdline.split()
+              if s.startswith('bromure.experimental_async_squid_diagnostics=')]
+    if values and values != ['1']:
+        raise ValueError('invalid private async Squid diagnostics opt-in')
+    return bool(values)
+
+
 def ipv6_disabled(root=Path('/proc/sys/net/ipv6/conf')):
     """A missing/unreadable/partial policy is not proof IPv6 is disabled."""
     try:
@@ -114,12 +122,14 @@ def stop_child(process):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--private-runtime', action='store_true')
+    parser.add_argument('--diagnostics', action='store_true', help='PRIVATE bounded counter snapshots; no traffic contents')
     parser.add_argument('--squid', default='/usr/sbin/squid')
     parser.add_argument('--config', default='/etc/squid/squid.conf')
     parser.add_argument('--gateway', default=str(Path(__file__).resolve().with_name('async-squid-gateway.py')))
     parser.add_argument('--run-dir', default='/run/bromure-async-squid')
     args = parser.parse_args()
-    if os.geteuid() != 0 or not (args.private_runtime or opted_in(Path('/proc/cmdline').read_text())):
+    cmdline = Path('/proc/cmdline').read_text()
+    if os.geteuid() != 0 or not (args.private_runtime or opted_in(cmdline)):
         parser.error('root and explicit private opt-in required')
     squid_user, gateway_user = pwd.getpwnam('proxy'), pwd.getpwnam('nobody')
     if squid_user.pw_uid == 0 or gateway_user.pw_uid in (0, squid_user.pw_uid):
@@ -144,6 +154,15 @@ def main():
     if state.is_symlink():
         raise ValueError('untrusted worker directory')
     os.chown(state, squid_user.pw_uid, squid_user.pw_gid)
+    diagnostics = None
+    if args.diagnostics or diagnostics_opted_in(cmdline):
+        diagnostics_dir = runtime/'diagnostics'
+        diagnostics_dir.mkdir(mode=0o700, exist_ok=True)
+        if diagnostics_dir.is_symlink() or diagnostics_dir.stat().st_uid not in (0, gateway_user.pw_uid):
+            raise ValueError('untrusted diagnostics directory')
+        os.chmod(diagnostics_dir, 0o700)
+        os.chown(diagnostics_dir, gateway_user.pw_uid, gateway_user.pw_gid)
+        diagnostics = diagnostics_dir/'gateway.json'
     native_config = runtime/'squid.conf'
     if native_config.is_symlink():
         raise ValueError('untrusted native config')
@@ -163,6 +182,8 @@ def main():
         # later IPv6 enablement cannot bypass the gateway during monitor delay.
         ipv4_only = ipv6_disabled()
         gateway_args = [sys.executable, str(gateway)] + (['--ipv4-only'] if ipv4_only else [])
+        if diagnostics:
+            gateway_args += ['--diagnostics-file', str(diagnostics)]
         gateway_process = subprocess.Popen(gateway_args, env=env,
             user=gateway_user.pw_uid, group=gateway_user.pw_gid, extra_groups=[],
             stdout=subprocess.PIPE, text=True, start_new_session=True)
@@ -182,7 +203,8 @@ def main():
             raise RuntimeError('native Squid executable/UID verification failed')
         print('BROMURE_ASYNC_SQUID_ACTIVE ' + json.dumps(dict(squidPID=squid_process.pid,
               squidUID=squid_user.pw_uid, gatewayPID=gateway_process.pid, gatewayUID=gateway_user.pw_uid,
-              ipv4Only=ipv4_only, ipv6RedirectInstalled=True)), flush=True)
+              ipv4Only=ipv4_only, ipv6RedirectInstalled=True,
+              diagnosticsFile=str(diagnostics) if diagnostics else None)), flush=True)
         while not stopped.wait(.25):
             if squid_process.poll() is not None or gateway_process.poll() is not None:
                 raise RuntimeError('candidate worker exited; stopping without routing fallback')

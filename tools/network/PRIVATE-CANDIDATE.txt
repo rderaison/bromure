@@ -76,3 +76,39 @@ Ubuntu noble ARM64 iptables,libip4tc2,libip6tc2,libxtables12=1.8.10-3ubuntu2;
 libmnl0,libnetfilter-conntrack3,libnfnetlink0,libnftnl11 and netbase included.
 Guest libc6 remains installed version (requires>=2.38). Verify SHA256SUMS then
 dpkg -i ./*.deb inside the private clone.
+
+Private counters (OFF unless explicitly requested):
+  Add bromure.experimental_async_squid_diagnostics=1 beside the existing
+  experimental_async_squid=1 kernel argument, or pass --diagnostics to the
+  private supervisor. Install the matching updated supervisor AND gateway.
+  No config-agent changes or stdout/stderr redirection are needed.
+  Root can sample /run/bromure-async-squid/diagnostics/gateway.json every5s.
+  File0600 in gateway-owned0700 directory; written atomically at startup,
+  every5s, and shutdown. No URLs, destination addresses, credentials, payloads,
+  certificates or exception messages. Capture PID+monotonic with each snapshot;
+  counters reset on gateway restart. A stale timestamp is unavailable evidence.
+
+Counters: active/peakActive, accepted SOCKS connections, rejectedCapacity,
+completed relays, failed by originalDestination/connect/relay phase, fixed
+error categories, bounded errno histogram, SOCKS reply codes, EOFs and bytes
+READ from Squid/router. Read bytes are not proof of delivery or decryption.
+Connection closure after a valid full body can still raise an EOF/shutdown
+error; do not equate every relay failure with failed HTTPS handshakes. Compare
+counter deltas at the exact browser error time and corroborate with the
+layered probe/cache.log. Supplement with process FD/thread counts (no argv or
+environment dump) to see the production routing-socks thread pool as well.
+
+TLS isolation regression:
+  sudo -n env PYTHONDONTWRITEBYTECODE=1 unshare --net --mount-proc --pid --fork \
+    python3 tools/network/test-async-squid-tls.py
+This uses actual native Squid, kernel REDIRECT, gateway and unmodified router,
+with a local trusted-certificate TLS endpoint. TLS1.2/1.3 and10 exact one-MiB
+responses (8parallel) pass; periodic/final counters and rule cleanup checked.
+TLS close_notify is completed to distinguish clean transfers from deliberate
+client TCP close/reset. It does not claim external-site or liveVPN acceptance.
+
+probe-https-route.py is an explicit private diagnostic comparing verified TLS
+through Squid hostname/numeric CONNECT, routing-socks numeric, and direct
+numeric sockets. No browser/routing settings change. A complete HTTP403 is
+TLS transport success but not successful site-content acceptance. Direct/SOCKS
+legs are diagnostic comparisons, never a workaround for browser-route failure.

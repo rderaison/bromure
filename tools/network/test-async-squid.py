@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Portable policy/cleanup regressions; kernel redirection lives in netns test."""
 import ast
+import asyncio
 import importlib.util
 import os
+import json
 from pathlib import Path
 import socket
 import struct
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock, patch, mock_open
+from unittest.mock import Mock, AsyncMock, patch, mock_open
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -29,6 +31,13 @@ config = load(config_path)
 
 
 class Tests(unittest.TestCase):
+    def test_diagnostics_opt_in_is_separate_and_strict(self):
+        self.assertFalse(launcher.diagnostics_opted_in('bromure.experimental_async_squid=1'))
+        self.assertTrue(launcher.diagnostics_opted_in('bromure.experimental_async_squid_diagnostics=1'))
+        for value in ('0', '', 'yes', '1 bromure.experimental_async_squid_diagnostics=1'):
+            with self.assertRaises(ValueError):
+                launcher.diagnostics_opted_in('bromure.experimental_async_squid_diagnostics='+value)
+
     def test_ipv4_only_requires_complete_disabled_policy(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -133,6 +142,41 @@ class Tests(unittest.TestCase):
                 original(address, port, scope)
         with self.assertRaises(ValueError):
             original('198.18.0.1', family=socket.AF_INET6)
+
+
+class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    async def test_phase_counts_capacity_and_private_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'stats.json'
+            g = gateway.Gateway(max_connections=1, diagnostics_file=path)
+            writer = Mock()
+            g.active.add('existing')
+            await g.client(None, writer)
+            self.assertEqual(g.rejected, 1)
+            g.active.clear()
+            with patch.object(gateway, 'original_destination', side_effect=ValueError('private destination')), patch('builtins.print'):
+                await g.client(None, writer)
+            with patch.object(gateway, 'original_destination', return_value=(gateway.ipaddress.ip_address('198.18.0.1'), 443)), \
+                 patch.object(g, 'connect', AsyncMock(side_effect=ConnectionResetError('private endpoint'))), patch('builtins.print'):
+                await g.client(None, writer)
+            downstream = asyncio.StreamReader(); downstream.feed_data(b'private request'); downstream.feed_eof()
+            upstream = asyncio.StreamReader(); upstream.feed_data(b'private response'); upstream.feed_eof()
+            out = Mock(); out.drain = AsyncMock()
+            await g.relay(downstream, out, upstream, out)
+            g.write_diagnostics()
+            report = json.loads(path.read_text())
+            self.assertEqual(report['rejectedCapacity'], 1)
+            self.assertEqual(report['failed'], 2)
+            self.assertEqual(report['failuresByPhase'], {'originalDestination': 1, 'connect': 1, 'relay': 0})
+            self.assertEqual(report['bytesRead'], {'squid': 15, 'router': 16})
+            self.assertEqual(report['eofs'], {'squid': 1, 'router': 1})
+            self.assertEqual(report['active'], 0)
+            self.assertNotIn('private', path.read_text())
+            self.assertNotIn('198.18', path.read_text())
+            self.assertEqual(path.stat().st_mode & 0o077, 0)
+            g.accepted = 9; g.write_diagnostics()
+            self.assertEqual(json.loads(path.read_text())['accepted'], 9)
+            self.assertEqual(list(Path(directory).iterdir()), [path])
 
 
 if __name__ == '__main__':
