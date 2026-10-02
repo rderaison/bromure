@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import struct
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock, patch, mock_open
 
@@ -28,6 +29,24 @@ config = load(config_path)
 
 
 class Tests(unittest.TestCase):
+    def test_ipv4_only_requires_complete_disabled_policy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.assertFalse(launcher.ipv6_disabled(root))
+            for name in ('all', 'default', 'lo', 'eth0'):
+                (root/name).mkdir()
+                (root/name/'disable_ipv6').write_text('1\n')
+            self.assertTrue(launcher.ipv6_disabled(root))
+            for name in ('all', 'default', 'lo', 'eth0'):
+                value = root/name/'disable_ipv6'
+                value.write_text('0\n')
+                self.assertFalse(launcher.ipv6_disabled(root))
+                value.write_text('1\n')
+            (root/'wg0').mkdir()
+            self.assertFalse(launcher.ipv6_disabled(root))
+            (root/'wg0/disable_ipv6').write_text('1\n')
+            self.assertTrue(launcher.ipv6_disabled(root))
+
     def test_opt_in_is_explicit_and_missing_candidate_fails_closed(self):
         legacy = ['proxychains4', '-q', '-f', '/etc/proxychains/proxychains.conf',
                   'squid', '-N', '-f', '/etc/squid/squid.conf']

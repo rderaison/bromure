@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import shutil
+import signal
 import tempfile
 import time
 
@@ -40,9 +41,9 @@ assert out==b'reply:'+data,(len(out),len(data))
 print('CLIENT_PASS',len(out))
 '''
 
-async def client(host, port, size=1, success=True):
+async def client(host, port, size=1, success=True, uid=UID):
     p=await asyncio.create_subprocess_exec(sys.executable,'-c',CLIENT,host,str(port),str(size),
-        user=UID,group=UID,extra_groups=[],stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+        user=uid,group=uid,extra_groups=[],stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
     try:
         out,err=await asyncio.wait_for(p.communicate(),5)
         assert (p.returncode==0)==success,(p.returncode,out,err)
@@ -188,7 +189,7 @@ class DNS(asyncio.DatagramProtocol):
         except (AssertionError,IndexError,UnicodeError):
             pass
 
-async def native_squid(crash=False):
+async def native_squid(crash=False, ipv4_only=False, flip=False):
     extracted=Path(os.environ.get('BROMURE_SQUID_TEST_ROOT','/tmp/bromure-network-audit/root'))
     assert (extracted/'usr/sbin/squid').exists(),'extract actual Squid packages first'
     base=Path(tempfile.mkdtemp(prefix='bromure-native-squid-'))
@@ -196,6 +197,10 @@ async def native_squid(crash=False):
     for name,source in [('squid',extracted/'usr/sbin/squid'),('async-squid-gateway.py',HERE/'async-squid-gateway.py')]:
         shutil.copyfile(source,base/name);(base/name).chmod(0o755)
     config=base/'test.conf'
+    if ipv4_only:
+        subprocess.run(['sysctl','-qw','net.ipv6.conf.all.disable_ipv6=1',
+                        'net.ipv6.conf.default.disable_ipv6=1'],check=True)
+        assert launcher.ipv6_disabled()
     config.write_text(f"""http_port 127.0.0.1:3128
 visible_hostname async-squid-private-test
 acl blocked dst 0.0.0.0/32
@@ -241,27 +246,46 @@ error_directory {extracted}/usr/share/squid/errors/en
         await asyncio.wait_for(fixture.pending.wait(),2)
         start=time.monotonic()
         await fetch('allowed.fixture:18082')
-        await fetch('[2001:db8::1]:18082')
+        if not ipv4_only:
+            await fetch('[2001:db8::1]:18082')
         await fetch('blocked.fixture:18082',403)
         elapsed=time.monotonic()-start
         assert not slow.done()
-        assert ('198.18.0.1',18082) in fixture.requests and ('2001:db8::1',18082) in fixture.requests
+        assert ('198.18.0.1',18082) in fixture.requests
+        if not ipv4_only:assert ('2001:db8::1',18082) in fixture.requests
         assert not any(ip=='0.0.0.0' for ip,port in fixture.requests)
         fixture.release.set();await slow
+        active=next(line.split(' ',1)[1] for line in (base/'supervisor.log').read_text().splitlines()
+                    if line.startswith('BROMURE_ASYNC_SQUID_ACTIVE '))
+        identity=json.loads(active)
+        assert identity['ipv4Only']==ipv4_only and identity['ipv6RedirectInstalled']
+        if flip:
+            # Freeze the monitor: installed IPv6 redirects must prevent egress
+            # even BEFORE it notices policy change. This is namespace-local.
+            os.kill(proc.pid,signal.SIGSTOP)
+            v6trap=None
+            try:
+                subprocess.run(['sysctl','-qw','net.ipv6.conf.all.disable_ipv6=0',
+                                'net.ipv6.conf.default.disable_ipv6=0'],check=True)
+                assert not launcher.ipv6_disabled()
+                v6trap=await asyncio.start_server(fixture.trap,'::1',18082)
+                await client('::1',18082,success=False,uid=identity['squidUID'])
+                assert fixture.direct==0
+            finally:
+                if v6trap:v6trap.close();await v6trap.wait_closed()
+                os.kill(proc.pid,signal.SIGCONT)
         if crash:
-            active=next(line.split(' ',1)[1] for line in (base/'supervisor.log').read_text().splitlines()
-                        if line.startswith('BROMURE_ASYNC_SQUID_ACTIVE '))
-            identity=json.loads(active)
             os.kill(identity['gatewayPID'],9)
-        else:
+        elif not flip:
             proc.terminate()
         await asyncio.wait_for(proc.wait(),8)
-        assert (proc.returncode!=0)==crash,(base/'supervisor.log').read_text()
+        assert (proc.returncode!=0)==(crash or flip),(base/'supervisor.log').read_text()
         assert not launcher.processes_for_uid(__import__('pwd').getpwnam('proxy').pw_uid)
         for binary in ('iptables','ip6tables'):
             assert launcher.CHAIN not in subprocess.check_output([binary,'-t','nat','-S'],text=True)
         print('BROMURE_NATIVE_SQUID_GATEWAY_PASS '+json.dumps(dict(healthyAndDNSSeconds=elapsed,
               requests=fixture.requests,dnsSinkholeDenied=True,gatewayCrash=crash,
+              ipv4Only=ipv4_only,ipv6PolicyChangeFailsClosedBeforeMonitor=flip,
               producerStoppedBeforeCleanup=True,supervisorExit=proc.returncode,logs=str(base))),flush=True)
     finally:
         fixture.release.set()
@@ -351,3 +375,5 @@ if __name__=='__main__':
     if '--native-squid' in sys.argv:
         asyncio.run(native_squid())
         asyncio.run(native_squid(crash=True))
+        asyncio.run(native_squid(ipv4_only=True))
+        asyncio.run(native_squid(ipv4_only=True,flip=True))

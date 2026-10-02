@@ -29,6 +29,17 @@ def opted_in(cmdline):
     return bool(values)
 
 
+def ipv6_disabled(root=Path('/proc/sys/net/ipv6/conf')):
+    """A missing/unreadable/partial policy is not proof IPv6 is disabled."""
+    try:
+        entries = list(root.iterdir())
+        if not {'all', 'default', 'lo'} <= {path.name for path in entries}:
+            return False
+        return all(path.joinpath('disable_ipv6').read_text().strip() == '1' for path in entries)
+    except OSError:
+        return False
+
+
 class RedirectRules:
     def __init__(self, uid, port=PORT, runner=subprocess.run):
         if type(uid) is not int or uid <= 0 or not 1024 <= port <= 65535:
@@ -147,12 +158,17 @@ def main():
     rules = RedirectRules(squid_user.pw_uid)
     gateway_process = squid_process = None
     try:
-        gateway_process = subprocess.Popen([sys.executable, str(gateway)], env=env,
+        # Respect the guest's deliberate IPv6-disable policy. Even without an
+        # IPv6 listener we install BOTH redirect families before Squid starts;
+        # later IPv6 enablement cannot bypass the gateway during monitor delay.
+        ipv4_only = ipv6_disabled()
+        gateway_args = [sys.executable, str(gateway)] + (['--ipv4-only'] if ipv4_only else [])
+        gateway_process = subprocess.Popen(gateway_args, env=env,
             user=gateway_user.pw_uid, group=gateway_user.pw_gid, extra_groups=[],
             stdout=subprocess.PIPE, text=True, start_new_session=True)
         ready, _, _ = select.select([gateway_process.stdout], [], [], 5)
         if not ready or not gateway_process.stdout.readline().startswith('BROMURE_ASYNC_SQUID_READY '):
-            raise RuntimeError('both gateway address families must bind before Squid launch')
+            raise RuntimeError('gateway address families required by policy must bind before Squid launch')
         rules.install()
         squid_process = subprocess.Popen([str(squid), '-N', '-f', str(native_config)], env=env,
             user=squid_user.pw_uid, group=squid_user.pw_gid, extra_groups=[], start_new_session=True)
@@ -165,10 +181,13 @@ def main():
         if any(int(x) != squid_user.pw_uid for x in ids) or actual.joinpath('exe').resolve() != squid:
             raise RuntimeError('native Squid executable/UID verification failed')
         print('BROMURE_ASYNC_SQUID_ACTIVE ' + json.dumps(dict(squidPID=squid_process.pid,
-              squidUID=squid_user.pw_uid, gatewayPID=gateway_process.pid, gatewayUID=gateway_user.pw_uid)), flush=True)
+              squidUID=squid_user.pw_uid, gatewayPID=gateway_process.pid, gatewayUID=gateway_user.pw_uid,
+              ipv4Only=ipv4_only, ipv6RedirectInstalled=True)), flush=True)
         while not stopped.wait(.25):
             if squid_process.poll() is not None or gateway_process.poll() is not None:
                 raise RuntimeError('candidate worker exited; stopping without routing fallback')
+            if ipv4_only and not ipv6_disabled():
+                raise RuntimeError('IPv6 policy changed; stop Squid before restarting gateway listeners')
     finally:
         # Stop traffic producer FIRST. Never remove redirect under a live Squid.
         stop_child(squid_process)

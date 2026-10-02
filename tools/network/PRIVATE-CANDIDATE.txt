@@ -12,7 +12,7 @@ Private-image installation (root, OFFLINE clone or before config-agent starts):
   install -o root -g root -m 0755 config-agent.py /usr/local/bin/
 
 Requires existing proxy/nobody accounts, Python 3.9+, iptables and ip6tables
-with owner/NAT/REDIRECT kernel support, IPv6 loopback, and Squid. Missing
+with owner/NAT/REDIRECT kernel support and Squid. Missing
 requirements fail closed; no direct or legacy fallback after an opted-in failure.
 Use a fresh VM. Never start alongside the legacy proxychains Squid process.
 Logs: /tmp/bromure/resilient-launch.0.log; supervisor emits
@@ -23,6 +23,10 @@ Routing:
 - ALL Squid-UID outbound TCP (IPv4, IPv6, including loopback) is redirected.
 - Original numeric IP/port goes ONLY to existing routing-socks on localhost40001.
 - Gateway runs as nobody; Squid is launched as proxy before exec, without preload.
+- IPv6 listener is omitted ONLY when all/default/lo/every interface disable_ipv6
+  values are verified1. Both IPv4 and IPv6 UID NAT rules are still mandatory.
+  Later policy change remains redirected (no listener, no egress) and supervisor
+  stops Squid; no IPv6 sysctl is enabled by this candidate.
 - Other UIDs are unaffected. No direct gateway destination injection is accepted.
 - IPv6 scoped/link-local addresses fail closed: SOCKS cannot convey scope IDs.
 - Maximum256 active connections, 30s connect handshake, 64KiB relay buffers with
@@ -55,3 +59,16 @@ WireGuard/IKEv2 up/down and custom proxy parity, long sessions, throughput at
 256 connections, release packaging. Do not enable production until those gates
 pass. This fixes a demonstrated proxy head-of-line blocking mechanism; it does
 not establish the cause of independent eight-video rendering slowness.
+
+IPv6-disabled followup evidence: results/async-squid-ipv4-policy-20261002.log
+and JSON. Tests include actual native Squid with all/default IPv6 disabled,
+then re-enable IPv6 with the supervisor deliberately SIGSTOPped: UID TCP still
+cannot reach a direct IPv6 trap before policy monitoring resumes. Supervisor
+then stops producer and cleans both NAT families. No guest policy loosening.
+
+Private offline dependency bundle was sent separately (not vendored):
+SHA256 6f8a5bd004e0d92d0dc7d24b53a0b8a77eb823cb042e010b30c3f2d6deac7784.
+Ubuntu noble ARM64 iptables,libip4tc2,libip6tc2,libxtables12=1.8.10-3ubuntu2;
+libmnl0,libnetfilter-conntrack3,libnfnetlink0,libnftnl11 and netbase included.
+Guest libc6 remains installed version (requires>=2.38). Verify SHA256SUMS then
+dpkg -i ./*.deb inside the private clone.

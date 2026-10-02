@@ -43,10 +43,11 @@ def original_destination(sock, gateway_port):
 
 class Gateway:
     def __init__(self, port=40002, router_port=40001, max_connections=256,
-                 connect_timeout=30, lifetime=86400):
+                 connect_timeout=30, lifetime=86400, ipv4_only=False):
         self.port, self.router_port = port, router_port
         self.max_connections = max_connections
         self.connect_timeout, self.lifetime = connect_timeout, lifetime
+        self.ipv4_only = ipv4_only
         self.active = set()
         self.servers = []
         self.accepted = self.rejected = self.failed = 0
@@ -128,7 +129,10 @@ class Gateway:
 
     async def start(self):
         try:
-            for family, host in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')):
+            families = [(socket.AF_INET, '127.0.0.1')]
+            if not self.ipv4_only:
+                families.append((socket.AF_INET6, '::1'))
+            for family, host in families:
                 sock = socket.socket(family, socket.SOCK_STREAM)
                 try:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -161,11 +165,14 @@ async def main():
     parser.add_argument('--max-connections', type=int, default=256)
     parser.add_argument('--connect-timeout', type=float, default=30)
     parser.add_argument('--lifetime', type=float, default=86400)
+    parser.add_argument('--ipv4-only', action='store_true',
+                        help='supervisor must verify disabled IPv6 and STILL install IPv6 redirect rules')
     args = parser.parse_args()
     if not (1024 <= args.port <= 65535 and 1 <= args.router_port <= 65535 and args.port != args.router_port
             and 1 <= args.max_connections <= 256 and 0 < args.connect_timeout <= 30 and 0 < args.lifetime <= 86400):
         parser.error('candidate limits exceeded')
-    gateway = Gateway(args.port, args.router_port, args.max_connections, args.connect_timeout, args.lifetime)
+    gateway = Gateway(args.port, args.router_port, args.max_connections, args.connect_timeout, args.lifetime,
+                      ipv4_only=args.ipv4_only)
     stopped = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         asyncio.get_running_loop().add_signal_handler(sig, stopped.set)
