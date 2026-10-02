@@ -1,0 +1,57 @@
+Private async Squid candidate — 2026-10-02
+
+Status: Linux candidate only. NOT installed by setup.sh or enabled by default.
+A private guest clone must contain the two root-owned executable scripts and
+updated config-agent.py, and boot with bromure.experimental_async_squid=1.
+Do not add Chrome proxy bypasses for acceptance. Production and externally
+configured proxy branches retain their existing commands without this opt-in.
+
+Private-image installation (root, OFFLINE clone or before config-agent starts):
+  install -o root -g root -m 0755 async-squid-gateway.py /usr/local/bin/
+  install -o root -g root -m 0755 async-squid-launch.py /usr/local/bin/
+  install -o root -g root -m 0755 config-agent.py /usr/local/bin/
+
+Requires existing proxy/nobody accounts, Python 3.9+, iptables and ip6tables
+with owner/NAT/REDIRECT kernel support, IPv6 loopback, and Squid. Missing
+requirements fail closed; no direct or legacy fallback after an opted-in failure.
+Use a fresh VM. Never start alongside the legacy proxychains Squid process.
+Logs: /tmp/bromure/resilient-launch.0.log; supervisor emits
+BROMURE_ASYNC_SQUID_ACTIVE with verified Squid/gateway PIDs and distinct UIDs.
+
+Routing:
+- Squid retains DNS resolution, filtering, ACLs and cache_peer configuration.
+- ALL Squid-UID outbound TCP (IPv4, IPv6, including loopback) is redirected.
+- Original numeric IP/port goes ONLY to existing routing-socks on localhost40001.
+- Gateway runs as nobody; Squid is launched as proxy before exec, without preload.
+- Other UIDs are unaffected. No direct gateway destination injection is accepted.
+- IPv6 scoped/link-local addresses fail closed: SOCKS cannot convey scope IDs.
+- Maximum256 active connections, 30s connect handshake, 64KiB relay buffers with
+  drain backpressure, 24h connection lifetime. Excess connections are closed.
+- Supervisor stops Squid before removing owned rules. Worker failure stops both.
+  SIGKILL/power loss may leave rules within that guest; stale chains are refused,
+  never blindly flushed. A fresh private boot is the recovery path.
+
+Validation:
+  PYTHONDONTWRITEBYTECODE=1 python3 tools/network/test-async-squid.py
+  sudo -n env PYTHONDONTWRITEBYTECODE=1 unshare --net --mount-proc --pid --fork \
+    python3 tools/network/test-async-squid-netns.py --native-squid
+
+The native test uses extracted Ubuntu ARM64 Squid 6.14 packages from
+/tmp/bromure-network-audit/root (override BROMURE_SQUID_TEST_ROOT), not a host
+service installation. Extract squid, squid-common, squid-langpack, libecap3,
+and libltdl7 with dpkg-deb -x. All actual firewall/address changes occur only
+inside the new network/PID namespace; script requires root PID1.
+
+Evidence: results/async-squid-netns-20261002.log and its provenance JSON.
+Actual kernel tests cover IPv4/IPv6/loopback destinations, exact1MiB transfer,
+UID isolation, held-connect concurrency, saturation/deadline/recovery, no
+fallback when router/gateway disappears, exact rule cleanup, native Squid DNS
+sinkhole blocking, and supervisor gateway-crash cleanup. Unmodified production
+routing-socks passes direct→synthetic WARP→direct switching for both families;
+selected WARP failure does not connect directly.
+
+Not yet proven: actual Mac private-image normal-route browsing, live VPN/WARP/
+WireGuard/IKEv2 up/down and custom proxy parity, long sessions, throughput at
+256 connections, release packaging. Do not enable production until those gates
+pass. This fixes a demonstrated proxy head-of-line blocking mechanism; it does
+not establish the cause of independent eight-video rendering slowness.

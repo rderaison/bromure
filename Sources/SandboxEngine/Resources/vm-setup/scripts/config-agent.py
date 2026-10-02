@@ -37,6 +37,21 @@ NIC_MTU_MARKER = "/tmp/bromure/nic-mtu"
 EPHEMERAL_CHROME_DIR = "/home/chrome/.bromure-chrome"
 
 
+def squid_launch_command(cmdline):
+    """Keep the private candidate explicit; never silently fall back on error."""
+    values = [word.split('=', 1)[1] for word in cmdline.split()
+              if word.startswith('bromure.experimental_async_squid=')]
+    if values and values != ['1']:
+        raise ValueError('invalid async Squid experimental boot opt-in')
+    if values:
+        candidate = '/usr/local/bin/async-squid-launch.py'
+        if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+            raise RuntimeError('private async Squid candidate is not installed')
+        return [candidate]
+    return ["proxychains4", "-q", "-f", "/etc/proxychains/proxychains.conf",
+            "squid", "-N", "-f", "/etc/squid/squid.conf"]
+
+
 def run(cmd, check=False):
     """Run a shell command, return (returncode, stdout)."""
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -1490,11 +1505,15 @@ def configure_services(cfg, ca_count):
              "/usr/local/bin/routing-socks.py"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Start squid through proxychains (auto-restarted on crash).
+        # Private-image experiment only. Candidate scripts are deliberately
+        # not shipped by setup.sh; an opted-in image must install them first.
+        with open('/proc/cmdline') as kernel_options:
+            squid_command = squid_launch_command(kernel_options.read())
+
+        # Candidate supervisor stops Squid before removing its redirect rules.
+        # A failure is restarted in the selected mode, never by direct fallback.
         subprocess.Popen(
-            ["/usr/local/bin/resilient-launch.sh",
-             "proxychains4", "-q", "-f", "/etc/proxychains/proxychains.conf",
-             "squid", "-N", "-f", "/etc/squid/squid.conf"],
+            ["/usr/local/bin/resilient-launch.sh"] + squid_command,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Profile preferences. Persistent profiles use their mounted dir;
