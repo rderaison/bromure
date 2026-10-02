@@ -447,6 +447,53 @@ struct DelegationTests {
         #expect(f.store.delegation(d.id)?.status == .done)
     }
 
+    /// A native machine (Bromure Sidecar) as the engine sees one: its own
+    /// session store, and what the host asked it to type.
+    private final class FakeMachine: AgentHostLink {
+        let agentHostID: UUID? = UUID()
+        let hostName = "macdev2-native"
+        let hostSessions = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("machine-sessions-\(UUID().uuidString).json"))
+        let hostHome: String? = "/Users/someone"
+        var commands: [String] = []
+        func hostExec(_ command: String, timeout: Int) async throws -> String { commands.append(command); return "" }
+        func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any] { [:] }
+        func hostTabStatus(window: Int) -> AgentStatus? { .done }
+        func hostSessionCommand(_ id: UUID, _ action: String, _ body: [String: Any]) {}
+        func hostControl(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])? { nil }
+        func hostStartSession(tool: Profile.Tool, cwd: String, message: String) async -> UUID? { nil }
+    }
+
+    @Test("a board task queued for a native machine's session reaches it, and its delivery comes back")
+    func boardRequestToMachine() async throws {
+        let f = fixture()
+        let machine = FakeMachine()
+        let mid = try #require(machine.agentHostID)
+        f.engine.agentHostLinks = { [machine] }
+        var gpu = AgentSession(profileID: mid, tool: .codex, title: "Codex in bromure",
+                               cwd: "/Users/someone/Devel/bromure", windowIndex: 1)
+        gpu.agentAlive = true
+        gpu.nickname = "macos-gpu-work"
+        machine.hostSessions.upsert(gpu)
+        var got: [DelegationMessage] = []
+        f.engine.onBoardMessage = { _, m in got.append(m) }
+        let d = try await f.engine.requestFromBoard(to: gpu.id, title: "Speed up the renderer",
+                                                    text: "Profile the renderer and speed it up.")
+        #expect(d.childSessionID == gpu.id)
+        #expect(d.profileID == mid)
+        // The machine's session answers over its own MCP connection (the
+        // Sidecar's shim announces window 1).
+        let server = DelegationMCPServer(profileID: mid, sessions: { machine.hostSessions }, engine: { f.engine })
+        let inbox = parse(await server.handle(line: call("read_inbox"), branch: "w1"))
+        #expect(!isError(inbox), Comment(rawValue: text(inbox)))
+        #expect(text(inbox).contains("Profile the renderer"))
+        let del = parse(await server.handle(line: call("deliver", [
+            "delegation_id": d.id.uuidString, "summary": "Done on wt/speed"]), branch: "w1"))
+        #expect(!isError(del), Comment(rawValue: text(del)))
+        #expect(got.last?.kind == .deliver)
+        #expect(f.store.delegation(d.id)?.status == .delivered)
+    }
+
     @Test("a board task that reads like an injection is withheld")
     func boardRequestScanned() async {
         let f = fixture()

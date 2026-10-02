@@ -3003,6 +3003,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// vsock-only on purpose — keeps working with no virtiofs share mounted
     /// (the future remote-access case), which is why the file explorer uses it.
     func guestExec(profileID: Profile.ID, command: String, timeout: Int = 30) async throws -> String {
+        // An attached native machine (Bromure Sidecar) runs it on that Mac —
+        // the board's worktree lookups and reviews reach its sessions too.
+        if let m = attachedMachines[profileID] {
+            return try await m.hostExec(command, timeout: timeout)
+        }
         // Wait up to ~3s for a pooled connection (covers boot races) without
         // blocking the main actor.
         var connection: VZVirtioSocketConnection?

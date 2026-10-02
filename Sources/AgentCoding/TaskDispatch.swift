@@ -39,16 +39,17 @@ final class TaskDispatcher {
     /// Sessions and rooms the board can hand a task to.
     func choices() -> TaskAssigneeChoices {
         guard let delegate else { return TaskAssigneeChoices() }
-        let store = delegate.agentSessionStore
         let model = delegate.unifiedWindow?.listModel
-        let sessions = store.sessions
+        // This host's sessions and its native machines' (Bromure Sidecar).
+        let sessions = delegate.allSessionRecords
             .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
             .sorted { SessionHome.lastActivity($0) > SessionHome.lastActivity($1) }
             .prefix(40)
             .map { s -> TaskAssigneeChoices.Session in
                 let bucket = model.map { SessionHome.bucket(for: s, in: $0) }
                 return .init(id: s.id, label: delegate.delegationEngine.label(s),
-                             workspace: delegate.profile(for: s.profileID)?.name ?? "",
+                             workspace: delegate.profile(for: s.profileID)?.name
+                                ?? delegate.attachedMachines[s.profileID]?.name ?? "",
                              busy: bucket == .working || bucket == .needsYou)
             }
         let rooms = delegate.agentRoomStore.rooms
@@ -122,7 +123,7 @@ final class TaskDispatcher {
     /// resumed with it). Without a window model, only a live agent mid-turn
     /// counts as busy.
     private func sessionIsFree(_ id: UUID) -> Bool {
-        guard let delegate, let s = delegate.agentSessionStore.session(id), !s.isDeleted else { return false }
+        guard let delegate, let s = delegate.sessionRecord(id), !s.isDeleted else { return false }
         if let model = delegate.unifiedWindow?.listModel {
             let b = SessionHome.bucket(for: s, in: model)
             return b != .working && b != .needsYou
@@ -171,7 +172,7 @@ final class TaskDispatcher {
                 delegate.codingTaskEngine.start(taskID)
                 return
             case .session:
-                guard let s = delegate.agentSessionStore.session(assignment.id), !s.isDeleted else {
+                guard let s = delegate.sessionRecord(assignment.id), !s.isDeleted else {
                     revert(NSLocalizedString("That session no longer exists.", comment: "task assign"))
                     return
                 }
@@ -305,17 +306,17 @@ final class TaskDispatcher {
         // Where to look: the session that delivered, or — through a room —
         // every session in the room.
         var candidates: [AgentSession] = []
-        if let s = delegate.agentSessionStore.session(d.childSessionID), !s.isSwitchboard {
+        if let s = delegate.sessionRecord(d.childSessionID), !s.isSwitchboard {
             candidates.append(s)
         }
         if let a = task.assignment, a.kind == .room {
-            candidates += delegate.agentSessionStore.sessions.filter {
+            candidates += delegate.allSessionRecords.filter {
                 $0.roomID == a.id && !$0.isSwitchboard && !$0.isDeleted
             }
         }
         if let a = task.assignment, a.kind == .switchboard {
             // Any session the Switchboard may have picked, most recent first.
-            candidates += delegate.agentSessionStore.sessions
+            candidates += delegate.allSessionRecords
                 .filter { !$0.isSwitchboard && !$0.isDeleted }
                 .sorted { SessionHome.lastActivity($0) > SessionHome.lastActivity($1) }
                 .prefix(40)
@@ -323,7 +324,7 @@ final class TaskDispatcher {
         // Delegates a member started for it count too (their parents are
         // the candidates).
         let parents = Set(candidates.map(\.id))
-        candidates += delegate.agentSessionStore.sessions.filter {
+        candidates += delegate.allSessionRecords.filter {
             $0.parentSessionID.map(parents.contains) ?? false
         }
         var seen = Set<String>()
