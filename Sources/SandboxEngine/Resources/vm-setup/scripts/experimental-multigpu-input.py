@@ -1,10 +1,11 @@
 #!/usr/bin/python3 -u
 """Experimental host-only screen-local XTEST pointer/focus/wheel, vsock5830.
 
-Required: display(0/1), x/y(normalized), buttons(left1/right2/middle4).
+Required: display(0..screen_count-1), x/y(normalized), buttons(left1/right2/middle4).
 Optional: focus(bool), wheelX/wheelY(pixels, positive right/down, max2048).
-One ordered connection controls both X screens; legacy5821 stays unchanged.
+One ordered connection controls all X screens; legacy5821 stays unchanged.
 """
+import argparse
 import ctypes as C
 import json
 import math
@@ -26,7 +27,9 @@ def unique(pairs):
     return result
 
 
-def parse(line):
+def parse(line, screen_count=2):
+    if type(screen_count) is not int or not 2 <= screen_count <= 16:
+        raise ValueError('invalid screen count')
     if len(line) > MAX_LINE:
         raise ValueError('oversized input')
     value = json.loads(line, object_pairs_hook=unique)
@@ -34,7 +37,7 @@ def parse(line):
     if not isinstance(value, dict) or not required <= value.keys() or \
             value.keys() - (required | {'focus', 'wheelX', 'wheelY'}):
         raise ValueError('invalid input fields')
-    if type(value['display']) is not int or value['display'] not in (0, 1):
+    if type(value['display']) is not int or not 0 <= value['display'] < screen_count:
         raise ValueError('invalid screen')
     if type(value['buttons']) is not int or not 0 <= value['buttons'] <= 7:
         raise ValueError('invalid buttons')
@@ -72,7 +75,9 @@ class WindowAttributes(C.Structure):
 
 
 class XInput:
-    def __init__(self, display=b':0'):
+    def __init__(self, display=b':0', expected_count=2):
+        if type(expected_count) is not int or not 2 <= expected_count <= 16:
+            raise ValueError('expected screen count must be 2 through 16')
         self.x = C.CDLL('libX11.so.6')
         self.xt = C.CDLL('libXtst.so.6')
         for name, result, args in (
@@ -103,15 +108,16 @@ class XInput:
         self.xt.XTestFakeMotionEvent.argtypes = [C.c_void_p, C.c_int, C.c_int, C.c_int, C.c_ulong]
         self.xt.XTestFakeButtonEvent.argtypes = [C.c_void_p, C.c_uint, C.c_int, C.c_ulong]
         self.display = self.x.XOpenDisplay(display)
-        if not self.display or self.x.XScreenCount(self.display) != 2:
+        self.screen_count = self.x.XScreenCount(self.display) if self.display else 0
+        if self.screen_count != expected_count:
             if self.display:
                 self.x.XCloseDisplay(self.display)
             self.x.XSetErrorHandler(self.previous_error_handler)
-            raise OSError('exactly two X screens required')
-        self.roots = [self.x.XRootWindow(self.display, i) for i in range(2)]
+            raise OSError(f'expected {expected_count} X screens, found {self.screen_count}')
+        self.roots = [self.x.XRootWindow(self.display, i) for i in range(self.screen_count)]
         self.buttons = 0
         self.screen = None
-        self.wheels = [[0., 0.], [0., 0.]]
+        self.wheels = [[0., 0.] for _ in range(self.screen_count)]
 
     def dimensions(self, window):
         root, x, y = C.c_ulong(), C.c_int(), C.c_int()
@@ -224,7 +230,7 @@ def connection(sock, injector):
             while b'\n' in pending:
                 line, _, rest = pending.partition(b'\n')
                 pending = bytearray(rest)
-                injector.update(parse(line))
+                injector.update(parse(line, injector.screen_count))
             if len(pending) > MAX_LINE:
                 raise ValueError('oversized input')
     finally:
@@ -232,10 +238,13 @@ def connection(sock, injector):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--screen-count', type=int, choices=range(2, 17), default=2)
+    args = parser.parse_args()
     def terminate(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, terminate)
-    injector = XInput()
+    injector = XInput(expected_count=args.screen_count)
     try:
         with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM) as server:
             server.bind((socket.VMADDR_CID_ANY, PORT))

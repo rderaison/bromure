@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -u
-"""Opt-in two-GPU experiment: one Xorg, two independent X screens.
+"""Opt-in multi-GPU experiment: one Xorg, 2..16 independent X screens.
 
 prepare runs before Xorg as root; session runs as chrome under xinit.
 No PRIME sharing, Xinerama, persistent profile reuse or default activation.
@@ -20,7 +20,21 @@ XORG_CONFIG = Path('/etc/X11/bromure-experimental-multigpu.conf')
 MESA = Path('/opt/bromure/mesa-virgl')
 
 
-def discover(sysfs=Path('/sys/class/drm')):
+def requested_count(cmdline=None):
+    if cmdline is None:
+        cmdline = Path('/proc/cmdline').read_text()
+    values = [word.split('=', 1)[1] for word in cmdline.split()
+              if word.startswith('bromure.experimental_multigpu=')]
+    if not values:
+        return 2  # Direct diagnostic commands retain the original default.
+    if len(values) != 1 or not re.fullmatch(r'(?:[2-9]|1[0-6])', values[0]):
+        raise ValueError('experimental GPU count must be one integer from 2 through 16')
+    return int(values[0])
+
+
+def discover(sysfs=Path('/sys/class/drm'), count=2):
+    if type(count) is not int or not 2 <= count <= 16:
+        raise ValueError('experimental GPU count must be 2 through 16')
     devices = []
     for card in sysfs.glob('card*'):
         if not re.fullmatch(r'card\d+', card.name):
@@ -49,8 +63,8 @@ def discover(sysfs=Path('/sys/class/drm')):
                             render='/dev/dri/' + renders[0],
                             busID=f'PCI:{bus}@{domain}:{slot}:{function}'))
     devices.sort(key=lambda d: d['pci'])
-    if len(devices) != 2 or len({d['pci'] for d in devices}) != 2:
-        raise ValueError(f'experiment requires exactly two negotiated VirGL GPUs, found {len(devices)}')
+    if len(devices) != count or len({d['pci'] for d in devices}) != count:
+        raise ValueError(f'experiment requires exactly {count} negotiated VirGL GPUs, found {len(devices)}')
     for index, device in enumerate(devices):
         device.update(index=index, display=f':0.{index}', cdpPort=9222 + index)
     return devices
@@ -65,10 +79,10 @@ EndSection
 Section "ServerLayout"
   Identifier "BromureExperimentalMultiGPU"
   Screen 0 "BromureScreen0" 0 0
-  Screen 1 "BromureScreen1" RightOf "BromureScreen0"
-  Option "Xinerama" "false"
-EndSection
 ''']
+    for i in range(1, len(devices)):
+        sections.append(f'  Screen {i} "BromureScreen{i}" RightOf "BromureScreen{i - 1}"')
+    sections.append('  Option "Xinerama" "false"\nEndSection\n')
     for device in devices:
         i = device['index']
         sections.append(f'''Section "Device"
@@ -157,7 +171,7 @@ def browser_command(values, device, profiles):
 def prepare():
     if os.geteuid() != 0:
         raise ValueError('prepare requires root before Xorg starts')
-    devices = discover()
+    devices = discover(count=requested_count())
     import pwd
     user = pwd.getpwnam('chrome')
     runtime = Path(f'/run/user/{user.pw_uid}')
@@ -185,8 +199,8 @@ def session():
         os.execvp('dbus-run-session', ['dbus-run-session', '--', __file__, 'session'])
     manifest = json.loads((STATE / 'displays.json').read_text())
     devices = manifest['devices']
-    if len(devices) != 2:
-        raise ValueError('expected two screens')
+    if len(devices) != requested_count():
+        raise ValueError('screen manifest does not match requested GPU count')
     stopped = False
 
     def stop(*_):
@@ -216,7 +230,7 @@ def session():
     work.mkdir(mode=0o700, exist_ok=True)
     children, logs = [], []
     try:
-        # Exactly one audio stack and session bus for the VM, shared by both
+        # Exactly one audio stack and session bus for the VM, shared by all
         # browsers. Profile policy and the configured proxy remain in force.
         if values.get('AUDIO') == '1':
             for name in ('pipewire', 'wireplumber', 'pipewire-pulse'):
@@ -226,13 +240,13 @@ def session():
                 time.sleep(.3)
         for device in devices:
             env = screen_environment(values, device)
-            # Fail before launching either browser if the X screen is absent.
+            # Fail before launching any browser if an X screen is absent.
             subprocess.run(['xdpyinfo', '-display', device['display']], env=env,
                            stdout=subprocess.DEVNULL, check=True, timeout=5)
         log = open(work / 'input.log', 'ab', buffering=0)
         logs.append(log)
         children.append(('input', subprocess.Popen(
-            ['/usr/local/bin/experimental-multigpu-input.py'],
+            ['/usr/local/bin/experimental-multigpu-input.py', '--screen-count', str(len(devices))],
             env=screen_environment(values, devices[0]), stdout=log, stderr=log)))
         for device in devices:
             env = screen_environment(values, device)
@@ -274,7 +288,7 @@ def main():
     parser.add_argument('action', choices=('prepare', 'session', 'probe'))
     args = parser.parse_args()
     if args.action == 'probe':
-        print(json.dumps(discover(), indent=2))
+        print(json.dumps(discover(count=requested_count()), indent=2))
     elif args.action == 'prepare':
         prepare()
     else:

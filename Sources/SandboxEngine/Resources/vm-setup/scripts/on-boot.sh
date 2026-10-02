@@ -16,9 +16,9 @@ modprobe virtiofs 2>/dev/null
 modprobe loop 2>/dev/null
 mkdir -p /mnt/share
 
-# Explicit two-GPU experiment only. Xorg must know its two independent screens
+# Explicit multi-GPU experiment only. Xorg must know its independent screens
 # before claim-time configuration arrives; ordinary boots take no new path.
-if grep -Fqw 'bromure.experimental_multigpu=2' /proc/cmdline; then
+if grep -Eq '(^|[[:space:]])bromure\.experimental_multigpu=' /proc/cmdline; then
     modprobe virtio_gpu 2>/dev/null || true
     _gpu_attempt=0
     while ! /usr/local/bin/experimental-multigpu.py prepare > /tmp/bromure/multigpu-prepare.log 2>&1; do

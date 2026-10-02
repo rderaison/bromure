@@ -1,6 +1,6 @@
 clear
 if [ -z "$DISPLAY" ]; then
-  if grep -Fqw 'bromure.experimental_multigpu=2' /proc/cmdline; then
+  if grep -Eq '(^|[[:space:]])bromure\.experimental_multigpu=' /proc/cmdline; then
     if [ -r /etc/X11/bromure-experimental-multigpu.conf ]; then
       startx /usr/local/bin/experimental-multigpu.py session -- \
         -config bromure-experimental-multigpu.conf > /tmp/startx.log 2>&1

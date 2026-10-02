@@ -27,6 +27,50 @@ wire = load('experimental-multigpu-input')
 
 
 class Tests(unittest.TestCase):
+    def test_count_boundaries_and_kernel_opt_in(self):
+        self.assertEqual(session.requested_count('quiet'), 2)
+        for count in range(2, 17):
+            self.assertEqual(session.requested_count(f'quiet bromure.experimental_multigpu={count} ro'), count)
+            value = dict(display=count - 1, x=.5, y=.5, buttons=0)
+            self.assertEqual(wire.parse(json.dumps(value), count)['display'], count - 1)
+            for invalid in (-1, count, True):
+                with self.assertRaises(ValueError):
+                    wire.parse(json.dumps(value | {'display': invalid}), count)
+        for value in ('', '0', '1', '17', '-2', '2.0', '02', 'true', '2 bromure.experimental_multigpu=4'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                session.requested_count('bromure.experimental_multigpu=' + value)
+        for count in (1, 17, True):
+            with self.assertRaises(ValueError):
+                session.discover(count=count)
+            with self.assertRaises(ValueError):
+                wire.parse('{}', count)
+
+    def test_sixteen_devices_layout_and_exact_count(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            drm = root / 'drm'
+            drm.mkdir()
+            for index in range(16):
+                device = root / 'devices' / f'0000:00:{index:02x}.0' / f'virtio{index}'
+                device.mkdir(parents=True)
+                (device / 'features').write_text('1' + '0' * 63)
+                for name in (f'card{index}', f'renderD{128 + index}'):
+                    (drm / name).mkdir()
+                    (drm / name / 'device').symlink_to(device)
+            devices = session.discover(drm, count=16)
+            self.assertEqual(devices[-1]['display'], ':0.15')
+            self.assertEqual(devices[-1]['cdpPort'], 9237)
+            config = session.xorg_config(devices)
+            self.assertEqual(config.count('Section "Screen"'), 16)
+            self.assertIn('Screen 15 "BromureScreen15" RightOf "BromureScreen14"', config)
+            self.assertEqual(len({d['render'] for d in devices}), 16)
+            for count in (2, 15):
+                with self.assertRaisesRegex(ValueError, f'exactly {count}'):
+                    session.discover(drm, count=count)
+            (root / 'devices/0000:00:0f.0/virtio15/features').write_text('0' * 64)
+            with self.assertRaisesRegex(ValueError, 'exactly 16'):
+                session.discover(drm, count=16)
+
     def test_topology_excludes_builtin_and_pins_pci_not_card_order(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -50,7 +94,7 @@ class Tests(unittest.TestCase):
             self.assertIn('Option "Xinerama" "false"', text)
             self.assertNotIn('/dev/dri/card0', text)
             (root / 'devices/0000:00:0e.0/virtio2/features').write_text('0' * 64)
-            with self.assertRaisesRegex(ValueError, 'exactly two'):
+            with self.assertRaisesRegex(ValueError, 'exactly 2'):
                 session.discover(drm)
 
     def test_distinct_browser_profiles_ports_and_render_nodes(self):
@@ -84,6 +128,7 @@ class Tests(unittest.TestCase):
 
     def test_fragmented_stream_and_failure_release(self):
         class Injector:
+            screen_count = 2
             def __init__(self):
                 self.values = []
                 self.releases = 0
@@ -102,12 +147,17 @@ class Tests(unittest.TestCase):
         self.assertEqual(injector.releases, 1)
 
     @unittest.skipUnless(shutil.which('Xvfb'), 'requires Xvfb')
-    def test_live_two_roots_pointer_buttons_focus_and_keyboard(self):
+    def test_live_multiple_roots_pointer_buttons_focus_and_keyboard(self):
+        for count in (2, 4, 16):
+            with self.subTest(count=count):
+                self.check_live_roots(count)
+
+    def check_live_roots(self, count):
         with tempfile.TemporaryDirectory() as temp:
             # Xvfb allocates an unused display atomically via -displayfd.
             readfd, writefd = os.pipe()
-            server = subprocess.Popen(['Xvfb', '-displayfd', str(writefd),
-                                       '-screen', '0', '640x480x24', '-screen', '1', '800x600x24',
+            screens = [arg for i in range(count) for arg in ('-screen', str(i), f'{640 + 8*i}x{480 + 4*i}x24')]
+            server = subprocess.Popen(['Xvfb', '-displayfd', str(writefd), *screens,
                                        '-nolisten', 'tcp', '-noreset'], pass_fds=(writefd,),
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             os.close(writefd)
@@ -116,7 +166,9 @@ class Tests(unittest.TestCase):
                 import select
                 self.assertTrue(select.select([readfd], [], [], 5)[0], 'Xvfb startup timeout')
                 display = b':' + os.read(readfd, 32).strip()
-                injector = wire.XInput(display)
+                with self.assertRaisesRegex(OSError, 'expected'):
+                    wire.XInput(display, expected_count=4 if count == 2 else 2)
+                injector = wire.XInput(display, expected_count=count)
                 x, d = injector.x, injector.display
                 for name, result, args in (
                     ('XCreateSimpleWindow', C.c_ulong, [C.c_void_p, C.c_ulong, C.c_int,
@@ -143,9 +195,10 @@ class Tests(unittest.TestCase):
                     x.XMapWindow(d, window)
                     windows.append(window)
                 x.XSync(d, False)
-                for screen in (0, 1, 0, 1):
+                visits = [*range(count), *reversed(range(count))]
+                for screen in visits:
                     injector.update(wire.parse(json.dumps(dict(
-                        display=screen, x=.25, y=.75, buttons=1, focus=True))))
+                        display=screen, x=.25, y=.75, buttons=1, focus=True)), count))
                     focus, revert = C.c_ulong(), C.c_int()
                     x.XGetInputFocus(d, C.byref(focus), C.byref(revert))
                     self.assertEqual(focus.value, windows[screen])
@@ -168,10 +221,10 @@ class Tests(unittest.TestCase):
                     event = (C.c_long * 24)()
                     x.XNextEvent(d, C.byref(event))
                     event_types.append(C.cast(event, C.POINTER(C.c_int))[0])
-                self.assertEqual(event_types.count(2), 4)  # KeyPress
-                self.assertEqual(event_types.count(3), 4)  # KeyRelease
-                self.assertEqual(event_types.count(4), 4)  # ButtonPress
-                self.assertEqual(event_types.count(5), 4)  # ButtonRelease
+                self.assertEqual(event_types.count(2), len(visits))  # KeyPress
+                self.assertEqual(event_types.count(3), len(visits))  # KeyRelease
+                self.assertEqual(event_types.count(4), len(visits))  # ButtonPress
+                self.assertEqual(event_types.count(5), len(visits))  # ButtonRelease
             finally:
                 os.close(readfd)
                 if injector:
