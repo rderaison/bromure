@@ -514,6 +514,8 @@ class Controller:
                     raise RuntimeError('browser did not create a distinct window')
                 self.active[wid] = tid
             self.bindings[index] = wid
+            if cmd == 'attachPrimary':
+                self.active.setdefault(wid, self.groups[wid][0]['id'])
             self.place(wid, active[index])
             return {'windowId': wid, 'targetId': self.active.get(wid)}
         integer(wid, 1, SAFE_INTEGER, 'windowId')

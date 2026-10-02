@@ -175,6 +175,7 @@ class ControllerTests(unittest.TestCase):
         reply = self.controller.handle(dict(id=2, cmd='attachPrimary', scanout=0, topology=layout))
         self.assertTrue(reply['ok'], reply)
         self.assertEqual(reply['windowId'], 10)
+        self.assertEqual(reply['targetId'], 'a')
 
     def test_single_browser_create_focus_new_tab_close_and_idempotence(self):
         self.attach()
