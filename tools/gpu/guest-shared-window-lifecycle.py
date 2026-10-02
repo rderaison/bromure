@@ -11,6 +11,7 @@ import argparse
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import threading
@@ -89,6 +90,27 @@ def get(path):
         return json.load(r)
 
 
+def profile_directory(command):
+    fields = [arg for arg in command if arg]
+    flattened = len(fields) == 1 and ' --' in fields[0]
+    if flattened:
+        # Chromium may rewrite argv into a single process-title string. Only
+        # accept the known UUID mount token; never guess quoted/space paths.
+        values = re.findall(r'(?<!\S)--user-data-dir=(\S+)', fields[0])
+        if '--user-data-dir' not in fields[0]:
+            return None, 'flattened'
+        assert len(values) == 1 and fields[0].count('--user-data-dir') == 1, 'ambiguous flattened profile'
+        path = values[0]
+        prefix = '/home/chrome/.'
+        assert path.startswith(prefix), 'unexpected flattened profile mount'
+        suffix = path[len(prefix):]
+        assert str(uuid.UUID(suffix)).upper() == suffix.upper(), 'invalid profile UUID mount'
+        return path, 'flattened'
+    values = [arg.split('=', 1)[1] for arg in fields if arg.startswith('--user-data-dir=')]
+    assert len(values) <= 1 and '--user-data-dir' not in fields, 'ambiguous profile arguments'
+    return (values[0] if values else None), 'argv'
+
+
 def processes():
     rows = []
     boot_id = str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
@@ -100,8 +122,9 @@ def processes():
             if any('--type=' in arg for arg in command):
                 continue
             stat = directory.joinpath('stat').read_text().rsplit(')', 1)[1].split()
-            profile = next((arg.split('=', 1)[1] for arg in command if arg.startswith('--user-data-dir=')), None)
-            rows.append(dict(bootId=boot_id, pid=int(directory.name), startTicks=int(stat[19]), command=command, profile=profile))
+            profile, encoding = profile_directory(command)
+            rows.append(dict(bootId=boot_id, pid=int(directory.name), startTicks=int(stat[19]),
+                             command=command, commandEncoding=encoding, profile=profile))
         except OSError:
             continue
     assert len(rows) == 1, rows

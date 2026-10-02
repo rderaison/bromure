@@ -14,6 +14,16 @@ fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
 class FixtureTests(unittest.TestCase):
+    def test_flattened_profile_is_exact_uuid_mount_or_fails(self):
+        path = '/home/chrome/.C3D89033-06A4-4321-B9C3-603F2E1246EE'
+        self.assertEqual(fixture.profile_directory(['/usr/lib/chromium/chromium --user-agent=two words --user-data-dir=' + path + ' --no-first-run', '']),
+                         (path, 'flattened'))
+        self.assertEqual(fixture.profile_directory(['/usr/lib/chromium/chromium', '--user-data-dir=' + path, '']), (path, 'argv'))
+        self.assertEqual(fixture.profile_directory(['chromium --no-first-run', '']), (None, 'flattened'))
+        for value in ('/tmp/unknown', '"' + path + '"', path + '/suffix', path + ' --user-data-dir=' + path):
+            with self.subTest(value=value), self.assertRaises((ValueError, AssertionError)):
+                fixture.profile_directory(['chromium --user-data-dir=' + value])
+
     def start_server(self, limit=16, sequential=False):
         ready = queue.Queue()
         class Handler(fixture.FixtureHandler):
