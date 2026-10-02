@@ -193,10 +193,19 @@ struct AutomationHubView: View {
     var body: some View {
         let actions = tabActions
         return VStack(spacing: 0) {
-            header
-            if hub.tab == .security && !findingStore.watches.isEmpty {
-                securityBar
+            // The task board's chrome: a floating glass bar over a tinted
+            // backdrop, the content's cards floating on the same wash.
+            VStack(spacing: 0) {
+                header
+                if hub.tab == .security && !findingStore.watches.isEmpty {
+                    Divider().opacity(0.5).padding(.horizontal, 12)
+                    securityBar
+                }
             }
+            .modifier(GlassCapsule(cornerRadius: 20))
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
             if let flash = hub.flash {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -207,10 +216,11 @@ struct AutomationHubView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(Color.green.opacity(0.08))
+                .background(Color.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
-            Divider()
             Group {
                 switch hub.tab {
                 case .automations:
@@ -244,7 +254,7 @@ struct AutomationHubView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color.platformWindowBackground)
+        .background(BoardBackdrop())
         .animation(.easeInOut(duration: 0.2), value: hub.flash)
         .environment(\.findingRouting, FindingRouting(
             rooms: actions.switchboardRooms(),
@@ -314,7 +324,7 @@ struct AutomationHubView: View {
             } label: {
                 Label(NSLocalizedString("New Automation", comment: "hub"), systemImage: "plus")
             }
-            .buttonStyle(.borderedProminent)
+            .modifier(ProminentGlassButton())
             .keyboardShortcut("n", modifiers: [.command, .option])
         }
         .padding(.horizontal, 16)
@@ -456,8 +466,7 @@ struct HubCard<Content: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08)))
+        .modifier(FloatingCardBackground(cornerRadius: 12))
     }
 }
 
@@ -752,10 +761,9 @@ private struct AutomationKindCard: View {
             }
             .padding(18)
             .frame(maxWidth: .infinity, minHeight: 330, alignment: .topLeading)
-            .background(Color.primary.opacity(hovering ? 0.055 : 0.03), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(hovering ? tint.opacity(0.55) : Color.primary.opacity(0.09),
-                              lineWidth: hovering ? 1.5 : 1))
+            .modifier(FloatingCardBackground(cornerRadius: 14, hovering: hovering))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(hovering ? tint.opacity(0.55) : .clear, lineWidth: 1.5))
             .contentShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
@@ -831,8 +839,7 @@ struct HubSecurityWelcome: View {
                         }
                         .padding(14)
                         .frame(maxWidth: .infinity, minHeight: 130, alignment: .topLeading)
-                        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.08)))
+                        .modifier(FloatingCardBackground(cornerRadius: 12))
                     }
                 }
                 .frame(maxWidth: 820)
@@ -895,9 +902,7 @@ struct HubStatTile: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .padding(14)
-            .background(Color.primary.opacity(hovering ? 0.06 : 0.035),
-                        in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.08)))
+            .modifier(FloatingCardBackground(cornerRadius: 12, hovering: hovering))
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
