@@ -3583,3 +3583,27 @@
 "Open the sign-in page and approve access." = "Öffnen Sie die Anmeldeseite und genehmigen Sie den Zugriff.";
 "Approve the sign-in in your browser; it should show this code:" = "Genehmigen Sie die Anmeldung in Ihrem Browser; dort sollte dieser Code angezeigt werden:";
 "Open the sign-in page and check that it shows this code:" = "Öffnen Sie die Anmeldeseite und prüfen Sie, ob dort dieser Code angezeigt wird:";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "Ihr Anpassungsskript (%@) kann nicht gelesen werden – das Image wird ohne es erstellt.";
+"Run my customize script after Bromure's setup" = "Mein Anpassungsskript nach der Einrichtung von Bromure ausführen";
+"No script chosen" = "Kein Skript gewählt";
+"Last Log" = "Letztes Protokoll";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "Läuft als root im Basis-Image, nachdem die Agenten installiert sind – bei jedem Neuaufbau und jeder Image-Aktualisierung, sodass jeder danach erstellte oder zurückgesetzte Workspace hat, was es installiert. Mit bash -x protokolliert; die Ausgabe wird in ~/Library/Logs/BromureAC/base-image-customize.log gesichert. Schlägt es fehl, bleibt das aktuelle Image erhalten.";
+"Choose the shell script to run inside the base image" = "Wählen Sie das Shell-Skript, das im Basis-Image ausgeführt werden soll";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "Fertiges Image laden";
+"The latest published image, then the recommended packages. A few minutes." = "Das neueste veröffentlichte Image, dann die empfohlenen Pakete. Ein paar Minuten.";
+"Recommended" = "Empfohlen";
+"Rebuild locally" = "Lokal neu erstellen";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "Auf diesem Mac mit dem vollständigen Installer neu erstellt. Etwa 10 Minuten.";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Ihre Workspaces bleiben unverändert – jeder bietet beim nächsten Start ein Zurücksetzen auf das neue Image an.";
+"Download & Update" = "Laden und aktualisieren";
+"Rebuild" = "Neu erstellen";
+"Update the base image" = "Basis-Image aktualisieren";
+"New workspaces start from this image: the system, the coding agents and their tools." = "Neue Workspaces starten von diesem Image: das System, die Coding-Agenten und ihre Werkzeuge.";
+"Customize the image" = "Image anpassen";
+"Choose Script…" = "Skript auswählen …";
+"Change…" = "Ändern …";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "Läuft als root im Image, nachdem die Agenten installiert sind – bei jedem Neuaufbau und jeder Aktualisierung, sodass neue und zurückgesetzte Workspaces haben, was es installiert. Mit bash -x protokolliert in ~/Library/Logs/BromureAC/base-image-customize.log. Schlägt es fehl, bleibt das aktuelle Image erhalten.";
+"Your customize script failed — the current image is kept. See %@" = "Ihr Anpassungsskript ist fehlgeschlagen – das aktuelle Image bleibt erhalten. Siehe %@";

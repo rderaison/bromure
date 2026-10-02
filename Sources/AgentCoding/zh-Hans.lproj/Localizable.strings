@@ -3583,3 +3583,27 @@
 "Open the sign-in page and approve access." = "打开登录页面并批准访问。";
 "Approve the sign-in in your browser; it should show this code:" = "在浏览器中批准登录；页面上应显示此代码：";
 "Open the sign-in page and check that it shows this code:" = "打开登录页面，确认页面上显示的是此代码：";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "无法读取你的自定义脚本（%@）——将在不运行它的情况下构建镜像。";
+"Run my customize script after Bromure's setup" = "在 Bromure 设置完成后运行我的自定义脚本";
+"No script chosen" = "未选择脚本";
+"Last Log" = "上次日志";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "在安装代理之后，以 root 身份在基础镜像中运行；每次重建或更新镜像时都会运行，因此之后创建或重置的每个工作区都会包含它安装的内容。使用 bash -x 跟踪，输出保存到 ~/Library/Logs/BromureAC/base-image-customize.log。如果失败，将保留当前镜像。";
+"Choose the shell script to run inside the base image" = "选择要在基础镜像中运行的 shell 脚本";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "下载预构建镜像";
+"The latest published image, then the recommended packages. A few minutes." = "获取最新发布的镜像，然后安装推荐的软件包。需要几分钟。";
+"Recommended" = "推荐";
+"Rebuild locally" = "在本地重建";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "在这台 Mac 上用完整安装程序从头构建。大约 10 分钟。";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "你的工作区不会被改动——每个工作区下次启动时都会提示重置到新镜像。";
+"Download & Update" = "下载并更新";
+"Rebuild" = "重建";
+"Update the base image" = "更新基础镜像";
+"New workspaces start from this image: the system, the coding agents and their tools." = "新的工作区都从这个镜像开始：系统、编程代理及其工具。";
+"Customize the image" = "自定义镜像";
+"Choose Script…" = "选择脚本…";
+"Change…" = "更改…";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "在安装代理之后，每次重建或更新时以 root 身份在镜像中运行，因此新建或重置的工作区都会包含它安装的内容。使用 bash -x 跟踪并写入 ~/Library/Logs/BromureAC/base-image-customize.log。如果失败，将保留当前镜像。";
+"Your customize script failed — the current image is kept. See %@" = "你的自定义脚本运行失败——已保留当前镜像。请查看 %@";
