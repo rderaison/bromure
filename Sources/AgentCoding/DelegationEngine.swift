@@ -60,6 +60,14 @@ final class DelegationEngine {
     private var typingNotice: Set<UUID> = []
     private var landing: Set<UUID> = []
 
+    /// The Coding Tasks board as a requester: it hands a task to a session
+    /// that already exists (or to a room's Switchboard) as a request. It
+    /// has no session; what comes back to it goes to `onBoardMessage`.
+    static let boardSessionID = UUID(uuidString: "B0A2D000-0000-4000-8000-00000000B0A2")!
+    static let boardLabel = "the Coding Tasks board"
+    /// A message for the board (an ask, a report, a delivery, a host note).
+    var onBoardMessage: (@MainActor (Delegation, DelegationMessage) -> Void)?
+
     /// A child may delegate in turn, this deep.
     static let maxDepth = 3
     /// Open delegations one session may have at once.
@@ -352,6 +360,36 @@ final class DelegationEngine {
         store.upsert(d)
         audit(me.profileID, auditData(title: d.title, kind: .brief, from: .parent, to: .child, text: text))
         BACDebug.log("delegation", "\(label(me)) asked \(label(peer)): \(DelegationNotice.oneLine(text, max: 80))")
+        notify(peer.id, d, m)
+        return d
+    }
+
+    /// The board hands a coding task to `peerID` — an existing session or a
+    /// room's Switchboard. Same record and notice as an agent's request; the
+    /// replies come back through `onBoardMessage`. Scanned like any text
+    /// crossing to an agent.
+    func requestFromBoard(to peerID: UUID, title: String, text: String) async throws -> Delegation {
+        guard let peer = sessions.session(peerID), !peer.isDeleted else {
+            throw DelegationRefusal("That session no longer exists.")
+        }
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw DelegationRefusal("Nothing to ask.") }
+        if let snippet = await scan(text) {
+            audit(peer.profileID, auditData(title: title, kind: .brief, from: .user, to: .child,
+                                            text: text, blocked: snippet))
+            throw DelegationRefusal("The task was withheld: it reads like a prompt injection (“\(DelegationNotice.oneLine(snippet, max: 120))”). Reword the brief.")
+        }
+        var d = Delegation(profileID: peer.profileID, parentSessionID: Self.boardSessionID,
+                           childSessionID: peer.id,
+                           title: DelegationNotice.oneLine(title, max: 60), brief: text, kind: .request)
+        d.parentLabel = Self.boardLabel
+        d.childLabel = label(peer)
+        d.status = .working
+        let m = DelegationMessage(kind: .brief, from: .user, to: .child, text: text)
+        d.messages = [m]
+        store.upsert(d)
+        audit(peer.profileID, auditData(title: d.title, kind: .brief, from: .user, to: .child, text: text))
+        BACDebug.log("delegation", "the board asked \(label(peer)): \(d.title)")
         notify(peer.id, d, m)
         return d
     }
@@ -1152,6 +1190,14 @@ final class DelegationEngine {
     /// as a one-line notice — now if the prompt can take it, on a later
     /// tick if not, through a resume if the agent has ended.
     private func notify(_ sessionID: UUID, _ d: Delegation, _ m: DelegationMessage) {
+        if sessionID == Self.boardSessionID {
+            // The board has no prompt: its engine takes the message, and it
+            // counts as read (nothing is owed to a session that isn't one).
+            store.markNoticed([m.id])
+            store.markRead([m.id])
+            onBoardMessage?(d, m)
+            return
+        }
         if let ws = waiters[sessionID], !ws.isEmpty {
             for w in ws { w.resume() }
             return

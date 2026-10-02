@@ -59,7 +59,7 @@ pipeline {
         stage('Archive') {
             steps {
                 sh '''
-                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+                    BUILD_DIR=$(swift build --build-system "${SWIFT_BUILD_SYSTEM:-native}" -c release --arch arm64 --show-bin-path 2>/dev/null)
                     DMG_FILENAME="Bromure-${BROMURE_VERSION}.dmg"
                     cp "$BUILD_DIR/Bromure.dmg" "${WORKSPACE}/${DMG_FILENAME}"
                 '''

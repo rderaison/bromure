@@ -73,6 +73,8 @@ struct AutomationKanbanView: View {
     var store: ScheduledAutomationStore
     @Bindable var model: SessionListModel
     let actions: Actions
+    /// Off when the board is a tab of the Automations hub (it has its own).
+    var showsHeader = true
 
     /// Done-column paging: recent runs come from the store; older ones load
     /// from the on-disk archive on demand.
@@ -163,8 +165,10 @@ struct AutomationKanbanView: View {
         let done = doneRuns(cols)
         return VStack(alignment: .leading, spacing: 0) {
             #if os(macOS)
-            header
-            Divider()
+            if showsHeader {
+                header
+                Divider()
+            }
             #endif
             if compact {
                 // Phone: one vertical scroll with the columns stacked.
@@ -204,7 +208,7 @@ struct AutomationKanbanView: View {
                 }
             }
         }
-        .background(Color.platformWindowBackground)
+        .background(BoardBackdrop(tints: [.orange, .pink, .blue]))
     }
 
     private var header: some View {
@@ -325,6 +329,8 @@ struct KanbanColumn<Content: View>: View {
     let count: Int
     var tint: Color = .secondary
     var emptyText: String = ""
+    /// One line under the title: what the column is for.
+    var subtitle: String? = nil
     @ViewBuilder let content: () -> Content
     /// Compact = iPhone portrait: columns are stacked vertically in one board
     /// scroll, so a column is full-width and lays its cards out inline (no inner
@@ -332,74 +338,268 @@ struct KanbanColumn<Content: View>: View {
     @Environment(\.horizontalSizeClass) private var hSize
     private var compact: Bool { hSize == .compact }
 
+    /// The header's accent: the column tint, or a neutral grey.
+    private var accent: Color { tint == .secondary ? Color.gray : tint }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 12) {
+            // The heading floats as a glass pill; the cards sit on the
+            // board's wash underneath — no grey wells.
+            HStack(alignment: .center, spacing: 8) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(tint)
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .textCase(.uppercase)
-                    .tracking(0.6)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(accent.gradient))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 4)
                 Text("\(count)")
-                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.primary.opacity(0.07)))
-                Spacer(minLength: 0)
+                    .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(count > 0 ? accent : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(accent.opacity(count > 0 ? 0.14 : 0.06)))
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .modifier(GlassCapsule(cornerRadius: 14))
             if compact {
                 cards   // inline — the whole board scrolls
             } else {
                 ScrollView(showsIndicators: false) { cards }
+                    .scrollClipDisabled()
             }
         }
-        .padding(8)
-        .frame(minWidth: compact ? nil : 210, maxWidth: compact ? .infinity : 400,
+        .padding(.horizontal, 2)
+        .frame(minWidth: compact ? nil : 210, maxWidth: compact ? .infinity : 420,
                maxHeight: compact ? nil : .infinity, alignment: .top)
-        .background(RoundedRectangle(cornerRadius: 10)
-            .fill(Color.primary.opacity(0.035)))
     }
 
     private var cards: some View {
-        LazyVStack(alignment: .leading, spacing: 8) {
+        LazyVStack(alignment: .leading, spacing: 10) {
             if count == 0 && !emptyText.isEmpty {
-                Text(emptyText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 18)
+                VStack(spacing: 6) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 17, weight: .light))
+                        .foregroundStyle(accent.opacity(0.7))
+                    Text(emptyText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 22)
+                .padding(.horizontal, 10)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.primary.opacity(0.02)))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .foregroundStyle(accent.opacity(0.25)))
             }
             content()
         }
-        .padding(2)
+        .padding(.horizontal, 2)
+        .padding(.vertical, 4)
+    }
+}
+
+/// The primary action: Liquid Glass prominent on macOS 26, bordered
+/// prominent before.
+struct ProminentGlassButton: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        if #available(macOS 26.0, *) {
+            content.buttonStyle(.glassProminent)
+        } else {
+            content.buttonStyle(.borderedProminent)
+        }
+        #else
+        content.buttonStyle(.borderedProminent)
+        #endif
+    }
+}
+
+/// Liquid Glass on macOS 26 (a thin material before, and off the Mac).
+struct GlassCapsule: ViewModifier {
+    var cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            fallback(content)
+        }
+        #else
+        fallback(content)
+        #endif
+    }
+
+    private func fallback(_ content: Content) -> some View {
+        content
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07)))
+    }
+}
+
+/// A board's backdrop: the window colour washed with a few soft tints, so
+/// glass and cards have something to sit on.
+struct BoardBackdrop: View {
+    var tints: [Color] = [.blue, .purple, .teal]
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let a = scheme == .dark ? 0.16 : 0.10
+        ZStack {
+            Color.platformWindowBackground
+            if #available(macOS 15.0, iOS 18.0, visionOS 2.0, *) {
+                MeshGradient(width: 3, height: 3, points: [
+                    [0, 0], [0.5, 0], [1, 0],
+                    [0, 0.5], [0.55, 0.45], [1, 0.5],
+                    [0, 1], [0.5, 1], [1, 1],
+                ], colors: [
+                    tints[0].opacity(a), .clear, tints[1].opacity(a * 0.8),
+                    .clear, tints[2].opacity(a * 0.5), .clear,
+                    tints[1].opacity(a * 0.6), .clear, tints[0].opacity(a * 0.7),
+                ])
+            } else {
+                LinearGradient(colors: [tints[0].opacity(a), .clear, tints[1].opacity(a)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
+
+/// A column with nothing in it, folded to a slim rail so the rest of the
+/// board fits. Clicking it does `onTap` (usually: explain how it fills).
+struct KanbanRail: View {
+    let title: String
+    let systemImage: String
+    var tint: Color = .secondary
+    var help: String = ""
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(tint == .secondary ? Color.gray : tint)
+                .frame(width: 24, height: 24)
+                .background((tint == .secondary ? Color.gray : tint).opacity(0.14),
+                            in: RoundedRectangle(cornerRadius: 7))
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .rotationEffect(.degrees(-90))
+                .frame(width: 20, height: 80)
+            Text("0")
+                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .padding(.vertical, 12)
+        .frame(width: 46)
+        .modifier(GlassCapsule(cornerRadius: 16))
+        .frame(maxHeight: .infinity, alignment: .top)
+        .help(help)
     }
 }
 
 // MARK: - Cards
 
-/// Shared card chrome: rounded, hairline border, hover-highlight.
+/// Shared card chrome: a raised surface that lifts on hover. A tint marks a
+/// state (needs you, in review, attention) with a bar down the leading edge.
 struct CardChrome: ViewModifier {
     var borderTint: Color = .clear
     @State private var hovering = false
+    @Environment(\.colorScheme) private var scheme
 
     func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         content
-            .padding(10)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 13)
+            .padding(.leading, borderTint == .clear ? 0 : 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 8)
-                .fill(Color.platformControlBackground
-                    .opacity(hovering ? 1.0 : 0.7)))
-            .overlay(RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(borderTint == .clear
-                              ? Color.primary.opacity(0.09)
-                              : borderTint.opacity(0.55),
-                              lineWidth: borderTint == .clear ? 1 : 1.5))
+            .background(
+                shape
+                    .fill(Color.platformControlBackground.opacity(scheme == .dark ? 0.85 : 0.96))
+                    .shadow(color: .black.opacity(hovering ? 0.14 : 0.06),
+                            radius: hovering ? 12 : 4, y: hovering ? 6 : 2))
+            .overlay(alignment: .leading) {
+                if borderTint != .clear {
+                    // State as an inset capsule, not a hard edge.
+                    Capsule()
+                        .fill(borderTint.gradient)
+                        .frame(width: 4)
+                        .padding(.vertical, 10)
+                        .padding(.leading, 6)
+                }
+            }
+            .overlay(shape.strokeBorder(
+                LinearGradient(colors: [Color.white.opacity(scheme == .dark ? 0.12 : 0.7),
+                                        Color.primary.opacity(hovering ? 0.12 : 0.06)],
+                               startPoint: .top, endPoint: .bottom)))
+            .scaleEffect(hovering ? 1.012 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: hovering)
             .onHover { hovering = $0 }
+    }
+}
+
+/// The workspace a card belongs to: its colour and name, as a small chip.
+struct WorkspaceChip: View {
+    let name: String
+    let accentHex: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle().fill(Color(hex: accentHex)).frame(width: 6, height: 6)
+            Text(name.isEmpty ? "—" : name)
+                .lineLimit(1)
+        }
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Color(hex: accentHex).opacity(0.1)))
+    }
+}
+
+/// A short state label on a card ("Working", "Needs you", "Queued").
+struct CardStatusPill: View {
+    let text: String
+    let tint: Color
+    var spinning = false
+    var systemImage: String? = nil
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if spinning {
+                ProgressView().controlSize(.mini)
+            } else if let systemImage {
+                Image(systemName: systemImage).font(.system(size: 9, weight: .bold))
+            } else {
+                Circle().fill(tint).frame(width: 6, height: 6)
+            }
+            Text(text).lineLimit(1)
+        }
+        .font(.system(size: 10.5, weight: .semibold))
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(tint.opacity(0.12)))
     }
 }
 

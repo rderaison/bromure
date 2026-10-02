@@ -218,7 +218,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var automationHosting: NSHostingView<AutomationEditorView>?
     /// Automation kanban board overlay — same full-bleed slot pattern.
     private let kanbanSlot = NSView()
-    private var kanbanHosting: NSHostingView<AutomationKanbanView>?
+    private var kanbanHosting: NSHostingView<AutomationHubView>?
+    /// The Automations hub's navigation (tab, selected finding, filters).
+    let automationHub = AutomationHubModel()
     /// Coding-task kanban board overlay.
     private let taskBoardSlot = NSView()
     private var taskBoardHosting: NSHostingView<CodingKanbanView>?
@@ -426,6 +428,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     withWizard: NSEvent.modifierFlags.contains(.option))
             },
             automationStore: acDelegate.scheduledAutomationStore,
+            findingStore: acDelegate.findingStore,
             onNewAutomation:    { [weak self] in self?.showAutomationEditor(nil) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: acDelegate.codingTaskStore,
@@ -2752,7 +2755,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// automation's, or a blank one (id = nil, the sidebar "+").
     /// Rebuilt on every show so the profile snapshot (names, credentials,
     /// ask-before-use flags) is current.
-    func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) {
+    func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil,
+                              trigger: ScheduledAutomation.TriggerKind? = nil) {
         guard let delegate = acDelegate else { return }
         if automationEditorVisible {
             // Re-clicking the automation that's already open must not
@@ -2780,14 +2784,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             profiles: delegate.profiles,
             editing: id,
             prefill: prefill,
+            initialTrigger: trigger,
             onSave: { [weak self] automation in
                 self?.acDelegate?.saveAutomation(automation)
                 self?.clearAutomationEditor(force: true)
+                self?.showAutomationBoard(tab: .automations)
             },
             onRunNow: { [weak self] automation in
                 self?.acDelegate?.saveAutomation(automation)
                 self?.acDelegate?.runAutomationNow(automation.id)
                 self?.clearAutomationEditor(force: true)
+                self?.showAutomationBoard(tab: .runs)
             },
             onDelete: { [weak self] automationID in
                 self?.acDelegate?.confirmDeleteAutomation(automationID)
@@ -2797,6 +2804,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             onDirtyChange: { [weak self] dirty in
                 self?.automationDraftDirty = dirty
+            },
+            onClose: { [weak self] in
+                // Back to the hub; a dirty draft asks first.
+                guard let self, self.clearAutomationEditor() else { return }
+                self.showAutomationBoard()
             })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -2840,10 +2852,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         return true
     }
 
-    /// Show the automation kanban board as the stage surface: Scheduled /
-    /// In Progress / (Needs Attention) / Done. The hosting view is built
-    /// once and kept — everything it renders reads live observable state.
-    func showAutomationBoard() {
+    /// Show the Automations hub as the stage surface (Overview / Findings /
+    /// Repositories / Board). The hosting view is built once and kept —
+    /// everything it renders reads live observable state.
+    func showAutomationBoard(tab: AutomationHubModel.Tab? = nil) {
+        if let tab { automationHub.tab = tab }
         guard let delegate = acDelegate else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
@@ -2855,18 +2868,48 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearSessionStage()
         listModel.automationBoardSelected = true
         if kanbanHosting == nil {
-            let view = AutomationKanbanView(
-                store: delegate.scheduledAutomationStore,
+            let view = AutomationHubView(
+                automationStore: delegate.scheduledAutomationStore,
+                findingStore: delegate.findingStore,
+                taskStore: delegate.codingTaskStore,
                 model: listModel,
-                actions: AutomationKanbanView.Actions(
-                    selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
-                    newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
-                    runNow: { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
-                    toggle: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
-                    delete: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) },
-                    openRun: { [weak self] run in self?.acDelegate?.openAutomationRun(run) },
-                    acknowledge: { [weak self] id in
-                        self?.acDelegate?.scheduledAutomationStore.acknowledge(id)
+                hub: automationHub,
+                workspaces: { [weak self] in self?.acDelegate?.watchWorkspaceChoices() ?? [] },
+                promptGuardInstalled: { PromptInjectionModels.isInstalled(.promptGuard) },
+                actions: AutomationHubView.Actions(
+                    board: AutomationKanbanView.Actions(
+                        selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+                        newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
+                        runNow: { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
+                        toggle: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
+                        delete: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) },
+                        openRun: { [weak self] run in self?.acDelegate?.openAutomationRun(run) },
+                        acknowledge: { [weak self] id in
+                            self?.acDelegate?.scheduledAutomationStore.acknowledge(id)
+                        }),
+                    newAutomation: { [weak self] kind in self?.showAutomationEditor(nil, trigger: kind) },
+                    saveWatch: { [weak self] w, scan in self?.acDelegate?.saveWatch(w, scanNow: scan) },
+                    deleteWatch: { [weak self] id in
+                        self?.acDelegate?.repoWatchEngine.removeWatch(id, removeFindings: true)
+                    },
+                    toggleWatch: { [weak self] id in self?.acDelegate?.repoWatchEngine.toggleWatch(id) },
+                    scanNow: { [weak self] id in self?.acDelegate?.repoWatchEngine.scanNow(id) },
+                    fix: { [weak self] id in self?.acDelegate?.repoWatchEngine.fix(id) },
+                    routeToSwitchboard: { [weak self] id, room in
+                        self?.acDelegate?.routeFindingToSwitchboard(id, room: room)
+                    },
+                    switchboardRooms: { [weak self] in self?.acDelegate?.switchboardRoomChoices() ?? [] },
+                    openTask: { [weak self] id in self?.acDelegate?.openFixTask(id) },
+                    setStatus: { [weak self] id, status, note in
+                        self?.acDelegate?.findingStore.setStatus(id, status, note: note)
+                    },
+                    markDuplicate: { [weak self] id, of in
+                        self?.acDelegate?.findingStore.markDuplicate(id, of: of)
+                    },
+                    deleteFinding: { [weak self] id in self?.acDelegate?.findingStore.removeFinding(id) },
+                    editWorkspace: { [weak self] id in self?.acDelegate?.sidebarEditProfile(id) },
+                    fetchRepos: { [weak self] pid in
+                        try await self?.acDelegate?.fetchGitHubRepos(profileID: pid) ?? []
                     }))
             let host = NSHostingView(rootView: view)
             // The board's SwiftUI max-width must never resize the WINDOW —
@@ -2968,6 +3011,24 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     openTranscript: { [weak self] id in
                         self?.acDelegate?.taskTranscriptWindows.open(taskID: id)
+                    },
+                    assignees: { [weak self] in self?.acDelegate?.taskDispatcher.choices() ?? TaskAssigneeChoices() },
+                    assign: { [weak self] id, a in self?.acDelegate?.taskDispatcher.assign(id, to: a) },
+                    answer: { [weak self] id, text in
+                        Task { @MainActor in _ = await self?.acDelegate?.taskDispatcher.answer(id, text: text) }
+                    },
+                    recall: { [weak self] id in self?.acDelegate?.taskDispatcher.recall(id) },
+                    openAssignee: { [weak self] task in
+                        guard let self, let a = task.assignment else { return }
+                        switch a.kind {
+                        case .session: self.selectSession(a.id)
+                        case .room: self.showRoom(a.id)
+                        case .worktree: break
+                        case .switchboard:
+                            if let sid = self.acDelegate?.switchboardEngine.switchboard?.id {
+                                self.selectSession(sid)
+                            }
+                        }
                     }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []
@@ -3312,6 +3373,11 @@ struct SessionSidebar: View {
     /// Scheduled automations — the third sidebar group, after the
     /// workspace rows.
     var automationStore: ScheduledAutomationStore
+    /// Repository-watch findings: the Automations header's open-findings pill.
+    var findingStore: FindingStore? = nil
+    private var openFindingCount: Int {
+        findingStore?.findings.filter { $0.status == .new }.count ?? 0
+    }
     let onNewAutomation: () -> Void
     /// Open the automation kanban board as the stage surface.
     let onShowAutomationBoard: () -> Void
@@ -3402,6 +3468,7 @@ struct SessionSidebar: View {
                 AutomationsSection(
                     store: automationStore,
                     model: model,
+                    openFindings: openFindingCount,
                     onNew: onNewAutomation,
                     onShowBoard: onShowAutomationBoard)
                 if let taskStore {
@@ -3495,6 +3562,7 @@ struct SessionSidebar: View {
                 AutomationsSection(
                     store: automationStore,
                     model: model,
+                    openFindings: openFindingCount,
                     onNew: onNewAutomation,
                     onShowBoard: onShowAutomationBoard)
                 machinesSection

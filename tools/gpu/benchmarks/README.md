@@ -1,5 +1,48 @@
 # GPU path comparison — 1 October 2026
 
+## Current 5.0.0 rerun with the 5.0.1 fixes
+
+The current comparison uses a freshly verified published image 500 with the
+candidate image 501 Mesa fixes installed in a private clone. Both guest paths
+use the same clone and current optimized app build; there is no 4.0.0 baseline.
+The app version was still 5.0.0 during measurement, before the requested 5.0.1
+version bump. All three WebGL paths were rerun with the unchanged workload.
+
+| Workload | Metal enabled | Metal disabled / Apple VZ | Native macOS / Metal | Speedup over VZ |
+|---|---:|---:|---:|---:|
+| 2,048 draws, 64×64 | 20.8 ms | 169.5 ms | 12.9 ms | 8.1× |
+| 64 draws, 720p, 32 shader iterations | 32.2 ms | 965.2 ms | 22.8 ms | 30.0× |
+| 24 draws, 1080p, 128 shader iterations | 68.2 ms | 3,555.1 ms | 63.9 ms | 52.1× |
+
+The final video comparison passed all 30 trials, following a separate successful
+15-trial diagnostic run. Values below are five-trial medians, using muted local
+clips and browser playback counters. CPU attribution excludes shared system
+services and does not measure total energy.
+
+| Clip | Metal FPS | VZ FPS | Metal host CPU | VZ host CPU |
+|---|---:|---:|---:|---:|
+| H.264 1080p60 | 58.4 | 59.9 | 68.0% | 49.5% |
+| H.264 4K60 | 55.5 | 59.8 | 68.6% | 85.1% |
+| AV1 1080p60 | 59.8 | 59.8 | 106.0% | 69.6% |
+
+One CPU core equals 100%. H.264 used hardware decoding on Metal; AV1 remained
+software decoded. At 4K60, attributed host CPU fell 19.4%, but the median dropped
+frame rate was 7.26% versus 0.084% on the legacy path. Hardware decoding is not a
+uniform speed or efficiency improvement across these workloads. The final Metal
+GPU-process crash count was zero.
+
+The work fixed excessive compressed-bitstream transfers, IPC per guest page,
+partial readbacks overwriting unrelated bytes, and a Mesa fence reference leak.
+The fixed GPU process stayed alive for 961 observer samples with bounded fence
+and descriptor counts. See the saved audit for its capture limitations.
+
+[Current raw results and charts](results/image501-candidate-2026-10-01/),
+[methodology and image provenance](results/image501-candidate-2026-10-01/METHODOLOGY.md),
+[WebGL chart](results/image501-candidate-2026-10-01/comparison.png),
+[video chart](results/image501-candidate-2026-10-01/video-comparison.png).
+
+## Historical image 403 comparison
+
 Rebuilt after merging `origin/main` (`bf277e4f`). Dependency resolution required
 aligning MLX Swift to 0.32.3, matching MLX Swift LM 3.32.3. The benchmark found
 and verified a renderer fix: valid Mesa 3D submissions above 64 KiB were rejected.
