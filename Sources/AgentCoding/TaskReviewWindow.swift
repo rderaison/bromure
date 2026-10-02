@@ -183,6 +183,10 @@ final class TaskReviewWindowManager {
                 comments: { t()?.comments ?? [] },
                 viewed: { t()?.reviewViewed ?? [:] },
                 plan: { t()?.plan },
+                note: {
+                    guard let task = t(), let text = task.mergeReport ?? task.deliverySummary else { return nil }
+                    return (task.assignment?.label ?? NSLocalizedString("The agent", comment: "review"), text)
+                },
                 fetch: { base, _ in
                     guard let task = t() else { return nil }
                     return await c.fetchReview(task, base)

@@ -699,6 +699,7 @@ final class RemoteHostController {
         // ProfileRows (all workspaces) + minimal mirrored Profiles.
         var rows: [SessionListModel.ProfileRow] = []
         var newProfiles: [Profile.ID: Profile] = [:]
+        var newCredentials: [Profile.ID: WorkspaceCredentials] = [:]
         var newSpecs: [Profile.ID: WorkspaceSpec] = [:]
         for w in workspaces {
             guard let idStr = w["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
@@ -736,6 +737,11 @@ final class RemoteHostController {
             p.customBackgroundHex = w["backgroundHex"] as? String
             p.customForegroundHex = w["foregroundHex"] as? String
             newProfiles[id] = p
+            if let gh = w["hasGitHubToken"] as? Bool {
+                newCredentials[id] = WorkspaceCredentials(
+                    github: gh, linear: w["hasLinearToken"] as? Bool ?? false,
+                    askBeforeUseLabels: w["askBeforeUseLabels"] as? [String] ?? [])
+            }
         }
         // Restyle live terminal surfaces when a workspace's appearance changed
         // on the host (the local editor applies saves live; the mirror should
@@ -750,6 +756,7 @@ final class RemoteHostController {
             }
         }
         profilesByID = newProfiles
+        if credentialsByID != newCredentials { credentialsByID = newCredentials }
         specs = newSpecs
         if listModel.profileRows != rows { listModel.profileRows = rows }
 
@@ -1362,6 +1369,16 @@ final class RemoteHostController {
     var hasSnapshot: Bool { revision > 0 }
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
+
+    /// Which credentials a workspace holds on the host (the mirrored profile
+    /// carries none). nil: an older host that doesn't say.
+    struct WorkspaceCredentials: Equatable {
+        var github: Bool
+        var linear: Bool
+        var askBeforeUseLabels: [String]
+    }
+    private(set) var credentialsByID: [Profile.ID: WorkspaceCredentials] = [:]
+    func credentials(for id: Profile.ID) -> WorkspaceCredentials? { credentialsByID[id] }
     /// Mirrored profiles in source-list order (the automation editor's
     /// workspace picker + default owner rely on a stable order).
     var profiles: [Profile] { listModel.profileRows.compactMap { profilesByID[$0.id] } }
@@ -2507,7 +2524,7 @@ final class RemoteHostWindow: NSWindow {
     private var sessionHeaderHost: NSHostingView<SessionHeaderView>?
     private var sessionHeaderHeight: NSLayoutConstraint!
     private var sessionOverlayHost: NSView?
-    private var selectedSessionID: UUID?
+    private(set) var selectedSessionID: UUID?
     /// The room on stage (its grid of the server's sessions).
     private var roomController: RoomStageController?
     private var sessionPresentationKey: String?
@@ -3536,6 +3553,9 @@ final class RemoteHostWindow: NSWindow {
         AutomationEditorView(
             store: controller.automationStore,
             profiles: controller.profiles,
+            credentials: { [controller] id in
+                controller.credentials(for: id).map { ($0.github, $0.linear) }
+            },
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,
@@ -3642,8 +3662,9 @@ final class RemoteHostWindow: NSWindow {
                         return WatchWorkspaceChoice(
                             id: p.id, name: p.name, tools: tools,
                             defaultTool: tools.contains(p.tool) ? p.tool : (tools.first ?? p.tool),
-                            hasGitHubToken: p.hasGitHubCredential,
-                            askBeforeUseLabels: p.askBeforeUseCredentialLabels)
+                            hasGitHubToken: c.credentials(for: p.id)?.github ?? p.hasGitHubCredential,
+                            askBeforeUseLabels: c.credentials(for: p.id)?.askBeforeUseLabels
+                                ?? p.askBeforeUseCredentialLabels)
                     }
                 },
                 // The host enforces it; the mirror can't see the host's models.
@@ -3753,6 +3774,13 @@ final class RemoteHostWindow: NSWindow {
     /// transcript is tailed from the remote guest over the tunnel and the
     /// input box types into the remote session, so the fat client gets the
     /// same "whole UI" plan experience as the host.
+    /// The Quick Task panel (⇧⌥Space) planned a task on this host: start
+    /// the planning interview there and open its window here, as the board does.
+    func planQuickTask(_ id: UUID) {
+        controller.taskCommand(id, "plan")
+        planSessionWindows.open(taskID: id)
+    }
+
     private lazy var planSessionWindows = PlanSessionWindowManager(
         context: PlanSessionWindowManager.Context(
             store: { [weak self] in self?.controller.taskStore },

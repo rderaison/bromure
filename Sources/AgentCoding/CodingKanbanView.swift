@@ -1718,9 +1718,20 @@ struct TaskEditorSheet: View {
         selectedProfile?.allToolSpecs ?? []
     }
 
+    /// A title, or a description to take one from — not every task
+    /// deserves one of its own.
     private var canSave: Bool {
-        !task.title.trimmingCharacters(in: .whitespaces).isEmpty
-            && selectedProfile != nil
+        selectedProfile != nil && !Self.titled(task).title.isEmpty
+    }
+
+    /// The task as saved: with no title of its own, it's named after its
+    /// description, the way a session is named after its first message.
+    static func titled(_ task: CodingTask) -> CodingTask {
+        var t = task
+        if t.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            t.title = AgentSession.title(fromMessage: t.details.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return t
     }
 
     private func dependencyBinding(_ sibling: CodingTask) -> Binding<Bool> {
@@ -1776,7 +1787,10 @@ struct TaskEditorSheet: View {
                         .background(Capsule().fill(Color.primary.opacity(0.07)))
                 }
             }
-            TextField(NSLocalizedString("What needs doing?", comment: "quick task"),
+            // No title yet: the one it'll get from the description, greyed.
+            TextField(task.title.isEmpty && !Self.titled(task).title.isEmpty
+                      ? Self.titled(task).title
+                      : NSLocalizedString("What needs doing?", comment: "quick task"),
                       text: $task.title, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 24, weight: .bold))
@@ -1788,12 +1802,37 @@ struct TaskEditorSheet: View {
             descriptionCard
                 .layoutPriority(1)
 
+            if !isNew, let said = task.mergeReport ?? task.deliverySummary ?? task.assigneeNote,
+               !said.isEmpty {
+                assigneeCard(said)
+            }
+
             if !siblings.isEmpty {
                 dependencyChips
             }
 
             footer
         }
+    }
+
+    /// What the agent the task was handed to said: its delivery (or merge),
+    /// else its latest progress report.
+    private func assigneeCard(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(String(format: NSLocalizedString("%@ says", comment: "review: the assignee's delivery"),
+                         task.assignment?.label ?? NSLocalizedString("The agent", comment: "review")),
+                  systemImage: "text.bubble")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.indigo)
+            ScrollView {
+                MarkdownBlocks(text: text, compact: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 180)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.indigo.opacity(0.06)))
     }
 
     // MARK: Chips
@@ -2074,7 +2113,7 @@ struct TaskEditorSheet: View {
             Spacer(minLength: 8)
             if task.stage == .backlog && task.assignment == nil {
                 Button {
-                    onPlan(task)
+                    onPlan(Self.titled(task))
                 } label: {
                     Label(NSLocalizedString("Plan", comment: "task editor"), systemImage: "list.number")
                 }
@@ -2086,7 +2125,7 @@ struct TaskEditorSheet: View {
             Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
                 .keyboardShortcut(.cancelAction)
             Button {
-                onSave(task)
+                onSave(Self.titled(task))
             } label: {
                 Text(isNew ? NSLocalizedString("Add Task", comment: "task editor")
                            : NSLocalizedString("Save", comment: ""))

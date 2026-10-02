@@ -16,6 +16,61 @@ import SwiftUI
 final class QuickTaskPanel {
     private weak var delegate: ACAppDelegate?
     private var panel: NSPanel?
+    /// Where the task goes, decided when the panel opens.
+    private var target: Target?
+
+    /// The board a quick task lands on: this Mac's, or — when a fat-client
+    /// window is in front — the host it mirrors (its workspaces, its
+    /// sessions' nicknames, its board).
+    private struct Target {
+        let profiles: [Profile]
+        let choices: TaskAssigneeChoices
+        /// The session in front of the user there, if any.
+        let current: AgentSession?
+        let label: (AgentSession) -> String
+        let save: (CodingTask) -> Void
+        let assign: (UUID, TaskAssignment) -> Void
+        let plan: (UUID) -> Void
+
+        func profile(_ id: UUID) -> Profile? { profiles.first { $0.id == id } }
+
+        @MainActor
+        static func local(_ d: ACAppDelegate) -> Target {
+            let current = d.unifiedWindow?.listModel.selectedSessionID.flatMap { d.agentSessionStore.session($0) }
+            return Target(profiles: d.profiles, choices: d.taskDispatcher.choices(), current: current,
+                          label: { d.delegationEngine.label($0) },
+                          save: { d.codingTaskStore.upsert($0) },
+                          assign: { d.taskDispatcher.assign($0, to: $1) },
+                          plan: { d.codingTaskEngine.plan($0) })
+        }
+
+        @MainActor
+        static func remote(_ w: RemoteHostWindow) -> Target {
+            let c = w.controller
+            func label(_ s: AgentSession) -> String { s.nickname.map { "@" + $0 } ?? s.title }
+            let sessions = c.sessionStore.sessions
+                .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
+                .sorted { SessionHome.lastActivity($0) > SessionHome.lastActivity($1) }
+                .prefix(40)
+                .map { s -> TaskAssigneeChoices.Session in
+                    let b = SessionHome.bucket(for: s, in: c.listModel)
+                    return .init(id: s.id, label: label(s), workspace: c.profile(for: s.profileID)?.name ?? "",
+                                 busy: b == .working || b == .needsYou)
+                }
+            let rooms = c.roomStore.rooms.filter { $0.archivedAt == nil }
+                .map { TaskAssigneeChoices.Room(id: $0.id, name: $0.name) }
+            return Target(profiles: c.profiles,
+                          choices: TaskAssigneeChoices(sessions: Array(sessions), rooms: rooms),
+                          current: w.selectedSessionID.flatMap { c.sessionStore.session($0) },
+                          label: label,
+                          save: { c.upsertTask($0) },
+                          assign: { id, a in
+                              c.taskCommand(id, "assign", body: ["kind": a.kind.rawValue, "id": a.id.uuidString,
+                                                                 "label": a.label])
+                          },
+                          plan: { [weak w] id in w?.planQuickTask(id) })
+        }
+    }
     /// The app that was in front when the panel was summoned from outside
     /// Bromure — it gets focus back when the panel closes.
     private var previousApp: NSRunningApplication?
@@ -42,23 +97,31 @@ final class QuickTaskPanel {
         guard let delegate else { return }
         let front = NSWorkspace.shared.frontmostApplication
         previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
+        // A fat-client window in front: the task is for the host it mirrors.
+        let target: Target = (previousApp == nil ? NSApp.keyWindow as? RemoteHostWindow : nil)
+            .map(Target.remote) ?? Target.local(delegate)
+        self.target = target
         // Context: the session in front of the user, if any.
-        let model = delegate.unifiedWindow?.listModel
-        let current = model?.selectedSessionID.flatMap { delegate.agentSessionStore.session($0) }
-        let choices = delegate.taskDispatcher.choices()
-        let profiles = delegate.profiles
+        let current = target.current
+        let choices = target.choices
+        let profiles = target.profiles
         guard let workspace = current?.profileID ?? profiles.first?.id else { return }
         let here = current.map {
-            TaskAssignment(kind: .session, id: $0.id, label: delegate.delegationEngine.label($0))
+            TaskAssignment(kind: .session, id: $0.id, label: target.label($0))
         }
-        let initial = TaskAssignment.autoAssign ?? here
+        // The board's standing choice names a session of this Mac's board:
+        // only when it's one of the target's.
+        let standing = TaskAssignment.autoAssign.flatMap { a in
+            a.kind != .session || choices.sessions.contains { $0.id == a.id } ? a : nil
+        }
+        let initial = standing ?? here
         let folder = current?.cwd ?? "~"
-        let tool = current?.tool ?? delegate.profile(for: workspace)?.tool ?? .claude
+        let tool = current?.tool ?? target.profile(workspace)?.tool ?? .claude
         let view = QuickTaskView(
             choices: choices,
             here: here,
             folder: folder,
-            workspaceName: delegate.profile(for: workspace)?.name ?? "",
+            workspaceName: target.profile(workspace)?.name ?? "",
             initialAssignment: initial,
             profiles: profiles,
             profileID: workspace,
@@ -122,28 +185,28 @@ final class QuickTaskPanel {
 
     /// A task from the full editor.
     private func add(_ task: CodingTask, plan: Bool) {
-        guard let delegate else { return }
+        guard let target else { return }
         var t = task
         t.stage = .backlog
-        delegate.codingTaskStore.upsert(t)
+        target.save(t)
         if plan {
-            delegate.codingTaskEngine.plan(t.id)
+            target.plan(t.id)
         } else if let a = t.assignment {
-            delegate.taskDispatcher.assign(t.id, to: a)
+            target.assign(t.id, a)
         }
         BACDebug.log("tasks", "quick task “\(t.title)” (editor) → \(t.assignment?.label ?? "backlog")")
     }
 
     private func add(title: String, details: String, assignment: TaskAssignment?,
                      profileID: UUID, folder: String, tool: Profile.Tool?) {
-        guard let delegate else { return }
-        let profile = delegate.profile(for: profileID)
+        guard let target else { return }
+        let profile = target.profile(profileID)
         let task = CodingTask(title: title, details: details, profileID: profileID,
                               repoPath: folder, tool: tool ?? profile?.tool ?? .claude,
                               stage: .backlog)
-        delegate.codingTaskStore.upsert(task)
+        target.save(task)
         if let assignment {
-            delegate.taskDispatcher.assign(task.id, to: assignment)
+            target.assign(task.id, assignment)
         }
         BACDebug.log("tasks", "quick task “\(title)” → \(assignment?.label ?? "backlog")")
     }

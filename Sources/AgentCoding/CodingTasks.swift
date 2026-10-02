@@ -111,6 +111,8 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var pendingAskID: UUID?
     /// What the assignee said when it delivered.
     var deliverySummary: String?
+    /// What the assignee said when it merged the task on acceptance.
+    var mergeReport: String?
     /// The pull request the assignee opened for it (found in its delivery).
     var pullRequestURL: String?
 
@@ -2406,6 +2408,14 @@ final class CodingTaskEngine {
                squash: Bool = false, cleanup: Bool = true) {
         guard let task = store.task(taskID), task.stage == .testing,
               let branch = task.branch, let delegate else { return }
+        // Done by an assignee (a session, a room, the Switchboard): it merges
+        // its own work where it did it — the board may not even reach that
+        // machine (a native one), and the worktree is the assignee's.
+        if task.delegationID != nil {
+            Task { _ = await delegate.taskDispatcher.requestMerge(
+                taskID, into: targetOverride, squash: squash, cleanup: cleanup) }
+            return
+        }
         guard let target = targetOverride ?? task.parentBranch,
               let root = task.rootRepo else {
             // Metadata capture failed at hand-to-review (workspace down at

@@ -313,6 +313,10 @@ struct AutomationEditorView: View {
     var store: ScheduledAutomationStore
     /// Snapshot of the delegate's profiles at presentation time.
     let profiles: [Profile]
+    /// Which tokens a workspace holds, when `profiles` can't say (a fat
+    /// client mirrors workspaces without their credentials). nil, or nil
+    /// for a workspace: read the profile.
+    let credentials: ((UUID) -> (github: Bool, linear: Bool)?)?
     let onSave: (ScheduledAutomation) -> Void
     let onRunNow: (ScheduledAutomation) -> Void
     let onDelete: (UUID) -> Void
@@ -416,6 +420,7 @@ struct AutomationEditorView: View {
 
     init(store: ScheduledAutomationStore,
          profiles: [Profile],
+         credentials: ((UUID) -> (github: Bool, linear: Bool)?)? = nil,
          editing id: UUID?,
          prefill: AutomationPrefill? = nil,
          initialTrigger: ScheduledAutomation.TriggerKind? = nil,
@@ -427,6 +432,7 @@ struct AutomationEditorView: View {
          onClose: (() -> Void)? = nil) {
         self.store = store
         self.profiles = profiles
+        self.credentials = credentials
         self.onSave = onSave
         self.onRunNow = onRunNow
         self.onDelete = onDelete
@@ -491,11 +497,13 @@ struct AutomationEditorView: View {
     }
 
     private var hasGitHubToken: Bool {
-        selectedProfile?.hasGitHubCredential ?? false
+        guard let p = selectedProfile else { return false }
+        return credentials?(p.id)?.github ?? p.hasGitHubCredential
     }
 
     private var hasLinearToken: Bool {
-        !(selectedProfile?.linearToken.isEmpty ?? true)
+        guard let p = selectedProfile else { return false }
+        return credentials?(p.id)?.linear ?? !p.linearToken.isEmpty
     }
 
     /// Whether the workspace has the credential a trigger kind needs.

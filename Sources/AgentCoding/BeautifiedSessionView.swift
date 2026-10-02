@@ -676,9 +676,12 @@ final class BeautifiedSessionModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
     /// How a display card (an agent's show_media) reads its file: the same
     /// guest file ops as the rest of the chat — local, or over the tunnel.
-    lazy var displayFileReader = DisplayFileReader.chunked { [weak self] op in
-        await self?.provider.guestFileOp(op)
-    }
+    lazy var displayFileReader: DisplayFileReader = {
+        var r = DisplayFileReader.chunked { [weak self] op in await self?.provider.guestFileOp(op) }
+        // Which machine: two machines' /tmp/screenshot.png are two pictures.
+        r.scope = provider.historyCacheKey ?? "\(ObjectIdentifier(self).hashValue)"
+        return r
+    }()
     /// Ids for optimistic (locally-added) items — descend from Int.max so they
     /// never collide with the parser's ascending ids.
     private var nextOptimisticID = Int.max
