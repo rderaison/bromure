@@ -6,7 +6,7 @@ import Virtualization
 /// Manages a pool of pre-warmed Linux VMs for instant browser windows.
 ///
 /// Pre-boots a VM in the background so that "File > New Browser" is instant.
-/// When a VM is claimed (shown to user), the next one starts booting immediately.
+/// Optional replenishment keeps a spare VM available after a browser launch.
 private let bromureDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
 
 /// Outcome of the guest's boot-time network probe (see on-boot.sh).
@@ -99,6 +99,8 @@ public final class VMPool {
     /// true preserves Web's behaviour.
     private let requireImageVersion: Bool
     private let experimentalGPU: Bool
+    /// Browser disables replacement VMs on hosts with shared browser windows.
+    private let automaticallyReplenishes: Bool
     private var warmVM: WarmVM?
     private var shutdownRequested = false
     private var isWarming = false
@@ -125,8 +127,9 @@ public final class VMPool {
 
     public init(config: VMConfig, storageDir: URL? = nil, isolatePeers: Bool = true,
                 requireImageVersion: Bool = true, pinnedOctet: UInt8? = nil,
-                experimentalGPU: Bool? = nil) {
+                experimentalGPU: Bool? = nil, automaticallyReplenishes: Bool = true) {
         self.config = config
+        self.automaticallyReplenishes = automaticallyReplenishes
         let dir = storageDir ?? VMConfig.defaultStorageDirectory
         self.storageDir = dir
         self.imageManager = LinuxImageManager(storageDir: dir)
@@ -141,7 +144,7 @@ public final class VMPool {
     /// The VM boots with no chrome-env, no services — just Alpine at a shell prompt.
     /// The guest xinitrc waits up to 120s for `/tmp/bromure/chrome-ready`, which is
     /// written later by `applyConfig(_:to:)` when the user claims the VM.
-    public func warmUp() async throws {
+    public func warmUp(requestedConfig: VMConfig? = nil) async throws {
         guard !shutdownRequested, !isWarming, warmVM == nil else { return }
         isWarming = true
         defer { isWarming = false }
@@ -149,7 +152,9 @@ public final class VMPool {
         let defaults = UserDefaults.standard
         let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
         let bridgedIface: String?
-        if networkMode == "bridged",
+        if let interface = requestedConfig?.networkInterface, !interface.isEmpty {
+            bridgedIface = interface == "nat" ? nil : interface
+        } else if networkMode == "bridged",
            let ifName = defaults.string(forKey: "vm.bridgedInterface"),
            !ifName.isEmpty {
             bridgedIface = ifName
@@ -157,7 +162,7 @@ public final class VMPool {
             bridgedIface = nil
         }
 
-        let warm = try await bootVM(bridgedInterface: bridgedIface)
+        let warm = try await bootVM(bridgedInterface: bridgedIface, requestedConfig: requestedConfig)
         if shutdownRequested {
             _ = await Self.releaseResources(warm)
             warmingMAC = nil
@@ -378,12 +383,20 @@ public final class VMPool {
         profileID: UUID? = nil,
         profileImageDir: URL? = nil,
         profileDiskKey: String? = nil,
-        restoreSession: Bool = false
+        restoreSession: Bool = false,
+        onColdBoot: (() -> Void)? = nil
     ) async -> WarmVM? {
         guard !shutdownRequested else { return nil }
+        var reportedColdBoot = false
+        func reportColdBoot() {
+            guard !reportedColdBoot else { return }
+            reportedColdBoot = true
+            onColdBoot?()
+        }
         // If no pre-warmed VM is available, warm up on demand.
         // If another task is already warming up, wait for it to finish.
         if warmVM == nil {
+            reportColdBoot()
             if isWarming {
                 // Another task is warming up — poll until it finishes
                 for _ in 0..<300 { // up to 30s
@@ -392,16 +405,17 @@ public final class VMPool {
                 }
             }
             if warmVM == nil {
-                try? await warmUp()
+                try? await warmUp(requestedConfig: config)
             }
         }
         // If the warm VM died (e.g. pool was restarted), discard and warm a fresh one.
         // Paused is valid (pool suspends after 30s idle).
         if let warm = warmVM, warm.vm.state != .running && warm.vm.state != .paused {
+            reportColdBoot()
             print("[VMPool] claim: discarding dead warm VM (state=\(warm.vm.state.rawValue))")
             _ = await Self.releaseResources(warm)
             warmVM = nil
-            try? await warmUp()
+            try? await warmUp(requestedConfig: config)
         }
 
         // Check whether the profile needs different networking or rendering than the pool VM.
@@ -429,7 +443,14 @@ public final class VMPool {
             (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
              config.experimentalGPUCount != warm.graphicsSessions.count) ||
             (profileWantsMetal && config.sharedWindowScanoutCount != (warm.graphicsSession?.outputCapacity ?? 1)) {
+            reportColdBoot()
             print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
+            if !automaticallyReplenishes, let unused = warmVM {
+                warmVM = nil
+                suspendTimer?.invalidate()
+                suspendTimer = nil
+                _ = await Self.releaseResources(unused)
+            }
             do {
                 let dedicated = try await bootVM(bridgedInterface: profileBridgedIface,
                                                  requestedConfig: config)
@@ -522,6 +543,7 @@ public final class VMPool {
     /// Schedule a warm-up after a delay, to avoid resource contention with the
     /// session that just launched.
     public func scheduleWarmUp(delay: Duration = .seconds(20)) {
+        guard automaticallyReplenishes, !shutdownRequested else { return }
         Task {
             try? await Task.sleep(for: delay)
             try? await warmUp()

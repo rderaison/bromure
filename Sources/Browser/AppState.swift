@@ -566,7 +566,9 @@ final class AppState: @unchecked Sendable {
 
     func startPool() {
         let config = buildBaseConfig()
-        pool = VMPool(config: config, storageDir: storageDir)
+        let replenish: Bool
+        if #available(macOS 27.0, *) { replenish = false } else { replenish = true }
+        pool = VMPool(config: config, storageDir: storageDir, automaticallyReplenishes: replenish)
         poolReady = false
         let env = ProcessInfo.processInfo.environment
         if env["BROMURE_DEBUG"] != nil && env["BROMURE_DEBUG_PREWARM"] == nil {

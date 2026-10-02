@@ -839,6 +839,23 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         self.setupWindow = window
     }
 
+    /// Reuse the initial boot animation without changing global setup state.
+    private func showBrowserStartingWindow() -> NSWindow {
+        let view = NSHostingView(rootView: StartingPanel())
+        view.safeAreaRegions = []
+        let window = NSWindow(contentRect: .zero,
+            styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        window.contentView = view
+        window.title = "Bromure"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        return window
+    }
+
     /// `BROMURE_DEBUG_SETUP_SHOT=<path.png>` (with BROMURE_DEBUG_SETUP_UI)
     /// writes the setup window's content to a PNG once it has settled.
     private func snapshotSetupWindowIfRequested() {
@@ -1598,8 +1615,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             config.homePage = initialURL.absoluteString
         }
         Task { @MainActor [self] in
-            guard let warm = await state.pool?.claim(config: config) else {
+            var startingWindow: NSWindow?
+            defer { startingWindow?.orderOut(nil) }
+            guard let warm = await state.pool?.claim(config: config, onColdBoot: {
+                startingWindow = self.showBrowserStartingWindow()
+            }) else {
                 if let url = initialURL { self.pendingURL = url }
+                startingWindow?.orderOut(nil)
                 self.showSessionError()
                 return
             }
@@ -1731,14 +1753,18 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
 
         Task { @MainActor [self] in
+            var startingWindow: NSWindow?
+            defer { startingWindow?.orderOut(nil) }
             guard let warm = await state.pool?.claim(
                 config: config,
                 profileID: profile.id,
                 profileImageDir: profileImageDir,
                 profileDiskKey: profileDiskKey,
-                restoreSession: restoreSession
+                restoreSession: restoreSession,
+                onColdBoot: { startingWindow = self.showBrowserStartingWindow() }
             ) else {
                 self.state.isLaunching = false
+                startingWindow?.orderOut(nil)
                 self.showSessionError()
                 return
             }
@@ -2201,12 +2227,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
         }
 
+        var startingWindow: NSWindow?
+        defer { startingWindow?.orderOut(nil) }
         guard let warm = await state.pool?.claim(
             config: config,
             profileID: profile.id,
             profileImageDir: profileImageDir,
             profileDiskKey: profileDiskKey,
-            restoreSession: restore
+            restoreSession: restore,
+            onColdBoot: { startingWindow = self.showBrowserStartingWindow() }
         ) else {
             print("[Automation] Failed to claim VM")
             return nil
