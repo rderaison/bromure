@@ -375,6 +375,61 @@ class ControllerTests(unittest.TestCase):
         self.assertGreaterEqual(reads[0], 2)
         self.assertEqual(self.bounds[10]['height'], 626)
 
+    def test_close_reconciles_disappeared_target_without_replaying_close(self):
+        self.attach()
+        created = self.controller.handle(dict(id=3, cmd='create', scanout=1, topology=self.layout()))
+        self.assertTrue(created['ok'], created)
+        original = self.controller.browser_call
+        stale = []
+        live_list = self.controller.list_targets
+        def call(method, params):
+            if method == 'Target.closeTarget':
+                stale.extend(live_list())
+            if method == 'Browser.getWindowForTarget' and params['targetId'] not in self.targets:
+                raise shared.CDPError(method, dict(code=-32000, message='No target with given id'))
+            return original(method, params)
+        def listing():
+            if stale:
+                result = list(stale)
+                stale.clear()
+                return result
+            return live_list()
+        self.controller.browser_call = call
+        self.controller.list_targets = listing
+        reply = self.controller.handle(dict(id=4, cmd='close', windowId=10))
+        self.assertTrue(reply['ok'], reply)
+        self.assertTrue(reply['stateComplete'])
+        self.assertEqual([w['windowId'] for w in reply['windows']], [created['windowId']])
+        self.assertEqual(sum(method == 'Target.closeTarget' for method, _ in self.calls), 1)
+
+    def test_unresolved_and_unrelated_lookup_errors_preserve_cached_ownership(self):
+        self.attach()
+        old_groups, old_bindings = dict(self.controller.groups), dict(self.controller.bindings)
+        for message, attempts in (('No target with given id', 3), ('Permission denied', 1)):
+            failing = unittest.mock.Mock(side_effect=shared.CDPError(
+                'Browser.getWindowForTarget', dict(code=-32000, message=message)))
+            self.controller.browser_call = failing
+            with self.assertRaises(RuntimeError):
+                self.controller.refresh()
+            self.assertEqual(failing.call_count, attempts)
+            self.assertEqual(self.controller.groups, old_groups)
+            self.assertEqual(self.controller.bindings, old_bindings)
+
+    def test_target_added_during_snapshot_is_mapped_before_commit(self):
+        self.attach()
+        original = self.controller.browser_call
+        added = [False]
+        def call(method, params):
+            if method == 'Browser.getWindowForTarget' and not added[0]:
+                added[0] = True
+                self.targets['b'] = 20
+                self.bounds[20] = dict(self.bounds[10])
+            return original(method, params)
+        self.controller.browser_call = call
+        groups, mapping = self.controller.refresh()
+        self.assertEqual(mapping, {'a': 10, 'b': 20})
+        self.assertEqual(set(groups), {10, 20})
+
     def test_restore_timeout_does_not_send_geometry_and_reports_evidence(self):
         self.controller.browser_call = unittest.mock.Mock(return_value={'bounds': {'windowState': 'maximized'}})
         with patch.object(shared.time, 'monotonic', side_effect=[0, 4]):
@@ -495,7 +550,8 @@ class CDPTests(unittest.TestCase):
         return Connected(), server
 
     def test_real_fragmented_rpc_and_explicit_cdp_error(self):
-        for result in ({'result': {'windowId': 10}}, {'error': {'code': -1, 'message': 'refused'}}):
+        for result in ({'result': {'windowId': 10}}, {'error': {'code': -1, 'message': 'refused'}},
+                       {'error': {'code': -32000, 'message': 'No target with given id'}}):
             with self.subTest(result=result):
                 client, server = self.socket()
 
@@ -515,8 +571,11 @@ class CDPTests(unittest.TestCase):
                 thread.start()
                 with patch.object(shared.socket, 'socket', return_value=client):
                     if 'error' in result:
-                        with self.assertRaisesRegex(RuntimeError, 'refused'):
+                        with self.assertRaises(shared.CDPError) as raised:
                             shared.cdp_call('ws://127.0.0.1:9222/devtools/browser/test', 'Browser.getWindowForTarget', {})
+                        self.assertEqual(raised.exception.code, result['error']['code'])
+                        self.assertEqual(raised.exception.message, result['error']['message'])
+                        self.assertEqual(raised.exception.method, 'Browser.getWindowForTarget')
                     else:
                         self.assertEqual(shared.cdp_call('ws://127.0.0.1:9222/devtools/browser/test', 'Browser.getWindowForTarget', {}), result['result'])
                 thread.join(timeout=2)

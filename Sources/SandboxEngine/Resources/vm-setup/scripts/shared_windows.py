@@ -32,6 +32,14 @@ CHROME_PAGES = {'newtab', 'new-tab-page', 'history', 'bookmarks', 'downloads',
                 'settings', 'gpu', 'version', 'policy'}
 
 
+class CDPError(RuntimeError):
+    def __init__(self, method, error):
+        self.method = method
+        self.code = error.get('code') if isinstance(error, dict) else None
+        self.message = error.get('message') if isinstance(error, dict) else None
+        super().__init__('CDP ' + method + ': ' + str(error)[:256])
+
+
 def navigation_url(value):
     """Explicit navigation policy for the opt-in controller/tab commands.
 
@@ -147,7 +155,7 @@ def cdp_call(ws_url, method, params, timeout=3):
                     raise ValueError('invalid CDP response')
                 if response.get('id') == 1:
                     if 'error' in response:
-                        raise RuntimeError('CDP ' + method + ': ' + str(response['error'])[:256])
+                        raise CDPError(method, response['error'])
                     return response.get('result')
         raise TimeoutError('CDP control response missing')
 
@@ -463,20 +471,51 @@ class Controller:
         return result
 
     def refresh(self, targets=None):
-        targets = self.list_targets() if targets is None else targets
-        if not isinstance(targets, list) or len(targets) > 256:
-            raise ValueError('browser target count exceeds bound')
         deadline = time.monotonic() + 8
+
+        def target_ids(rows):
+            if not isinstance(rows, list) or len(rows) > 256:
+                raise ValueError('browser target count exceeds bound')
+            ids = [row.get('id') if isinstance(row, dict) else None for row in rows]
+            if any(not isinstance(tid, str) or not re.fullmatch(r'[A-Za-z0-9-]+', tid) for tid in ids):
+                raise ValueError('invalid browser target ID')
+            if len(set(ids)) != len(ids):
+                raise ValueError('duplicate browser target ID')
+            return set(ids)
 
         def lookup(tid):
             if time.monotonic() >= deadline:
                 raise TimeoutError('window grouping deadline exceeded')
-            return self.call('Browser.getWindowForTarget', {'targetId': tid})
+            result = self.call('Browser.getWindowForTarget', {'targetId': tid})
+            integer(result.get('windowId'), 1, SAFE_INTEGER, 'observed windowId')
+            return result
 
-        groups, target_windows = group_targets(targets, lookup)
-        self.groups, self.target_windows = groups, target_windows
-        self.bindings = {index: wid for index, wid in self.bindings.items() if wid in groups}
-        return groups, target_windows
+        # Chromium can close a target between /json and window lookup. Retry
+        # only observations, never the close/create which prompted them. Commit
+        # cached ownership only after a complete mapping and matching target set.
+        for _ in range(3):
+            if time.monotonic() >= deadline:
+                raise TimeoutError('window grouping deadline exceeded')
+            if targets is None:
+                targets = self.list_targets()
+            before = target_ids(targets)
+            try:
+                groups, target_windows = group_targets(targets, lookup)
+            except CDPError as error:
+                if not (error.method == 'Browser.getWindowForTarget' and error.code == -32000 and
+                        error.message == 'No target with given id'):
+                    raise
+                targets = None
+                continue
+            observed = self.list_targets()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('window grouping deadline exceeded')
+            if before == target_ids(observed):
+                self.groups, self.target_windows = groups, target_windows
+                self.bindings = {index: wid for index, wid in self.bindings.items() if wid in groups}
+                return groups, target_windows
+            targets = observed
+        raise RuntimeError('browser target set did not stabilize during window grouping')
 
     def outputs(self):
         rows = discover_outputs(self.run(['xrandr', '--query', '--props']), self.sysfs)

@@ -1301,6 +1301,10 @@ def main():
             try:
                 with _shared.lock:
                     groups, target_windows = _shared.refresh(targets)
+                    if {t['id'] for t in targets} != set(target_windows):
+                        # Reconciliation observed a newer set. Restart this
+                        # read-only poll rather than emit old rows with new IDs.
+                        raise RuntimeError('target list changed during shared tab poll')
                     _shared.active = active_by_window(groups, visibility, _shared.active)
                     active_ids = set(_shared.active.values())
             except (ValueError, OSError, RuntimeError) as error:
