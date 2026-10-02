@@ -3607,3 +3607,5 @@
 "Change…" = "変更…";
 "Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "エージェントのインストール後、再構築や更新のたびにイメージ内で root として実行されるため、新規またはリセットしたワークスペースにはインストール内容が含まれます。bash -x で ~/Library/Logs/BromureAC/base-image-customize.log にトレースされます。失敗した場合は現在のイメージが維持されます。";
 "Your customize script failed — the current image is kept. See %@" = "カスタマイズスクリプトが失敗しました。現在のイメージは維持されます。%@ を参照してください";
+"%@ says" = "%@ のコメント";
+"The agent" = "エージェント";

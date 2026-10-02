@@ -27,6 +27,9 @@ struct ReviewSource {
     /// path → fingerprint of the diff seen.
     var viewed: () -> [String: String]
     var plan: () -> String? = { nil }
+    /// What the agent the task was handed to said when it delivered
+    /// (who, and its words) — shown even when there's no diff to read.
+    var note: () -> (who: String, text: String)? = { nil }
     /// The diff at `base`. The second argument: a file the review is about
     /// (a turn's edit) — its git checkout is diffed, which may not be the
     /// session's folder (a worktree the agent edits in).
@@ -199,11 +202,16 @@ struct ReviewView: View {
     @State private var draftFile: String?
     @State private var baseChosen = false
     @State private var planOpen = true
+    @State private var noteOpen = true
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            if let note = source.note(), !note.text.isEmpty {
+                noteCard(note)
+                Divider()
+            }
             HSplitView {
                 fileList
                     .frame(minWidth: 220, idealWidth: 270, maxWidth: 380)
@@ -512,6 +520,39 @@ struct ReviewView: View {
     }
 
     /// A task's plan, above its diff — what the change set out to do.
+    /// The assignee's own account of the work, open by default (it's what
+    /// you read before the diff); scrolls past a few lines.
+    private func noteCard(_ note: (who: String, text: String)) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { noteOpen.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: noteOpen ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
+                    Label(String(format: NSLocalizedString("%@ says", comment: "review: the assignee's delivery"), note.who),
+                          systemImage: "text.bubble")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.indigo)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if noteOpen {
+                ScrollView {
+                    MarkdownBlocks(text: note.text, compact: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.indigo.opacity(0.06)))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
     private func planCard(_ plan: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {

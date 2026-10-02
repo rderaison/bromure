@@ -65,9 +65,13 @@ final class TaskDispatcher {
     func assign(_ taskID: UUID, to assignment: TaskAssignment?) {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
               task.stage == .backlog || task.stage == .planning else { return }
+        // Queued for a session: the work happens in its workspace, so that's
+        // the card's — not whichever workspace the editor defaulted to.
+        let worker = assignment.flatMap { $0.kind == .session ? delegate.agentSessionStore.session($0.id) : nil }
         delegate.codingTaskStore.mutate(taskID) {
             $0.assignment = assignment
             $0.lastError = nil
+            if let worker { $0.profileID = worker.profileID }
         }
         BACDebug.log("tasks", "“\(task.title)” queued for \(assignment?.label ?? "nobody")")
         pump()
@@ -190,6 +194,12 @@ final class TaskDispatcher {
                 }
                 target = sid
             }
+            // The card shows (and later reviews and merges in) the workspace
+            // the work happens in: the assignee's. A room's or the
+            // Switchboard's pick is corrected on delivery, from the worktree.
+            if let s = delegate.agentSessionStore.session(target) {
+                store.mutate(taskID) { $0.profileID = s.profileID }
+            }
             let text = Self.brief(for: task, slug: slug, viaRoom: assignment.kind == .room,
                                   viaSwitchboard: assignment.kind == .switchboard,
                                   pullRequest: TaskAssignment.finishWithPullRequest)
@@ -275,6 +285,20 @@ final class TaskDispatcher {
             }
         case .report:
             store.mutate(task.id) { $0.assigneeNote = m.text }
+        case .deliver where task.mergingAt != nil && task.stage == .testing:
+            // The assignee merged it, as asked on acceptance.
+            store.mutate(task.id) {
+                $0.stage = .done
+                $0.completedAt = Date()
+                $0.merged = true
+                $0.mergingAt = nil
+                $0.lastError = nil
+                $0.mergeReport = m.text
+                $0.pendingQuestion = nil
+                $0.pendingAskID = nil
+            }
+            BACDebug.log("tasks", "“\(task.title)”: merged by \(task.assignment?.label ?? "its assignee")")
+            pump()
         case .deliver:
             store.mutate(task.id) {
                 $0.deliverySummary = m.text
@@ -394,6 +418,44 @@ final class TaskDispatcher {
             }
             return false
         }
+    }
+
+    /// An assigned task accepted on the board: its assignee merges its own
+    /// branch — into the branch it started from (its checkout's), or
+    /// `target` — where it did the work, a native machine included, and
+    /// delivers again; that delivery makes the card Done. A merge it can't
+    /// finish comes back as a question on the card.
+    func requestMerge(_ taskID: UUID, into target: String?, squash: Bool, cleanup: Bool) async -> Bool {
+        guard let delegate, let task = delegate.codingTaskStore.task(taskID),
+              task.stage == .testing, task.mergingAt == nil, let did = task.delegationID else { return false }
+        let text = Self.mergeRequest(branch: task.branch ?? "wt/\(task.branchSlug ?? "")",
+                                     into: target ?? task.parentBranch, squash: squash, cleanup: cleanup)
+        do {
+            try await delegate.delegationEngine.steer(
+                from: DelegationEngine.boardSessionID, delegationKey: did.uuidString, text: text, by: .user)
+        } catch {
+            delegate.codingTaskStore.mutate(taskID) {
+                $0.lastError = (error as? DelegationRefusal)?.why ?? error.localizedDescription
+            }
+            return false
+        }
+        delegate.codingTaskStore.mutate(taskID) { $0.mergingAt = Date(); $0.lastError = nil }
+        BACDebug.log("tasks", "“\(task.title)”: asked \(task.assignment?.label ?? "its assignee") to merge")
+        return true
+    }
+
+    /// What the assignee is asked to do on acceptance.
+    nonisolated static func mergeRequest(branch: String, into target: String?,
+                                         squash: Bool, cleanup: Bool) -> String {
+        let dest = target.map { "into \($0)" }
+            ?? "into the branch your own checkout was on when you started this task"
+        return "Accepted on the board — merge it. Merge \(branch) \(dest)"
+            + (squash ? " as a single squashed commit" : "") + ": commit anything still outstanding in its "
+            + "worktree first, resolve any conflicts, and check the result still builds. "
+            + (cleanup ? "Then remove the worktree and delete the branch. "
+                       : "Keep the worktree and the branch. ")
+            + "Deliver again with one line saying where it landed. If you can't merge it, don't deliver: "
+            + "ask, saying what's in the way."
     }
 
     /// Take a task back from its assignee (back to the backlog).

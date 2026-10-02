@@ -447,6 +447,38 @@ struct DelegationTests {
         #expect(f.store.delegation(d.id)?.status == .done)
     }
 
+    @Test("accepted on the board: the assignee is asked to merge on the same thread, and delivers again")
+    func boardAcceptMerge() async throws {
+        let f = fixture()
+        let hot = peer(in: f, workspace: f.profileID, nick: "hotfixes", window: 9)
+        var got: [DelegationMessage] = []
+        f.engine.onBoardMessage = { _, m in got.append(m) }
+        let d = try await f.engine.requestFromBoard(to: hot.id, title: "Fix it", text: "Fix it.")
+        _ = await f.server.handle(line: call("deliver", ["delegation_id": d.id.uuidString,
+                                                          "summary": "Fixed on wt/fix"]), branch: "w9")
+        #expect(f.store.delegation(d.id)?.status == .delivered)
+        // The board's acceptance reaches the delivered request as a steer…
+        let accept = TaskDispatcher.mergeRequest(branch: "wt/fix", into: nil, squash: false, cleanup: true)
+        try await f.engine.steer(from: DelegationEngine.boardSessionID, delegationKey: d.id.uuidString,
+                                 text: accept, by: .user)
+        #expect(f.store.delegation(d.id)?.messages.last?.kind == .steer)
+        // …and the assignee's next delivery comes back to the board.
+        let again = parse(await f.server.handle(line: call("deliver", ["delegation_id": d.id.uuidString,
+                                                                        "summary": "Merged into hotfixes-v5"]), branch: "w9"))
+        #expect(!isError(again), Comment(rawValue: text(again)))
+        #expect(got.last?.kind == .deliver && got.last?.text == "Merged into hotfixes-v5")
+    }
+
+    @Test("the merge request names the branch and where it goes — the assignee's own branch by default")
+    func mergeRequestText() {
+        let own = TaskDispatcher.mergeRequest(branch: "wt/fix", into: nil, squash: false, cleanup: true)
+        #expect(own.contains("Merge wt/fix into the branch your own checkout was on"))
+        #expect(own.contains("remove the worktree") && own.contains("ask"))
+        let main = TaskDispatcher.mergeRequest(branch: "wt/fix", into: "main", squash: true, cleanup: false)
+        #expect(main.contains("Merge wt/fix into main as a single squashed commit"))
+        #expect(main.contains("Keep the worktree"))
+    }
+
     @Test("a board task that reads like an injection is withheld")
     func boardRequestScanned() async {
         let f = fixture()

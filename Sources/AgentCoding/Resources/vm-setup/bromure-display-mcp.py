@@ -8,9 +8,11 @@ cards the user can pop out into a window. This server only checks the
 arguments so a bad call fails loudly to the agent instead of showing the user
 a broken card.
 """
+import hashlib
 import json
 import mimetypes
 import os
+import shutil
 import sys
 
 PROTOCOL = "2025-03-26"
@@ -122,6 +124,47 @@ def check_media(args):
     return None, kind, size
 
 
+# What an agent shows is kept: screenshots usually sit in /tmp, which the
+# machine empties at every boot, and the chat reads a card's file again each
+# time it's drawn — after a restart the card had nothing left to show. A
+# copy per shown path (the chat falls back to it; same naming on the host,
+# DisplayKeep.path), the oldest dropped past the budget.
+KEEP_DIR = "/home/ubuntu/.bromure/display"
+KEEP_BUDGET = 2 * 1024 * 1024 * 1024
+KEEP_MAX_FILE = 512 * 1024 * 1024
+
+
+def kept_path(path):
+    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:32]
+    return os.path.join(KEEP_DIR, digest + os.path.splitext(path)[1].lower())
+
+
+def keep(path):
+    try:
+        if os.path.getsize(path) > KEEP_MAX_FILE:
+            return
+        os.makedirs(KEEP_DIR, exist_ok=True)
+        dst = kept_path(path)
+        if os.path.realpath(path) == os.path.realpath(dst):
+            return
+        tmp = dst + ".tmp"
+        shutil.copyfile(path, tmp)
+        os.replace(tmp, dst)
+        files = []
+        for name in os.listdir(KEEP_DIR):
+            full = os.path.join(KEEP_DIR, name)
+            if os.path.isfile(full) and not name.endswith(".tmp"):
+                st = os.stat(full)
+                files.append((st.st_mtime, st.st_size, full))
+        total = 0
+        for _, size, full in sorted(files, reverse=True):
+            total += size
+            if total > KEEP_BUDGET and full != dst:
+                os.remove(full)
+    except OSError:
+        pass   # best effort: the card still reads the original
+
+
 def check_chart(args):
     spec = args.get("spec")
     if isinstance(spec, str):
@@ -183,6 +226,7 @@ def call(name, args):
         if isinstance(r, str):
             return r, True
         _, size = r
+        keep(args["path"])
         return ("Offered to the user in the chat as a download: %s (%s). They save it on "
                 "their own computer from there." % (os.path.basename(args["path"]), human(size))), False
     if name == "show_media":
@@ -190,6 +234,7 @@ def call(name, args):
         if isinstance(r, str):
             return r, True
         _, kind, size = r
+        keep(args["path"])
         return ("Shown to the user in the chat: the %s %s (%d KB). They can pop it out into a window."
                 % (kind, args["path"], max(1, size // 1024))), False
     if name == "show_chart":

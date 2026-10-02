@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 import WebKit
 #if canImport(AVKit)
@@ -72,6 +73,25 @@ struct DisplayFileReader {
     let read: (_ path: String, _ maxBytes: Int) async -> Data?
     /// The guest file op underneath (downloads stream through it).
     var op: (([String: Any]) async -> [String: Any]?)? = nil
+    /// The machine it reads from, so cached media never crosses machines.
+    var scope = ""
+
+    func cacheKey(_ path: String) -> String { scope + "\u{1}" + path }
+
+    /// Read `path`, else the copy the machine kept when it was shown (the
+    /// original sat in /tmp, emptied at every boot, or was deleted since).
+    func readKept(_ path: String, _ maxBytes: Int) async -> Data? {
+        if let d = await read(path, maxBytes) { return d }
+        return await read(DisplayKeep.path(for: path), maxBytes)
+    }
+
+    /// The path to fetch `path` from: itself while it exists, else its kept copy.
+    func resolve(_ path: String) async -> (path: String, size: Int64)? {
+        if let n = await size(path) { return (path, n) }
+        let kept = DisplayKeep.path(for: path)
+        if let n = await size(kept) { return (kept, n) }
+        return nil
+    }
 
     /// The file's size on the machine, or nil when it can't be read.
     func size(_ path: String) async -> Int64? {
@@ -321,6 +341,17 @@ struct DisplayCard: View {
     }
 }
 
+/// Where the machine keeps a copy of what an agent showed or sent
+/// (bromure-display-mcp.py `kept_path`, same naming).
+enum DisplayKeep {
+    static let dir = "/home/ubuntu/.bromure/display"
+    static func path(for original: String) -> String {
+        let digest = SHA256.hash(data: Data(original.utf8)).map { String(format: "%02x", $0) }.joined()
+        let ext = (original as NSString).pathExtension.lowercased()
+        return dir + "/" + String(digest.prefix(32)) + (ext.isEmpty ? "" : "." + ext)
+    }
+}
+
 // MARK: Sent files (send_file)
 
 /// One download's progress, held outside the view so it survives the chat's
@@ -343,8 +374,8 @@ final class DisplayDownloads: ObservableObject {
     func state(_ key: String) -> State { states[key] ?? .idle }
 
     func loadSize(_ path: String, reader: DisplayFileReader) async {
-        guard sizes[path] == nil, let n = await reader.size(path) else { return }
-        sizes[path] = n
+        guard sizes[path] == nil, let found = await reader.resolve(path) else { return }
+        sizes[path] = found.size
     }
 
     func start(_ key: String, path: String, to dest: URL, reader: DisplayFileReader) {
@@ -352,7 +383,9 @@ final class DisplayDownloads: ObservableObject {
         states[key] = .running(done: 0, total: sizes[path] ?? 0)
         tasks[key] = Task { [weak self] in
             do {
-                try await reader.download(path, to: dest) { done, total in
+                // The original, else the copy the machine kept when it was sent.
+                let source = await reader.resolve(path)?.path ?? path
+                try await reader.download(source, to: dest) { done, total in
                     self?.states[key] = .running(done: done, total: total)
                 }
                 self?.states[key] = .done(dest)
@@ -576,8 +609,9 @@ struct MediaView: View {
             }
         }
         .onAppear {
-            if let d = DisplayMediaCache.image(path), let img = PlatformImage(data: d) { image = img; return }
-            if let u = DisplayMediaCache.video(path) { videoURL = u; return }
+            let key = reader?.cacheKey(path) ?? path
+            if let d = DisplayMediaCache.image(key), let img = PlatformImage(data: d) { image = img; return }
+            if let u = DisplayMediaCache.video(key) { videoURL = u; return }
             if kind == .image || expanded { load() }   // a video waits for a tap inline
         }
     }
@@ -603,7 +637,8 @@ struct MediaView: View {
         let path = self.path
         Task { @MainActor in
             let cap = kind == .image ? 25 * 1024 * 1024 : 500 * 1024 * 1024
-            guard let data = await reader.read(path, cap) else {
+            let key = reader.cacheKey(path)
+            guard let data = await reader.readKept(path, cap) else {
                 loading = false
                 failure = String(format: NSLocalizedString("Couldn't read %@.", comment: "display card"),
                                  (path as NSString).lastPathComponent)
@@ -612,13 +647,13 @@ struct MediaView: View {
             switch kind {
             case .image:
                 if let img = PlatformImage(data: data) {
-                    DisplayMediaCache.store(image: data, for: path)
+                    DisplayMediaCache.store(image: data, for: key)
                     image = img
                 } else {
                     failure = NSLocalizedString("That image couldn't be decoded.", comment: "display card")
                 }
             case .video:
-                if let url = DisplayMediaCache.store(video: data, for: path,
+                if let url = DisplayMediaCache.store(video: data, for: key,
                                                      ext: (path as NSString).pathExtension.lowercased()) {
                     videoURL = url
                 } else {

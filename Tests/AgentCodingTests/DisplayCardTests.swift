@@ -60,6 +60,68 @@ struct DisplayCardTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["out 2.zip", "out.zip"])
     }
 
+    private static var displayMCP: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-display-mcp.py")
+    }
+
+    private func python(_ code: String) throws -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.arguments = ["-c", code]
+        proc.currentDirectoryURL = Self.displayMCP.deletingLastPathComponent()
+        let out = Pipe(); proc.standardOutput = out; proc.standardError = out
+        try proc.run(); proc.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @Test("the host finds the machine's kept copy under the name the display server gives it")
+    func keptNamingMatches() throws {
+        let path = "/tmp/shots/Home Page.PNG"
+        let py = try python("""
+            import importlib.util
+            s = importlib.util.spec_from_file_location("d", "bromure-display-mcp.py")
+            m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+            print(m.kept_path("\(path)"))
+            """)
+        #expect(py == DisplayKeep.path(for: path))
+        #expect(DisplayKeep.path(for: path).hasPrefix("/home/ubuntu/.bromure/display/"))
+        #expect(DisplayKeep.path(for: path).hasSuffix(".png"))
+    }
+
+    @Test("showing a file keeps a copy, the oldest dropped past the budget")
+    func serverKeepsCopies() throws {
+        let out = try python("""
+            import importlib.util, os, tempfile, time
+            s = importlib.util.spec_from_file_location("d", "bromure-display-mcp.py")
+            m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+            d = tempfile.mkdtemp(); m.KEEP_DIR = os.path.join(d, "keep"); m.KEEP_BUDGET = 25
+            paths = []
+            for i in range(3):
+                p = os.path.join(d, "shot%d.png" % i)
+                open(p, "wb").write(b"x" * 10)
+                m.keep(p); paths.append(p); time.sleep(0.02)
+            os.remove(paths[2])
+            print(os.path.exists(m.kept_path(paths[2])), os.path.exists(m.kept_path(paths[1])),
+                  os.path.exists(m.kept_path(paths[0])))
+            """)
+        // The newest survives its original's deletion; past 25 bytes the oldest goes.
+        #expect(out == "True True False")
+    }
+
+    @Test("a card whose file is gone shows the kept copy; cache keys don't cross machines")
+    func readerFallsBack() async {
+        let kept = DisplayKeep.path(for: "/tmp/gone.png")
+        var r = DisplayFileReader(read: { path, _ in path == kept ? Data([1, 2, 3]) : nil })
+        r.scope = "host-a:ws:0"
+        #expect(await r.readKept("/tmp/gone.png", 100) == Data([1, 2, 3]))
+        #expect(await r.readKept("/tmp/never.png", 100) == nil)
+        var other = r
+        other.scope = "host-b:ws:0"
+        #expect(r.cacheKey("/tmp/shot.png") != other.cacheKey("/tmp/shot.png"))
+    }
+
     @Test("a display call is shown, never folded into the activity line")
     func notFolded() {
         let show = TranscriptItem(id: 1, kind: .toolUse(name: "mcp__display__show_chart", summary: "",
