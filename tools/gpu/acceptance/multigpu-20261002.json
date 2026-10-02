@@ -48,5 +48,18 @@
     "Privileged Xorg rejected absolute config path; fixed by relative /etc/X11 configuration.",
     "Fixture presentation race; test waits for composition before host pixel check.",
     "Fixture mousedown focus overridden by default browser action; mouseup focus corrected."
-  ]
+  ],
+  "signedBundle": {
+    "source": "bac4f660",
+    "buildCommand": "./package.sh bromure",
+    "identity": "Developer ID Application: RENAUD MARIE DERAISON (W3RD8G85BC)",
+    "strictSignatureVerification": "PASS",
+    "actualSignedBundleAcceptance": "PASS",
+    "exitCode": 0,
+    "log": "/private/tmp/bromure-multigpu-signed-boot.log",
+    "logSHA256": "c76c7afe636fdf0b6628d77957355aa8f9343f8ec109fe280185259da00a5b3b",
+    "binarySHA256": "b3313461cae037887177397f6e99ab1bb5dd7a92cd78dd49170bc52c7c8daba8",
+    "notarization": "BLOCKED: No Keychain password item found for profile Bromure",
+    "desktopPreview": "/Users/renaud/Desktop/Bromure Multi-GPU Preview bac4f660"
+  }
 }
