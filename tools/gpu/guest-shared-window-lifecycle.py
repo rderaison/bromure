@@ -91,6 +91,7 @@ def get(path):
 
 def processes():
     rows = []
+    boot_id = str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
     for directory in Path('/proc').glob('[0-9]*'):
         try:
             if directory.joinpath('exe').resolve().name not in ('chrome', 'chromium'):
@@ -100,7 +101,7 @@ def processes():
                 continue
             stat = directory.joinpath('stat').read_text().rsplit(')', 1)[1].split()
             profile = next((arg.split('=', 1)[1] for arg in command if arg.startswith('--user-data-dir=')), None)
-            rows.append(dict(pid=int(directory.name), startTicks=int(stat[19]), command=command, profile=profile))
+            rows.append(dict(bootId=boot_id, pid=int(directory.name), startTicks=int(stat[19]), command=command, profile=profile))
         except OSError:
             continue
     assert len(rows) == 1, rows
@@ -181,7 +182,8 @@ def main():
         if args.after_restart:
             assert args.phase == 'check-cookie', 'restart mode only verifies persistence'
             assert current['profile'] and current['profile'] == state['browser']['profile'], current
-            assert (current['pid'], current['startTicks']) != (state['browser']['pid'], state['browser']['startTicks']), 'browser did not restart'
+            assert all(key in state['browser'] for key in ('bootId', 'pid', 'startTicks')), 'initial fixture lacks complete process identity'
+            assert (current['bootId'], current['pid'], current['startTicks']) != (state['browser']['bootId'], state['browser']['pid'], state['browser']['startTicks']), 'browser did not restart'
         else:
             assert current == state['browser'], (current, state['browser'])
         selected = [p for p in records if args.window is None or p['windowId'] == args.window]
