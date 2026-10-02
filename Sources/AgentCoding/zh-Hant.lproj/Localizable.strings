@@ -3615,3 +3615,9 @@
 "Ask %@ to Merge into %@" = "請 %@ 合併到 %@";
 "Ask %@ to Merge" = "請 %@ 合併";
 "Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "請完成任務的代理程式在其工作的地方合併它的分支；它回報後卡片即標記為完成。按住可選擇壓縮合併、提取要求或其他分支。";
+"%@ merges %@ into…" = "%@ 將 %@ 合併到…";
+"%@ — where it started" = "%@ — 開始工作的地方";
+"Loading branches…" = "正在載入分支…";
+"Squash into one commit" = "壓縮成一個提交";
+"Ask %@ to Merge into…" = "請 %@ 合併到…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "選擇分支：完成工作的代理程式會在其工作的地方合併，它回報後卡片即標記為完成。";

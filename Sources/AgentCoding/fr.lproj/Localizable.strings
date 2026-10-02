@@ -3612,3 +3612,9 @@
 "Ask %@ to Merge into %@" = "Demander à %@ de fusionner dans %@";
 "Ask %@ to Merge" = "Demander à %@ de fusionner";
 "Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "Demande à l’agent qui l’a fait de fusionner sa branche là où il a travaillé ; la carte passe à Terminé quand il en rend compte. Maintenez pour fusionner en un seul commit, ouvrir une pull request ou choisir une autre branche.";
+"%@ merges %@ into…" = "%@ fusionne %@ dans…";
+"%@ — where it started" = "%@ — là où il a commencé";
+"Loading branches…" = "Chargement des branches…";
+"Squash into one commit" = "Fusionner en un seul commit";
+"Ask %@ to Merge into…" = "Demander à %@ de fusionner dans…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Choisissez la branche : l’agent qui a fait le travail le fusionne là où il a travaillé, et la carte passe à Terminé quand il en rend compte.";
