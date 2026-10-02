@@ -447,8 +447,10 @@ def confirm_focus(target, timeout):
 def shutdown_endpoint(timeout=3):
     """Resolve one browser endpoint with a wall deadline, then pin it for quit."""
     conn = http.client.HTTPConnection('127.0.0.1', 9222, timeout=timeout)
+    expired = threading.Event()
 
     def expire():
+        expired.set()
         sock = conn.sock
         if sock is not None:
             try:
@@ -466,10 +468,17 @@ def shutdown_endpoint(timeout=3):
         body = response.read(65537)
         if response.status != 200 or len(body) > 65536:
             raise RuntimeError('invalid browser endpoint response')
-        endpoint = json.loads(body).get('webSocketDebuggerUrl')
+        value = json.loads(body)
+        endpoint = value.get('webSocketDebuggerUrl') if isinstance(value, dict) else None
         if not isinstance(endpoint, str):
             raise RuntimeError('browser endpoint missing')
+        if expired.is_set():
+            raise TimeoutError('browser endpoint deadline exceeded')
         return endpoint
+    except Exception as error:
+        if expired.is_set():
+            raise TimeoutError('browser endpoint deadline exceeded') from error
+        raise
     finally:
         timer.cancel()
         conn.close()

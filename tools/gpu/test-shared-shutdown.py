@@ -18,6 +18,39 @@ spec.loader.exec_module(shared)
 
 
 class Tests(unittest.TestCase):
+    def test_endpoint_discovery_bounds_slow_response_and_rejects_nonobject(self):
+        # Actual loopback socket verifies the wall timer stops a trickle which
+        # would continually reset a normal per-read socket timeout.
+        for trickle in (False, True):
+            server = socket.socket()
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(('127.0.0.1', 9222));server.listen(1);server.settimeout(1)
+            stop = threading.Event()
+            def respond():
+                try:
+                    client, _ = server.accept()
+                    with client:
+                        client.settimeout(1)
+                        client.recv(4096)
+                        if not trickle:
+                            client.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]')
+                        else:
+                            client.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n')
+                            while not stop.wait(.01):
+                                client.sendall(b' ')
+                except OSError:
+                    pass
+            worker = threading.Thread(target=respond)
+            worker.start()
+            started = time.monotonic()
+            try:
+                with self.assertRaises(TimeoutError if trickle else RuntimeError):
+                    shared.shutdown_endpoint(timeout=.15)
+                self.assertLess(time.monotonic()-started, .7)
+            finally:
+                stop.set();server.close();worker.join(2)
+                self.assertFalse(worker.is_alive())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
