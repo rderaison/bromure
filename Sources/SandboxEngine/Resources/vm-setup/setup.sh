@@ -309,7 +309,7 @@ log "apt-get install X + WM + fonts + audio"
 retry apt-get install -y -q --no-install-recommends \
     xserver-xorg-core xserver-xorg-legacy \
     xserver-xorg-input-libinput xserver-xorg-video-modesetting \
-    xinit xauth x11-xserver-utils x11-xkb-utils \
+    xinit xauth x11-xserver-utils x11-xkb-utils x11-utils libxtst6 \
     keyboard-configuration console-setup xkb-data \
     openbox xdotool \
     spice-vdagent \
@@ -752,6 +752,8 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
 install_config   scripts/resize-watcher.py  /mnt/usr/local/bin/resize-watcher.py 755
+install_config   scripts/experimental-multigpu.py /mnt/usr/local/bin/experimental-multigpu.py 755
+install_config   scripts/experimental-multigpu-input.py /mnt/usr/local/bin/experimental-multigpu-input.py 755
 install_config   scripts/graphics-env.sh /mnt/usr/local/bin/graphics-env.sh 644
 install_config   scripts/graphics-diagnostics.py /mnt/usr/local/bin/graphics-diagnostics.py 755
 install_config   scripts/graphics-prerequisites.py /mnt/usr/local/bin/graphics-prerequisites.py 755
