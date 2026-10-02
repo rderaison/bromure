@@ -93,7 +93,8 @@ class Shortcuts(unittest.TestCase):
         server = Mock(); server.accept.side_effect = [(c, ('127.0.0.1', 1)) for c in connections] + [KeyboardInterrupt()]
         link = Mock()
         with patch.object(agent.socket, 'socket', return_value=server), patch.object(agent, 'log'), \
-             patch.object(agent, '_shared', types.SimpleNamespace(focused_window=321)):
+             patch.object(agent, '_shared', types.SimpleNamespace(focused_window=321)), \
+             patch.object(agent.time, 'monotonic', return_value=.01):
             with self.assertRaises(KeyboardInterrupt): agent.shortcut_listener(link)
         self.assertEqual([c.args[0] for c in link.send.call_args_list], [
             {'event':'shortcut','key':'n','windowId':321},

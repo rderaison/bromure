@@ -1271,7 +1271,7 @@ def shortcut_listener(link):
                 conn.close()
             if key is not None:
                 now = time.monotonic()
-                if now - last_fire.get(key, 0.0) < debounce:
+                if key in last_fire and now - last_fire[key] < debounce:
                     continue
                 last_fire[key] = now
                 log(f"shortcut -> host: {key}")
