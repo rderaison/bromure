@@ -1295,7 +1295,7 @@ struct AssignTaskSheet: View {
             HStack {
                 Toggle(NSLocalizedString("Open a pull request when done", comment: "assign sheet"),
                        isOn: Binding(get: { prWhenDone }, set: { prWhenDone = $0; TaskAssignment.finishWithPullRequest = $0 }))
-                    .toggleStyle(.checkbox)
+                    .platformCheckboxToggle()
                     .font(.system(size: 11.5))
                     .help(NSLocalizedString("A session or room pushes its branch and opens a pull request before the card moves to Testing/Review.", comment: "assign sheet"))
                 Spacer()
