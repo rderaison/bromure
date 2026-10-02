@@ -38,6 +38,10 @@ final class RemoteHostController {
     let gridStore: GridLayoutStore
     /// Mirror of the remote automations.
     let automationStore: ScheduledAutomationStore
+    #if os(macOS)
+    /// Mirror of the remote repository watches + findings.
+    let findingStore: FindingStore
+    #endif
     /// Mirror of the remote Kubernetes clusters (records + live status).
     let kubeStore = KubeClusterStore(mirror: true)
     /// Mirror of the server's delegations between sessions.
@@ -398,6 +402,9 @@ final class RemoteHostController {
         dataDir = base
         gridStore = GridLayoutStore(saveURL: base.appendingPathComponent("grid-layout.json"))
         automationStore = ScheduledAutomationStore(fileURL: base.appendingPathComponent("automations.json"))
+        #if os(macOS)
+        findingStore = FindingStore(fileURL: base.appendingPathComponent("findings.json"), persists: false)
+        #endif
         taskStore = CodingTaskStore(fileURL: base.appendingPathComponent("tasks.json"))
     }
 
@@ -1043,6 +1050,14 @@ final class RemoteHostController {
         let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
             .compactMapValues { iso.date(from: $0) }
         automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
+        #if os(macOS)
+        // Absent on a server without repository watches: leave the mirror empty.
+        if autos["watches"] != nil || autos["findings"] != nil {
+            findingStore.mirror(
+                watches: decode((autos["watches"] as? [[String: Any]]) ?? [], WatchedRepo.self),
+                findings: decode((autos["findings"] as? [[String: Any]]) ?? [], RepoFinding.self))
+        }
+        #endif
     }
 
     private func applyKubeClusters(_ payload: [String: Any]) {
@@ -1960,6 +1975,25 @@ final class RemoteHostController {
         guard let doc = ACAppDelegate.codableToDict(automation) else { return }
         send("POST", "/automations", body: doc)
     }
+
+    #if os(macOS)
+    // Repository watches + findings, over the tunnel; the mirror confirms on
+    // poll.
+    func saveWatch(_ w: WatchedRepo, scanNow: Bool) {
+        guard var doc = ACAppDelegate.codableToDict(w) else { return }
+        doc["scanNow"] = scanNow
+        send("POST", "/watches", body: doc)
+    }
+    func watchCommand(_ id: UUID, _ action: String) {
+        send(action.isEmpty ? "DELETE" : "POST",
+             "/watches/\(ControlClient.encodeSegment(id.uuidString))" + (action.isEmpty ? "" : "/" + action))
+    }
+    func findingCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
+        send(action.isEmpty ? "DELETE" : "POST",
+             "/findings/\(ControlClient.encodeSegment(id.uuidString))" + (action.isEmpty ? "" : "/" + action),
+             body: body)
+    }
+    #endif
 }
 
 #if os(macOS)
@@ -3413,16 +3447,17 @@ final class RemoteHostWindow: NSWindow {
     /// fat client keeps editors in windows, like workspace settings). Saves ride
     /// the tunnel: `onSave`/`onRunNow` upsert via `POST /automations`, delete via
     /// `DELETE /automations/{id}`. `nil` id opens a fresh draft (the "+" button).
-    private func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) {
+    private func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil,
+                                      trigger: ScheduledAutomation.TriggerKind? = nil) {
         controller.listModel.automationSelectedID = id
         if let win = automationWindow {
             // Rebuild for the newly-requested automation.
-            win.contentView = NSHostingView(rootView: makeAutomationEditor(id, prefill: prefill))
+            win.contentView = NSHostingView(rootView: makeAutomationEditor(id, prefill: prefill, trigger: trigger))
             win.makeKeyAndOrderFront(nil)
             return
         }
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 680),
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 820),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered, defer: false)
         win.title = id == nil
@@ -3430,17 +3465,19 @@ final class RemoteHostWindow: NSWindow {
             : NSLocalizedString("Edit automation", comment: "remote automation title")
         win.center()
         win.isReleasedWhenClosed = false
-        win.contentView = NSHostingView(rootView: makeAutomationEditor(id, prefill: prefill))
+        win.contentView = NSHostingView(rootView: makeAutomationEditor(id, prefill: prefill, trigger: trigger))
         win.makeKeyAndOrderFront(nil)
         automationWindow = win
     }
 
-    private func makeAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) -> AutomationEditorView {
+    private func makeAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil,
+                                      trigger: ScheduledAutomation.TriggerKind? = nil) -> AutomationEditorView {
         AutomationEditorView(
             store: controller.automationStore,
             profiles: controller.profiles,
             editing: id,
             prefill: prefill,
+            initialTrigger: trigger,
             onSave: { [weak self] auto in
                 self?.controller.upsertAutomation(auto)
                 self?.closeAutomationWindow()
@@ -3481,7 +3518,8 @@ final class RemoteHostWindow: NSWindow {
 
     // MARK: Automation kanban board (mirrors the local stage surface)
 
-    private var kanbanHost: NSHostingView<AutomationKanbanView>?
+    private var kanbanHost: NSHostingView<AutomationHubView>?
+    let automationHub = AutomationHubModel()
 
     /// Run-detail windows for the mirrored board: the live terminal is a
     /// remote attach over SSH; transcripts are fetched from the host once
@@ -3531,17 +3569,55 @@ final class RemoteHostWindow: NSWindow {
         setFilePaneOpen(false)
         if kanbanHost == nil {
             let c = controller
-            let view = AutomationKanbanView(
-                store: c.automationStore,
+            let view = AutomationHubView(
+                automationStore: c.automationStore,
+                findingStore: c.findingStore,
+                taskStore: c.taskStore,
                 model: c.listModel,
-                actions: AutomationKanbanView.Actions(
-                    selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
-                    newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
-                    runNow: { c.runAutomation($0) },
-                    toggle: { c.toggleAutomation($0) },
-                    delete: { [weak self] id in self?.confirmDeleteAutomation(id) },
-                    openRun: { [weak self] run in self?.runWindowManager.open(run: run) },
-                    acknowledge: { c.acknowledgeRun($0) }))
+                hub: automationHub,
+                workspaces: {
+                    c.profiles.map { p in
+                        let tools = p.allToolSpecs.map(\.tool)
+                        return WatchWorkspaceChoice(
+                            id: p.id, name: p.name, tools: tools,
+                            defaultTool: tools.contains(p.tool) ? p.tool : (tools.first ?? p.tool),
+                            hasGitHubToken: p.hasGitHubCredential,
+                            askBeforeUseLabels: p.askBeforeUseCredentialLabels)
+                    }
+                },
+                // The host enforces it; the mirror can't see the host's models.
+                promptGuardInstalled: { true },
+                actions: AutomationHubView.Actions(
+                    board: AutomationKanbanView.Actions(
+                        selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+                        newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
+                        runNow: { c.runAutomation($0) },
+                        toggle: { c.toggleAutomation($0) },
+                        delete: { [weak self] id in self?.confirmDeleteAutomation(id) },
+                        openRun: { [weak self] run in self?.runWindowManager.open(run: run) },
+                        acknowledge: { c.acknowledgeRun($0) }),
+                    newAutomation: { [weak self] kind in self?.showAutomationEditor(nil, trigger: kind) },
+                    saveWatch: { c.saveWatch($0, scanNow: $1) },
+                    deleteWatch: { c.watchCommand($0, "") },
+                    toggleWatch: { c.watchCommand($0, "toggle") },
+                    scanNow: { c.watchCommand($0, "scan") },
+                    fix: { c.findingCommand($0, "fix") },
+                    routeToSwitchboard: { id, room in
+                        c.findingCommand(id, "switchboard", body: room.map { ["room": $0.uuidString] } ?? [:])
+                    },
+                    openTask: { [weak self] id in self?.taskReviewWindows.open(taskID: id) },
+                    setStatus: { id, status, note in
+                        var body: [String: Any] = ["status": status.rawValue]
+                        if let note { body["note"] = note }
+                        c.findingCommand(id, "status", body: body)
+                    },
+                    markDuplicate: { id, of in
+                        c.findingCommand(id, "duplicate", body: ["of": of.uuidString])
+                    },
+                    deleteFinding: { c.findingCommand($0, "") },
+                    // No remote repo listing: the editor falls back to typing
+                    // owner/name.
+                    fetchRepos: { _ in [] }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []   // never let board sizing resize the mirror window
             host.translatesAutoresizingMaskIntoConstraints = false
@@ -3851,7 +3927,26 @@ final class RemoteHostWindow: NSWindow {
                     resume: { c.taskCommand($0, "resume") },
                     openTranscript: { [weak self] id in
                         self?.taskTranscriptWindows.open(taskID: id)
-                    }))
+                    },
+                    assignees: {
+                        TaskAssigneeChoices(
+                            sessions: c.sessionStore.sessions
+                                .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
+                                .prefix(40)
+                                .map { .init(id: $0.id, label: $0.nickname.map { "@" + $0 } ?? $0.title,
+                                             workspace: c.profile(for: $0.profileID)?.name ?? "", busy: false) },
+                            rooms: c.roomStore.rooms.filter { $0.archivedAt == nil }
+                                .map { .init(id: $0.id, name: $0.name) })
+                    },
+                    assign: { id, a in
+                        if let a {
+                            c.taskCommand(id, "assign", body: ["kind": a.kind.rawValue, "id": a.id.uuidString, "label": a.label])
+                        } else {
+                            c.taskCommand(id, "assign", body: ["kind": "none"])
+                        }
+                    },
+                    answer: { id, text in c.taskCommand(id, "answer", body: ["text": text]) },
+                    recall: { c.taskCommand($0, "recall") }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false
@@ -5634,6 +5729,7 @@ final class RemoteHostWindow: NSWindow {
                 self?.createWorkspace(withWizard: NSEvent.modifierFlags.contains(.option))
             },
             automationStore: c.automationStore,
+            findingStore: c.findingStore,
             onNewAutomation: { [weak self] in self?.showAutomationEditor(nil) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: c.taskStore,

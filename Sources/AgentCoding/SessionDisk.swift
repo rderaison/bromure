@@ -1389,13 +1389,33 @@ public final class SessionDisk {
         ["command": "python3", "args": [automationMCPShimGuestPath]]
     }
     /// The task shim, pointed at the automations port (same reconnecting
-    /// stdio↔vsock pump; no branch to announce).
+    /// stdio↔vsock pump). It announces the git branch of the directory the
+    /// agent runs in when that's a worktree branch — a repository-watch
+    /// scan's findings are tied to their run through it.
     static var automationMCPShimScript: String {
         taskMCPShimScript
             .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(automationMCPVsockPort)")
             .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-automations-mcp")
             .replacingOccurrences(of: "task-board MCP", with: "automations MCP")
+            .replacingOccurrences(of: "import socket, sys, threading, time",
+                                  with: "import socket, subprocess, sys, threading, time")
+            .replacingOccurrences(of: "HELLO = sys.argv[1] if len(sys.argv) > 1 else \"\"",
+                                  with: automationMCPHelloBlock)
     }
+    static let automationMCPHelloBlock = """
+    def _hello():
+        # Which run am I: the worktree branch of the agent's directory (the
+        # shim inherits its cwd). Only wt/ branches mean anything to the host.
+        if len(sys.argv) > 1 and sys.argv[1]:
+            return sys.argv[1]
+        try:
+            out = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            return ""
+        return out if out.startswith("wt/") else ""
+    HELLO = _hello()
+    """
     static let taskMCPShimGuestPath = "/mnt/bromure-meta/bromure-task-mcp.py"
     /// Host vsock port for the plan-stream channel (plan-stream protocol
     /// v1): guest plan drivers connect here and exchange NDJSON events/

@@ -208,6 +208,8 @@ struct BromureAC: ParsableCommand {
             let view: AnyView
             var size = NSSize(width: 900, height: 620)
             switch which {
+            case let w where w.hasPrefix("hub-"):
+                (view, size) = AutomationHubPreview.view(w)
             case "palette":
                 let items: [PaletteItem] = [
                     PaletteItem(section: .actions, title: "New Session", icon: "plus", shortcut: "⌘N") {},
@@ -917,7 +919,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
 
     // The two kanban boards — menu + shortcut peers of their (subtle)
     // sidebar buttons.
-    let autoBoardItem = NSMenuItem(title: L("Automation Board"),
+    let autoBoardItem = NSMenuItem(title: L("Automations"),
                                    action: #selector(ACAppDelegate.showAutomationBoardAction(_:)),
                                    keyEquivalent: "a")
     autoBoardItem.keyEquivalentModifierMask = [.command, .shift]
@@ -930,6 +932,14 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     taskBoardItem.keyEquivalentModifierMask = [.command, .shift]
     taskBoardItem.target = delegate
     wsMenu.addItem(taskBoardItem)
+    // Jot a task into the backlog without leaving what you're doing —
+    // ⇧⌥Space works from any app (a system-wide hot key; shown here).
+    let quickTaskItem = NSMenuItem(title: L("Quick Task…"),
+                                   action: #selector(ACAppDelegate.quickTaskAction(_:)),
+                                   keyEquivalent: QuickTaskHotKey.keyEquivalent)
+    quickTaskItem.keyEquivalentModifierMask = QuickTaskHotKey.modifiers
+    quickTaskItem.target = delegate
+    wsMenu.addItem(quickTaskItem)
 
     // The Linux machine behind the selected session: its terminal tab — and
     // from that terminal, the session again.
@@ -1960,6 +1970,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Coding kanban (sidebar "Tasks"): agent-driven tasks flowing Backlog →
     /// In Progress → Testing → Done through git worktrees.
     let codingTaskStore = CodingTaskStore()
+    /// Repository watches and the findings their scans report
+    /// (RepoWatch.swift) — the Automations hub's Findings / Repositories.
+    let findingStore = FindingStore()
+    private(set) lazy var repoWatchEngine = RepoWatchEngine(store: findingStore, delegate: self)
+    /// Board tasks handed to an existing session or a room (TaskDispatch.swift).
+    private(set) lazy var taskDispatcher = TaskDispatcher(delegate: self)
+    /// ⇧⌘N: jot a task into the backlog (QuickTask.swift).
+    private(set) lazy var quickTaskPanel = QuickTaskPanel(delegate: self)
     /// Agent sessions — the unit the home screen is built around.
     let agentSessionStore = AgentSessionStore()
     private(set) lazy var agentSessionEngine =
@@ -3041,6 +3059,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // routes fires missed while the app was quit through each
         // automation's missed-run policy.
         scheduledAutomationEngine.start()
+        // Repository watches: follow fix tasks, count each finished scan's
+        // findings, and land notification clicks on the hub.
+        scheduledAutomationEngine.onRunCompleted = { [weak self] run in
+            self?.repoWatchEngine.runCompleted(run)
+        }
+        repoWatchEngine.start()
+        // Board tasks given to a session or a room: their replies come back
+        // through the delegation engine to the board.
+        delegationEngine.onBoardMessage = { [weak self] d, m in
+            self?.taskDispatcher.handle(d, m)
+        }
+        taskDispatcher.start()
+        // ⇧⌥Space from any app: the Quick Task panel.
+        QuickTaskHotKey.register { [weak self] in self?.quickTaskPanel.toggle() }
+        RepoWatchNotifier.shared.onOpen = { [weak self] findingID in
+            self?.showAutomationHub(finding: findingID)
+        }
         // The Switchboard's event log follows every session from launch on
         // (its tick starts with the engine).
         _ = switchboardEngine
@@ -3690,7 +3725,54 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // window — E2E/doc-screenshot hook for the board. The
                     // window is created on demand so a fresh headless launch
                     // (the screenshot pipeline) can capture it.
-                    self.ensureUnifiedWindow().showAutomationBoard()
+                    self.ensureUnifiedWindow().showAutomationBoard(tab: .runs)
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("hub:"):
+                    // The Automations hub on a tab ("hub:overview",
+                    // "hub:findings", "hub:repositories", "hub:board") or on
+                    // a finding ("hub:finding:<uuid>").
+                    let rest = String(w.dropFirst(4))
+                    if rest == "new-watch" || rest.hasPrefix("edit-watch:") {
+                        // The watch editor sheet over the Repositories tab
+                        // ("hub:new-watch", "hub:edit-watch:<uuid>"); render
+                        // it with a follow-up which=unified-sheet.
+                        let win = self.ensureUnifiedWindow()
+                        win.showAutomationBoard()
+                        win.automationHub.showSecurity(.repositories)
+                        if rest == "new-watch" {
+                            guard let ws = self.watchWorkspaceChoices().first(where: \.hasGitHubToken)
+                                ?? self.watchWorkspaceChoices().first else { return ["error": "no workspace"] }
+                            win.automationHub.editingWatchIsNew = true
+                            win.automationHub.editingWatch = WatchedRepo(
+                                repo: "", profileID: ws.id, tool: ws.defaultTool)
+                        } else {
+                            guard let wid = UUID(uuidString: String(rest.dropFirst(11))),
+                                  let watch = self.findingStore.watch(wid) else { return ["error": "unknown watch"] }
+                            win.automationHub.editingWatchIsNew = false
+                            win.automationHub.editingWatch = watch
+                        }
+                    } else if rest.hasPrefix("finding:"),
+                       let fid = UUID(uuidString: String(rest.dropFirst(8))) {
+                        self.showAutomationHub(finding: fid)
+                    } else if rest.hasPrefix("edit:") || rest.hasPrefix("new-automation") {
+                        // The automation editor ("hub:edit:<uuid>", or
+                        // "hub:new-automation[:<trigger>]").
+                        let win = self.ensureUnifiedWindow()
+                        if rest.hasPrefix("edit:") {
+                            guard let aid = UUID(uuidString: String(rest.dropFirst(5))) else {
+                                return ["error": "automation id?"]
+                            }
+                            win.showAutomationEditor(aid)
+                        } else {
+                            let kind = rest.split(separator: ":").dropFirst().first
+                                .flatMap { ScheduledAutomation.TriggerKind(rawValue: String($0)) }
+                            win.showAutomationEditor(nil, trigger: kind ?? .schedule)
+                        }
+                    } else {
+                        let win = self.ensureUnifiedWindow()
+                        win.showAutomationBoard()
+                        guard win.automationHub.go(rest) else { return ["error": "unknown hub tab"] }
+                    }
                     window = self.unifiedWindow
                 case let w where w.hasPrefix("run:"):
                     // A run-detail window ("run:<run-uuid>"): open (or find)
@@ -4513,6 +4595,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return true
             }
         }
+        server.onWatchesCommand = { [weak self] method, path, body in
+            await self?.watchesCommand(method: method, path: path, body: body) ?? ["error": "no app"]
+        }
         server.onToggleAutomation = { [weak self] id in
             MainActor.assumeIsolated {
                 guard let self, let uuid = UUID(uuidString: id) else { return false }
@@ -4970,6 +5055,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 switch action {
                 case "start":
                     self.codingTaskEngine.start(id)
+                case "assign":
+                    // Queue it for a session, a room, or new agents
+                    // ({kind, id, label}); kind "none" takes it off its queue.
+                    if body["kind"] as? String == "none" {
+                        self.taskDispatcher.assign(id, to: nil)
+                    } else if let kind = (body["kind"] as? String).flatMap(TaskAssignment.Kind.init(rawValue:)) {
+                        let a = kind == .worktree ? TaskAssignment.newAgent : kind == .switchboard ? TaskAssignment.switchboard : TaskAssignment(
+                            kind: kind, id: (body["id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID(),
+                            label: body["label"] as? String ?? "")
+                        self.taskDispatcher.assign(id, to: a)
+                    } else {
+                        return ["error": "kind required"]
+                    }
+                case "answer":
+                    guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, text: text) }
+                case "recall":
+                    self.taskDispatcher.recall(id)
                 case "plan", "plan-start":   // plan-start: legacy alias
                     self.codingTaskEngine.plan(id)
                 case "send-back":
@@ -5598,6 +5701,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
             "nextFires": scheduledAutomationStore.allNextFires()
                 .mapValues { iso.string(from: $0) },
+            // Repository watches + findings ride along for the fat client.
+            "watches": findingStore.watches.compactMap(Self.codableToDict),
+            "findings": findingStore.findings.compactMap(Self.codableToDict),
         ]
     }
 
@@ -7316,6 +7422,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
         w.showAutomationBoard()
+    }
+
+    @objc func quickTaskAction(_ sender: Any?) {
+        quickTaskPanel.toggle()
     }
 
     @objc func showTaskBoardAction(_ sender: Any?) {
@@ -10529,7 +10639,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profile: { [weak self] in self?.profiles.first { $0.id == pid } },
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
-                        runNow: { [weak self] id in self?.runAutomationNow(id) }),
+                        runNow: { [weak self] id in self?.runAutomationNow(id) },
+                        watches: { [weak self] in self?.repoWatchEngine }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,
@@ -13754,7 +13865,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profile: { [weak self] in self?.profiles.first { $0.id == pid } },
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
-                        runNow: { [weak self] id in self?.runAutomationNow(id) }),
+                        runNow: { [weak self] id in self?.runAutomationNow(id) },
+                        watches: { [weak self] in self?.repoWatchEngine }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,

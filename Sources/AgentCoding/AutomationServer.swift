@@ -257,6 +257,9 @@ final class ACAutomationServer {
     var onDeleteAutomation: ((_ id: String) -> Bool)?
     var onRunAutomation: ((_ id: String) -> Bool)?
     var onToggleAutomation: ((_ id: String) -> Bool)?
+    /// Repository watches + findings: `/watches…` and `/findings…` (path
+    /// without the leading slash). Returns the body; "error" = failure.
+    var onWatchesCommand: ((_ method: String, _ path: String, _ body: [String: Any]) async -> [String: Any])?
     /// One native file op ({"file": {...}}) in the VM's guest — the remote
     /// file browser's data plane (upload/download/list/delete as base64 JSON).
     var onGuestFileOp: ((_ idOrName: String, _ op: [String: Any], _ timeout: Int) async -> [String: Any])?
@@ -1146,6 +1149,22 @@ final class ACAutomationServer {
             default:
                 sendResponse(fd: fd, status: 404, body: ["error": "Not found", "path": path])
             }
+
+        // Repository watches + findings (fat client, debug hooks).
+        case (let m, let p) where p == "/watches" || p.hasPrefix("/watches/")
+                || p.hasPrefix("/findings/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let sub = String(p.dropFirst())
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any] = ["error": "not handled"]
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onWatchesCommand?(m, sub, bodyJSON) ?? ["error": "not handled"]
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: result["error"] == nil ? 200 : 400, body: result)
 
         // Fat-client automation edits: DELETE /automations/{id},
         // POST /automations/{id}/run, POST /automations/{id}/toggle.
