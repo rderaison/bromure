@@ -1,0 +1,14 @@
+{
+  "viewSHA256": "568e29c9ec87c0cabb2bd89dedd357b2b6996f85957c916964b871ee9988f053",
+  "bridgeSHA256": "1bee42b262d7799e87ac27d75e793cf8e77657dba4d52e444eda4e2855861dcd",
+  "blockSHA256": "60e876a1291d4e3698e6db757b00e4e5d34badbf9917e20776e72eda7c1eb550",
+  "methodSHA256": "f004c477610649ca34710e149b9e1b4ee66bef640cdc3e957ad8db710b56fc41",
+  "eventGuardSHA256": "359377e2589f052c2383311fda32b398c934b76ed58a40b55306fd7987bcf46d",
+  "unguardedEventRejected": true,
+  "generatedSHA256": "8ce9eaf11d6dd85cb22bb2fbea0a537866bdb365d017f637dbc0087f182cf6e7",
+  "sourceRoutingChecks": true,
+  "scope": "Actual completion block and event guard, Foundation/fake fields and events; routing checked statically, not native input",
+  "passed": true,
+  "stdout": "COMPLETION_EVENT_GUARD_PASS nil/nonkey/deletion/typing\nCOMPLETION_CASE_PASS case\nCOMPLETION_CASE_PASS full-scheme\nCOMPLETION_CASE_PASS scheme-mismatch\nCOMPLETION_CASE_PASS www-fallback\nCOMPLETION_CASE_PASS www-preserved\nCOMPLETION_CASE_PASS www-full-scheme\nCOMPLETION_CASE_PASS ranked-first\nCOMPLETION_CASE_PASS skip-nonprefix\nCOMPLETION_CASE_PASS exact-no-suffix\nCOMPLETION_CASE_PASS no-match\nCOMPLETION_CASE_PASS empty-reply\nCOMPLETION_CASE_PASS canonical-shorter-candidate\nCOMPLETION_CASE_PASS canonical-longer-candidate\nCOMPLETION_CASE_PASS surrogate-pair\nCOMPLETION_CASE_PASS japanese\nCOMPLETION_CASE_PASS casefold-length-shrink\nBROMURE_HISTORY_COMPLETION_ACTUAL_BLOCK_PASS\n",
+  "stderr": ""
+}

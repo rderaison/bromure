@@ -70,7 +70,8 @@ func check(_ name: String, _ typed: String, _ urls: [String], _ expected: String
     print("COMPLETION_CASE_PASS \(name)")
 }
 @main struct Main {
-    static func main() throws {
+    @MainActor static func main() throws {
+        try checkEventGuard()
         try check("case", "EXa", ["https://example.test/path"], "EXample.test/path")
         try check("full-scheme", "https://EXa", ["https://example.test/path"], "https://EXample.test/path")
         try check("scheme-mismatch", "http://exa", ["https://example.test/path"], nil)
@@ -91,6 +92,46 @@ func check(_ name: String, _ typed: String, _ urls: [String], _ expected: String
         try check("casefold-length-shrink", "i\u{307}i\u{307}", ["https://İİx"], "i\u{307}i\u{307}x")
         print("BROMURE_HISTORY_COMPLETION_ACTUAL_BLOCK_PASS")
     }
+}
+'''
+
+EVENT_PRELUDE = r'''
+enum EventType { case keyDown, keyUp, appKitDefined, systemDefined, leftMouseDown }
+final class FakeEvent {
+    let type: EventType
+    let code: UInt16
+    var keyCodeReads = 0
+    init(_ type: EventType, _ code: UInt16) { self.type = type; self.code = code }
+    var keyCode: UInt16 {
+        precondition(type == .keyDown, "keyCode read on non-keyDown event")
+        keyCodeReads += 1
+        return code
+    }
+}
+@MainActor final class FakeApp { var currentEvent: FakeEvent? }
+@MainActor let NSApp = FakeApp()
+@MainActor func eventAllowsCompletion() -> Bool {
+    return
+'''
+EVENT_TESTS = r'''
+}
+@MainActor func checkEventGuard() throws {
+    NSApp.currentEvent = nil
+    try require(eventAllowsCompletion(), "no current event must support paste/programmatic edit")
+    for type in [EventType.appKitDefined, .systemDefined, .leftMouseDown, .keyUp] {
+        let event = FakeEvent(type, 51)
+        NSApp.currentEvent = event
+        try require(eventAllowsCompletion() && event.keyCodeReads == 0,
+                    "non-keyDown event read keyCode or suppressed completion")
+    }
+    for code in [UInt16(51), 117, 0] {
+        let event = FakeEvent(.keyDown, code)
+        NSApp.currentEvent = event
+        try require(eventAllowsCompletion() == (code == 0), "deletion guard incorrect")
+        try require(event.keyCodeReads > 0, "keyDown path not exercised")
+    }
+    NSApp.currentEvent = nil
+    print("COMPLETION_EVENT_GUARD_PASS nil/nonkey/deletion/typing")
 }
 '''
 
@@ -123,8 +164,11 @@ def source_parts(view, bridge):
     assert 'field.stringValue == typed' in change
     assert change.count('!editor.hasMarkedText()') == 2
     assert change.count('editor.selectedRange().length == 0') == 2
-    assert 'keyCode != 51' in change and 'keyCode != 117' in change
-    return block, method
+    event_match = re.search(r'\(NSApp\.currentEvent\?\.type != \.keyDown \|\|\s*'
+                            r'\(NSApp\.currentEvent\?\.keyCode != 51 && NSApp\.currentEvent\?\.keyCode != 117\)\)', change)
+    assert event_match, 'keyCode must be short-circuited for every non-keyDown event'
+    assert change.count('.keyCode') == 2, 'unreviewed additional keyCode access'
+    return block, method, event_match.group()
 
 
 def main():
@@ -136,13 +180,24 @@ def main():
     parser.add_argument('--output-json', type=Path)
     args = parser.parse_args()
     view, bridge = args.view.read_text(), args.bridge.read_text()
-    block, method = source_parts(view, bridge)
-    generated = PRELUDE + block + TESTS
+    block, method, event_guard = source_parts(view, bridge)
+    # Verify the static regression rejects the exact old unguarded form.
+    old_view = view.replace(event_guard,
+                            '(NSApp.currentEvent?.keyCode != 51 && NSApp.currentEvent?.keyCode != 117)')
+    try:
+        source_parts(old_view, bridge)
+    except AssertionError:
+        pass
+    else:
+        raise RuntimeError('old unguarded event access was not rejected')
+    generated = (PRELUDE + block + TESTS + EVENT_PRELUDE.rstrip()
+                 + ' ' + event_guard + '\n' + EVENT_TESTS)
     digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
     result = dict(viewSHA256=digest(view), bridgeSHA256=digest(bridge),
                   blockSHA256=digest(block), methodSHA256=digest(method),
+                  eventGuardSHA256=digest(event_guard), unguardedEventRejected=True,
                   generatedSHA256=digest(generated), sourceRoutingChecks=True,
-                  scope='Actual completion block, Foundation, fake fields; routing and edit guards checked statically, not native input')
+                  scope='Actual completion block and event guard, Foundation/fake fields and events; routing checked statically, not native input')
     if args.emit:
         args.emit.write_text(generated)
         print(json.dumps(dict(result, emitted=str(args.emit))))
