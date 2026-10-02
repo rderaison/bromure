@@ -1,6 +1,6 @@
 Private async Squid candidate — 2026-10-02
 
-Status: Linux candidate only. NOT installed by setup.sh or enabled by default.
+Status: Private candidate. NOT installed by setup.sh or enabled by default.
 A private guest clone must contain the two root-owned executable scripts and
 updated config-agent.py, and boot with bromure.experimental_async_squid=1.
 Do not add Chrome proxy bypasses for acceptance. Production and externally
@@ -54,7 +54,11 @@ sinkhole blocking, and supervisor gateway-crash cleanup. Unmodified production
 routing-socks passes direct→synthetic WARP→direct switching for both families;
 selected WARP failure does not connect directly.
 
-Not yet proven: actual Mac private-image normal-route browsing, live VPN/WARP/
+Mac private-image normal-route shared-window/IME/lifecycle acceptance has now
+passed (v13 and later), with no Chrome loopback bypass. This does not establish
+real VPN/proxy routing. See REAL-ROUTE-ACCEPTANCE.txt for the bounded matrix.
+
+Not yet proven: live VPN/WARP/
 WireGuard/IKEv2 up/down and custom proxy parity, long sessions, throughput at
 256 connections, release packaging. Do not enable production until those gates
 pass. This fixes a demonstrated proxy head-of-line blocking mechanism; it does
