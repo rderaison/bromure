@@ -5185,6 +5185,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.startOver(id)
                 case "close-no-merge":
                     self.codingTaskEngine.closeWithoutMerge(id)
+                case "mark-done":
+                    self.codingTaskEngine.markDone(id)
                 case "comment-remove":
                     guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:))
                     else { return ["error": "comment required"] }
@@ -11811,6 +11813,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             openPR: { [weak self] taskID in
                 self?.codingTaskEngine.openPR(taskID)
+            },
+            markDone: { [weak self] taskID in
+                self?.codingTaskEngine.markDone(taskID)
             },
             fetchBranches: { [weak self] task in
                 await self?.fetchTaskBranches(task) ?? []

@@ -2581,6 +2581,23 @@ final class CodingTaskEngine {
     /// worktree + branch go away like a merged task's would — "abandoned"
     /// means exactly that, and the archived transcript keeps the durable
     /// record of what the agent did.
+    /// Done as it stands — nothing merged, nothing removed: the worktree and
+    /// its branch stay exactly where they are (merged by hand, or kept).
+    /// Only the transcript is archived, as for any finished task.
+    func markDone(_ taskID: UUID) {
+        guard let task = store.task(taskID), task.stage == .testing else { return }
+        store.mutate(taskID) {
+            $0.stage = .done
+            $0.completedAt = Date()
+            $0.merged = false
+            $0.mergingAt = nil
+            $0.lastError = nil
+        }
+        BACDebug.log("tasks", "“\(task.title)”: marked done")
+        pumpQueue()
+        archiveTranscriptThenCleanup(taskID, removeWorktree: false)
+    }
+
     func closeWithoutMerge(_ taskID: UUID) {
         store.mutate(taskID) {
             $0.stage = .done
