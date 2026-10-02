@@ -2468,7 +2468,7 @@ final class RemoteHostWindow: NSWindow {
     private var sessionHeaderHost: NSHostingView<SessionHeaderView>?
     private var sessionHeaderHeight: NSLayoutConstraint!
     private var sessionOverlayHost: NSView?
-    private var selectedSessionID: UUID?
+    private(set) var selectedSessionID: UUID?
     /// The room on stage (its grid of the server's sessions).
     private var roomController: RoomStageController?
     private var sessionPresentationKey: String?
@@ -3708,6 +3708,13 @@ final class RemoteHostWindow: NSWindow {
     /// transcript is tailed from the remote guest over the tunnel and the
     /// input box types into the remote session, so the fat client gets the
     /// same "whole UI" plan experience as the host.
+    /// The Quick Task panel (⇧⌥Space) planned a task on this host: start
+    /// the planning interview there and open its window here, as the board does.
+    func planQuickTask(_ id: UUID) {
+        controller.taskCommand(id, "plan")
+        planSessionWindows.open(taskID: id)
+    }
+
     private lazy var planSessionWindows = PlanSessionWindowManager(
         context: PlanSessionWindowManager.Context(
             store: { [weak self] in self?.controller.taskStore },
