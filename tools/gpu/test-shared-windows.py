@@ -242,6 +242,28 @@ class ControllerTests(unittest.TestCase):
 
 
 class CDPTests(unittest.TestCase):
+    def test_legacy_socket_timeout_normalized_for_all_io(self):
+        class LegacyTimeout(OSError):
+            pass
+
+        for stage in ('connect', 'sendall', 'recv'):
+            class TimedOutSocket:
+                def __enter__(self): return self
+                def __exit__(self, *_): pass
+                def settimeout(self, value): pass
+                def __getattr__(self, name):
+                    def operation(*args):
+                        if name == stage:
+                            raise LegacyTimeout('timed out')
+                    return operation
+
+            with self.subTest(stage=stage), \
+                    patch.object(shared.socket, 'socket', return_value=TimedOutSocket()), \
+                    patch.object(shared.socket, 'timeout', LegacyTimeout):
+                with self.assertRaises(TimeoutError) as raised:
+                    shared.cdp_call('ws://127.0.0.1:9222/devtools/browser/test', 'Browser.getWindowForTarget', {})
+                self.assertIsInstance(raised.exception.__cause__, LegacyTimeout)
+
     def socket(self):
         client, server = socket.socketpair()
         self.addCleanup(server.close)

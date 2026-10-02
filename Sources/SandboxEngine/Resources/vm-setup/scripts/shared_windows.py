@@ -44,11 +44,19 @@ def cdp_call(ws_url, method, params, timeout=3):
                 raise TimeoutError('CDP control deadline exceeded')
             sock.settimeout(value)
 
+        def timed_io(operation, *args):
+            remaining()
+            try:
+                return operation(*args)
+            except socket.timeout as error:
+                # Python 3.9 uses a distinct socket.timeout exception;
+                # normalize it without extending the original wall deadline.
+                raise TimeoutError('CDP control deadline exceeded') from error
+
         def read(count):
             data = bytearray()
             while len(data) < count:
-                remaining()
-                part = sock.recv(count - len(data))
+                part = timed_io(sock.recv, count - len(data))
                 if not part:
                     raise ConnectionError('CDP closed')
                 data.extend(part)
@@ -64,14 +72,11 @@ def cdp_call(ws_url, method, params, timeout=3):
                 prefix = bytes((0x80 | opcode, 0xFE)) + struct.pack('>H', len(data))
             else:
                 prefix = bytes((0x80 | opcode, 0xFF)) + struct.pack('>Q', len(data))
-            remaining()
-            sock.sendall(prefix + mask + bytes(byte ^ mask[i % 4] for i, byte in enumerate(data)))
+            timed_io(sock.sendall, prefix + mask + bytes(byte ^ mask[i % 4] for i, byte in enumerate(data)))
 
-        remaining()
-        sock.connect(('127.0.0.1', 9222))
+        timed_io(sock.connect, ('127.0.0.1', 9222))
         key = base64.b64encode(os.urandom(16)).decode()
-        remaining()
-        sock.sendall((f'GET {url.path} HTTP/1.1\r\nHost: 127.0.0.1:9222\r\n'
+        timed_io(sock.sendall, (f'GET {url.path} HTTP/1.1\r\nHost: 127.0.0.1:9222\r\n'
                       'Upgrade: websocket\r\nConnection: Upgrade\r\n'
                       f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n').encode())
         header = bytearray()
