@@ -8,7 +8,10 @@
     "transport": "Production shell helper, private loopback port and helper path substituted; actual TCP EOF framing",
     "passthrough": "Copy/paste/undo/find/bookmark/tab-bookmark-bar chords caused no host bounce; legacy Openbox keyboard remains empty",
     "historyRegressionTests": 8,
-    "shellSyntax": "PASS"
+    "shellSyntax": "PASS",
+    "verifiedSourceCommit": "1d60f530",
+    "firstEventDebounce": "PASS: monotonic clock fixed at 0.01; first n and bookmarks-manager dispatch, repeated n debounced",
+    "macPeerReported": "Darwin Python 3.9: 5 portable tests pass, Linux live test skipped; 8 AppKit menu tests pass (reported by macos-gpu-work)"
   },
   "wire": {
     "maxBytes": 32,
@@ -46,8 +49,8 @@
   ],
   "sourceSHA256": {
     "Sources/SandboxEngine/Resources/vm-setup/configs/openbox-rc-nativetabs.xml": "981ee9078d0521078882c02ca39944778c28491ee183221b9d2137a3f51f0e9c",
-    "Sources/SandboxEngine/Resources/vm-setup/scripts/tab-agent.py": "f06c1b7538e59c3cc728e46a75e77233ed221cff95000087a7986ce466f3b4b3",
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/tab-agent.py": "fe3a699bf74b9888271d9944f6de0886dc11da887e192d180f6c3a4251187ed7",
     "Sources/SandboxEngine/Resources/vm-setup/scripts/bromure-hostkey": "9072fd4345ce3677592aac4d24630572fda378043ae2b05dc94cecf7d2f84f92",
-    "tools/gpu/test-native-shortcuts.py": "f33aea0145ad7fa0188dbe35d9515e68fdb11aec6b839b64a147d9ce969943b4"
+    "tools/gpu/test-native-shortcuts.py": "2744f608dfa262d441b6805d05a243e9eb0cf62b768db734f3051fa14d11acf5"
   }
 }
