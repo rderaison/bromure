@@ -15,7 +15,7 @@ struct Bromure: ParsableCommand {
         abstract: "Run a browser in an isolated, ephemeral VM.",
         subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self,
                       InitFossImage.self, BuildProvisioner.self, VerifyImage.self, VerifyBrowsers.self,
-                      GPUDemo.self, GPUBrowser.self],
+                      GPUDemo.self, GPUBrowser.self, MultiGPUBrowser.self],
         defaultSubcommand: Launch.self
     )
 

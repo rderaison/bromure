@@ -1,0 +1,25 @@
+{
+  "kind": "functional smoke acceptance; not a physical-screen vs remote comparison",
+  "date": "2026-10-02",
+  "appVersion": "5.0.1",
+  "image": "private patched 500 with both 501 fixes; original metadata preserved",
+  "checks": {
+    "metal": {
+      "passed": true,
+      "trials": 15,
+      "frames": 1801,
+      "gpuCrashCount": 0,
+      "hiddenDuringTest": false,
+      "geometryChanged": false
+    },
+    "apple": {
+      "passed": true,
+      "trials": 15,
+      "frames": 1801,
+      "gpuCrashCount": 0,
+      "hiddenDuringTest": false,
+      "geometryChanged": false
+    }
+  },
+  "multiGPU": "two custom devices validate, boot and negotiate Linux DRIVER_OK; no rendered multi-output acceptance"
+}

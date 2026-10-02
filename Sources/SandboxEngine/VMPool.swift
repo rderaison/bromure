@@ -67,6 +67,10 @@ public final class VMPool {
         public var bootedNetworkMode: String = "nat"
         public var requestedMetalRenderer = false
         public var graphicsSession: (any HostGraphicsSession)? = nil
+        public var additionalGraphicsSessions: [any HostGraphicsSession] = []
+        public var graphicsSessions: [any HostGraphicsSession] {
+            (graphicsSession.map { [$0] } ?? []) + additionalGraphicsSessions
+        }
     }
 
     private var config: VMConfig
@@ -260,17 +264,28 @@ public final class VMPool {
         )
 
         var graphicsSession: (any HostGraphicsSession)?
+        var additionalGraphicsSessions: [any HostGraphicsSession] = []
         let requestedMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
             imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
         if requestedMetal, #available(macOS 27.0, *) {
             do {
-                let session = try await MacOS27GPUSession.create(
-                    width: config.displayWidth, height: config.displayHeight + config.nativeChromeInset)
-                vzConfig.customVirtioDevices = [session.configuration]
-                do { try vzConfig.validate() }
-                catch { session.stop(); vzConfig.customVirtioDevices = []; throw error }
-                graphicsSession = session
-                print("[VMPool] Sandboxed VirGL/Metal renderer selected")
+                guard (1...2).contains(config.experimentalGPUCount) else {
+                    throw SandboxError.vmStartFailed("Experimental GPU count must be 1 or 2")
+                }
+                var sessions: [MacOS27GPUSession] = []
+                do {
+                    for _ in 0..<config.experimentalGPUCount {
+                        sessions.append(try await MacOS27GPUSession.create(
+                            width: config.displayWidth, height: config.displayHeight + config.nativeChromeInset))
+                    }
+                    vzConfig.customVirtioDevices = sessions.map { $0.configuration }
+                    try vzConfig.validate()
+                } catch {
+                    sessions.forEach { $0.stop() }; vzConfig.customVirtioDevices = []; throw error
+                }
+                graphicsSession = sessions.first
+                additionalGraphicsSessions = Array(sessions.dropFirst())
+                print("[VMPool] Sandboxed VirGL/Metal renderer selected (\(sessions.count) GPU devices)")
             } catch {
                 print("[VMPool] Experimental GPU unavailable; using software: \(error)")
             }
@@ -329,7 +344,8 @@ public final class VMPool {
             networkDiagnosisBox: diagnosisBox,
             bootedNetworkMode: bootedNetworkMode,
             requestedMetalRenderer: requestedMetal,
-            graphicsSession: graphicsSession
+            graphicsSession: graphicsSession,
+            additionalGraphicsSessions: additionalGraphicsSessions
         )
     }
 
@@ -394,7 +410,9 @@ public final class VMPool {
         let profileWantsMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
             imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
         if let warm = warmVM,
-           profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer {
+           profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer ||
+            (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
+             config.experimentalGPUCount != warm.graphicsSessions.count) {
             print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
             do {
                 let dedicated = try await bootVM(bridgedInterface: profileBridgedIface,
@@ -542,6 +560,7 @@ public final class VMPool {
         // through the SOCKS forwarder). Takes precedence over the above in
         // config-agent, so the browser reaches the remote guest's dev server.
         if let pac = config.proxyPacBase64 { cfg["proxyPacB64"] = pac }
+        if warm.graphicsSessions.count > 1 { cfg["experimentalGPUCount"] = warm.graphicsSessions.count }
         cfg["graphicsBackend"] = config.enableGPU ? (warm.graphicsSession?.backendName ?? "software") : "software"
         if !config.enableGPU { cfg["disableGPU"] = true }
         if !config.enableWebGL { cfg["disableWebGL"] = true }
@@ -1036,7 +1055,7 @@ public final class VMPool {
                 }
             }
         }
-        warm.graphicsSession?.stop()
+        warm.graphicsSessions.forEach { $0.stop() }
         warm.serialOutput.fileHandleForReading.readabilityHandler = nil
         try? warm.serialOutput.fileHandleForReading.close()
         try? warm.serialOutput.fileHandleForWriting.close()
