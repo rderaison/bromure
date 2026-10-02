@@ -18,6 +18,7 @@ import sys
 import base64
 import hashlib
 import struct
+import http.client
 from urllib.parse import urlparse
 
 MAX_SCANOUTS = 16
@@ -28,6 +29,7 @@ MAX_OUTPUT_PIXELS = 33554432
 SAFE_INTEGER = (1 << 53) - 1
 MAX_FRAME = 65536
 PORT = 5832
+SHUTDOWN_DIR = Path('/tmp/bromure')
 CHROME_PAGES = {'newtab', 'new-tab-page', 'history', 'bookmarks', 'downloads',
                 'settings', 'gpu', 'version', 'policy'}
 
@@ -442,9 +444,75 @@ def confirm_focus(target, timeout):
     return json.loads(probe.stdout)
 
 
+def shutdown_endpoint(timeout=3):
+    """Resolve one browser endpoint with a wall deadline, then pin it for quit."""
+    conn = http.client.HTTPConnection('127.0.0.1', 9222, timeout=timeout)
+
+    def expire():
+        sock = conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        conn.close()
+
+    timer = threading.Timer(timeout, expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        conn.request('GET', '/json/version')
+        response = conn.getresponse()
+        body = response.read(65537)
+        if response.status != 200 or len(body) > 65536:
+            raise RuntimeError('invalid browser endpoint response')
+        endpoint = json.loads(body).get('webSocketDebuggerUrl')
+        if not isinstance(endpoint, str):
+            raise RuntimeError('browser endpoint missing')
+        return endpoint
+    finally:
+        timer.cancel()
+        conn.close()
+
+
+def process_stat(pid, proc=Path('/proc')):
+    text = (proc / str(pid) / 'stat').read_text()
+    if ')' not in text:
+        raise ValueError('invalid process stat')
+    fields = text.rsplit(')', 1)[1].split()
+    if len(fields) < 20:
+        raise ValueError('incomplete process stat')
+    return fields[0], int(fields[19])
+
+
+def browser_identity(pid, proc=Path('/proc')):
+    integer(pid, 1, SAFE_INTEGER, 'browser PID')
+    state, start = process_stat(pid, proc)
+    path = proc / str(pid)
+    command = path.joinpath('cmdline').read_bytes()
+    if (state in ('Z', 'X') or path.joinpath('exe').resolve(strict=True).name not in ('chrome', 'chromium')
+            or not command or re.search(rb'(?:^|[\x00\s])--type=', command)):
+        raise RuntimeError('CDP process is not a live Chromium browser')
+    if process_stat(pid, proc)[1] != start:
+        raise RuntimeError('Chromium identity changed during validation')
+    boot = str(uuid.UUID(proc.joinpath('sys/kernel/random/boot_id').read_text().strip()))
+    return dict(pid=pid, startTicks=start, bootId=boot)
+
+
+def browser_alive(identity, proc=Path('/proc')):
+    try:
+        state, start = process_stat(identity['pid'], proc)
+        return start == identity['startTicks'] and state not in ('Z', 'X')
+    except FileNotFoundError:
+        return False
+
+
 class Controller:
     def __init__(self, list_targets, browser_call, scale=2, runner=run_command,
-                 sysfs=Path('/sys/class/drm'), focus_observer=confirm_focus, page_call=cdp_call):
+                 sysfs=Path('/sys/class/drm'), focus_observer=confirm_focus, page_call=cdp_call,
+                 quit_endpoint=shutdown_endpoint, quit_rpc=cdp_call,
+                 identify_browser=browser_identity, browser_running=browser_alive,
+                 shutdown_dir=SHUTDOWN_DIR):
         self.list_targets, self.browser_call = list_targets, browser_call
         self.scale = integer(scale, 1, 4, 'display scale')
         self.run, self.sysfs = runner, sysfs
@@ -463,8 +531,68 @@ class Controller:
         self.last_id = 0
         self.replies = OrderedDict()
         self.last_outputs = []
+        self.quit_endpoint, self.quit_rpc = quit_endpoint, quit_rpc
+        self.identify_browser, self.browser_running = identify_browser, browser_running
+        self.shutdown_dir = shutdown_dir
+        self.shutdown_result = None
+
+    def shutdown(self):
+        # One terminal attempt per controller lifetime, including lost ACKs.
+        if self.shutdown_result is not None:
+            return self.terminal_status()
+        endpoint = self.quit_endpoint(timeout=3)
+        processes = self.quit_rpc(endpoint, 'SystemInfo.getProcessInfo', {}, timeout=3).get('processInfo', [])
+        pids = [item.get('id') for item in processes if item.get('type') == 'browser']
+        if len(pids) != 1:
+            raise RuntimeError('cannot identify sole Chromium browser for shutdown')
+        identity = self.identify_browser(pids[0])
+        if not self.browser_running(identity):
+            raise RuntimeError('Chromium exited before shutdown request')
+        marker = self.shutdown_dir / 'shared-shutdown-requested'
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(dict(epoch=self.epoch, browser=identity), stream)
+        result = dict(epoch=self.epoch, terminal=True, shutdownRequested=True,
+                      closeAcknowledged=False, exited=False, browser=identity,
+                      exitObservationTimeoutSeconds=8, stateComplete=False, ok=False)
+        self.shutdown_result = result
+        self.focused_window, self.focus_evidence = None, None
+        try:
+            answer = self.quit_rpc(endpoint, 'Browser.close', {}, timeout=3)
+            result['closeAcknowledged'] = isinstance(answer, dict)
+        except (OSError, ValueError, RuntimeError) as error:
+            # Closing a browser may close CDP before its reply arrives. Observe
+            # the pinned process; never re-resolve a new browser or replay close.
+            result['closeError'] = str(error)[:256]
+        deadline = time.monotonic() + 8
+        try:
+            while self.browser_running(identity):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    result['error'] = 'Chromium exit observation deadline exceeded'
+                    break
+                time.sleep(min(.025, remaining))
+            else:
+                result['exited'] = result['ok'] = True
+        except (OSError, ValueError, RuntimeError) as error:
+            result['error'] = 'Chromium exit observation failed: ' + str(error)[:256]
+        return dict(result)
+
+    def terminal_status(self):
+        result = self.shutdown_result
+        if not result['exited']:
+            try:
+                if not self.browser_running(result['browser']):
+                    result['exited'] = result['ok'] = True
+                    if 'error' in result:
+                        result['initialObservationError'] = result.pop('error')
+            except (OSError, ValueError, RuntimeError) as error:
+                result['error'] = 'Chromium exit observation failed: ' + str(error)[:256]
+        return dict(result)
 
     def call(self, method, params):
+        if self.shutdown_result is not None:
+            raise RuntimeError('browser controller is shutting down')
         result = self.browser_call(method, params)
         if not isinstance(result, dict):
             raise RuntimeError('CDP call failed: ' + method)
@@ -537,7 +665,8 @@ class Controller:
                 item.update(scanout=index, output=output.get('output'), rect=output.get('rect'))
             windows.append(item)
         active = [row['rect'] for row in self.last_outputs if row.get('rect')]
-        return {'epoch': self.epoch, 'topologyVersion': self.version, 'windows': windows,
+        return {'epoch': self.epoch, 'shutdownProtocolVersion': 1,
+                'topologyVersion': self.version, 'windows': windows,
                 'outputs': self.last_outputs, 'rootPixelLimit': self.root_pixel_limit or MAX_ROOT_PIXELS,
                 'root': {'width': max((r['x'] + r['width'] for r in active), default=0),
                          'height': max((r['y'] + r['height'] for r in active), default=0)}}
@@ -659,6 +788,8 @@ class Controller:
         return tid
 
     def new_tab(self, wid, url):
+        if self.shutdown_result is not None:
+            raise RuntimeError('browser controller is shutting down')
         url = navigation_url(url)
         self.refresh()
         self.focus(wid)
@@ -747,6 +878,17 @@ class Controller:
             if rid <= self.last_id:
                 raise ValueError('stale request id; reconcile using list with a new id')
             self.last_id = rid
+            if request.get('cmd') == 'shutdown' or self.shutdown_result is not None:
+                try:
+                    cmd = request.get('cmd')
+                    if request.keys() != {'id', 'cmd'} or cmd not in ('shutdown', 'list'):
+                        raise ValueError('terminal shutdown accepts only id and cmd; controller cannot resume')
+                    result = self.terminal_status() if cmd == 'list' else self.shutdown()
+                    reply = dict(result, id=rid)
+                except (ValueError, OSError, RuntimeError, http.client.HTTPException) as error:
+                    reply = dict(id=rid, ok=False, epoch=self.epoch, stateComplete=False,
+                                 terminal=self.shutdown_result is not None, error=str(error)[:512])
+                return self.remember_reply(rid, canonical, reply)
             try:
                 common = {'id', 'cmd', 'expectedScanouts', 'rootPixelLimit'}
                 fields = {'list': set(), 'attachPrimary': {'scanout', 'windowId', 'topology'},
@@ -782,10 +924,13 @@ class Controller:
                 except (ValueError, OSError, RuntimeError, subprocess.SubprocessError):
                     state, complete = self.state(observe=False), False
                 reply = dict(state, id=rid, ok=False, error=str(error)[:512], stateComplete=complete)
-            self.replies[rid] = canonical, reply
-            while len(self.replies) > 128:
-                self.replies.popitem(last=False)
-            return reply
+            return self.remember_reply(rid, canonical, reply)
+
+    def remember_reply(self, rid, canonical, reply):
+        self.replies[rid] = canonical, reply
+        while len(self.replies) > 128:
+            self.replies.popitem(last=False)
+        return reply
 
     def serve_connection(self, sock, address):
         if address[0] != getattr(socket, 'VMADDR_CID_HOST', 2):
@@ -807,6 +952,12 @@ class Controller:
                 if len(encoded) > MAX_FRAME:
                     raise ValueError('reply exceeds bound')
                 sock.sendall(encoded)
+                if reply.get('terminal') and reply.get('exited'):
+                    # xinitrc permits at most two seconds after browser exit
+                    # for this delivery before its existing guest poweroff.
+                    fd = os.open(self.shutdown_dir / 'shared-shutdown-replied',
+                                 os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                    os.close(fd)
             if len(pending) > MAX_FRAME:
                 raise ValueError('oversized request')
 

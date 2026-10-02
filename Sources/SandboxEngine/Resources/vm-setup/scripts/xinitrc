@@ -267,6 +267,16 @@ for attempt in 1 2 3 4 5; do
     else
         $CHROME_CMD
     fi
+    # Explicit shared-owner quit must not be mistaken for a quick startup
+    # crash. Give the controller a bounded chance to send its process-exit
+    # evidence before the normal guest shutdown below.
+    if [ "$_SHARED_WINDOWS" = "1" ] && [ -f /tmp/bromure/shared-shutdown-requested ]; then
+        for shutdown_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            [ -f /tmp/bromure/shared-shutdown-replied ] && break
+            sleep 0.1
+        done
+        break
+    fi
     now_ts=$(date +%s)
     elapsed=$((now_ts - start_ts))
     # If Chrome ran for more than 10 seconds, treat it as a real session

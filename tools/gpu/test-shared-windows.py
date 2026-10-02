@@ -234,6 +234,7 @@ class ControllerTests(unittest.TestCase):
     def attach(self):
         reply = self.controller.handle(dict(id=1, cmd='list', expectedScanouts=2))
         self.assertTrue(reply['ok'], reply)
+        self.assertEqual(reply['shutdownProtocolVersion'], 1)
         self.assertEqual(reply['outputs'][0]['output'], 'Virtual-2')
         layout = self.layout(1)
         layout[0]['windowId'] = 10
