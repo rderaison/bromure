@@ -23,6 +23,7 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var interactive = false
     @Flag(name: .long) var nativeChrome = false
     @Flag(name: .long) var sharedNativeWindows = false
+    @Option(name: .long, help: "Initial native windows for a matched shared-VM benchmark.") var sharedNativeWindowCount: Int = 2
     @Flag(name: .long) var sharedInputCheck = false
     @Flag(name: .long) var sharedIMECheck = false
     @Flag(name: .long) var sharedLifecycleCheck = false
@@ -51,6 +52,9 @@ struct GPUBrowser: ParsableCommand {
     @Option(name: .long) var url: String = "chrome://gpu"
 
     func validate() throws {
+        if sharedNativeWindows && !(1...sharedScanouts).contains(sharedNativeWindowCount) {
+            throw ValidationError("Initial window count must fit the shared scanout capacity")
+        }
         if sharedQuitCheck && !sharedNativeWindows {
             throw ValidationError("Shared quit check requires native shared windows")
         }
@@ -198,7 +202,7 @@ struct GPUBrowser: ParsableCommand {
         session.show()
         if sharedNativeWindows {
             try session.startSharedWindows { child in sharedChildren.append(child) }
-            session.createSharedWindow()
+            for _ in 1..<sharedNativeWindowCount { session.createSharedWindow() }
         }
         let sharedTask: Task<SharedWindowProof?, Error>? = sharedScanouts > 1 && !sharedNativeWindows ? Task { @MainActor in
             try await Task.sleep(for: .seconds(14))
@@ -222,6 +226,16 @@ struct GPUBrowser: ParsableCommand {
             additional.append((extraPool, extra, extraSession))
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
+        let presentationTask: Task<Void,Never>? = ProcessInfo.processInfo.environment["BROMURE_GPU_CAPTURE_TRACE"] == "1" ? Task { @MainActor in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for:.seconds(10)) } catch { return }
+                let rows = ([session] + sharedChildren).map {
+                    "window=\($0.window.windowNumber) completed=\($0.graphicsPresentedFrameCount)"
+                }
+                print("[GPU presentation] t=\(ProcessInfo.processInfo.systemUptime) " + rows.joined(separator:" "))
+            }
+        } : nil
+        defer { presentationTask?.cancel() }
         let acceptanceTasks: [Task<Bool, Never>] = requireGPUCheck ? ([warm] + additional.map { $0.1 }).map { vm in
             Task { await vm.serialWaiter.probe(for: "BROMURE_GPU_ACCEPTANCE_PASS", timeout: TimeInterval(checkTimeout)) }
         } : []
@@ -243,6 +257,7 @@ struct GPUBrowser: ParsableCommand {
                     }
                 }
             }
+            if sharedNativeWindows { session.window.makeKeyAndOrderFront(nil) }
             let diagnostic = "echo BROMURE_GPU_DIAGNOSTIC; DISPLAY=:0 XAUTHORITY=/home/chrome/.Xauthority /usr/local/bin/graphics-diagnostics.py; python3 -c 'import runpy,json,urllib.request; m=runpy.run_path(\"/usr/local/bin/tab-agent.py\"); v=json.load(urllib.request.urlopen(\"http://127.0.0.1:9222/json/version\")); print(json.dumps(m[\"cdp_ws_call\"](v[\"webSocketDebuggerUrl\"],\"SystemInfo.getInfo\")))'; cat /tmp/startx.log | grep -E '(GL implementation|EGL|egl|ANGLE|Gpu|gpu_process|GL context)' | tail -30; echo BROMURE_GPU_DIAGNOSTIC_END\n"
             warm.serialInput.fileHandleForWriting.write(Data(diagnostic.utf8))
         }

@@ -1,0 +1,1809 @@
+{
+  "date": "2026-10-02",
+  "fix": "Capture only accepted scanout crops intersecting successful resource-space damage; no capture cache",
+  "host": {
+    "gpu": "Apple M5 Pro",
+    "gpuCores": 20,
+    "display": "1920x1080 60Hz"
+  },
+  "image": {
+    "version": 501,
+    "scope": "same private shared-window image as delivered archive; no guest changes",
+    "archiveSHA256": "fc6b36012946f17460538587b41bdc9b211f2a5952ba40207febf71484c028e9"
+  },
+  "clip": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "durationSeconds": 10,
+    "bytes": 1847695,
+    "sha256": "e4f4e01f6230f7ebaea8ff7d2828dca31af9397ce87a7129797fc7818d0a4475",
+    "sourceSHA256": "950683cab054fc9b9d18206a19ad63af0b13c1743fae6f613248a790dae6fc48",
+    "reencode": "libx264 veryfast CRF40, no audio"
+  },
+  "root": {
+    "threeWindowsPhysicalPixels": [
+      5760,
+      1316
+    ],
+    "perWindowCSSViewport": [
+      960,
+      571
+    ],
+    "dpr": 2
+  },
+  "runs": {
+    "three-unfiltered-56": {
+      "trials": [
+        {
+          "trial": 0,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964305394,
+          "elapsedMs": 10004,
+          "before": {
+            "currentTime": 3.00635,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 187,
+            "dropped": 14,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.00546,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 786,
+            "dropped": 16,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 599,
+          "videoCallbacks": 502,
+          "rafHz": 59.87604958016793,
+          "videoCallbackHz": 50.17992802878848,
+          "mediaSecondsAdvanced": -0.0008900000000000574,
+          "totalFramesDelta": 599,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 596,
+          "callbackGaps": 95,
+          "rafIntervalsMs": {
+            "count": 598,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 33.40000000000873,
+            "over25ms": 1,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 501,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 96,
+            "over40ms": 0
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 8,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 452,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 88,
+            "over40ms": 0
+          },
+          "processingDurationMs": {
+            "count": 502,
+            "p50": 85.3,
+            "p95": 179.10000000000002,
+            "max": 204.8,
+            "over25ms": 441,
+            "over40ms": 401
+          },
+          "visibility": []
+        },
+        {
+          "trial": 1,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964315401,
+          "elapsedMs": 10000.200000000012,
+          "before": {
+            "currentTime": 3.007775,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 786,
+            "dropped": 16,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.002054,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 18,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 487,
+          "rafHz": 59.99880002399945,
+          "videoCallbackHz": 48.699026019479554,
+          "mediaSecondsAdvanced": -0.005721000000000309,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 597,
+          "callbackGaps": 111,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 486,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50,
+            "over25ms": 111,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 20,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 437,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50,
+            "over25ms": 91,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 487,
+            "p50": 89.30000000000001,
+            "p95": 183.2,
+            "max": 203.6,
+            "over25ms": 435,
+            "over40ms": 380
+          },
+          "visibility": []
+        },
+        {
+          "trial": 2,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964325403,
+          "elapsedMs": 10002.5,
+          "before": {
+            "currentTime": 3.004003,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 18,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.002483,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1985,
+            "dropped": 19,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 516,
+          "rafHz": 59.985003749062734,
+          "videoCallbackHz": 51.58710322419395,
+          "mediaSecondsAdvanced": -0.0015200000000001879,
+          "totalFramesDelta": 599,
+          "droppedFramesDelta": 1,
+          "presentedDelta": 598,
+          "callbackGaps": 83,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.80000000000291,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 515,
+            "p50": 16.69999999999709,
+            "p95": 33.30000000000291,
+            "max": 50,
+            "over25ms": 83,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.30000000000291,
+            "max": 33.40000000000873,
+            "over25ms": 5,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 466,
+            "p50": 16.69999999999709,
+            "p95": 33.30000000000291,
+            "max": 50,
+            "over25ms": 78,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 516,
+            "p50": 85.9,
+            "p95": 182.4,
+            "max": 202.9,
+            "over25ms": 453,
+            "over40ms": 398
+          },
+          "visibility": []
+        }
+      ],
+      "mediaProperties": {},
+      "lastCaptureStatistics": [
+        "18120",
+        "36170",
+        "1.949"
+      ],
+      "acceptanceMarker": true,
+      "gpuRejections": 0,
+      "rawLog": "/private/tmp/bromure-window-video-three-unfiltered-56.log",
+      "rawSHA256": "3937ca4993752d99ac0d299afaca55385f6f5848759b9026f4de0945cad04531"
+    },
+    "three-filtered-56": {
+      "trials": [
+        {
+          "trial": 0,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964537393,
+          "elapsedMs": 10003.900000000009,
+          "before": {
+            "currentTime": 3.002028,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 187,
+            "dropped": 12,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.003544,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 785,
+            "dropped": 14,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 469,
+          "rafHz": 59.9766091224422,
+          "videoCallbackHz": 46.88171613070898,
+          "mediaSecondsAdvanced": 0.0015160000000000728,
+          "totalFramesDelta": 598,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 595,
+          "callbackGaps": 127,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.79999999998836,
+            "max": 33.39999999999418,
+            "over25ms": 1,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 468,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 50,
+            "over25ms": 128,
+            "over40ms": 2
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 33.40000000000873,
+            "over25ms": 12,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 419,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 50,
+            "over25ms": 116,
+            "over40ms": 2
+          },
+          "processingDurationMs": {
+            "count": 469,
+            "p50": 85,
+            "p95": 168.7,
+            "max": 201.9,
+            "over25ms": 407,
+            "over40ms": 375
+          },
+          "visibility": []
+        },
+        {
+          "trial": 1,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964547399,
+          "elapsedMs": 10002.800000000003,
+          "before": {
+            "currentTime": 3.0057,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 785,
+            "dropped": 14,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.00338,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 16,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 601,
+          "videoCallbacks": 472,
+          "rafHz": 60.08317671052104,
+          "videoCallbackHz": 47.18678769944414,
+          "mediaSecondsAdvanced": -0.0023200000000000998,
+          "totalFramesDelta": 601,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 600,
+          "callbackGaps": 129,
+          "rafIntervalsMs": {
+            "count": 600,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 471,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 129,
+            "over40ms": 0
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.39999999999418,
+            "over25ms": 14,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 422,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 115,
+            "over40ms": 0
+          },
+          "processingDurationMs": {
+            "count": 472,
+            "p50": 89.6,
+            "p95": 168.8,
+            "max": 232.3,
+            "over25ms": 419,
+            "over40ms": 380
+          },
+          "visibility": []
+        },
+        {
+          "trial": 2,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964557404,
+          "elapsedMs": 10000.300000000003,
+          "before": {
+            "currentTime": 3.005709,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 16,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.003796,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1986,
+            "dropped": 18,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 458,
+          "rafHz": 59.99820005399836,
+          "videoCallbackHz": 45.79862604121875,
+          "mediaSecondsAdvanced": -0.0019130000000000535,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 597,
+          "callbackGaps": 140,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 457,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50.09999999999127,
+            "over25ms": 140,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 33.40000000000873,
+            "over25ms": 18,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 408,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50.09999999999127,
+            "over25ms": 122,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 458,
+            "p50": 85.8,
+            "p95": 166.7,
+            "max": 204.7,
+            "over25ms": 405,
+            "over40ms": 374
+          },
+          "visibility": []
+        }
+      ],
+      "mediaProperties": {},
+      "lastCaptureStatistics": [
+        "11880",
+        "7902",
+        "1.035"
+      ],
+      "acceptanceMarker": true,
+      "gpuRejections": 0,
+      "rawLog": "/private/tmp/bromure-window-video-three-filtered-56.log",
+      "rawSHA256": "6bae02cf90d9e20be9a574a8913085c744354142e5b37ab1564c3306adfca7f1"
+    },
+    "active-unfiltered-56": {
+      "trials": [
+        {
+          "trial": 0,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964787548,
+          "elapsedMs": 10002.800000000003,
+          "before": {
+            "currentTime": 3.005029,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 185,
+            "dropped": 49,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.003344,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 786,
+            "dropped": 220,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 598,
+          "videoCallbacks": 503,
+          "rafHz": 59.78326068700762,
+          "videoCallbackHz": 50.28591994241611,
+          "mediaSecondsAdvanced": -0.0016850000000001586,
+          "totalFramesDelta": 601,
+          "droppedFramesDelta": 171,
+          "presentedDelta": 596,
+          "callbackGaps": 94,
+          "rafIntervalsMs": {
+            "count": 597,
+            "p50": 16.69999999999709,
+            "p95": 16.79999999998836,
+            "max": 50,
+            "over25ms": 2,
+            "over40ms": 1
+          },
+          "videoIntervalsMs": {
+            "count": 502,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50,
+            "over25ms": 96,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 9,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 453,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50,
+            "over25ms": 87,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 503,
+            "p50": 116,
+            "p95": 211.29999999999998,
+            "max": 271.6,
+            "over25ms": 472,
+            "over40ms": 453
+          },
+          "visibility": []
+        },
+        {
+          "trial": 1,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964797553,
+          "elapsedMs": 10002.5,
+          "before": {
+            "currentTime": 3.005221,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 786,
+            "dropped": 220,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.006542,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1384,
+            "dropped": 385,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 594,
+          "videoCallbacks": 493,
+          "rafHz": 59.38515371157211,
+          "videoCallbackHz": 49.28767808047988,
+          "mediaSecondsAdvanced": 0.0013209999999999056,
+          "totalFramesDelta": 598,
+          "droppedFramesDelta": 165,
+          "presentedDelta": 593,
+          "callbackGaps": 101,
+          "rafIntervalsMs": {
+            "count": 593,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 33.39999999999418,
+            "over25ms": 6,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 492,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 49.90000000000873,
+            "over25ms": 105,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.39999999999418,
+            "over25ms": 11,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 443,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 49.90000000000873,
+            "over25ms": 94,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 493,
+            "p50": 89.2,
+            "p95": 182.10000000000002,
+            "max": 200.9,
+            "over25ms": 445,
+            "over40ms": 407
+          },
+          "visibility": []
+        },
+        {
+          "trial": 2,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790964807557,
+          "elapsedMs": 10000.199999999997,
+          "before": {
+            "currentTime": 3.008226,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1384,
+            "dropped": 385,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.003191,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1985,
+            "dropped": 567,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 591,
+          "videoCallbacks": 485,
+          "rafHz": 59.098818023639545,
+          "videoCallbackHz": 48.499030019399626,
+          "mediaSecondsAdvanced": -0.005034999999999901,
+          "totalFramesDelta": 601,
+          "droppedFramesDelta": 182,
+          "presentedDelta": 590,
+          "callbackGaps": 106,
+          "rafIntervalsMs": {
+            "count": 590,
+            "p50": 16.69999999999709,
+            "p95": 16.79999999998836,
+            "max": 33.40000000000873,
+            "over25ms": 9,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 484,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 50,
+            "over25ms": 110,
+            "over40ms": 4
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50,
+            "over25ms": 7,
+            "over40ms": 1
+          },
+          "laterVideoIntervalsMs": {
+            "count": 435,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 50,
+            "over25ms": 103,
+            "over40ms": 3
+          },
+          "processingDurationMs": {
+            "count": 485,
+            "p50": 108.5,
+            "p95": 206.9,
+            "max": 272.6,
+            "over25ms": 458,
+            "over40ms": 429
+          },
+          "visibility": []
+        }
+      ],
+      "mediaProperties": {},
+      "lastCaptureStatistics": [
+        "27240",
+        "54410",
+        "1.445"
+      ],
+      "acceptanceMarker": true,
+      "gpuRejections": 0,
+      "rawLog": "/private/tmp/bromure-window-video-active-unfiltered-56.log",
+      "rawSHA256": "65a0806a2f2bb1e32bf57ebbb688eaee3f72f73211f6568e3ad7b276fdaa5616"
+    },
+    "active-damage-only-56": {
+      "trials": [
+        {
+          "trial": 0,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965270400,
+          "elapsedMs": 10003,
+          "before": {
+            "currentTime": 3.00309,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 186,
+            "dropped": 8,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.004403,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 785,
+            "dropped": 9,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 601,
+          "videoCallbacks": 489,
+          "rafHz": 60.08197540737779,
+          "videoCallbackHz": 48.8853343996801,
+          "mediaSecondsAdvanced": 0.0013130000000001196,
+          "totalFramesDelta": 599,
+          "droppedFramesDelta": 1,
+          "presentedDelta": 598,
+          "callbackGaps": 110,
+          "rafIntervalsMs": {
+            "count": 600,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 488,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 110,
+            "over40ms": 0
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 9,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 439,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 101,
+            "over40ms": 0
+          },
+          "processingDurationMs": {
+            "count": 489,
+            "p50": 87,
+            "p95": 168.2,
+            "max": 205,
+            "over25ms": 427,
+            "over40ms": 399
+          },
+          "visibility": []
+        },
+        {
+          "trial": 1,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965280404,
+          "elapsedMs": 10006.5,
+          "before": {
+            "currentTime": 3.006189,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 786,
+            "dropped": 9,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.011734,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 11,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 497,
+          "rafHz": 59.9610253335332,
+          "videoCallbackHz": 49.667715984610005,
+          "mediaSecondsAdvanced": 0.005545000000000133,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 598,
+          "callbackGaps": 102,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 496,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 102,
+            "over40ms": 0
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.39999999999418,
+            "over25ms": 15,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 447,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 87,
+            "over40ms": 0
+          },
+          "processingDurationMs": {
+            "count": 497,
+            "p50": 84.9,
+            "p95": 182.29999999999998,
+            "max": 202.1,
+            "over25ms": 429,
+            "over40ms": 376
+          },
+          "visibility": []
+        },
+        {
+          "trial": 2,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965290412,
+          "elapsedMs": 10001.800000000003,
+          "before": {
+            "currentTime": 3.013346,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 11,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.013762,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1986,
+            "dropped": 12,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 497,
+          "rafHz": 59.98920194365012,
+          "videoCallbackHz": 49.69105560999019,
+          "mediaSecondsAdvanced": 0.00041599999999997195,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 1,
+          "presentedDelta": 599,
+          "callbackGaps": 103,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 496,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 103,
+            "over40ms": 0
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 8,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 447,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.40000000000873,
+            "over25ms": 95,
+            "over40ms": 0
+          },
+          "processingDurationMs": {
+            "count": 497,
+            "p50": 86.9,
+            "p95": 177.9,
+            "max": 202.2,
+            "over25ms": 436,
+            "over40ms": 397
+          },
+          "visibility": []
+        }
+      ],
+      "mediaProperties": {},
+      "lastCaptureStatistics": [
+        "35520",
+        "23662",
+        "0.678"
+      ],
+      "acceptanceMarker": true,
+      "gpuRejections": 0,
+      "rawLog": "/private/tmp/bromure-window-video-active-damage-only-56.log",
+      "rawSHA256": "be0384dec0addaf989a7290c22a5549f36b4e1c5f90648c1c19bd4a371d38d75"
+    },
+    "active-filtered-57": {
+      "trials": [
+        {
+          "trial": 0,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965095471,
+          "elapsedMs": 10003.600000000006,
+          "before": {
+            "currentTime": 3.002267,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 186,
+            "dropped": 8,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.000392,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 785,
+            "dropped": 10,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 601,
+          "videoCallbacks": 458,
+          "rafHz": 60.07837178615695,
+          "videoCallbackHz": 45.7835179335439,
+          "mediaSecondsAdvanced": -0.001874999999999627,
+          "totalFramesDelta": 599,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 596,
+          "callbackGaps": 139,
+          "rafIntervalsMs": {
+            "count": 600,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 457,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.5,
+            "over25ms": 140,
+            "over40ms": 0
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.39999999999418,
+            "over25ms": 15,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 408,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 33.5,
+            "over25ms": 125,
+            "over40ms": 0
+          },
+          "processingDurationMs": {
+            "count": 458,
+            "p50": 86.4,
+            "p95": 180.79999999999998,
+            "max": 200.2,
+            "over25ms": 405,
+            "over40ms": 355
+          },
+          "visibility": []
+        },
+        {
+          "trial": 1,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965105476,
+          "elapsedMs": 10000.600000000006,
+          "before": {
+            "currentTime": 3.002401,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 786,
+            "dropped": 10,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 2.999711,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 12,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 453,
+          "rafHz": 59.99640021598701,
+          "videoCallbackHz": 45.29728216307019,
+          "mediaSecondsAdvanced": -0.002689999999999859,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 598,
+          "callbackGaps": 146,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 452,
+            "p50": 16.69999999999709,
+            "p95": 33.40000000000873,
+            "max": 33.5,
+            "over25ms": 146,
+            "over40ms": 0
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.70000000001164,
+            "p95": 33.40000000000873,
+            "max": 33.5,
+            "over25ms": 20,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 403,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.5,
+            "over25ms": 126,
+            "over40ms": 0
+          },
+          "processingDurationMs": {
+            "count": 453,
+            "p50": 85.5,
+            "p95": 180.9,
+            "max": 201.6,
+            "over25ms": 398,
+            "over40ms": 347
+          },
+          "visibility": []
+        },
+        {
+          "trial": 2,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965115479,
+          "elapsedMs": 10000.800000000003,
+          "before": {
+            "currentTime": 3.001427,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 12,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.000852,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1986,
+            "dropped": 14,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 461,
+          "rafHz": 59.99520038396926,
+          "videoCallbackHz": 46.09631229501638,
+          "mediaSecondsAdvanced": -0.0005749999999999922,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 598,
+          "callbackGaps": 138,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 460,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50,
+            "over25ms": 138,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 33.5,
+            "over25ms": 16,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 411,
+            "p50": 16.69999999999709,
+            "p95": 33.39999999999418,
+            "max": 50,
+            "over25ms": 122,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 461,
+            "p50": 84.4,
+            "p95": 180.79999999999998,
+            "max": 204.2,
+            "over25ms": 407,
+            "over40ms": 358
+          },
+          "visibility": []
+        }
+      ],
+      "mediaProperties": {},
+      "lastCaptureStatistics": [
+        "35520",
+        "23659",
+        "0.664"
+      ],
+      "acceptanceMarker": true,
+      "gpuRejections": 0,
+      "rawLog": "/private/tmp/bromure-window-video-active-filtered-57.log",
+      "rawSHA256": "a4c3a7a65e94152cd2e5cc5981ff93c95634c2b3a394310e0215b0b24a9f405d"
+    },
+    "one-final-58": {
+      "trials": [
+        {
+          "trial": 0,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965647354,
+          "elapsedMs": 10002,
+          "before": {
+            "currentTime": 3.003415,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 186,
+            "dropped": 5,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.000074,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 785,
+            "dropped": 7,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 565,
+          "rafHz": 59.9880023995201,
+          "videoCallbackHz": 56.48870225954809,
+          "mediaSecondsAdvanced": -0.0033409999999998163,
+          "totalFramesDelta": 599,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 597,
+          "callbackGaps": 33,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.79999999998836,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 564,
+            "p50": 16.69999999999709,
+            "p95": 33.29999999998836,
+            "max": 50.10000000000582,
+            "over25ms": 33,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 16.80000000000291,
+            "max": 33.19999999999709,
+            "over25ms": 1,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 515,
+            "p50": 16.69999999999709,
+            "p95": 33.29999999998836,
+            "max": 50.10000000000582,
+            "over25ms": 32,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 565,
+            "p50": 85.4,
+            "p95": 180.10000000000002,
+            "max": 203.3,
+            "over25ms": 512,
+            "over40ms": 452
+          },
+          "visibility": []
+        },
+        {
+          "trial": 1,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965657359,
+          "elapsedMs": 10001.699999999997,
+          "before": {
+            "currentTime": 3.002232,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 785,
+            "dropped": 7,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 2.998789,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1385,
+            "dropped": 9,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 600,
+          "videoCallbacks": 571,
+          "rafHz": 59.989801733705285,
+          "videoCallbackHz": 57.09029464990953,
+          "mediaSecondsAdvanced": -0.003442999999999863,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 2,
+          "presentedDelta": 598,
+          "callbackGaps": 28,
+          "rafIntervalsMs": {
+            "count": 599,
+            "p50": 16.69999999999709,
+            "p95": 16.79999999998836,
+            "max": 16.80000000000291,
+            "over25ms": 0,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 570,
+            "p50": 16.69999999999709,
+            "p95": 16.80000000000291,
+            "max": 50,
+            "over25ms": 28,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 33.30000000000291,
+            "max": 33.40000000000873,
+            "over25ms": 3,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 521,
+            "p50": 16.69999999999709,
+            "p95": 16.80000000000291,
+            "max": 50,
+            "over25ms": 25,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 571,
+            "p50": 87.5,
+            "p95": 168.3,
+            "max": 202.9,
+            "over25ms": 527,
+            "over40ms": 464
+          },
+          "visibility": []
+        },
+        {
+          "trial": 2,
+          "scope": "existing one-video page; callbacks not physical display",
+          "wallStart": 1790965667364,
+          "elapsedMs": 10001.5,
+          "before": {
+            "currentTime": 3.002101,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1386,
+            "dropped": 9,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "after": {
+            "currentTime": 3.000419,
+            "paused": false,
+            "readyState": 4,
+            "width": 1920,
+            "height": 1080,
+            "playbackRate": 1,
+            "total": 1986,
+            "dropped": 12,
+            "visibility": "visible",
+            "viewport": [
+              960,
+              571
+            ],
+            "dpr": 2,
+            "error": null
+          },
+          "rafCallbacks": 599,
+          "videoCallbacks": 563,
+          "rafHz": 59.89101634754787,
+          "videoCallbackHz": 56.291556266560015,
+          "mediaSecondsAdvanced": -0.0016820000000001833,
+          "totalFramesDelta": 600,
+          "droppedFramesDelta": 3,
+          "presentedDelta": 596,
+          "callbackGaps": 34,
+          "rafIntervalsMs": {
+            "count": 598,
+            "p50": 16.69999999999709,
+            "p95": 16.70000000001164,
+            "max": 33.30000000000291,
+            "over25ms": 1,
+            "over40ms": 0
+          },
+          "videoIntervalsMs": {
+            "count": 562,
+            "p50": 16.69999999999709,
+            "p95": 33.30000000000291,
+            "max": 50.09999999999127,
+            "over25ms": 35,
+            "over40ms": 1
+          },
+          "first50VideoIntervalsMs": {
+            "count": 49,
+            "p50": 16.69999999999709,
+            "p95": 16.80000000000291,
+            "max": 33.40000000000873,
+            "over25ms": 2,
+            "over40ms": 0
+          },
+          "laterVideoIntervalsMs": {
+            "count": 513,
+            "p50": 16.69999999999709,
+            "p95": 33.30000000000291,
+            "max": 50.09999999999127,
+            "over25ms": 33,
+            "over40ms": 1
+          },
+          "processingDurationMs": {
+            "count": 563,
+            "p50": 85.2,
+            "p95": 181,
+            "max": 203.9,
+            "over25ms": 493,
+            "over40ms": 441
+          },
+          "visibility": []
+        }
+      ],
+      "mediaProperties": {
+        "kBitrate": "1478156",
+        "kVideoDecoderName": "VaapiVideoDecoder",
+        "kIsStreaming": "true",
+        "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+        "kIsPlatformVideoDecoder": "true",
+        "kFrameUrl": "about:blank",
+        "kIsRangeHeaderSupported": "false",
+        "kIsVideoDecryptingDemuxerStream": "false",
+        "kStartTime": "0.0",
+        "kResolution": "1920x1080",
+        "kRendererName": "RendererImpl",
+        "kTotalBytes": "0x1c318f",
+        "kMaxDuration": "10.0",
+        "kIsSingleOrigin": "true",
+        "kFrameTitle": ""
+      },
+      "lastCaptureStatistics": [
+        "3960",
+        "0",
+        "1.463"
+      ],
+      "acceptanceMarker": true,
+      "gpuRejections": 0,
+      "rawLog": "/private/tmp/bromure-window-video-one-final-58.log",
+      "rawSHA256": "e153a99856c4a863bafb02c7c954235a264997806e4078eec48a7a8d0443b801"
+    }
+  },
+  "fixtures": {
+    "processorRouting": "PASS incl failures/lifetime/overflow",
+    "workerCommands": "24 PASS",
+    "XPC": "PASS real crop/color/fence/error/rebind/independent teardown",
+    "distinctMetalCropPixels": "PASS every pixel",
+    "bufferRange": "PASS unique data/range/SG"
+  },
+  "resize": {
+    "recordedFrames": 1427,
+    "blueCenterFrames": 1427,
+    "blackCenterFrames": 0,
+    "scope": "25-second single sibling movie central region; not exhaustive pixels",
+    "resizeMovie": {
+      "path": "/private/tmp/bromure-window-video-resize-final-58.mov",
+      "sha256": "91880b2f325035774acd42e99a5991a0721bce015638a8ea8b319d6570698b83"
+    },
+    "resizeLog": {
+      "path": "/private/tmp/bromure-window-video-resize-final-58.log",
+      "sha256": "a5cddd3128d811a82c2066f0d69ed56a4ad3ce5b08f4c2c28866645ea294ca66"
+    },
+    "resizeAnalysis": {
+      "path": "/private/tmp/bromure-window-video-resize-movie-final.log",
+      "sha256": "11fd69e84980a9653d585c56e3acf6d3cf0ff89ff567341a02e802f8a6bc69cc"
+    },
+    "processExit": 0,
+    "gpuRejections": 0,
+    "macReleases": 1,
+    "acceptanceMarker": true
+  },
+  "limitations": [
+    "No physical display FPS claim from callback or GPU completion counters",
+    "Local synthetic video plus animated canvas siblings; not all website workloads",
+    "Three 10-second trials, not overnight stability",
+    "Audio omitted as explicitly deferred",
+    "Historical-policy baseline keeps output-zero damage filtering; reconstructs former secondary capture policy",
+    "Experimental capture-cache candidate discarded after no convincing incremental benefit",
+    "Notarization currently blocked: missing Bromure Keychain credential"
+  ],
+  "sourceSHA256": {
+    "Sources/SandboxEngine/RendererCommandProcessor.swift": "52d2c3c793d18fac5efebe83fdd9fa0f099ad45c72d03356c4f39db2a7a877d8",
+    "tools/gpu/renderer-worker.c": "7d949fc2625a6bf942aa4329182c5dab04f62b3daf01c9d9a1ffde77b40e7674",
+    "tools/gpu/test-scanout-damage.swift": "8123824d8fff24405d692412d83f2a3427b01ea4ae6064c19c18f8fd98c6311e",
+    "tools/gpu/test-scanout-damage-xpc.m": "20aa0485d9901d668483b2e191731cf6e00bb4684dfa6ca647fc47f5f9f4aa63",
+    "tools/gpu/test-scanout-crop.m": "c46d348dc05dfb0399132b4f173eaf94e072292247f16ab59b11bab7d271eeb4"
+  },
+  "finalPackage": {
+    "log": "/private/tmp/bromure-window-video-package-final.log",
+    "signing": "Developer ID Application: RENAUD MARIE DERAISON (W3RD8G85BC)",
+    "signedBinary": "PASS package.sh strict verification",
+    "notarization": "BLOCKED: No Keychain password item found for profile Bromure",
+    "dmg": "not generated because app notarization failed"
+  }
+}

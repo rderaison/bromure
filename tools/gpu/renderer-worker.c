@@ -326,12 +326,13 @@ int run_renderer_worker(int output_fd)
             }
             // SET_SCANOUT binds the framebuffer; RESOURCE_FLUSH publishes its contents.
             // Publishing on SET exposes the modesetting buffer before guest repaint.
-            if (type == 0x104 && s->enabled && id == s->resource) {
+            if (type == 0x104 && s->enabled && id == s->resource &&
+                (uint64_t)x < (uint64_t)s->x + s->width && (uint64_t)s->x < (uint64_t)x + width &&
+                (uint64_t)y < (uint64_t)s->y + s->height && (uint64_t)s->y < (uint64_t)y + height) {
                 if (++fence_token == 0) ++fence_token;
                 if (!wait_for_gpu(fence_token, 0)) return 1;
                 if (info.native_type != VIRGL_NATIVE_HANDLE_METAL_TEXTURE || !info.native_handle ||
                     !renderer_capture_surface_region(info.native_handle, s->x, s->y, s->width, s->height)) { result = 0x1200; break; }
-
             }
             result = 0x1100; break;
         }

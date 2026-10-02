@@ -16,7 +16,22 @@ final class RendererCommandProcessor {
     private var cursorResources: [UInt32: (width: Int, height: Int, format: UInt32)] = [:]
     private var rejectedCommandCount = 0
     private var bufferSizes: [UInt32: Int] = [:]
-    private var scanoutResources: [UInt32: UInt32] = [:]
+    private struct ScanoutBinding {
+        let resource: UInt32
+        let x, y, width, height: UInt32
+        func intersectsDamage(_ command: Data) -> Bool {
+            let dx = UInt64(get32(command, at: 24)), dy = UInt64(get32(command, at: 28))
+            let dw = UInt64(get32(command, at: 32)), dh = UInt64(get32(command, at: 36))
+            return dw > 0 && dh > 0 && dx < UInt64(x) + UInt64(width) &&
+                UInt64(x) < dx + dw && dy < UInt64(y) + UInt64(height) && UInt64(y) < dy + dh
+        }
+    }
+    private var scanoutResources: [UInt32: ScanoutBinding] = [:]
+    private let captureTrace = ProcessInfo.processInfo.environment["BROMURE_GPU_CAPTURE_TRACE"] == "1"
+    private let captureAllForBenchmark = ProcessInfo.processInfo.environment["BROMURE_GPU_CAPTURE_ALL_BENCHMARK"] == "1"
+    private var flushCount: UInt64 = 0
+    private var secondaryCaptureCount: UInt64 = 0
+    private var flushNanoseconds: UInt64 = 0
     private var uploadedBytes: UInt64 = 0
     private var uploadRequests: UInt64 = 0
     var backingUploadStatistics: (bytes: UInt64, requests: UInt64) { (uploadedBytes, uploadRequests) }
@@ -269,6 +284,7 @@ final class RendererCommandProcessor {
             }
             return response
         }
+        let flushStart = captureTrace && type == 0x104 && snapshot.count == 48 ? DispatchTime.now().uptimeNanoseconds : 0
         let response = try request(snapshot)
         if [UInt32(0x102), 0x107].contains(type), snapshot.count == 32, get32(response, at: 0) == 0x1100 {
             backing.removeValue(forKey: get32(snapshot, at: 24))
@@ -290,23 +306,33 @@ final class RendererCommandProcessor {
             if type == 0x103, snapshot.count == 48 {
                 let index = get32(snapshot, at: 40), resource = get32(snapshot, at: 44)
                 if resource == 0 { scanoutResources.removeValue(forKey: index) }
-                else { scanoutResources[index] = resource }
+                else { scanoutResources[index] = ScanoutBinding(resource: resource, x: get32(snapshot, at: 24), y: get32(snapshot, at: 28), width: get32(snapshot, at: 32), height: get32(snapshot, at: 36)) }
             } else if type == 0x102, snapshot.count == 32 {
                 let resource = get32(snapshot, at: 24)
-                scanoutResources = scanoutResources.filter { $0.value != resource }
+                scanoutResources = scanoutResources.filter { $0.value.resource != resource }
             } else if type == 0x104, snapshot.count == 48 {
                 let resource = get32(snapshot, at: 40)
                 // Each output is a crop of the same root framebuffer. The XPC
                 // protocol carries one surface per reply, so snapshot other outputs
                 // serially after the successful flush; output zero is in that reply.
-                for index in scanoutResources.keys.sorted() where index != 0 && scanoutResources[index] == resource {
+                // Damage belongs to the shared resource coordinate space. Idle
+                // siblings retain their last frame without another fence/copy.
+                for index in scanoutResources.keys.sorted() where index != 0 && scanoutResources[index]?.resource == resource && (captureAllForBenchmark || scanoutResources[index]!.intersectsDamage(snapshot)) {
                     var capture = Data(repeating: 0, count: 28)
                     put32(0xffff0023, at: 0, into: &capture); put32(index, at: 24, into: &capture)
+                    if captureTrace { secondaryCaptureCount += 1 }
                     guard get32(try request(capture), at: 0) == 0x1100 else { throw failure("Output capture failed") }
                 }
             }
         }
 
+        if flushStart != 0 {
+            flushCount += 1
+            flushNanoseconds += DispatchTime.now().uptimeNanoseconds - flushStart
+            if flushCount <= 8 || flushCount % 120 == 0 {
+                NSLog("[GPU capture] flushes=%llu secondary=%llu averageMs=%.3f damage=%u,%u,%u,%u allBenchmark=%d", flushCount, secondaryCaptureCount, Double(flushNanoseconds)/Double(flushCount)/1_000_000, get32(snapshot,at:24),get32(snapshot,at:28),get32(snapshot,at:32),get32(snapshot,at:36),captureAllForBenchmark ? 1 : 0)
+            }
+        }
         return response
     }
 

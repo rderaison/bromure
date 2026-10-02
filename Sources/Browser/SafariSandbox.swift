@@ -3893,6 +3893,10 @@ final class BrowserSession {
 
     @MainActor func createSharedWindow() { sharedOwner?.createWindow() }
 
+    @MainActor var graphicsPresentedFrameCount: Int {
+        (vmView as? PrecisionScrollVMView)?.gpuFrameView?.presentedFrameCount ?? 0
+    }
+
     @MainActor func startSharedWindows(onWindowCreated: @escaping (BrowserSession) -> Void) throws {
         guard let warm = warmVM, (warm.graphicsSession?.outputCapacity ?? 1) > 1,
               let socket = warm.vm.socketDevices.first as? VZVirtioSocketDevice else {
