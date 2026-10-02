@@ -92,12 +92,14 @@ def emit(kind, **data):
 EXPRESSION = '''(()=>({url:location.href,visibility:document.visibilityState,ready:document.readyState,
  viewport:[innerWidth,innerHeight,devicePixelRatio],
  videos:Array.from(document.querySelectorAll('video')).slice(0,32).map((v,index)=>{
- const q=v.getVideoPlaybackQuality();return {index,src:v.currentSrc,time:v.currentTime,
+ const q=v.getVideoPlaybackQuality();return {index,src:v.currentSrc.slice(0,512),srcLength:v.currentSrc.length,time:v.currentTime,
  duration:Number.isFinite(v.duration)?v.duration:null,paused:v.paused,ended:v.ended,readyState:v.readyState,
  networkState:v.networkState,width:v.videoWidth,height:v.videoHeight,
  total:q.totalVideoFrames,dropped:q.droppedVideoFrames,
  error:v.error?{code:v.error.code,message:v.error.message}:null}}),
- images:{count:document.images.length,complete:Array.from(document.images).filter(i=>i.complete).length}}))()'''
+ images:{count:document.images.length,complete:Array.from(document.images).filter(i=>i.complete).length,
+ sample:Array.from(document.images).slice(0,16).map(i=>({src:i.currentSrc.slice(0,512),
+ width:i.naturalWidth,height:i.naturalHeight,complete:i.complete}))}}))()'''
 
 
 def main():
