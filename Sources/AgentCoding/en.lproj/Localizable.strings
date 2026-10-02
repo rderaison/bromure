@@ -3644,3 +3644,6 @@
 "Your customize script failed — the current image is kept. See %@" = "Your customize script failed — the current image is kept. See %@";
 "%@ says" = "%@ says";
 "The agent" = "The agent";
+"Ask %@ to Merge into %@" = "Ask %@ to Merge into %@";
+"Ask %@ to Merge" = "Ask %@ to Merge";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options.";

@@ -220,7 +220,8 @@ final class TaskReviewWindowManager {
                         onOpenPR: {
                             c.openPR(id)
                             self?.host.close(id)
-                        }))
+                        },
+                        assignee: t().flatMap { $0.delegationID == nil ? nil : $0.assignment?.label }))
                 })
         }
     }
@@ -234,9 +235,19 @@ struct TaskMergeMenu: View {
     let fetchBranches: () async -> [String]
     let onMerge: (_ target: String?, _ squash: Bool, _ cleanup: Bool) -> Void
     let onOpenPR: () -> Void
+    /// The task's assignee ("@hotfixes"), when it merges its own work.
+    var assignee: String? = nil
 
     @State private var cleanupAfterMerge = true
     @State private var branches: [String] = []
+
+    private var mergeTitle: String {
+        if let assignee {
+            return parent.map { String(format: NSLocalizedString("Ask %@ to Merge into %@", comment: "review"), assignee, $0) }
+                ?? String(format: NSLocalizedString("Ask %@ to Merge", comment: "review"), assignee)
+        }
+        return String(format: NSLocalizedString("Merge into %@", comment: "review"), parent ?? "parent")
+    }
 
     var body: some View {
         let parent = self.parent ?? "parent"
@@ -270,17 +281,20 @@ struct TaskMergeMenu: View {
                 }
             }
         } label: {
-            Label(String(format: NSLocalizedString("Merge into %@", comment: "review"), parent),
-                  systemImage: "arrow.triangle.merge")
+            Label(mergeTitle, systemImage: "arrow.triangle.merge")
         } primaryAction: {
             onMerge(nil, false, cleanupAfterMerge)
         }
         .menuStyle(.button)
         .buttonStyle(.bordered)
         .fixedSize()
-        .help(NSLocalizedString(
-            "Click to merge into the parent; hold for squash, pull-request, and other-branch options.",
-            comment: "review"))
+        .help(assignee == nil
+              ? NSLocalizedString(
+                "Click to merge into the parent; hold for squash, pull-request, and other-branch options.",
+                comment: "review")
+              : NSLocalizedString(
+                "Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options.",
+                comment: "review"))
         .task { branches = await fetchBranches() }
     }
 }
