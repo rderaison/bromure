@@ -354,6 +354,38 @@ class ControllerTests(unittest.TestCase):
             self.controller.new_tab(10, 'about:blank')
         self.assertFalse(any(method == 'Target.createTarget' for method, _ in self.calls[before:]))
 
+    def test_placement_observes_restore_before_numeric_bounds(self):
+        pending = [False]
+        reads = [0]
+        self.bounds[10]['windowState'] = 'maximized'
+        original = self.controller.browser_call
+        def delayed(method, params):
+            if method == 'Browser.setWindowBounds':
+                if 'windowState' in params['bounds']:
+                    pending[0] = True
+                    return {}
+                self.assertEqual(self.bounds[10]['windowState'], 'normal')
+            if method == 'Browser.getWindowBounds' and pending[0]:
+                reads[0] += 1
+                if reads[0] == 2:
+                    self.bounds[10]['windowState'] = 'normal'
+            return original(method, params)
+        self.controller.browser_call = delayed
+        self.controller.place(10, self.layout(1)[0])
+        self.assertGreaterEqual(reads[0], 2)
+        self.assertEqual(self.bounds[10]['height'], 626)
+
+    def test_restore_timeout_does_not_send_geometry_and_reports_evidence(self):
+        self.controller.browser_call = unittest.mock.Mock(return_value={'bounds': {'windowState': 'maximized'}})
+        with patch.object(shared.time, 'monotonic', side_effect=[0, 4]):
+            with self.assertRaisesRegex(RuntimeError, '"phase": "restore"') as failure:
+                self.controller.place(10, self.layout(1)[0])
+        self.assertIn('"requested":', str(failure.exception))
+        self.assertIn('"observed":', str(failure.exception))
+        sets = [call.args[1]['bounds'] for call in self.controller.browser_call.call_args_list
+                if call.args[0] == 'Browser.setWindowBounds']
+        self.assertEqual(sets, [{'windowState': 'normal'}])
+
     def test_page_focus_failure_blocks_ack_and_new_tab(self):
         self.attach()
         observer = unittest.mock.Mock()

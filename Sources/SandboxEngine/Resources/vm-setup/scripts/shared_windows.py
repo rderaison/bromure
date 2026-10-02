@@ -508,16 +508,26 @@ class Controller:
             raise ValueError('physical geometry must align with common display scale')
         bounds = dict(left=rect['x'] // self.scale, top=rect['y'] // self.scale,
                       width=rect['width'] // self.scale, height=rect['height'] // self.scale)
-        self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'normal'}})
-        self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': bounds})
         deadline = time.monotonic() + 3
-        while True:
-            actual = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
-            if all(actual.get(key) == value for key, value in bounds.items()):
-                return
-            if time.monotonic() >= deadline:
-                raise RuntimeError('Chromium window bounds did not converge')
-            time.sleep(.05)
+        initial = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
+        def wait_bounds(phase, matches):
+            while True:
+                actual = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
+                if matches(actual):
+                    return
+                if time.monotonic() >= deadline:
+                    evidence = dict(windowId=wid, phase=phase, scale=self.scale,
+                                    requested=bounds, initial=initial, observed=actual)
+                    raise RuntimeError('Chromium window bounds did not converge: ' + json.dumps(evidence, sort_keys=True))
+                time.sleep(.05)
+
+        self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'normal'}})
+        # Chromium restores a non-normal window INSTEAD of applying numeric
+        # bounds. Observe the asynchronous restore before sending geometry.
+        wait_bounds('restore', lambda actual: actual.get('windowState') == 'normal')
+        self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': bounds})
+        wait_bounds('geometry', lambda actual: actual.get('windowState') == 'normal' and
+                    all(actual.get(key) == value for key, value in bounds.items()))
 
     def apply_topology(self, topology, prospective=None):
         rows, root = validate_topology(topology, self.root_pixel_limit or MAX_ROOT_PIXELS)
