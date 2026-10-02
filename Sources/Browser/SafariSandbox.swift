@@ -3944,6 +3944,25 @@ final class BrowserSession {
             DispatchQueue.main.async { NSApp.hide(nil) }
             return
         }
+        if key == "history" {
+            navigateActiveTab(to: "chrome://history/")
+            return
+        }
+        // Guest Openbox grabs these before Chromium consumes them. Dispatch
+        // the actual menu equivalent so validation and app action semantics
+        // stay identical to shortcuts typed into the native address field.
+        if let chord = Self.nativeMenuShortcutChords[key] {
+            guard !closing else { return }
+            window.makeKeyAndOrderFront(nil)
+            if let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: chord.modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                characters: chord.character, charactersIgnoringModifiers: chord.character,
+                isARepeat: false, keyCode: 0) {
+                _ = NSApp.mainMenu?.performKeyEquivalent(with: event)
+            }
+            return
+        }
         guard let bridge = tabBridge, let tabModel = nativeTabBar?.model else { return }
         switch key {
         case "t":
@@ -4188,6 +4207,18 @@ final class BrowserSession {
         }
         return findFirstField(root)
     }
+
+    /// Tokens shared with the native-tabs Openbox shortcut relay.
+    static let nativeMenuShortcutChords: [String: (character: String, modifiers: NSEvent.ModifierFlags)] = [
+        "n": ("n", [.command]),
+        "private-window": ("n", [.command, .shift]),
+        "o": ("o", [.command]),
+        "app-settings": (",", [.command]),
+        "minimize": ("m", [.command]),
+        "hide-others": ("h", [.command, .option]),
+        "quit": ("q", [.command]),
+        "bookmarks-manager": ("b", [.command, .option]),
+    ]
 
     /// Keys (with ⌘) that the native-chrome local monitor handles host-side.
     /// Must stay in sync with the switch statement in the monitor handler.
@@ -6508,22 +6539,18 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // ⌘P must drive the macOS print pipeline (File ▸ Print), not
-        // Chromium's own print dialog. When the guest holds keyboard focus
-        // the VZ view claims ⌘-chords and forwards them to the guest before
-        // the main menu gets a look, so Chromium's (invisible, hidden-
-        // chrome) print dialog opens instead. Intercept ⌘P here, hand it to
-        // the menu, and always consume it so it never reaches the guest —
-        // even when printing is disabled (which keeps that dialog
-        // suppressed). All other chords fall through to the VZ view's normal
-        // handling, so in-page ⌘C / ⌘V / ⌘Z etc. still reach Chromium.
+        // VZ claims command chords before AppKit walks its menus. Give
+        // app actions first refusal in both native-tabs and legacy mode,
+        // while preserving in-page editing/zoom/find in the guest.
         let mods = event.modifierFlags
             .intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
-        if mods == [.command],
-           event.charactersIgnoringModifiers?.lowercased() == "p" {
-            _ = NSApp.mainMenu?.performKeyEquivalent(with: event)
-            return true
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if mods.contains(.command), !mods.contains(.control),
+           !BrowserSession.nativeChromeGuestEditingKeys.contains(key) {
+            if NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }
+            // A disabled Print action must never open Chromium's hidden dialog.
+            if mods == [.command], key == "p" { return true }
         }
         return super.performKeyEquivalent(with: event)
     }
