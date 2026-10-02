@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 MAX_SCANOUTS = 16
 MAX_AXIS = 8192
 MAX_ROOT_PIXELS = 33554432
+NEGOTIATED_ROOT_PIXELS = 67108864
 MAX_OUTPUT_PIXELS = 33554432
 SAFE_INTEGER = (1 << 53) - 1
 MAX_FRAME = 65536
@@ -171,6 +172,8 @@ def enabled(cmdline):
 
 def validate_topology(value, max_root_pixels=MAX_ROOT_PIXELS):
     """Validate before any RandR/browser side effect; missing outputs are off."""
+    if type(max_root_pixels) is not int or max_root_pixels not in (MAX_ROOT_PIXELS, NEGOTIATED_ROOT_PIXELS):
+        raise ValueError('unsupported root pixel limit')
     if not isinstance(value, list) or not 1 <= len(value) <= MAX_SCANOUTS:
         raise ValueError('topology requires 1 through 16 entries')
     rows, scanouts, outputs, windows = [], set(), set(), set()
@@ -443,6 +446,7 @@ class Controller:
         self.epoch = str(uuid.uuid4())
         self.version = 0
         self.expected_scanouts = None
+        self.root_pixel_limit = None
         self.bindings = {}  # scanout -> Chromium window ID
         self.active = {}
         self.focused_window = None
@@ -494,7 +498,7 @@ class Controller:
             windows.append(item)
         active = [row['rect'] for row in self.last_outputs if row.get('rect')]
         return {'epoch': self.epoch, 'topologyVersion': self.version, 'windows': windows,
-                'outputs': self.last_outputs,
+                'outputs': self.last_outputs, 'rootPixelLimit': self.root_pixel_limit or MAX_ROOT_PIXELS,
                 'root': {'width': max((r['x'] + r['width'] for r in active), default=0),
                          'height': max((r['y'] + r['height'] for r in active), default=0)}}
 
@@ -515,7 +519,7 @@ class Controller:
             time.sleep(.05)
 
     def apply_topology(self, topology, prospective=None):
-        rows, root = validate_topology(topology)
+        rows, root = validate_topology(topology, self.root_pixel_limit or MAX_ROOT_PIXELS)
         for row in rows:
             if row['enabled'] and any(row[k] % self.scale for k in ('x', 'y', 'width', 'height')):
                 raise ValueError('topology must align with common display scale')
@@ -621,7 +625,7 @@ class Controller:
         wid = request.get('windowId')
         if cmd in ('attachPrimary', 'create', 'resize'):
             index = integer(request.get('scanout'), 0, 15, 'scanout')
-            rows, _ = validate_topology(request.get('topology'))
+            rows, _ = validate_topology(request.get('topology'), self.root_pixel_limit or MAX_ROOT_PIXELS)
             if not any(row['scanout'] == index and row['enabled'] for row in rows):
                 raise ValueError('requested scanout must be enabled')
             url = navigation_url(request.get('url', 'about:blank'))
@@ -658,7 +662,7 @@ class Controller:
             return {'windowId': wid, 'targetId': self.focus(wid), 'focusEvidence': self.focus_evidence}
         if cmd == 'close':
             if 'topology' in request:
-                validate_topology(request['topology'])
+                validate_topology(request['topology'], self.root_pixel_limit or MAX_ROOT_PIXELS)
             # Closing only this window's tabs never sends Browser.close.
             for target in list(self.groups[wid]):
                 result = self.call('Target.closeTarget', {'targetId': target['id']})
@@ -687,22 +691,32 @@ class Controller:
                 raise ValueError('stale request id; reconcile using list with a new id')
             self.last_id = rid
             try:
-                common = {'id', 'cmd', 'expectedScanouts'}
+                common = {'id', 'cmd', 'expectedScanouts', 'rootPixelLimit'}
                 fields = {'list': set(), 'attachPrimary': {'scanout', 'windowId', 'topology'},
                           'create': {'scanout', 'url', 'topology'},
                           'resize': {'scanout', 'windowId', 'topology'},
                           'close': {'windowId', 'topology'}, 'focus': {'windowId'}}
                 if not isinstance(request.get('cmd'), str) or request['cmd'] not in fields or request.keys() - (common | fields[request['cmd']]):
                     raise ValueError('invalid request fields or command')
+                count = self.expected_scanouts
                 if 'expectedScanouts' in request:
                     count = integer(request['expectedScanouts'], 2, 16, 'expectedScanouts')
                     if self.expected_scanouts is not None and count != self.expected_scanouts:
                         raise ValueError('expectedScanouts is immutable during controller lifetime')
-                    self.expected_scanouts = count
-                if self.expected_scanouts is None:
+                if count is None:
                     raise ValueError('initial request must include expectedScanouts')
+                limit = self.root_pixel_limit or MAX_ROOT_PIXELS
+                if 'rootPixelLimit' in request:
+                    limit = request['rootPixelLimit']
+                    if type(limit) is not int or limit not in (MAX_ROOT_PIXELS, NEGOTIATED_ROOT_PIXELS):
+                        raise ValueError('unsupported root pixel limit')
+                    if self.root_pixel_limit is None and request['cmd'] != 'list':
+                        raise ValueError('rootPixelLimit must be negotiated on initial list')
+                    if self.root_pixel_limit is not None and limit != self.root_pixel_limit:
+                        raise ValueError('rootPixelLimit is immutable during controller lifetime')
                 if 'windowId' in request:
                     integer(request['windowId'], 1, SAFE_INTEGER, 'windowId')
+                self.expected_scanouts, self.root_pixel_limit = count, limit
                 result = self.execute(request)
                 reply = dict(self.state(), **result, id=rid, ok=True, stateComplete=True)
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:

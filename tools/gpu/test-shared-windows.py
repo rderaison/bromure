@@ -58,6 +58,21 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 shared.validate_topology(rows)
 
+    def test_expanded_root_preserves_output_and_axis_limits(self):
+        layout = [output(0, 0, width=4096, height=8192),
+                  output(1, 4096, width=4096, height=8192)]
+        with self.assertRaisesRegex(ValueError, 'root pixel'):
+            shared.validate_topology(layout)
+        _, root = shared.validate_topology(layout, shared.NEGOTIATED_ROOT_PIXELS)
+        self.assertEqual(root, dict(width=8192, height=8192))
+        for rows in ([output(0, 0, width=8192, height=8192)],
+                     [output(0, 8191, width=64, height=64)]):
+            with self.assertRaises(ValueError):
+                shared.validate_topology(rows, shared.NEGOTIATED_ROOT_PIXELS)
+        for limit in (True, None, '67108864', 67108864.0, 33554433, 67108865):
+            with self.assertRaises(ValueError):
+                shared.validate_topology(layout, limit)
+
     def test_bad_layouts_reject_without_mutation(self):
         for rows in ([], [output(0, 0), output(1, 100)], [output(0, 0), output(0, 1920)],
                      [output(16, 0)], [output(True, 0)], [output(0, 0, width=1921)],
@@ -135,7 +150,7 @@ class ControllerTests(unittest.TestCase):
             for index in range(2):
                 rect = self.rects[index]
                 geometry = (f" {rect['width']}x{rect['height']}+{rect['x']}+{rect['y']}" if rect else '')
-                lines.append(f'Virtual-{index + 2} connected{geometry}\n\tCONNECTOR_ID: {100 + index}\n   1920x1252 60.00*+')
+                lines.append(f'Virtual-{index + 2} connected{geometry}\n\tCONNECTOR_ID: {100 + index}\n   1920x1252 60.00*+\n   4096x8192 60.00')
             return '\n'.join(lines)
         self.mutations.append(args)
         for index in range(2):
@@ -210,6 +225,62 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.controller.handle(dict(id=7, cmd='close', windowId=20, topology=self.layout(1)))['ok'])
         self.assertEqual(self.targets, {'a': 10})
         self.assertFalse(any(method == 'Browser.close' for method, _ in self.calls))
+
+    def test_root_limit_negotiation_is_immutable_and_defaults_to_32(self):
+        self.attach()
+        self.assertEqual(self.controller.root_pixel_limit, shared.MAX_ROOT_PIXELS)
+        before = len(self.mutations)
+        response = self.controller.handle(dict(id=3, cmd='list', rootPixelLimit=67108864))
+        self.assertFalse(response['ok'])
+        self.assertEqual(response['rootPixelLimit'], 33554432)
+        self.assertEqual(len(self.mutations), before)
+        self.assertTrue(self.controller.handle(dict(id=4, cmd='list', rootPixelLimit=33554432))['ok'])
+        big = [output(i, i*4096, width=4096, height=8192) | {'output': f'Virtual-{i+2}'} for i in range(2)]
+        for rid, fields in enumerate((dict(cmd='create', scanout=1),
+                                      dict(cmd='resize', scanout=0, windowId=10),
+                                      dict(cmd='attachPrimary', scanout=1),
+                                      dict(cmd='close', windowId=10)), 5):
+            reply = self.controller.handle(dict(id=rid, topology=big, **fields))
+            self.assertFalse(reply['ok'], reply)
+            self.assertIn('root pixel budget', reply['error'])
+        self.assertEqual(len(self.mutations), before)
+        self.assertEqual(self.targets, {'a':10})
+
+    def test_opt_in_64_applies_to_all_topology_mutations_and_replay(self):
+        request = dict(id=1, cmd='list', expectedScanouts=2, rootPixelLimit=67108864)
+        reply = self.controller.handle(request)
+        self.assertTrue(reply['ok'], reply)
+        self.assertEqual(reply['rootPixelLimit'], 67108864)
+        self.assertEqual(self.controller.handle(request), reply)
+        layout = [output(i, i*4096, width=4096, height=8192) | {'output': f'Virtual-{i+2}'} for i in range(2)]
+        for rid, fields in ((2, dict(cmd='attachPrimary', scanout=0)),
+                            (3, dict(cmd='create', scanout=1)),
+                            (4, dict(cmd='resize', scanout=1, windowId=20))):
+            reply = self.controller.handle(dict(id=rid, topology=layout, **fields))
+            self.assertTrue(reply['ok'], reply)
+            self.assertEqual(reply['root'], dict(width=8192, height=8192))
+        self.assertFalse(self.controller.handle(dict(id=5, cmd='list', rootPixelLimit=33554432))['ok'])
+        # Preserve a64MiPixel bounding box including a gap after closing output1.
+        remaining = [dict(layout[0], x=4096)]
+        reply = self.controller.handle(dict(id=6, cmd='close', windowId=20, topology=remaining))
+        self.assertTrue(reply['ok'], reply)
+        self.assertEqual(reply['rootPixelLimit'], 67108864)
+        self.assertEqual(reply['root'], dict(width=8192, height=8192))
+        self.assertEqual(self.targets, {'a':10})
+
+    def test_bad_initial_root_negotiation_does_not_pin_other_fields(self):
+        for rid, limit in enumerate((True, '67108864', 67108864.0, 0, 67108865), 1):
+            reply = self.controller.handle(dict(id=rid, cmd='list', expectedScanouts=2, rootPixelLimit=limit))
+            self.assertFalse(reply['ok'])
+            self.assertIsNone(self.controller.expected_scanouts)
+            self.assertIsNone(self.controller.root_pixel_limit)
+        reply = self.controller.handle(dict(id=6, cmd='attachPrimary', expectedScanouts=2,
+                                            rootPixelLimit=67108864, scanout=0, topology=self.layout(1)))
+        self.assertFalse(reply['ok'])
+        self.assertIsNone(self.controller.expected_scanouts)
+        self.assertEqual(self.mutations, [])
+        reply = self.controller.handle(dict(id=7, cmd='list', expectedScanouts=2, rootPixelLimit=67108864))
+        self.assertTrue(reply['ok'], reply)
 
     def test_invalid_topology_never_modesets_or_creates_browser_window(self):
         self.attach()
