@@ -1,0 +1,212 @@
+[
+  {
+    "case": "h264_1080p60",
+    "trial": 1,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 159
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 1,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 158
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 1,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 160
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 1,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 160
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 1,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 1,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 2,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 160
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 2,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 160
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 2,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 2,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 2,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 157
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 2,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 157
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 3,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 3,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 3,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 157
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 3,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 157
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 3,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 160
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 3,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 161
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 4,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 157
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 4,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 158
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 4,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 161
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 4,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 161
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 4,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 4,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 5,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 160
+  },
+  {
+    "case": "h264_4k60",
+    "trial": 5,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 162
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 5,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "av1_1080p60",
+    "trial": 5,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 70
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 5,
+    "phase": "before",
+    "pid": 816,
+    "fdCount": 157
+  },
+  {
+    "case": "h264_1080p60",
+    "trial": 5,
+    "phase": "after",
+    "pid": 816,
+    "fdCount": 157
+  }
+]

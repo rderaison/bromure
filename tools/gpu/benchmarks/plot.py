@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Plot recorded results; requires matplotlib. No benchmark is rerun."""
+import argparse
 import json
 from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-root=Path(__file__).parent/'results'
+parser=argparse.ArgumentParser()
+parser.add_argument('--results-dir',type=Path,default=Path(__file__).parent/'results')
+root=parser.parse_args().results_dir
 j=json.loads((root/'comparison.json').read_text())
 platforms=[('apple_vz','Apple VZ / llvmpipe','#9296a0'),('bromure','Bromure / VirGL Metal','#625dff'),('native_macos','Native macOS / Metal','#1685c9')]
 fig,axes=plt.subplots(3,1,figsize=(9,6.7),sharex=True,layout='constrained')

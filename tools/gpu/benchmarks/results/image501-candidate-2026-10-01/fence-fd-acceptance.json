@@ -1,0 +1,61 @@
+{
+  "sourceFile": "bromure-fixed-memory.jsonl",
+  "sourceSha256": "6a42b35ef6a26413d610bc4914ad805c3a6b4cf01da01aa8f9fe9f32100fa3c6",
+  "sourceRecords": 1059,
+  "sampleCount": 961,
+  "gpuSamples": 961,
+  "gpuIdentity": [
+    [
+      816,
+      292
+    ]
+  ],
+  "firstUTC": "2026-10-01T23:23:38.508635+00:00",
+  "lastUTC": "2026-10-01T23:39:40.125893+00:00",
+  "capturedSeconds": 961.617257542,
+  "fdMin": 61,
+  "fdMax": 166,
+  "fdFirst": 61,
+  "fdLast": 161,
+  "detailedGpuSamples": 193,
+  "syncFileMin": 1,
+  "syncFileMax": 45,
+  "finalFdTypes": {
+    "other": 13,
+    "eventpoll": 3,
+    "socket": 11,
+    "eventfd": 5,
+    "pipe": 4,
+    "drm": 9,
+    "memfd": 28,
+    "sync_file": 44,
+    "dmabuf": 44
+  },
+  "openFilesLimit": [
+    "Max open files            16384                1048576              files     "
+  ],
+  "oomKillCounts": [
+    0
+  ],
+  "minMemAvailableKiB": 1551540,
+  "snapshotErrors": 0,
+  "truncatedFdSamples": 0,
+  "observerEndPresent": false,
+  "limitations": [
+    "Observer configured for1200s but file ends before deadline; no end/exit completion claim.",
+    "Roles were empty because Chromium rewrote its command line into one space-separated argv0. GPU identity recovered from saved argv0, executable and PID.",
+    "Old baseline observer omitted GPU; baseline growth evidence comes separate per-trial inventories, not this file."
+  ],
+  "firstMonotonicNs": 14156607714,
+  "lastMonotonicNs": 975773865256,
+  "fenceFixCommit": "9d574cae",
+  "observerCaptureSourceCommit": "0839c3eb",
+  "roleParserFixCommit": "f048597e",
+  "provenanceHashes": {
+    "mesaArchive": "097842f3e49d996868b38688db87b006f7d4541e93ce86d2f341d8b3e7be7c93",
+    "candidateArchive": "434a69b2c516aa54cd364b1e2c975f25207ef0003df438922986aa136596e1f4",
+    "candidateLibGallium": "8468eb40d1f7e695be5d703c384f686180a9025fc8887b63bb2622deca62e077",
+    "embeddedObserver": "de82475f42b75d5363332274d9de1b71fc0856e13031a48384441aa052059bed",
+    "baselineObserverJsonl": "e9b161825f6d8824297054ced3740168ce3bd76904856a8f30ba2845ca02ad2f"
+  }
+}

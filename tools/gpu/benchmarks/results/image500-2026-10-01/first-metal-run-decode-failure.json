@@ -1,0 +1,26 @@
+{
+  "case": "h264_1080p60",
+  "trial": 4,
+  "completedPreviousTrials": 9,
+  "after": {
+    "total": 1741,
+    "dropped": 881,
+    "currentTime": 8.958349,
+    "error": {
+      "code": 3,
+      "message": "PipelineStatus::PIPELINE_ERROR_DECODE: video decode error!"
+    },
+    "paused": true,
+    "readyState": 4,
+    "fullscreen": false,
+    "mediaClock": {
+      "mediaSeconds": 26.015985999999998,
+      "lastTime": 8.958349,
+      "samples": 600
+    },
+    "wall": 64112.59999999998,
+    "visibility": "visible",
+    "fullscreenEvents": []
+  },
+  "status": "Initial continuous run aborted by original harness on decode error; retained, never counted as a pass"
+}

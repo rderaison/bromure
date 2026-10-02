@@ -14,6 +14,8 @@ Metal accelerates browser graphics, including compositing and supported WebGL wo
 
 Metal requires **Apple Silicon, macOS 27 or later, and a compatible browser image**. Both the app-wide and profile choices default to enabled, including profiles saved before the profile option existed. A previously saved app-wide off choice remains off.
 
+**Bromure 5.0.1 uses browser image 501**, which includes fixes for H.264 video transfer overhead and a graphics fence leak that could restart the browser's GPU process during extended playback. Update the browser image as well as the app to receive those guest-side fixes.
+
 On **macOS 26 and earlier**, the Metal controls are greyed out. A browser image without the required graphics capability information uses the legacy graphics path. Updating an image does not force older applications or unsupported hosts to use Metal.
 
 ## Enable or disable Metal
