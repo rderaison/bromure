@@ -1423,6 +1423,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         /// Its provider name in omp's models.yml.
         public var yamlName: String { "bromure-\(provider.rawValue)" }
+        /// The provider as omp names it (its own slug for a native one).
+        public var ompSlug: String {
+            if baseURL == nil, let op = provider.ompProvider { return op.rawValue }
+            return yamlName
+        }
     }
 
     /// Per-workspace override of the global model settings. nil ⇒ this workspace
@@ -5085,11 +5090,20 @@ public final class ProfileStore {
         # --hook or the sidebar dot never updates for MITM-blind providers
         # (z.ai/Ollama/custom). The hook reports working/done per tab via
         # agent-status.sh.
+        # The overlay the models.yml merge below composed (the staged one +
+        # the providers the user added in omp), else the staged one.
         if [ -r /mnt/bromure-meta/omp-config.yml ]; then
+            _bromure_omp_config() {
+                if [ -r "$HOME/.omp/agent/bromure-overlay.yml" ]; then
+                    printf '%s' "$HOME/.omp/agent/bromure-overlay.yml"
+                else
+                    printf '%s' /mnt/bromure-meta/omp-config.yml
+                fi
+            }
             if [ -r "$HOME/.omp/agent/hooks/agent-status.ts" ]; then
-                omp() { command omp --config /mnt/bromure-meta/omp-config.yml --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
+                omp() { command omp --config "$(_bromure_omp_config)" --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
             else
-                omp() { command omp --config /mnt/bromure-meta/omp-config.yml "$@"; }
+                omp() { command omp --config "$(_bromure_omp_config)" "$@"; }
             fi
         fi
     fi
@@ -5099,9 +5113,11 @@ public final class ProfileStore {
     # the user added in omp itself. Nothing staged: Bromure's block goes, so
     # a provider removed from Settings → Models doesn't linger. A file an
     # older Bromure wrote whole holds nothing of the user's.
-    if [ -r /mnt/bromure-meta/omp-models.yml ] || [ -f "$HOME/.omp/agent/models.yml" ]; then
+    if [ -r /mnt/bromure-meta/omp-models.yml ] || [ -f "$HOME/.omp/agent/models.yml" ] \\
+       || [ -r /mnt/bromure-meta/omp-config.yml ]; then
         mkdir -p "$HOME/.omp/agent"
-        python3 - "$HOME/.omp/agent/models.yml" /mnt/bromure-meta/omp-models.yml <<'BROMURE_OMP_MODELS' 2>/dev/null || true
+        python3 - "$HOME/.omp/agent/models.yml" /mnt/bromure-meta/omp-models.yml \\
+            /mnt/bromure-meta/omp-config.yml "$HOME/.omp/agent/bromure-overlay.yml" <<'BROMURE_OMP_MODELS' 2>/dev/null || true
     import os, sys
     dest, staged = sys.argv[1], sys.argv[2]
     NL = chr(10)
@@ -5150,6 +5166,33 @@ public final class ProfileStore {
         with open(tmp, "w") as f:
             f.write(body + NL)
         os.replace(tmp, dest)
+    # The providers the user defined (outside Bromure's block), enabled in
+    # the overlay next to Bromure's: its enabledModels otherwise hides them.
+    overlay_src, overlay_dest = sys.argv[3], sys.argv[4]
+    users, indent, under = [], None, False
+    for line in out:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        lead = len(line) - len(line.lstrip())
+        if lead == 0:
+            under = line.rstrip() == "providers:"
+            continue
+        if under and line.rstrip().endswith(":"):
+            if indent is None:
+                indent = lead
+            if lead == indent:
+                users.append(line.strip()[:-1].strip(chr(34) + chr(39)))
+    overlay = read(overlay_src)
+    if overlay is None:
+        if os.path.exists(overlay_dest):
+            os.remove(overlay_dest)
+    else:
+        if users and "enabledModels:" in overlay:
+            at = overlay.index("enabledModels:") + 1
+            overlay[at:at] = ["  - " + chr(34) + name + "/*" + chr(34) for name in users]
+        with open(overlay_dest + ".bromure-tmp", "w") as f:
+            f.write(NL.join(overlay) + NL)
+        os.replace(overlay_dest + ".bromure-tmp", overlay_dest)
     BROMURE_OMP_MODELS
     fi
 

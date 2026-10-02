@@ -1225,7 +1225,8 @@ public final class SessionDisk {
             //    provider so no role can silently fall back to a cloud model
             //    whose key is only present for a sibling agent (see the helper).
             let overlay = Self.ompConfigOverlay(authMode: ompSpec.authMode,
-                                                provider: prov, modelName: modelName)
+                                                provider: prov, modelName: modelName,
+                                                extraProviders: profile.ompExtraProviders.map(\.ompSlug))
             try overlay.write(
                 to: tmp.appendingPathComponent("omp-config.yml"),
                 atomically: true, encoding: .utf8)
@@ -1854,9 +1855,16 @@ public final class SessionDisk {
     ///    fuzzy-match the bare model; local/custom need the `bromure/` qualifier.
     ///
     /// Pure (no I/O) so it's unit-tested — see `OmpAgentTests`.
+    ///
+    /// `extraProviders`: the other providers configured in Settings → Models
+    /// (omp's slug for each — `zai`, `bromure-openrouter`…), enabled next to
+    /// its own so its picker offers them (issue #37); the guest adds the
+    /// providers the user defined in omp's models.yml. The default stays
+    /// pinned to the assigned model.
     static func ompConfigOverlay(authMode: Profile.AuthMode,
                                  provider: Profile.OmpProvider,
-                                 modelName: String) -> String {
+                                 modelName: String,
+                                 extraProviders: [String] = []) -> String {
         // A local model (on-device engine or a custom OpenAI-compatible server)
         // is served under the `bromure` provider written into models.yml; a
         // cloud omp uses its own provider slug (which equals the raw case name).
@@ -1867,6 +1875,7 @@ public final class SessionDisk {
             + "setupVersion: 99\n"
             + "enabledModels:\n"
             + "  - \"\(providerSlug)/*\"\n"
+            + extraProviders.filter { $0 != providerSlug }.map { "  - \"\($0)/*\"\n" }.joined()
             + "  - \"web/*\"\n"
             + "  - \"local/*\"\n"
         if modelName != "default", !modelName.isEmpty {
