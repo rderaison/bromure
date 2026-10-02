@@ -1914,6 +1914,8 @@ struct TaskEditorSheet: View {
                     ForEach(assignees.sessions) { s in
                         Button {
                             task.assignment = TaskAssignment(kind: .session, id: s.id, label: s.label)
+                            // Its work happens in its workspace: the card shows that one.
+                            if let pid = s.profileID { task.profileID = pid }
                         } label: {
                             Label(s.label + (s.workspace.isEmpty ? "" : "  ·  " + s.workspace),
                                   systemImage: "person.crop.circle")

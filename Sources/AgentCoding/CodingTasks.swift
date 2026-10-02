@@ -305,6 +305,9 @@ struct TaskAssigneeChoices: Equatable, Sendable {
         let label: String
         let workspace: String
         let busy: Bool
+        /// Its workspace: a task queued for it is that workspace's (the
+        /// card's chip, review, merge), whatever the editor defaulted to.
+        var profileID: UUID? = nil
     }
     struct Room: Identifiable, Equatable, Sendable, Hashable {
         let id: UUID
@@ -312,6 +315,14 @@ struct TaskAssigneeChoices: Equatable, Sendable {
     }
     var sessions: [Session] = []
     var rooms: [Room] = []
+
+    /// The workspace a task queued this way belongs to: the session's, when
+    /// it goes to one (nil: a room, the Switchboard, a new agent — keep the
+    /// task's own).
+    func workspace(for assignment: TaskAssignment?) -> UUID? {
+        guard let a = assignment, a.kind == .session else { return nil }
+        return sessions.first { $0.id == a.id }?.profileID
+    }
 }
 
 /// One piece of review feedback on a task's changes. `file` scopes a
