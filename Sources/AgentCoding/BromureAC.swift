@@ -1148,6 +1148,10 @@ final class RunningSession {
     /// `vm ls` / the API / SSH can show tabs (incl. worktree metadata) even
     /// while the session is detached.
     var tabs: [GuestTab] = []
+    /// Each tab's agent status (working / done / needs you), by window index —
+    /// kept here, not only on a pane's tab model, so a session with no local
+    /// window (driven from a fat client) still reports it in `/state`.
+    var agentStatus: [Int: AgentStatus] = [:]
     /// Fusion engaged state, mirrored from the engine so a reattaching
     /// window restores the toolbar toggle correctly.
     var fusionEngaged: Bool = false
@@ -1766,11 +1770,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             headlessEntryCache[id] = entry
             let ids = Dictionary(entry.model.tabs.map { ($0.index, $0.id) }, uniquingKeysWith: { a, _ in a })
             entry.model.tabs = session.tabs.map {
-                TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
-                              cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
-                              parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
-                              display: $0.display, repoRoot: $0.repoRoot,
-                              id: ids[$0.index] ?? UUID())
+                let tab = TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
+                                        cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
+                                        parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
+                                        display: $0.display, repoRoot: $0.repoRoot,
+                                        id: ids[$0.index] ?? UUID())
+                // No pane: the session record holds what the hooks reported.
+                tab.agentStatus = session.agentStatus[$0.index] ?? .done
+                return tab
             }
             entry.model.rosterLive = true   // only ever the guest's own roster
             headless.append(entry)
@@ -1877,9 +1884,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per VM, like all proxy signals: every Codex tab that is mid-turn shares
     /// the refused credential.
     func noteModelCallRefused(_ id: Profile.ID, status: Int) {
-        guard [401, 402, 403].contains(status), let pane = pane(for: id) else { return }
-        for (tab, kind) in agentTabs(of: pane) where kind == "codex" && tab.agentStatus == .working {
-            setTabAgentStatus(id, index: tab.index, .needsInput)
+        guard [401, 402, 403].contains(status) else { return }
+        if let pane = pane(for: id) {
+            for (tab, kind) in agentTabs(of: pane) where kind == "codex" && tab.agentStatus == .working {
+                setTabAgentStatus(id, index: tab.index, .needsInput)
+            }
+            return
+        }
+        // No pane (a fat client drives it): the session record and its tools.
+        guard let session = runningSessions[id] else { return }
+        let codexWindows = Set(agentSessionStore.sessions
+            .filter { $0.profileID == id && !$0.hasEnded && $0.tool == .codex }
+            .compactMap(\.windowIndex))
+        for (index, st) in session.agentStatus where st == .working && codexWindows.contains(index) {
+            setTabAgentStatus(id, index: index, .needsInput)
         }
     }
 
@@ -1946,6 +1964,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// hook reported). Authoritative for that tab — no timer, since the Stop
     /// hook delivers the terminal state explicitly.
     func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
+        // Always on the session too: a workspace the fat client drives has no
+        // pane here, and dropping the report left every tab of it "Ready".
+        let recorded = runningSessions[id]?.agentStatus[index]
+        runningSessions[id]?.agentStatus[index] = status
         if let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) {
             let previousStatus = tab.agentStatus
             tab.agentStatus = status
@@ -1968,6 +1990,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // session's mirrored roster and route the done signal to the engines
         // anyway. Without this, a remote-driven plan/task session finished
         // invisibly — the tab never closed and the card never moved.
+        reportPushTransition(id, index: index, from: recorded ?? .done, to: status)
+        headlessEntryCache[id]?.model.tabs.first(where: { $0.index == index })?.agentStatus = status
         guard status == .done,
               let tab = runningSessions[id]?.tabs.first(where: { $0.index == index })
         else { return }
@@ -5655,7 +5679,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Agent status dot (working/done/needsInput) for the fat-client
                 // mirror — sourced from the attached pane's tab model when present.
                 if let status = pane(for: s.profileID)?.model.tabs
-                    .first(where: { $0.index == t.index })?.agentStatus {
+                    .first(where: { $0.index == t.index })?.agentStatus
+                    ?? s.agentStatus[t.index] {
                     d["agentStatus"] = status.rawValue
                 }
                 return d
@@ -13623,10 +13648,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // there's nothing to spawn or raise.
         if !session.tabs.isEmpty {
             pane.model.tabs = session.tabs.map {
-                TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
-                              cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
-                              parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
-                              display: $0.display, repoRoot: $0.repoRoot)
+                let tab = TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
+                                        cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
+                                        parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
+                                        display: $0.display, repoRoot: $0.repoRoot)
+                // What the hooks reported while no window was attached.
+                tab.agentStatus = session.agentStatus[$0.index] ?? .done
+                return tab
             }
             pane.model.rosterLive = true   // the guest's own roster, cached
             pane.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
