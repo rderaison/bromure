@@ -1,0 +1,9 @@
+Bromure 2026 website brand assets, supplied by @bromure_web on 2026-10-03.
+Website guide: src/app/globals.css, website main commit bda70fa.
+Signature embedded inline in splash.html from src/components/brand-mark.tsx BrandLockup.
+Fonts redistributed unmodified under SIL Open Font License 1.1; see ../licenses/.
+Exact upstream release/subsetting tool not recorded in website history.
+
+FragmentMono.woff2 SHA256 44c4e39bff5e76652a24a872cbebabccbcfb20f62c4633b27c1f2745cba86b56
+InterTight.woff2 SHA256 367e4f01182444352abba7a882f5c0dd5acda9e962c4a4272643c3f7455446ff
+Manrope-SemiBold.ttf SHA256 1a31a2f333c3ab58f92c8dfa33244872e1f59ea84aefa52a66675fb2de3605cc

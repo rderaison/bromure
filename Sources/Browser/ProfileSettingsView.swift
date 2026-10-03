@@ -962,10 +962,10 @@ struct ProfileSettingsView: View {
             // User Agent
             VStack(alignment: .leading, spacing: 6) {
                 Text("User Agent").font(.headline)
-                Text("How this browser identifies itself to websites. By default Bromure appears as Chrome on macOS so sites don\u{2019}t see the Linux VM. Enter a custom user agent to override, or leave blank for the default.")
+                Text("How this browser identifies itself to websites. Leave blank to use the selected browser’s own user agent, or enter a custom value to override it.")
                     .settingDescription()
                 TextField(
-                    "Chrome on macOS (default)",
+                    "Browser default (no override)",
                     text: $draft.settings.userAgent,
                     axis: .vertical
                 )

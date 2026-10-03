@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-02",
+  "scope": "Linux guest native-chrome shortcut routing; no macOS physical-key acceptance claim",
+  "tests": {
+    "command": "PYTHONDONTWRITEBYTECODE=1 python3 tools/gpu/test-native-shortcuts.py --live-x11",
+    "passed": 6,
+    "actualOpenboxBindings": 20,
+    "transport": "Production shell helper, private loopback port and helper path substituted; actual TCP EOF framing",
+    "passthrough": "Copy/paste/undo/find/bookmark/tab-bookmark-bar chords caused no host bounce; legacy Openbox keyboard remains empty",
+    "historyRegressionTests": 8,
+    "shellSyntax": "PASS",
+    "verifiedSourceCommit": "1d60f530",
+    "firstEventDebounce": "PASS: monotonic clock fixed at 0.01; first n and bookmarks-manager dispatch, repeated n debounced",
+    "macPeerReported": "Darwin Python 3.9: 5 portable tests pass, Linux live test skipped; 8 AppKit menu tests pass (reported by macos-gpu-work)"
+  },
+  "wire": {
+    "maxBytes": 32,
+    "deadlineSeconds": 1,
+    "framing": "ASCII allowlisted token terminated by connection EOF; helper exits after printf",
+    "newTokens": [
+      "n",
+      "private-window",
+      "o",
+      "app-settings",
+      "minimize",
+      "hide-others",
+      "quit",
+      "bookmarks-manager",
+      "history"
+    ],
+    "alreadyPresent": [
+      "p",
+      "h",
+      "t",
+      "w",
+      "l",
+      "r",
+      "[",
+      "]",
+      "{",
+      "}"
+    ]
+  },
+  "limitations": [
+    "Host action routing tested by Mac peer separately",
+    "Real Command modifier forwarding requires Mac guest-focused acceptance",
+    "No Chromium/Chrome executable filtering; bindings only installed when native chrome is selected",
+    "Requires updated guest files; no public image publication claim"
+  ],
+  "sourceSHA256": {
+    "Sources/SandboxEngine/Resources/vm-setup/configs/openbox-rc-nativetabs.xml": "981ee9078d0521078882c02ca39944778c28491ee183221b9d2137a3f51f0e9c",
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/tab-agent.py": "fe3a699bf74b9888271d9944f6de0886dc11da887e192d180f6c3a4251187ed7",
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/bromure-hostkey": "9072fd4345ce3677592aac4d24630572fda378043ae2b05dc94cecf7d2f84f92",
+    "tools/gpu/test-native-shortcuts.py": "2744f608dfa262d441b6805d05a243e9eb0cf62b768db734f3051fa14d11acf5"
+  }
+}

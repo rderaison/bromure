@@ -73,7 +73,9 @@ git -C "$virgl" diff --cached --quiet
 git -C "$virgl" -c core.abbrev=8 diff -- meson.build src/meson.build src/vrend/vrend_decode.c src/vrend/virgl_video.h src/vrend/vrend_video.c src/vrend/vrend_formats.c src/vrend/vrend_renderer.c src/vrend/vrend_renderer.h src/vrend/vrend_shader.c | cmp - "$script_dir/virgl-metal-browser.patch"
 git -C "$virgl" diff --quiet -- . ':!src/vrend/vrend_formats.c' ':!src/vrend/vrend_renderer.c' ':!src/vrend/vrend_renderer.h' ':!meson.build' ':!src/meson.build' ':!src/vrend/virgl_video.h' ':!src/vrend/vrend_video.c' ':!src/vrend/vrend_decode.c' ':!src/vrend/vrend_shader.c'
 
-if [[ ! -f "$virgl/src/vrend/virgl_video_videotoolbox.m" ]]; then
+# This file is a generated overlay owned by Bromure, not upstream source.
+# Refresh reused build caches when the repository implementation changes.
+if ! cmp -s "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_video_videotoolbox.m"; then
     cp "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_video_videotoolbox.m"
 fi
 cmp "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_video_videotoolbox.m"

@@ -1,0 +1,53 @@
+{
+  "scope": "Explicit host opt-in plus negotiated guest device; AC Metal presentation opt-out",
+  "sourceSHA256": {
+    "Sources/AgentCoding/WorkspaceBrowserController.swift": "ef9a9f7177c21388af6f23368b2b651b6d67bb420a6d5694c4d1ff6c3572231f",
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/config-agent.py": "1d90a3f0a537f4a83a43e8397e020f7e20cf9fccda32ce7787e48bea776e4567",
+    "Tests/GuestGraphicsTests/test_guest_graphics.py": "e4551407da51da3047e0127362069e9e7f53df6da46bbe9beb47413ad6122c3c"
+  },
+  "guestUnitTests": {
+    "count": 47,
+    "result": "PASS"
+  },
+  "live": {
+    "imageVersion": 502,
+    "source": "freshly downloaded published image; candidate resolver executed read-only from /tmp",
+    "metal": {
+      "device": "/dev/dri/renderD129",
+      "default": "software",
+      "requested": "virgl",
+      "disabled": "software",
+      "exit": 0
+    },
+    "appleVZ": {
+      "device": null,
+      "default": "software",
+      "requested": "software",
+      "disabled": "software",
+      "exit": 0
+    }
+  },
+  "logSHA256": {
+    "/tmp/bromure-device-gate-metal-live.log": "587809ede7556edd61ae14e291acf50a389663bda0cf8b22da8c96684b57838f",
+    "/tmp/bromure-device-gate-apple-live.log": "91fe9a3d571042425678774c03ebb58daed7c10b26d44d4c471ae23340089804"
+  },
+  "limitations": [
+    "No live Bromure AC pane acceptance in these runs.",
+    "Guest device detection proves capability, not visual correctness or video decoding.",
+    "Hotfixes owns separate enableGPU:false and SwiftShader changes; not included here."
+  ],
+  "peerBuild": {
+    "peer": "hotfixes",
+    "command": "./build.sh bromure-ac",
+    "backend": "native",
+    "result": "peer-reported exit 0; combined enableGPU:false/enableMetalRenderer:false/experimentalGPU:false changes",
+    "base": "9422e078 plus uncommitted peer changes",
+    "liveACPane": false
+  },
+  "localBuild": {
+    "command": "swift build --build-system native -c release --arch arm64 --product bromure-ac",
+    "result": "PASS, exit 0",
+    "elapsedSeconds": 264.71,
+    "logSHA256": "104a2723ac42d6d78839c8f04bf1b2368f51a6e5c789b1fdecdaa761078461a0"
+  }
+}

@@ -336,6 +336,7 @@ final class WorkspaceBrowserController {
             // No GPU acceleration (no host-GPU Metal renderer, Chromium runs
             // --disable-gpu): WebGL below falls back to SwiftShader on the CPU.
             enableGPU: false,
+            // AC presents Apple's VZ scanout, not the custom Metal surfaces.
             enableMetalRenderer: false,
             // WebGL/WebGPU on (software GL via SwiftShader): the agent frequently
             // needs to view a WebGL/canvas app it just built. Without this the

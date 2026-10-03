@@ -309,7 +309,7 @@ log "apt-get install X + WM + fonts + audio"
 retry apt-get install -y -q --no-install-recommends \
     xserver-xorg-core xserver-xorg-legacy \
     xserver-xorg-input-libinput xserver-xorg-video-modesetting \
-    xinit xauth x11-xserver-utils x11-xkb-utils \
+    xinit xauth x11-xserver-utils x11-xkb-utils x11-utils libxtst6 libxss1 \
     keyboard-configuration console-setup xkb-data \
     openbox xdotool \
     spice-vdagent \
@@ -752,6 +752,8 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
 install_config   scripts/resize-watcher.py  /mnt/usr/local/bin/resize-watcher.py 755
+install_config   scripts/experimental-multigpu.py /mnt/usr/local/bin/experimental-multigpu.py 755
+install_config   scripts/experimental-multigpu-input.py /mnt/usr/local/bin/experimental-multigpu-input.py 755
 install_config   scripts/graphics-env.sh /mnt/usr/local/bin/graphics-env.sh 644
 install_config   scripts/graphics-diagnostics.py /mnt/usr/local/bin/graphics-diagnostics.py 755
 install_config   scripts/graphics-prerequisites.py /mnt/usr/local/bin/graphics-prerequisites.py 755
@@ -850,6 +852,7 @@ install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py  
 install_config scripts/cdp-agent.py         /mnt/usr/local/bin/cdp-agent.py         755
 install_config scripts/cdp-lan-forwarder.py /mnt/usr/local/bin/cdp-lan-forwarder.py 755
 install_config scripts/tab-agent.py         /mnt/usr/local/bin/tab-agent.py         755
+install_config scripts/shared_windows.py    /mnt/usr/local/bin/shared_windows.py    755
 install_config scripts/bromure-hostkey      /mnt/usr/local/bin/bromure-hostkey      755
 install_config scripts/shell-agent.py       /mnt/usr/local/bin/shell-agent.py       755
 install_config scripts/trace-agent.py      /mnt/usr/local/bin/trace-agent.py      755
@@ -957,8 +960,14 @@ done
 # connect-at-startup VPN is configured — prevents IP leak during handshake).
 mkdir -p /mnt/opt/bromure/splash
 install_config splash/splash.html /mnt/opt/bromure/splash/splash.html
-install_config splash/night.jpg   /mnt/opt/bromure/splash/night.jpg
-install_config splash/day.jpg     /mnt/opt/bromure/splash/day.jpg
+mkdir -p /mnt/opt/bromure/splash/fonts
+for font in Manrope-SemiBold.ttf InterTight.woff2 FragmentMono.woff2; do
+    install_config "splash/fonts/$font" "/mnt/opt/bromure/splash/fonts/$font"
+done
+mkdir -p /mnt/opt/bromure/splash/licenses
+for license in Manrope-OFL.txt InterTight-OFL.txt FragmentMono-OFL.txt ASSETS.txt; do
+    install_config "splash/licenses/$license" "/mnt/opt/bromure/splash/licenses/$license"
+done
 
 # Native messaging hosts (link sender + file picker + trace + corporate guard)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts

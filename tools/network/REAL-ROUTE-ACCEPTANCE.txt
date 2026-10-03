@@ -1,0 +1,191 @@
+Private async Squid: real-route acceptance matrix (2026-10-02)
+
+This is a test plan, not a claim that VPN/custom-proxy acceptance has passed.
+Do not enable by default, publish an image, or change its version from these
+instructions. Use isolated private images/profile copies and modes already
+configured on the Mac. Missing credentials/modes mean NOT TESTED, never PASS.
+No credentials need to be exported to the collaborator or acceptance record.
+
+Current evidence
+----------------
+Linux actual network-namespace/native-Squid tests passed for TCP redirect,
+UID isolation, DNS filtering, concurrency, failure/recovery, IPv4/IPv6, and
+synthetic WARP routing. Mac private-image normal-route native shared-window,
+IME, cookie, root-close and terminal browser-exit tests passed without a
+Chrome loopback bypass (v13 and later). These do not prove real VPN or parent
+proxy routing. Eight-video rendering performance is a separate investigation.
+
+Paired procedure and limits
+---------------------------
+For each available profile mode, compare fresh boots of the same base image:
+  A. Existing proxychains Squid, no experimental async kernel argument.
+  B. Same config/profile snapshot, bromure.experimental_async_squid=1.
+Never start both Squid implementations together. Use the existing profile/UI
+control path to connect/disconnect; do not fabricate authentication files or
+edit credentials. Keep Chrome's normal proxy settings and <-loopback> rule.
+
+Use one controlled HTTP endpoint and one controlled HTTPS endpoint with a
+known small response/digest, and an HTTPS one-MiB fixture for body integrity.
+Endpoint selection belongs to the Mac operator; do not send credentials or
+private browsing URLs to a public IP-check service. An endpoint can report
+observed egress identity; save only a salted per-run digest/equality assertion
+if the address is private. Public IP alone does not prove split-tunnel routing.
+
+Per arm: deadline 300s, connect/status deadline 60s, each HTTP request 10s,
+each diagnostic command 5s. No retry that silently overwrites a failure.
+Fresh TCP connections/unique nonces and Cache-Control:no-cache avoid confusing
+cached pages or existing sockets with the new route. Bound bodies to one MiB.
+Run 3 serial requests then 16 concurrent small requests (20s group deadline),
+one exact one-MiB transfer, and 30s native browser navigation/scroll/playback.
+Record failure and stop the arm on a deadline, route mismatch, unexpected
+direct fallback, missing firewall coverage, or process crash.
+
+At disconnected -> connected -> disconnected stages, record the invariants
+below and issue new requests. Preserve a failed stage before any diagnostic
+rerun. A deliberate user disconnect may restore direct routing; an upstream
+failure while the mode remains selected must be distinguished from that.
+
+Common guest assertions (both arms unless noted)
+------------------------------------------------
+1. Record image/source hashes, boot_id, test mode, and times; identify Squid,
+   routing-socks, gateway and Chromium by executable/PID/startTicks/UID only.
+   Do not log full browser arguments: custom proxy URLs can contain passwords.
+   Check proxy argument shape locally and emit booleans only:
+     internal mode: proxy-server exactly http://127.0.0.1:3128,
+                    proxy-bypass-list exactly <-loopback>;
+     external custom proxy: matches configured endpoint, no additional bypass.
+   No test-only direct URL exception or altered DNS configuration is allowed.
+
+2. Candidate internal mode: exactly one verified native Squid identity under
+   proxy UID, gateway under distinct nobody UID, both non-root. Squid has no
+   LD_PRELOAD/proxychains mapping; report booleans, not the whole environment.
+   routing-socks listens at127.0.0.1:40001, gateway at40002, Squid at3128.
+   Require BROMURE_ASYNC_SQUID_ACTIVE and the actual identities matching it.
+   Direct outbound socket ownership is routing-socks (or its WARP upstream),
+   never the Squid UID outside REDIRECT; inspect socket metadata, not payloads.
+
+3. Candidate internal mode: verify BOTH iptables and ip6tables NAT rules,
+   even when guest IPv6 is disabled. Determine UID from getent passwd proxy;
+   assert these commands succeed (substitute the numeric UID):
+     iptables  -w 2 -t nat -C OUTPUT -p tcp -m owner --uid-owner UID -j BRM_ASYNC_SQ
+     ip6tables -w 2 -t nat -C OUTPUT -p tcp -m owner --uid-owner UID -j BRM_ASYNC_SQ
+     iptables  -w 2 -t nat -C BRM_ASYNC_SQ -p tcp -j REDIRECT --to-ports 40002
+     ip6tables -w 2 -t nat -C BRM_ASYNC_SQ -p tcp -j REDIRECT --to-ports 40002
+   Scoped read-only rule inventory must also show exactly one owned OUTPUT
+   jump, ahead of any earlier matching terminal NAT rule. Do not dump unrelated
+   firewall configuration to the acceptance log.
+
+4. Preserve /proc/sys/net/ipv6/conf/{all,default,lo,each-interface}/disable_ipv6.
+   With IPv4Only=true, every value must be1; candidate must not enable IPv6.
+   If a real tunnel enables IPv6, the supervisor must stop the old producer
+   before removing rules and restart with working IPv6 listener plus BOTH
+   rules before new Squid traffic. Otherwise stay unavailable/fail closed.
+   No IPv6 bypass is acceptable during this transition. A lack of IPv6 service
+   is NOT an IPv6 route PASS; report unavailable/untested explicitly.
+
+5. Squid retains the same ACL/filter directives, DNS mode and parent policy.
+   Read /etc/squid/squid.conf locally but output only these safe summaries:
+     dns_nameservers: loopback127.0.0.1 vs system resolver;
+     cache_peer count, parent endpoint matches configured expectation (bool),
+     authentication configured (bool), never_direct allow all present (bool);
+     ACL/filter relevant configuration equality A/B (bool).
+   Never emit cache_peer lines (login credentials), raw profile config,
+   proxychains.conf, chrome-env, VPN configs, or process environments.
+   Compare DNS upstreams locally, reporting equality/changed/restored, not
+   private resolver names/addresses. Do not hash passwords for publication.
+
+Mode-specific matrix
+--------------------
+DIRECT / FILTERED DIRECT
+  warp-active absent. routing-socks uses kernel direct route. Without adblock,
+  malware or WireGuard, Squid uses system resolver; adblock/malware uses
+  dns_nameservers127.0.0.1 and running dnsmasq. Verify an existing controlled
+  blocked/sinkholed test name fails identically in A/B while healthy name works.
+  Loopback controlled fixture traverses Squid without a Chrome exception.
+  Adblock expected failure must be separated from routing failure.
+
+WARP
+  On: /tmp/bromure/warp-active exists, warp-svc SOCKS40000 is listening and
+  configured status says connected. A newly opened gateway request reaches
+  routing-socks40001 then WARP40000; observe socket ownership/connection counts
+  and controlled endpoint egress. Off: marker absent and fresh requests use
+  original direct route. Existing connections are not evidence for switching.
+  In a disposable diagnostic instance, selected WARP upstream unavailable with
+  marker still present must fail requests with zero direct endpoint hits.
+  Restore using the existing UI/service owner; do not fake a production PASS
+  using only a synthetic SOCKS server. WARP DNS behavior must match baseline;
+  this candidate is not a DNS-routing redesign.
+
+WIREGUARD (full and split as already configured)
+  warp-active absent unless combination explicitly supported by the profile.
+  wg0 exists/up when connected; query route selection for the CONTROLLED
+  destination, including policy table/fwmark rules. Record only expected-device
+  match booleans and numeric byte-counter deltas. Verify new traffic increases
+  tunnel counters and reaches the expected endpoint via the selected route.
+  Full tunnel: selected test destinations use tunnel. Split: one in-scope and
+  one out-of-scope controlled destination take their configured routes.
+  Squid uses dnsmasq even without adblocking; its upstream changes on connect
+  and restores on disconnect. Check resolution with fresh nonces/cache control.
+  Never record wg showconf/show all dump: these can expose private keys.
+  On involuntary tunnel failure, compare actual configured kill-switch behavior
+  to baseline; do not invent a blanket VPN fail-closed guarantee from UI state.
+
+IKEv2 WITHOUT / WITH PARENT PROXY (separate cases)
+  Check established child-SA and negotiated policy coverage for the controlled
+  destination using a local parser; report counts/matches and packet deltas.
+  Do NOT dump ip xfrm state: it can contain encryption keys. Kernel route
+  device alone cannot prove IPsec coverage; eth0 may still be the route device.
+  With configured parent, cache_peer must match it and never_direct allow all
+  must be present. Verify parent-observed request and authenticated success
+  without logging login= data. Parent down must not fall back directly while
+  parent-only policy remains selected. Test parent DNS failure separately.
+  Existing up/down hook pkill -f 'squid -N' must produce a fresh candidate
+  supervisor/Squid generation with correct new DNS/cache_peer policy, exactly
+  one redirect jump per family, no legacy proxychains fallback or stuck lock.
+  On disconnect, parent lines are removed and DNS/routes restore as baseline.
+
+OPENVPN (if configured)
+  tun0 up, route/policy match for controlled full/split destinations, byte
+  counters advancing, DNS changed/restored by existing agent. Preserve the
+  existing configured route and kill-switch behavior exactly as with WireGuard.
+  No config/auth file or full OpenVPN log is needed in the exported record.
+
+EXTERNAL CUSTOM HTTP PROXY
+  Existing config-agent intentionally bypasses internal Squid entirely here.
+  In BOTH arms there must be no candidate supervisor, gateway, Squid or owned
+  BRM_ASYNC_SQ chains. Chrome points to the exact configured external proxy.
+  Test HTTP, HTTPS CONNECT, and configured authentication with server-side
+  receipt or endpoint route evidence; do not export credentials. Unavailable
+  proxy must retain baseline failure behavior, no injected direct fallback.
+  This is an unaffected-branch parity test, not async gateway throughput proof.
+
+Failure/concurrency and production gate
+---------------------------------------
+After the route cases, use a disposable direct-mode instance for a held-connect
+endpoint plus16 healthy requests: prove healthy requests complete independently.
+Then stop ONLY the test-owned gateway through its supervisor path; verify Squid
+stops before owned rules disappear. Fresh boot must recover without stale
+chains. Do not SIGKILL a user's running VPN or mutate their host routing.
+The existing isolated network-namespace tests remain the controlled saturation,
+UID isolation and IPv6-disabled-window regressions; retain their evidence too.
+
+Before production enablement require all supported/configured route cases or
+an explicit narrower rollout scope, a30-minute multi-window normal-route soak,
+bounded process FD/RSS/connection counts after unload, and clean VM shutdown.
+Missing accounts are an evidence gap, not permission to add credentials or
+mark a mode supported. A future enabling change must install the two trusted
+scripts and iptables dependencies in image setup/postinstall, version the image
+capability contract, and gate host selection on that marker. Old images retain
+their existing path. No enabling/image-version patch is part of this plan.
+
+Compact exported result shape (no secrets)
+------------------------------------------
+{case, arm, imageHash, sourceHashes, bootId, mode, configured:true|false,
+ stages:[{name, elapsedMs, processIdentities, internalProxyShapeOK,
+          redirectV4OK,redirectV6OK,ipv4Only,ipv6PolicyPreserved,
+          resolverPolicyMatches,parentPolicyMatches,routeEvidenceMatches,
+          bodyDigestMatches,latencyMs,errors,exitCodes}],
+ outcome:PASS|FAIL|NOT_TESTED, reason, knownLimitations}
+
+PASS requires route evidence AND content correctness. UI Connected, one loaded
+page, unchanged public IP, or an open local port alone is not sufficient.

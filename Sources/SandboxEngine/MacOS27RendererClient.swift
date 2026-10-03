@@ -30,10 +30,14 @@ public final class MacOS27RendererClient {
         guard FileManager.default.fileExists(atPath: service.path) else {
             throw Self.failure("Embedded GPU renderer is missing")
         }
+        guard let rendererBundle = Bundle(url: service),
+              rendererBundle.object(forInfoDictionaryKey: "BromureRendererProtocolVersion") as? Int == 2 else {
+            throw Self.failure("Embedded GPU renderer is outdated; rebuild the app with the current renderer")
+        }
         connection = NSXPCConnection(serviceName: "io.bromure.gpu.renderer.broker")
         connection.remoteObjectInterface = NSXPCInterface(with: RendererServiceProtocol.self)
-        connection.invalidationHandler = { [weak self] in self?.stop() }
-        connection.interruptionHandler = { [weak self] in self?.stop() }
+        connection.invalidationHandler = { [weak self] in self?.stop(reason: "GPU renderer XPC connection invalidated") }
+        connection.interruptionHandler = { [weak self] in self?.stop(reason: "GPU renderer XPC connection interrupted") }
         connection.resume()
     }
 
@@ -60,7 +64,10 @@ public final class MacOS27RendererClient {
                     callback(result)
                 }
             }
-            let proxy = connection.remoteObjectProxyWithErrorHandler { error in finish(.failure(error)) }
+            let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+                NSLog("[GPU renderer] XPC request failed: %@", String(describing: error))
+                finish(.failure(error))
+            }
             guard let renderer = proxy as? RendererServiceProtocol else {
                 finish(.failure(Self.failure("Renderer XPC interface unavailable"))); return
             }
@@ -68,7 +75,7 @@ public final class MacOS27RendererClient {
                 if let error { finish(.failure(error)); return }
                 guard let response, response.count >= 24, response.count <= 65536,
                       Self.validReply(response, request: snapshot), Self.validSurface(surface),
-                      surface == nil || [UInt32(0x103), 0x104, 0xffff0003].contains(Self.word(snapshot, 0)) else {
+                      surface == nil || [UInt32(0x103), 0x104, 0xffff0003, 0xffff0023].contains(Self.word(snapshot, 0)) else {
                     finish(.failure(Self.failure("Malformed renderer reply"))); return
                 }
                 finish(.success(Reply(command: response, surface: surface)))
@@ -81,9 +88,12 @@ public final class MacOS27RendererClient {
         }
     }
 
-    public func stop() {
+    public func stop() { stop(reason: "GPU renderer stopped") }
+
+    private func stop(reason: String) {
         queue.async { [self] in
-            failAll(Self.failure("GPU renderer stopped"))
+            if !stopped { NSLog("[GPU renderer] %@", reason) }
+            failAll(Self.failure(reason))
             connection.invalidate()
         }
     }

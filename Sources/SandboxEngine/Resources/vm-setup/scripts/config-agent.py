@@ -37,6 +37,21 @@ NIC_MTU_MARKER = "/tmp/bromure/nic-mtu"
 EPHEMERAL_CHROME_DIR = "/home/chrome/.bromure-chrome"
 
 
+def squid_launch_command(cmdline):
+    """Keep the private candidate explicit; never silently fall back on error."""
+    values = [word.split('=', 1)[1] for word in cmdline.split()
+              if word.startswith('bromure.experimental_async_squid=')]
+    if values and values != ['1']:
+        raise ValueError('invalid async Squid experimental boot opt-in')
+    if values:
+        candidate = '/usr/local/bin/async-squid-launch.py'
+        if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+            raise RuntimeError('private async Squid candidate is not installed')
+        return [candidate]
+    return ["proxychains4", "-q", "-f", "/etc/proxychains/proxychains.conf",
+            "squid", "-N", "-f", "/etc/squid/squid.conf"]
+
+
 def run(cmd, check=False):
     """Run a shell command, return (returncode, stdout)."""
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -283,11 +298,6 @@ def sh_escape(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
-# Fallback Chrome major if `chromium-browser --version` can't be read.
-# Only used on error; the live version is normally detected at runtime.
-_FALLBACK_CHROME_MAJOR = "142"
-
-
 CRX_DIR = "/opt/bromure/crx"
 
 
@@ -327,65 +337,38 @@ def browser_binary(cfg):
     return "google-chrome-stable" if cfg.get("browser") == "chrome" else "chromium-browser"
 
 
-def chromium_major_version(binary="chromium-browser"):
-    """Best-effort Chrome major version (e.g. '142') from the installed
-    browser, so a spoofed macOS UA reports a version consistent with the
-    real engine instead of a stale hardcoded one."""
-    try:
-        out = subprocess.run(
-            [binary, "--version"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout
-        m = re.search(r"\b(\d+)\.\d+\.\d+\.\d+\b", out)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
-    return _FALLBACK_CHROME_MAJOR
-
-
 def resolve_user_agent(cfg):
-    """Return the User-Agent string to hand Chromium.
-
-    A non-empty `userAgent` is used verbatim. Empty (the default) yields a
-    Chrome-on-macOS UA built from the real Chromium version, so sites see a
-    stock macOS Chrome instead of the Linux VM — matching the rest of
-    Bromure's de-fingerprinting (locale, platform)."""
-    custom = (cfg.get("userAgent") or "").strip()
-    if custom:
-        return custom
-    major = chromium_major_version(browser_binary(cfg))
-    return (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        f"Chrome/{major}.0.0.0 Safari/537.36"
-    )
+    """Empty means no override; each browser supplies its native identity."""
+    return (cfg.get("userAgent") or "").strip()
 
 
 def graphics_backend(cfg):
     """Resolve the host-selected device backend, preserving legacy defaults.
 
-    A request for VirGL does not prove acceleration: the host must configure
-    the device before boot and verify the renderer separately. Profile GPU
-    policy takes precedence over device selection.
+    Both explicit host opt-in and a device with negotiated VirGL features
+    are required. A stale config/image cannot enable the patched Mesa/video
+    stack on Apple's standard VZ device. This is capability evidence, not
+    proof that rendering or decoding succeeds. Profile policy takes priority.
     """
-    if cfg.get("graphicsBackend") == "virgl" and not cfg.get("disableGPU"):
+    if (cfg.get("graphicsBackend") == "virgl" and not cfg.get("disableGPU")
+            and virgl_video_device() is not None):
         return "virgl"
     return "software"
 
 
-def virgl_video_device():
+def virgl_video_device(sysfs_root="/sys/class/drm",
+                       mesa_marker="/opt/bromure/mesa-virgl/graphics-build.txt"):
     """Select the render node whose negotiated virtio features include VirGL."""
     import glob
-    if not os.path.isfile("/opt/bromure/mesa-virgl/graphics-build.txt"):
+    if not os.path.isfile(mesa_marker):
         return None
-    for node in sorted(glob.glob("/sys/class/drm/renderD*")):
+    for node in sorted(glob.glob(os.path.join(sysfs_root, "renderD*"))):
         for features in [node + "/device/features"] + glob.glob(node + "/device/virtio*/features"):
             try:
                 with open(features) as stream:
                     bits = stream.read().strip()
                 # Linux virtio sysfs prints features in bit-index order.
-                if len(bits) >= 32 and bits[0] == "1":
+                if len(bits) >= 32 and set(bits) <= {"0", "1"} and bits[0] == "1":
                     return "/dev/dri/" + os.path.basename(node)
             except OSError:
                 continue
@@ -1490,11 +1473,15 @@ def configure_services(cfg, ca_count):
              "/usr/local/bin/routing-socks.py"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Start squid through proxychains (auto-restarted on crash).
+        # Private-image experiment only. Candidate scripts are deliberately
+        # not shipped by setup.sh; an opted-in image must install them first.
+        with open('/proc/cmdline') as kernel_options:
+            squid_command = squid_launch_command(kernel_options.read())
+
+        # Candidate supervisor stops Squid before removing its redirect rules.
+        # A failure is restarted in the selected mode, never by direct fallback.
         subprocess.Popen(
-            ["/usr/local/bin/resilient-launch.sh",
-             "proxychains4", "-q", "-f", "/etc/proxychains/proxychains.conf",
-             "squid", "-N", "-f", "/etc/squid/squid.conf"],
+            ["/usr/local/bin/resilient-launch.sh"] + squid_command,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Profile preferences. Persistent profiles use their mounted dir;

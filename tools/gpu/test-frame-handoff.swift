@@ -23,6 +23,19 @@ public struct HostGPUCursor { public var width, height, hotX, hotY: Int; public 
     @MainActor static func wait(_ seconds: Double) { RunLoop.main.run(until: Date(timeIntervalSinceNow: seconds)) }
     @MainActor static func main() throws {
         _ = NSApplication.shared
+        let startup = try HostGPUFrameView(gpuFrame: NSRect(x:0,y:0,width:200,height:120))
+        startup.guestDisplayScale = 2
+        startup.limitsStartupScale = true
+        try startup.present(surface(200,120,0xff0088ff))
+        let bootRect = startup.guestContentRect(for: NSSize(width:200,height:120))
+        precondition(bootRect.width == 100 && bootRect.height == 60,
+                     "startup framebuffer must not receive a second Retina enlargement")
+        try startup.present(surface(400,240,0xff0088ff))
+        precondition(!startup.limitsStartupScale, "matching initial mode releases startup scale cap")
+        startup.setFrameSize(NSSize(width:300,height:180))
+        let resizeRect = startup.guestContentRect(for: NSSize(width:400,height:240))
+        precondition(resizeRect.width == 300 && resizeRect.height == 180,
+                     "ordinary later resizing still scales the retained image")
         let v = try HostGPUFrameView(gpuFrame: NSRect(x: 0, y: 0, width: 100, height: 100))
         v.guestDisplayScale = 2
         v.hiddenTopRows = 16
@@ -439,6 +452,49 @@ public struct HostGPUCursor { public var width, height, hotX, hotY: Int; public 
         IOSurfaceGetBaseAddress(tail).assumingMemoryBound(to: UInt32.self)[6] = 0x000088ff
         try v.present(tail)
         precondition(v.currentFrameSize?.width == 7, "significant nonzero RGB tail must present even with alpha0")
+        let sibling = try HostGPUFrameView(gpuFrame: NSRect(x: 0, y: 0, width: 64, height: 64))
+        sibling.discardFrame()
+        try sibling.present(surface(64,64,0xff0088ff))
+        try sibling.present(surface(64,64,0xff000000))
+        precondition(pixel(sibling) == 0xff000000, "stationary dark content must display outside topology changes")
+        try sibling.present(surface(64,64,0xff0088ff))
+        sibling.prepareForSharedDesktopResize()
+        try sibling.present(surface(64,64,0xff000000))
+        precondition(pixel(sibling) == 0xff0088ff, "shared desktop clear must preserve the stationary sibling's painted pixels")
+        try sibling.present(surface(64,64,0xff449900))
+        wait(1.3)
+        precondition(pixel(sibling) == 0xff449900, "sibling repaint must cancel the held clear")
+        sibling.prepareForSharedDesktopResize()
+        try sibling.present(surface(64,64,0xff000000))
+        for _ in 0..<13 { sibling.prepareForSharedDesktopResize(); wait(0.1) }
+        precondition(pixel(sibling) == 0xff000000, "repeated shared topology activity must not extend a dark candidate's deadline")
+        sibling.discardFrame()
+        try sibling.present(surface(64,64,0xff0088ff))
+        let delayed = sibling.beginSharedDesktopResize()
+        wait(1.0)
+        try sibling.present(surface(64,64,0xff000000))
+        precondition(pixel(sibling) == 0xff0088ff, "delayed guest modeset must hold a stationary sibling while the operation is in flight")
+        wait(1.3)
+        precondition(pixel(sibling) == 0xff000000, "an in-flight operation must not extend the candidate deadline")
+        sibling.endSharedDesktopResize(delayed)
+        wait(0.8)
+        try sibling.present(surface(64,64,0xff0088ff))
+        try sibling.present(surface(64,64,0xff000000))
+        precondition(pixel(sibling) == 0xff000000, "completed shared operation must release eligibility")
+        let first = sibling.beginSharedDesktopResize(), second = sibling.beginSharedDesktopResize()
+        sibling.endSharedDesktopResize(first)
+        wait(0.8)
+        try sibling.present(surface(64,64,0xff0088ff))
+        try sibling.present(surface(64,64,0xff000000))
+        precondition(pixel(sibling) == 0xff0088ff, "ending one shared operation must preserve another operation's eligibility")
+        sibling.endSharedDesktopResize(second)
+        wait(1.3)
+        try sibling.present(surface(64,64,0xff0088ff))
+        sibling.endSharedDesktopResize(second)
+        sibling.endSharedDesktopResize(UUID())
+        try sibling.present(surface(64,64,0xff000000))
+        precondition(pixel(sibling) == 0xff000000, "duplicate or unknown operation completion must not rearm a finished handoff")
+        print("BROMURE_SHARED_SIBLING_HANDOFF_PASS")
         for (w,h) in [(5120,2948),(7680,4320)] {
             try v.present(surface(64,64,0xff0088ff))
             let blank = surface(w,h,0), start = Date()

@@ -13,6 +13,7 @@ public struct HostGPUCursor {
 /// The stable app-facing interface keeps macOS 27 device types out of WarmVM.
 public protocol HostGraphicsSession: AnyObject {
     var backendName: String { get }
+    var outputCapacity: Int { get }
     var isRendererRunning: Bool { get }
     var deliveredFrameCount: Int { get }
     var deliveredCursorCount: Int { get }
@@ -23,6 +24,8 @@ public protocol HostGraphicsSession: AnyObject {
     func resizeDisplay(width: Int, height: Int)
     func stop()
 }
+
+public extension HostGraphicsSession { var outputCapacity: Int { 1 } }
 
 @available(macOS 27.0, *)
 public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
@@ -49,6 +52,15 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
     private var latestFrame: IOSurface?
     private var cursorObserver: ((HostGPUCursor?) -> Void)?
     private var latestCursor: HostGPUCursor?
+    public let scanoutCount: Int
+    public var outputCapacity: Int { scanoutCount }
+    private var outputObservers: [Int: (IOSurface?) -> Void] = [:]
+    private var outputFrames: [Int: IOSurface] = [:]
+    private var outputCursorObservers: [Int: (HostGPUCursor?) -> Void] = [:]
+    private var outputCursors: [Int: HostGPUCursor] = [:]
+    private var outputFrameCounts: [Int: Int] = [:]
+    private var outputCursorCounts: [Int: Int] = [:]
+    private var outputMoveCounts: [Int: Int] = [:]
     private let frameCounterLock = NSLock()
     private var frameCounter = 0
     private var cursorCounter = 0
@@ -58,7 +70,8 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
     public var deliveredFrameCount: Int {
         frameCounterLock.lock(); defer { frameCounterLock.unlock() }; return frameCounter
     }
-    private init(width: Int, height: Int) throws {
+    private init(width: Int, height: Int, scanoutCount: Int) throws {
+        self.scanoutCount = scanoutCount
         client = try MacOS27RendererClient()
         configuration = VZCustomVirtioDeviceConfiguration()
         super.init()
@@ -69,27 +82,36 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         configuration.virtioQueueCount = 2
         configuration.optionalFeatures.subset0 |= 1
         configuration.deviceSpecificConfiguration = VZVirtioDeviceSpecificConfiguration(
-            configurationData: Data([0,0,0,0, 0,0,0,0, 1,0,0,0, 2,0,0,0]))
+            configurationData: Data([0,0,0,0, 0,0,0,0, UInt8(scanoutCount),0,0,0, 2,0,0,0]))
         configuration.provider = VZCustomVirtioDeviceDelegateProvider(deviceQueue: deviceQueue, delegate: self)
     }
 
     /// Capability validation finishes before the custom device enters a VM.
-    public static func create(width: Int, height: Int) async throws -> MacOS27GPUSession {
-        guard width > 0, height > 0, width <= 8192, height <= 8192 else { throw failure("Invalid GPU dimensions") }
-        let session = try MacOS27GPUSession(width: width, height: height)
+    public static func create(width: Int, height: Int, scanoutCount: Int = 1) async throws -> MacOS27GPUSession {
+        guard width > 0, height > 0, width <= 8192, height <= 8192,
+              width * height <= 33554432, (1...16).contains(scanoutCount) else { throw failure("Invalid GPU dimensions") }
+        let session = try MacOS27GPUSession(width: width, height: height, scanoutCount: scanoutCount)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             session.processingQueue.async {
                 do {
-                    let processor = try RendererCommandProcessor(client: session.client) { [weak session] surface in
+                    let processor = try RendererCommandProcessor(client: session.client, onDisplayFrame: { [weak session] output, surface in
                         guard let session else { return }
                         let token = session.processingGeneration
                         session.deviceQueue.async {
                             guard !session.stopped, session.generation == token else { return }
-                            session.frameCounterLock.lock(); session.frameCounter += 1; session.frameCounterLock.unlock()
-                            session.latestFrame = surface
-                            if !session.paused { session.observer?(surface) }
+                            let index = Int(output)
+                            session.frameCounterLock.lock()
+                            session.frameCounter += 1; session.outputFrameCounts[index, default: 0] += 1
+                            session.frameCounterLock.unlock()
+                            session.outputFrames[index] = surface
+                            if index == 0 { session.latestFrame = surface }
+                            if !session.paused {
+                                if index == 0 { session.observer?(surface) }
+                                session.outputObservers[index]?(surface)
+                            }
                         }
-                    }
+                    })
+                    try processor.setScanoutCount(UInt32(scanoutCount))
                     try processor.setDisplay(width: UInt32(width), height: UInt32(height))
                     session.processor = processor
                     continuation.resume()
@@ -118,7 +140,136 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         deviceQueue.async { [self] in cursorObserver = observer; if !paused { observer(latestCursor) } }
     }
 
+    public struct OutputGeometry {
+        public let index: Int
+        public let x: Int
+        public let y: Int
+        public let width: Int
+        public let height: Int
+        public let enabled: Bool
+        public init(index: Int, x: Int, y: Int, width: Int, height: Int, enabled: Bool) {
+            self.index = index; self.x = x; self.y = y
+            self.width = width; self.height = height; self.enabled = enabled
+        }
+    }
+
+    /// Publish a complete trusted topology before the guest applies RandR modes.
+    /// On failure the caller reconciles against the guest/controller's actual state.
+    public func publishOutputs(_ outputs: [OutputGeometry]) async throws {
+        guard outputs.count == scanoutCount, Set(outputs.map(\.index)) == Set(0..<scanoutCount) else {
+            throw Self.failure("Incomplete output topology")
+        }
+        var rootWidth = 0, rootHeight = 0
+        for output in outputs {
+            guard output.x >= 0, output.y >= 0, output.width >= 64, output.height >= 64,
+                  output.width <= 8192, output.height <= 8192, output.width % 8 == 0,
+                  output.width * output.height <= 33554432,
+                  output.x <= 8192 - output.width, output.y <= 8192 - output.height else {
+                throw Self.failure("Invalid output geometry")
+            }
+            if output.enabled {
+                rootWidth = max(rootWidth, output.x + output.width)
+                rootHeight = max(rootHeight, output.y + output.height)
+                for other in outputs where other.enabled && other.index < output.index {
+                    guard output.x >= other.x + other.width || other.x >= output.x + output.width ||
+                          output.y >= other.y + other.height || other.y >= output.y + output.height else {
+                        throw Self.failure("Overlapping output topology")
+                    }
+                }
+            }
+        }
+        guard rootWidth > 0, rootHeight > 0, rootWidth * rootHeight <= 67108864 else {
+            throw Self.failure("Output topology exceeds root budget")
+        }
+        let root = (rootWidth, rootHeight)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            deviceQueue.async { [self] in
+                guard !stopped, let device else { continuation.resume(throwing: Self.failure("GPU unavailable")); return }
+                let epoch = generation
+                processingQueue.async { [self] in
+                    do {
+                        guard let processor else { throw Self.failure("Renderer unavailable") }
+                        try processor.setDisplay(width: UInt32(root.0), height: UInt32(root.1), rootOnly: true)
+                        // Clear old metadata before enabling a changed layout, avoiding
+                        // intermediate old+new extents exceeding the root budget.
+                        for output in outputs {
+                            try processor.setOutput(index: UInt32(output.index), width: UInt32(output.width),
+                                height: UInt32(output.height), x: UInt32(output.x), y: UInt32(output.y), enabled: false)
+                        }
+                        for output in outputs where output.enabled {
+                            try processor.setOutput(index: UInt32(output.index), width: UInt32(output.width),
+                                height: UInt32(output.height), x: UInt32(output.x), y: UInt32(output.y), enabled: true)
+                        }
+                        deviceQueue.async { [self] in
+                            guard !stopped, generation == epoch else {
+                                continuation.resume(throwing: Self.failure("Stale output topology")); return
+                            }
+                            let data = Data([1,0,0,0, 0,0,0,0, UInt8(scanoutCount),0,0,0, 2,0,0,0])
+                            device.update(VZVirtioDeviceSpecificConfiguration(configurationData: data)) { error in
+                                if let error { continuation.resume(throwing: error) }
+                                else { continuation.resume() }
+                            }
+                        }
+                    } catch { continuation.resume(throwing: error) }
+                }
+            }
+        }
+    }
+
+    /// Window adapters observe a crop, while the parent owns the renderer and VM.
+    /// Their resize callback goes through the complete desktop topology controller.
+    public func outputSession(index: Int, onResize: @escaping (Int, Int) -> Void) -> HostGraphicsSession? {
+        guard (0..<scanoutCount).contains(index) else { return nil }
+        return OutputSession(parent: self, index: index, onResize: onResize)
+    }
+
+    private final class OutputSession: HostGraphicsSession {
+        let parent: MacOS27GPUSession
+        let index: Int
+        let onResize: (Int, Int) -> Void
+        init(parent: MacOS27GPUSession, index: Int, onResize: @escaping (Int, Int) -> Void) {
+            self.parent = parent; self.index = index; self.onResize = onResize
+        }
+        var backendName: String { parent.backendName }
+        var isRendererRunning: Bool { parent.isRendererRunning }
+        private func count(_ values: [Int: Int]) -> Int { values[index, default: 0] }
+        var deliveredFrameCount: Int {
+            parent.frameCounterLock.lock(); defer { parent.frameCounterLock.unlock() }
+            return count(parent.outputFrameCounts)
+        }
+        var deliveredCursorCount: Int {
+            parent.frameCounterLock.lock(); defer { parent.frameCounterLock.unlock() }
+            return count(parent.outputCursorCounts)
+        }
+        var cursorMoveCount: Int {
+            parent.frameCounterLock.lock(); defer { parent.frameCounterLock.unlock() }
+            return count(parent.outputMoveCounts)
+        }
+        func logResourceUsage() { parent.logResourceUsage() }
+        func observeFrames(_ observer: @escaping (IOSurface?) -> Void) {
+            parent.deviceQueue.async { [parent, index] in
+                parent.outputObservers[index] = observer
+                if !parent.paused { observer(parent.outputFrames[index]) }
+            }
+        }
+        func observeCursor(_ observer: @escaping (HostGPUCursor?) -> Void) {
+            parent.deviceQueue.async { [parent, index] in
+                parent.outputCursorObservers[index] = observer
+                if !parent.paused { observer(parent.outputCursors[index]) }
+            }
+        }
+        func resizeDisplay(width: Int, height: Int) { onResize(width, height) }
+        func stop() {
+            parent.deviceQueue.async { [parent, index] in
+                parent.outputObservers.removeValue(forKey: index)?(nil)
+                parent.outputCursorObservers.removeValue(forKey: index)?(nil)
+            }
+        }
+    }
+
     public func resizeDisplay(width: Int, height: Int) {
+        // Shared outputs resize only through their complete topology owner.
+        guard scanoutCount == 1 else { return }
         guard width >= 64, height >= 64, width <= 8192, height <= 8192,
               width * height <= 33554432 else { return }
         self.deviceQueue.async { [weak self] in
@@ -132,7 +283,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
                     self.deviceQueue.async { [self] in
                         guard !self.stopped, self.generation == epoch else { return }
                         // VIRTIO_GPU_EVENT_DISPLAY; the guest re-reads display info.
-                        let data = Data([1,0,0,0, 0,0,0,0, 1,0,0,0, 2,0,0,0])
+                        let data = Data([1,0,0,0, 0,0,0,0, UInt8(self.scanoutCount),0,0,0, 2,0,0,0])
                         device.update(VZVirtioDeviceSpecificConfiguration(configurationData: data)) { error in
                             if let error { print("[GPU] Display resize failed: \(error)") }
                         }
@@ -155,6 +306,9 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         pending.removeAll(); completions.removeAll(); pendingBytes = 0; notifiedQueues.removeAll()
         latestFrame = nil; observer?(nil)
         latestCursor = nil; cursorObserver?(nil)
+        outputFrames.removeAll(); outputCursors.removeAll()
+        for callback in outputObservers.values { callback(nil) }
+        for callback in outputCursorObservers.values { callback(nil) }
         device = nil
         client.stop()
         processingQueue.async { [self] in processor?.stop(); processor = nil }
@@ -236,9 +390,10 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
 
     private func handleCursor(_ snapshot: Data, element: VZVirtioQueueElement, device: VZCustomVirtioDevice) {
         let type = get32(snapshot, at: 0)
-        guard [UInt32(0x300), 0x301].contains(type), get32(snapshot, at: 24) == 0 else {
+        guard [UInt32(0x300), 0x301].contains(type), get32(snapshot, at: 24) < UInt32(scanoutCount) else {
             element.returnToQueue(); return
         }
+        let output = Int(get32(snapshot, at: 24))
         let token = UUID(), epoch = generation
         pending[token] = element; pendingBytes += snapshot.count
         processingQueue.async { [self] in
@@ -261,10 +416,17 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
                 guard !stopped, generation == epoch, pending[token] != nil else { return }
                 pendingBytes -= snapshot.count
                 frameCounterLock.lock()
-                if update && cursor != nil { cursorCounter += 1 }
-                if !update { moveCounter += 1 }
+                if update && cursor != nil { cursorCounter += 1; outputCursorCounts[output, default: 0] += 1 }
+                if !update { moveCounter += 1; outputMoveCounts[output, default: 0] += 1 }
                 frameCounterLock.unlock()
-                if update { latestCursor = cursor; if !paused { cursorObserver?(cursor) } }
+                if update {
+                    outputCursors[output] = cursor
+                    if output == 0 { latestCursor = cursor }
+                    if !paused {
+                        if output == 0 { cursorObserver?(cursor) }
+                        outputCursorObservers[output]?(cursor)
+                    }
+                }
                 if paused { completions[token] = Data() }
                 else { complete(token, response: Data()) }
             }
@@ -311,6 +473,8 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         completions.removeAll()
         observer?(latestFrame)
         cursorObserver?(latestCursor)
+        for (index, callback) in outputObservers { callback(outputFrames[index]) }
+        for (index, callback) in outputCursorObservers { callback(outputCursors[index]) }
     }
     public func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {
         state.lock(); generation += 1; state.broadcast(); state.unlock()
@@ -318,6 +482,9 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         pending.removeAll(); completions.removeAll(); pendingBytes = 0; notifiedQueues.removeAll()
         latestFrame = nil; observer?(nil)
         latestCursor = nil; cursorObserver?(nil)
+        outputFrames.removeAll(); outputCursors.removeAll()
+        for callback in outputObservers.values { callback(nil) }
+        for callback in outputCursorObservers.values { callback(nil) }
         processingQueue.async { [self] in
             processingGeneration = epoch
             do { try processor?.reset() }

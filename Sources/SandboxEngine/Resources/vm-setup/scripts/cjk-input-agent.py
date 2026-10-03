@@ -1,6 +1,9 @@
 #!/usr/bin/python3 -u
 """Bromure Chromium input agent — injects host input events via CDP.
 
+Shared-window boot mode additionally requires targetId on every message.
+Connections are selected from the sole local browser, never a fallback page.
+
 Runs inside the guest VM. The host sends JSON messages over vsock port 5007:
 
   {"type": "compose", "text": "みち"}              → inline IME composition
@@ -22,7 +25,11 @@ Started at boot via inittab (runs as chrome user).
 import hashlib
 import http.client
 import json
+import math
 import os
+import re
+from pathlib import Path
+from urllib.parse import urlparse
 import socket
 import struct
 import sys
@@ -38,7 +45,7 @@ CDP_PORT = 9222
 # Minimal WebSocket client (no external dependencies)
 # ---------------------------------------------------------------------------
 
-def ws_connect(url):
+def ws_connect(url, deadline=None):
     """Open a WebSocket connection. Returns the socket."""
     # Parse ws://host:port/path
     assert url.startswith("ws://")
@@ -52,33 +59,47 @@ def ws_connect(url):
         host, port = host_port, 80
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((host, port))
+    try:
+        if deadline is not None:
+            sock.settimeout(max(.001, deadline - time.monotonic()))
+        sock.connect((host, port))
 
-    # WebSocket handshake
-    key = "dGhlIHNhbXBsZSBub25jZQ=="  # static key is fine for local CDP
-    request = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
-        f"Upgrade: websocket\r\n"
-        f"Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        f"Sec-WebSocket-Version: 13\r\n"
-        f"\r\n"
-    )
-    sock.sendall(request.encode())
+        # WebSocket handshake
+        key = "dGhlIHNhbXBsZSBub25jZQ=="  # static key is fine for local CDP
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"\r\n"
+        )
+        sock.sendall(request.encode())
 
-    # Read response headers
-    response = b""
-    while b"\r\n\r\n" not in response:
-        chunk = sock.recv(4096)
-        if not chunk:
-            raise ConnectionError("WebSocket handshake failed")
-        response += chunk
+        # Read response headers
+        response = b""
+        while b"\r\n\r\n" not in response:
+            if deadline is not None:
+                if time.monotonic() >= deadline:
+                    sock.close()
+                    raise TimeoutError("WebSocket upgrade deadline")
+                sock.settimeout(deadline - time.monotonic())
+            if len(response) >= 16384:
+                sock.close()
+                raise ValueError("WebSocket headers too large")
+            chunk = sock.recv(1)
+            if not chunk:
+                raise ConnectionError("WebSocket handshake failed")
+            response += chunk
 
-    if b"101" not in response.split(b"\r\n")[0]:
-        raise ConnectionError(f"WebSocket upgrade rejected: {response[:200]}")
+        if b"101" not in response.split(b"\r\n")[0]:
+            raise ConnectionError(f"WebSocket upgrade rejected: {response[:200]}")
 
-    return sock
+        return sock
+    except BaseException:
+        sock.close()
+        raise
 
 
 def ws_send(sock, data):
@@ -104,11 +125,16 @@ def ws_send(sock, data):
     sock.sendall(frame)
 
 
-def ws_recv(sock):
+def ws_recv(sock, deadline=None):
     """Read one WebSocket frame. Returns the payload as string."""
     def read_exact(n):
         buf = b""
         while len(buf) < n:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("WebSocket receive deadline")
+                sock.settimeout(remaining)
             chunk = sock.recv(n - len(buf))
             if not chunk:
                 raise ConnectionError("WebSocket closed")
@@ -125,6 +151,8 @@ def ws_recv(sock):
     elif length == 127:
         length = struct.unpack(">Q", read_exact(8))[0]
 
+    if length > 1048576:
+        raise ConnectionError("WebSocket frame too large")
     if masked:
         mask = read_exact(4)
         data = bytearray(read_exact(length))
@@ -139,7 +167,7 @@ def ws_recv(sock):
         # Send pong
         pong = bytearray([0x8A, 0x80, 0, 0, 0, 0])
         sock.sendall(pong)
-        return ws_recv(sock)  # read next real frame
+        return ws_recv(sock, deadline)  # read next real frame
 
     return data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else data
 
@@ -163,7 +191,9 @@ class CDPClient:
     socket — breaking all subsequent CDP sends with no log trace.
     """
 
-    def __init__(self):
+    def __init__(self, shared=False):
+        self.shared = shared
+        self.target_id = None
         self.sock = None
         self.msg_id = 0
         # Serialises writes against the reader thread's pong response in
@@ -176,26 +206,41 @@ class CDPClient:
         # 1.0 if the query fails.
         self.dpr = 1.0
 
-    def connect(self):
-        """Connect to Chromium's first page target via CDP WebSocket."""
-        # Get the list of targets
-        conn = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=5)
-        conn.request("GET", "/json")
-        resp = conn.getresponse()
-        targets = json.loads(resp.read())
-        conn.close()
+    def connect(self, target_id=None):
+        """Legacy first page, or an explicitly selected shared-window page."""
+        self.close()
+        deadline = time.monotonic() + 3
+        if self.shared:
+            if not isinstance(target_id, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,128}', target_id):
+                raise ValueError("shared input requires a valid targetId")
+            from shared_windows import cdp_call
+            version = self.get_json('/json/version', deadline)
+            process = cdp_call(version.get('webSocketDebuggerUrl', ''),
+                               'SystemInfo.getProcessInfo', {}, timeout=self.remaining(deadline))
+            browsers = [p for p in process.get('processInfo', []) if p.get('type') == 'browser']
+            if len(browsers) != 1 or type(browsers[0].get('id')) is not int:
+                raise ValueError("cannot identify sole Chromium browser")
+        targets = self.get_json('/json', deadline)
 
         # Find a page target
         ws_url = None
         for t in targets:
-            if t.get("type") == "page":
+            if t.get("type") == "page" and (not self.shared or t.get("id") == target_id):
                 ws_url = t.get("webSocketDebuggerUrl")
                 break
 
         if not ws_url:
             raise RuntimeError("No page target found")
 
-        self.sock = ws_connect(ws_url)
+        if self.shared:
+            url = urlparse(ws_url)
+            if (url.scheme != 'ws' or url.hostname != CDP_HOST or url.port != CDP_PORT
+                    or url.path != '/devtools/page/' + target_id or url.query or url.fragment
+                    or url.username or url.password):
+                raise ValueError("unexpected selected page endpoint")
+        self.sock = ws_connect(ws_url, deadline)
+        self.target_id = target_id
+        self.dpr = 1.0
 
         # Synchronously probe devicePixelRatio BEFORE spawning the drain
         # thread (otherwise the drain would consume our reply). Chromium
@@ -209,23 +254,33 @@ class CDPClient:
                 "params": {"expression": "devicePixelRatio", "returnByValue": True},
             })
             ws_send(self.sock, probe)
+            probed = False
             for _ in range(10):
-                raw = ws_recv(self.sock)
+                self.sock.settimeout(self.remaining(deadline))
+                raw = ws_recv(self.sock, deadline)
                 try:
                     msg = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
                 except (ValueError, AttributeError):
                     continue
                 if msg.get("id") == 0:
                     value = msg.get("result", {}).get("result", {}).get("value")
-                    if isinstance(value, (int, float)) and value > 0:
+                    if type(value) in (int, float) and math.isfinite(value) and value > 0:
                         self.dpr = float(value)
+                        probed = True
                     break
+            if self.shared and not probed:
+                raise ValueError("selected page DPR unavailable")
             # msg_id stays where it was — probe used id=0 which can't collide.
             print(f"cjk-input-agent: DPR={self.dpr}", file=sys.stderr)
         except (OSError, ConnectionError, ValueError) as e:
-            print(f"cjk-input-agent: DPR probe failed ({e}); assuming 1.0", file=sys.stderr)
+            print(f"cjk-input-agent: DPR probe failed ({e}); " +
+                  ("rejecting shared input" if self.shared else "assuming 1.0"), file=sys.stderr)
             self.dpr = 1.0
+            if self.shared:
+                self.close()
+                raise
 
+        self.sock.settimeout(None)
         # Spawn a blocking reader that continuously drains response frames.
         # Running it on a thread (instead of draining in `send`) avoids the
         # non-blocking partial-frame corruption described in the class
@@ -246,6 +301,51 @@ class CDPClient:
                 pass
         threading.Thread(target=drain, daemon=True).start()
 
+    @staticmethod
+    def remaining(deadline):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("CDP selection deadline")
+        return remaining
+
+    @classmethod
+    def get_json(cls, path, deadline):
+        conn = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=cls.remaining(deadline))
+        timer = None
+        try:
+            conn.connect()
+            sock = conn.sock
+            def expire():
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            # Bound HTTP header/body parsing even if the local endpoint sends
+            # partial data before each socket timeout.
+            timer = threading.Timer(cls.remaining(deadline), expire)
+            timer.daemon = True
+            timer.start()
+            conn.request('GET', path)
+            response = conn.getresponse()
+            if response.status != 200:
+                raise ConnectionError("CDP target discovery failed")
+            data = response.read(1048577)
+            cls.remaining(deadline)
+            if len(data) > 1048576:
+                raise ValueError("CDP target discovery too large")
+            return json.loads(data)
+        finally:
+            if timer is not None:
+                timer.cancel()
+            conn.close()
+
+    def select_target(self, target_id):
+        if not isinstance(target_id, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,128}', target_id):
+            self.close()
+            raise ValueError("shared input requires a valid targetId")
+        if target_id != self.target_id or not self.sock:
+            self.connect(target_id)
+
     def send(self, method, params=None):
         """Send a CDP command (fire-and-forget)."""
         sock = self.sock
@@ -264,7 +364,12 @@ class CDPClient:
     def close(self):
         sock = self.sock
         self.sock = None
+        self.target_id = None
         if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 sock.close()
             except OSError:
@@ -277,6 +382,10 @@ class CDPClient:
 
 def handle_message(cdp, msg):
     """Process a JSON message from the host."""
+    if not isinstance(msg, dict):
+        raise ValueError("input must be an object")
+    if cdp.shared:
+        cdp.select_target(msg.get("targetId"))
     msg_type = msg.get("type")
     text = msg.get("text", "")
 
@@ -373,12 +482,13 @@ def main():
         print("cjk-input-agent: CDP not ready after 120s, exiting", file=sys.stderr)
         return
 
-    cdp = CDPClient()
+    from shared_windows import enabled
+    cdp = CDPClient(shared=enabled(Path("/proc/cmdline").read_text()))
 
     while True:
         try:
             # (Re)connect to CDP if needed
-            if not cdp.sock:
+            if not cdp.shared and not cdp.sock:
                 try:
                     cdp.connect()
                     print("cjk-input-agent: connected to CDP", file=sys.stderr)
@@ -394,14 +504,18 @@ def main():
             srv.listen(1)
 
             while True:
-                conn, _ = srv.accept()
+                conn, peer = srv.accept()
+                if cdp.shared and peer[0] != getattr(socket, "VMADDR_CID_HOST", 2):
+                    conn.close()
+                    continue
+                conn.settimeout(3)
                 try:
                     # Transparent reconnect: the background reader thread
                     # clears cdp.sock when CDP closes (peer shutdown, read
                     # error, etc.). Without this check we'd keep accepting
                     # vsock messages and silently drop every one forever
                     # because cdp.send() bails early on a None socket.
-                    if not cdp.sock:
+                    if not cdp.shared and not cdp.sock:
                         cdp.connect()
                         print("cjk-input-agent: reconnected to CDP", file=sys.stderr)
 

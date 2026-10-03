@@ -1,0 +1,14 @@
+{
+  "scope": "Programmatic native AppKit field-editor insertText and guest history RPC in child and root; not physical typing, IME or stale-reply/focus-invariance acceptance",
+  "passed": true,
+  "processExitCode": 0,
+  "browserExitCount": 1,
+  "macReleaseCount": 1,
+  "logSHA256": "1c88bab0dd9f4a2ee7d3347f9c293b58bf14c556a2c26cdcc1ea62e26064d78e",
+  "binarySHA256": "0efe221c8f99849bfafd0c4bea55ab86a88771886931fcd692ce02c24e05d22e",
+  "image": "private v15; history tab-agent from 22496a75, not published guest image",
+  "earlierFailures": [
+    "Build42 unguarded non-key NSEvent.keyCode read (fixed)",
+    "Build44/46/48/49 diagnostic used detached field editor (test corrected without weakening production guard)"
+  ]
+}

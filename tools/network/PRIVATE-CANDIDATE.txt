@@ -1,0 +1,114 @@
+Private async Squid candidate — 2026-10-02
+
+Status: Private candidate. NOT installed by setup.sh or enabled by default.
+A private guest clone must contain the two root-owned executable scripts and
+updated config-agent.py, and boot with bromure.experimental_async_squid=1.
+Do not add Chrome proxy bypasses for acceptance. Production and externally
+configured proxy branches retain their existing commands without this opt-in.
+
+Private-image installation (root, OFFLINE clone or before config-agent starts):
+  install -o root -g root -m 0755 async-squid-gateway.py /usr/local/bin/
+  install -o root -g root -m 0755 async-squid-launch.py /usr/local/bin/
+  install -o root -g root -m 0755 config-agent.py /usr/local/bin/
+
+Requires existing proxy/nobody accounts, Python 3.9+, iptables and ip6tables
+with owner/NAT/REDIRECT kernel support and Squid. Missing
+requirements fail closed; no direct or legacy fallback after an opted-in failure.
+Use a fresh VM. Never start alongside the legacy proxychains Squid process.
+Logs: /tmp/bromure/resilient-launch.0.log; supervisor emits
+BROMURE_ASYNC_SQUID_ACTIVE with verified Squid/gateway PIDs and distinct UIDs.
+
+Routing:
+- Squid retains DNS resolution, filtering, ACLs and cache_peer configuration.
+- ALL Squid-UID outbound TCP (IPv4, IPv6, including loopback) is redirected.
+- Original numeric IP/port goes ONLY to existing routing-socks on localhost40001.
+- Gateway runs as nobody; Squid is launched as proxy before exec, without preload.
+- IPv6 listener is omitted ONLY when all/default/lo/every interface disable_ipv6
+  values are verified1. Both IPv4 and IPv6 UID NAT rules are still mandatory.
+  Later policy change remains redirected (no listener, no egress) and supervisor
+  stops Squid; no IPv6 sysctl is enabled by this candidate.
+- Other UIDs are unaffected. No direct gateway destination injection is accepted.
+- IPv6 scoped/link-local addresses fail closed: SOCKS cannot convey scope IDs.
+- Maximum256 active connections, 30s connect handshake, 64KiB relay buffers with
+  drain backpressure, 24h connection lifetime. Excess connections are closed.
+- Supervisor stops Squid before removing owned rules. Worker failure stops both.
+  SIGKILL/power loss may leave rules within that guest; stale chains are refused,
+  never blindly flushed. A fresh private boot is the recovery path.
+
+Validation:
+  PYTHONDONTWRITEBYTECODE=1 python3 tools/network/test-async-squid.py
+  sudo -n env PYTHONDONTWRITEBYTECODE=1 unshare --net --mount-proc --pid --fork \
+    python3 tools/network/test-async-squid-netns.py --native-squid
+
+The native test uses extracted Ubuntu ARM64 Squid 6.14 packages from
+/tmp/bromure-network-audit/root (override BROMURE_SQUID_TEST_ROOT), not a host
+service installation. Extract squid, squid-common, squid-langpack, libecap3,
+and libltdl7 with dpkg-deb -x. All actual firewall/address changes occur only
+inside the new network/PID namespace; script requires root PID1.
+
+Evidence: results/async-squid-netns-20261002.log and its provenance JSON.
+Actual kernel tests cover IPv4/IPv6/loopback destinations, exact1MiB transfer,
+UID isolation, held-connect concurrency, saturation/deadline/recovery, no
+fallback when router/gateway disappears, exact rule cleanup, native Squid DNS
+sinkhole blocking, and supervisor gateway-crash cleanup. Unmodified production
+routing-socks passes direct→synthetic WARP→direct switching for both families;
+selected WARP failure does not connect directly.
+
+Mac private-image normal-route shared-window/IME/lifecycle acceptance has now
+passed (v13 and later), with no Chrome loopback bypass. This does not establish
+real VPN/proxy routing. See REAL-ROUTE-ACCEPTANCE.txt for the bounded matrix.
+
+Not yet proven: live VPN/WARP/
+WireGuard/IKEv2 up/down and custom proxy parity, long sessions, throughput at
+256 connections, release packaging. Do not enable production until those gates
+pass. This fixes a demonstrated proxy head-of-line blocking mechanism; it does
+not establish the cause of independent eight-video rendering slowness.
+
+IPv6-disabled followup evidence: results/async-squid-ipv4-policy-20261002.log
+and JSON. Tests include actual native Squid with all/default IPv6 disabled,
+then re-enable IPv6 with the supervisor deliberately SIGSTOPped: UID TCP still
+cannot reach a direct IPv6 trap before policy monitoring resumes. Supervisor
+then stops producer and cleans both NAT families. No guest policy loosening.
+
+Private offline dependency bundle was sent separately (not vendored):
+SHA256 6f8a5bd004e0d92d0dc7d24b53a0b8a77eb823cb042e010b30c3f2d6deac7784.
+Ubuntu noble ARM64 iptables,libip4tc2,libip6tc2,libxtables12=1.8.10-3ubuntu2;
+libmnl0,libnetfilter-conntrack3,libnfnetlink0,libnftnl11 and netbase included.
+Guest libc6 remains installed version (requires>=2.38). Verify SHA256SUMS then
+dpkg -i ./*.deb inside the private clone.
+
+Private counters (OFF unless explicitly requested):
+  Add bromure.experimental_async_squid_diagnostics=1 beside the existing
+  experimental_async_squid=1 kernel argument, or pass --diagnostics to the
+  private supervisor. Install the matching updated supervisor AND gateway.
+  No config-agent changes or stdout/stderr redirection are needed.
+  Root can sample /run/bromure-async-squid/diagnostics/gateway.json every5s.
+  File0600 in gateway-owned0700 directory; written atomically at startup,
+  every5s, and shutdown. No URLs, destination addresses, credentials, payloads,
+  certificates or exception messages. Capture PID+monotonic with each snapshot;
+  counters reset on gateway restart. A stale timestamp is unavailable evidence.
+
+Counters: active/peakActive, accepted SOCKS connections, rejectedCapacity,
+completed relays, failed by originalDestination/connect/relay phase, fixed
+error categories, bounded errno histogram, SOCKS reply codes, EOFs and bytes
+READ from Squid/router. Read bytes are not proof of delivery or decryption.
+Connection closure after a valid full body can still raise an EOF/shutdown
+error; do not equate every relay failure with failed HTTPS handshakes. Compare
+counter deltas at the exact browser error time and corroborate with the
+layered probe/cache.log. Supplement with process FD/thread counts (no argv or
+environment dump) to see the production routing-socks thread pool as well.
+
+TLS isolation regression:
+  sudo -n env PYTHONDONTWRITEBYTECODE=1 unshare --net --mount-proc --pid --fork \
+    python3 tools/network/test-async-squid-tls.py
+This uses actual native Squid, kernel REDIRECT, gateway and unmodified router,
+with a local trusted-certificate TLS endpoint. TLS1.2/1.3 and10 exact one-MiB
+responses (8parallel) pass; periodic/final counters and rule cleanup checked.
+TLS close_notify is completed to distinguish clean transfers from deliberate
+client TCP close/reset. It does not claim external-site or liveVPN acceptance.
+
+probe-https-route.py is an explicit private diagnostic comparing verified TLS
+through Squid hostname/numeric CONNECT, routing-socks numeric, and direct
+numeric sockets. No browser/routing settings change. A complete HTTP403 is
+TLS transport success but not successful site-content acceptance. Direct/SOCKS
+legs are diagnostic comparisons, never a workaround for browser-route failure.

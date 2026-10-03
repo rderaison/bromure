@@ -1,6 +1,6 @@
 ---
 title: "Profiles"
-description: "Creating, editing, and deleting profiles; the built-in Private Browsing profile and New Private Window; one window per persistent profile; opening links from other apps and the link chooser; Default Profile for Links; Send Link to Other Session; restoring tabs; and where profiles are stored."
+description: "Creating, editing, and deleting profiles; the built-in Private Browsing profile and New Private Window; shared windows for a profile; opening links from other apps and the link chooser; Default Profile for Links; Send Link to Other Session; restoring tabs; and where profiles are stored."
 order: 6
 ---
 
@@ -12,10 +12,10 @@ A **profile** is a named set of browser settings — which browser, which home p
 
 Whether a profile keeps anything is decided by one setting, **Retain Browsing Data**, in the profile's [General](07-profile-settings/general.mdx) settings:
 
-- **Ephemeral** (Retain Browsing Data off). Each window starts from a clean browser and everything — cookies, history, cache, downloads left in the VM — is destroyed when the window closes. You can open as many windows of an ephemeral profile as you like; each is its own VM.
-- **Persistent** (Retain Browsing Data on). The profile gets its own small disk on your Mac that holds the browser's user data: bookmarks, history, cookies, saved passwords, and open tabs. Everything else in the VM is still thrown away when the window closes. A persistent profile has **at most one window at a time**, because only one VM can use its disk. Opening it again brings the existing window to the front.
+- **Ephemeral** (Retain Browsing Data off). The session starts clean. Cookies, history, cache, and files left in the VM are destroyed when the session closes. With shared-window support, the session ends when its last window closes; on older systems each window has a separate ephemeral VM.
+- **Persistent** (Retain Browsing Data on). The profile gets its own small disk on your Mac that holds the browser's user data: bookmarks, history, cookies, saved passwords, and open tabs. Everything else in the VM is thrown away when its last window closes. Only one VM can use the profile disk: shared-window support lets several windows use that same VM and browser. Older systems allow at most one persistent-profile window. Selecting an already-open profile brings its window to the front.
 
-Both kinds start every window from the same clean base image; only the persistent profile's disk carries anything over. See [Concepts & Architecture](04-concepts.mdx) for how this works.
+Both kinds start each new VM session from the same clean base image; only the persistent profile's disk carries anything over. See [Concepts & Architecture](04-concepts.mdx) for how this works.
 
 ## The built-in Private Browsing profile
 
@@ -25,7 +25,17 @@ It has audio and GPU acceleration on, **Shared Clipboard** on, **Send Link to Ot
 
 ### New Private Window
 
-**File › New Private Window** (⇧⌘N) opens a window of the **Private Browsing** profile. If you have deleted or renamed it, Bromure uses the first ephemeral profile it finds instead. Because the profile is ephemeral, each ⇧⌘N opens a new, separate window.
+**File › New Private Window** (⇧⌘N) opens a window of the **Private Browsing** profile. If you have deleted or renamed it, Bromure uses the first ephemeral profile it finds instead. With shared-window support, ⇧⌘N adds a window to the existing Private Browsing session; otherwise it opens a separate ephemeral VM.
+
+## Picking and managing profiles
+
+Choose **File › Manage Profiles…** or **Manage Profiles…** in the profile chip. Search by name, open a profile, or use its settings button. Select several closed profiles with the checkboxes, then choose **Delete Selected** and confirm once. **Select All** selects the eligible profiles in the current search. Managed profiles and profiles whose VM is still using their data cannot be deleted.
+
+## Several windows, one profile
+
+On macOS 27 with Metal and a shared-window capable image, **File › New Window** (⌘N) adds a native window to the same profile's existing VM and Chromium process. Its windows share cookies, history, preferences and storage, while each has its own tabs. Closing the first window does not close later windows. The last window's close shuts Chromium down before releasing the VM.
+
+A persistent profile keeps its data for the next launch. An ephemeral profile's windows share temporary data until the last window closes, then that session's data is discarded. Different profiles always remain in separate VMs. On older macOS versions or images, persistent profiles retain their single-window behavior.
 
 ## Creating a profile
 

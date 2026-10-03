@@ -41,6 +41,8 @@ public final class GestureBridge {
     private static let minSendInterval: CFAbsoluteTime = 1.0 / 60.0
 
     private weak var socketDevice: VZVirtioSocketDevice?
+    public var targetProvider: (() -> String?)?
+    public var deliveryGate: ((@escaping () -> Void) -> Void)?
 
     // Coalescing state — mutated only on the main thread.
     private var pendingMagnification: Double = 0
@@ -95,6 +97,17 @@ public final class GestureBridge {
     }
 
     private func sendMessage(_ message: [String: String]) {
+        var message = message
+        if let targetProvider {
+            guard let target = targetProvider() else { return }
+            message["targetId"] = target
+        }
+        if let deliveryGate {
+            deliveryGate { [weak self] in self?.deliverMessage(message) }
+        } else { deliverMessage(message) }
+    }
+
+    private func deliverMessage(_ message: [String: String]) {
         guard let device = socketDevice else { return }
         guard let jsonData = try? JSONSerialization.data(withJSONObject: message),
               let jsonString = String(data: jsonData, encoding: .utf8) else { return }
