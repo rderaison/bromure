@@ -6,6 +6,8 @@
 #   sentry/<sourceHash>/catalog.json                          signed, 60 s TTL
 #   sentry/<sourceHash>/<kernel>/bromure_sentry-<kernel>-<sha12>.ko   immutable
 #   sentry/<sourceHash>/<kernel>/bromure_sentry-<kernel>-<sha12>.txt  build record
+#   sentry/<sourceHash>/<kernel>/bromure_sentry-<kernel>-<sha12>.ko.sig
+#       the module's own signature (Sparkle key, domain-separated statement)
 #
 # Additive only: kernels already in the published catalog stay (a rebuilt
 # kernel gets a new sha-named object, never an overwrite), and nothing is ever
@@ -67,6 +69,7 @@ for k in $BUILT; do
         continue
     fi
     put "$OUT/modules/bromure_sentry-$k.ko" "$key" application/octet-stream "$IMMUTABLE"
+    put "$OUT/modules/bromure_sentry-$k.ko.sig" "$key.sig" application/json "$IMMUTABLE"
     [ -f "$OUT/modules/bromure_sentry-$k.txt" ] && \
         put "$OUT/modules/bromure_sentry-$k.txt" "${key%.ko}.txt" "text/plain; charset=utf-8" "$IMMUTABLE"
 done
@@ -99,5 +102,7 @@ for k in $BUILT; do
     want=$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const m=c.modules.find(m=>m.kernel===process.argv[2]);process.stdout.write(m.path+" "+m.sha256)' "$CATALOG" "$k")
     got=$(curl -fsSL "$DO_SPACES_PUBLIC_BASE/${want% *}" | sha256sum | cut -d' ' -f1)
     [ "$got" = "${want#* }" ] || { echo "ERROR: $k from the CDN has sha256 $got, catalog says ${want#* }"; exit 1; }
+    curl -fsSL "$DO_SPACES_PUBLIC_BASE/${want% *}.sig" | grep -q "\"sha256\": \"${want#* }\"" \
+        || { echo "ERROR: $k's signature file is missing or names another sha256"; exit 1; }
 done
 echo "published and verified from the CDN: $BUILT"

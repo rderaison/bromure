@@ -45,24 +45,25 @@ struct SentryModuleStoreTests {
       "path": "sentry/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/6.8.0-139-generic/bromure_sentry-6.8.0-139-generic-a0656a0f8ff3.ko",
       "sha256": "a0656a0f8ff326f90b7373204b4c3dac0fedc4576db88e24d7df61f31845e8aa",
       "bytes": 8,
-      "builtAt": "2026-09-30T21:00:08.244Z"
+      "builtAt": "2026-10-03T18:54:42.496Z",
+      "signature": "Pd6Qr80gRenJ3F3IBb/It/f1TEwDfnAL3t/Z2ADb7cRGI0BrVAMXokjcvNOPWD5q25hdnGZ+mJt14d8kuFCvCw=="
     },
     {
       "kernel": "6.8.0-142-generic",
       "path": "sentry/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/6.8.0-142-generic/bromure_sentry-6.8.0-142-generic-b714b2e23f3f.ko",
       "sha256": "b714b2e23f3fd76e4d8f0b7f50d44c915ee358c0c085ecca1ed1c65a01f25905",
       "bytes": 14,
-      "headers": "linux-headers-6.8.0-142-generic 6.8.0-142.142",
-      "builtAt": "2026-09-30T21:00:08.247Z"
+      "builtAt": "2026-10-03T18:54:42.501Z",
+      "signature": "n2oy5tZnLwHK8f/ZUWTjB/5akPw/DbagrJPVkpGMzcUYm4NUyIW2QmhbR5Vkk2WcakucyksmDWcrz6DivNYdAA=="
     }
   ],
   "signature": {
-    "signedAt": "2026-09-30T21:00:08.248Z",
-    "edSignature": "b4gBShC9k90Hj01W9avjuh/zH8Y0EE9ZhLMwQLCMgMOdEnOX4uR8Ydr8WN6tNWQRHsTlM2imy4ru12/YlrawBQ=="
+    "signedAt": "2026-10-03T18:54:42.501Z",
+    "edSignature": "SnHHCNoU48QPYEutvAKFa6ofi/0FPc3Bjq+ssmF1/oZFNSnLpSjGoyi1vl2cxsafhiuPjTut+zv1VPIajy8BAg=="
   }
 }
 """#
-    static let testPublicKey = "69Dn+Wz4urZdxCB6zfQjwEsGWnJxlXl+DpNYUtA/HAE="
+    static let testPublicKey = "EF4W/MAp9ZmLXzSPquq34DlErSKulVvL7r2QLUs+V78="
     static let hash = String(repeating: "a", count: 64)
 
     func tempDir() -> URL {
@@ -194,4 +195,35 @@ struct SentryModuleStoreTests {
         #expect(s.knownKernels(for: a) == ["6.8.0-142-generic", "6.8.0-139-generic"])
         #expect(s.knownKernels(for: b) == ["6.8.0-150-generic"])
     }
+
+    @Test("Each module carries its own signature over a domain-separated statement")
+    func moduleSignatures() throws {
+        let c = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        for m in c.modules { #expect(c.isModuleSignatureValid(m, publicKeyBase64: Self.testPublicKey)) }
+        // Moving a valid signature to another module, or editing what it covers, breaks it.
+        var swapped = c.modules[0]; swapped.signature = c.modules[1].signature
+        #expect(!c.isModuleSignatureValid(swapped, publicKeyBase64: Self.testPublicKey))
+        var resized = c.modules[0]; resized.bytes += 1
+        #expect(!c.isModuleSignatureValid(resized, publicKeyBase64: Self.testPublicKey))
+        // The statement is never the raw module bytes (a Sparkle update
+        // signature covers raw bytes; the two must not be interchangeable).
+        let payload = SentryModuleCatalog.moduleSigningPayload(sourceHash: c.sourceHash, c.modules[0])
+        #expect(String(decoding: payload, as: UTF8.self).hasPrefix("bromure-sentry-module-v1\n"))
+    }
+
+    @Test("A module without its own valid signature is refused even when the catalog is signed")
+    func unsignedModuleRefused() async throws {
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
+        var c = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        // Strip the module signature but keep the catalog signature valid
+        // (module signatures aren't part of the catalog payload).
+        c.modules = c.modules.map { var m = $0; if m.kernel == "6.8.0-142-generic" { m.signature = nil }; return m }
+        #expect(c.isSignatureValid(publicKeyBase64: Self.testPublicKey))
+        serveCatalog(host, String(data: try JSONEncoder().encode(c), encoding: .utf8)!)
+        let s = store(host: host, root: root)
+        #expect(await s.ensure(kernel: "6.8.0-142-generic", hash: Self.hash) == "the 6.8.0-142-generic module isn't signed by Bromure")
+        #expect(await s.ensure(kernel: "6.8.0-139-generic", hash: Self.hash) == nil)
+    }
+
 }

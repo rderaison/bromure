@@ -33,6 +33,16 @@ import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from "
 import { join } from "node:path";
 
 export const MAGIC = "bromure-sentry-modules-v1";
+// Each module also carries its OWN signature (same Sparkle key), over a
+// domain-separated statement, never over the raw .ko bytes: Sparkle signs raw
+// update archives, so a raw-bytes signature would let a module pass for a
+// "signed update". SentryModuleCatalog.moduleSigningPayload builds the same.
+export const MODULE_MAGIC = "bromure-sentry-module-v1";
+
+export function moduleSigningPayload(sourceHash, m) {
+  return Buffer.from([MODULE_MAGIC, `sourceHash=${sourceHash}`, `kernel=${m.kernel}`,
+                      `sha256=${m.sha256.toLowerCase()}`, `bytes=${m.bytes}`].join("\n"), "utf8");
+}
 const KERNEL_RE = /^[0-9][0-9A-Za-z.+~-]*$/;
 
 const args = process.argv.slice(2);
@@ -101,6 +111,33 @@ if (previousPath && existsSync(previousPath)) {
   console.log(`make-sentry-catalog: kept ${byKernel.size} published module(s)`);
 }
 
+const unsigned = args.includes("--allow-unsigned");
+let key = null;
+if (!unsigned) {
+  const secret = process.env.SPARKLE_PRIVATE_KEY;
+  if (!secret) { console.error("make-sentry-catalog: SPARKLE_PRIVATE_KEY env is required (or --allow-unsigned)"); process.exit(1); }
+  const raw = Buffer.from(secret, "base64");
+  if (raw.length !== 64 && raw.length !== 32) {
+    console.error(`make-sentry-catalog: SPARKLE_PRIVATE_KEY must decode to 32 or 64 bytes, got ${raw.length}`);
+    process.exit(1);
+  }
+  key = createPrivateKey({
+    key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), raw.subarray(0, 32)]),
+    format: "der", type: "pkcs8",
+  });
+}
+
+// Kept entries must carry a valid module signature too (a merged catalog
+// vouches for nothing it can't re-verify).
+const pubForModules = opt("public-key");
+if (!unsigned && pubForModules) {
+  for (const m of byKernel.values()) {
+    const ok = m.signature && verify(null, moduleSigningPayload(sourceHash, m), publicKeyFromRaw(pubForModules),
+                                     Buffer.from(m.signature, "base64"));
+    if (!ok) { console.error(`make-sentry-catalog: kept module ${m.kernel} has no valid signature — refusing to merge`); process.exit(1); }
+  }
+}
+
 let added = 0;
 for (const name of readdirSync(modulesDir).sort()) {
   const match = /^bromure_sentry-(.+)\.ko$/.exec(name);
@@ -110,13 +147,27 @@ for (const name of readdirSync(modulesDir).sort()) {
   const file = join(modulesDir, name);
   const bytes = statSync(file).size;
   const sha256 = createHash("sha256").update(readFileSync(file)).digest("hex");
-  byKernel.set(kernel, {
+  const entry = {
     kernel,
     path: `${prefix}${kernel}/bromure_sentry-${kernel}-${sha256.slice(0, 12)}.ko`,
     sha256, bytes,
     headers: headersOf(join(modulesDir, `bromure_sentry-${kernel}.txt`)),
     builtAt: new Date().toISOString(),
-  });
+  };
+  if (key) {
+    const payload = moduleSigningPayload(sourceHash, entry);
+    const sig = sign(null, payload, key);
+    if (!verify(null, payload, createPublicKey(key), sig)) {
+      console.error("make-sentry-catalog: internal error — module signature failed self-verify"); process.exit(1);
+    }
+    entry.signature = sig.toString("base64");
+    // Detached copy, published beside the module (<path>.sig), so a module
+    // can be checked on its own.
+    writeFileSync(`${file}.sig`, JSON.stringify({
+      format: MODULE_MAGIC, sourceHash, kernel, sha256, bytes, edSignature: entry.signature,
+    }, null, 2) + "\n");
+  }
+  byKernel.set(kernel, entry);
   added++;
 }
 
@@ -126,20 +177,9 @@ const catalog = {
   modules: [...byKernel.values()].sort((a, b) => (a.kernel < b.kernel ? -1 : 1)),
 };
 
-if (args.includes("--allow-unsigned")) {
+if (unsigned) {
   console.log("make-sentry-catalog: --allow-unsigned — NOT signed (tests only; the app rejects unsigned production catalogs)");
 } else {
-  const secret = process.env.SPARKLE_PRIVATE_KEY;
-  if (!secret) { console.error("make-sentry-catalog: SPARKLE_PRIVATE_KEY env is required (or --allow-unsigned)"); process.exit(1); }
-  const raw = Buffer.from(secret, "base64");
-  if (raw.length !== 64 && raw.length !== 32) {
-    console.error(`make-sentry-catalog: SPARKLE_PRIVATE_KEY must decode to 32 or 64 bytes, got ${raw.length}`);
-    process.exit(1);
-  }
-  const key = createPrivateKey({
-    key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), raw.subarray(0, 32)]),
-    format: "der", type: "pkcs8",
-  });
   const signedAt = new Date().toISOString();
   const payload = signingPayload(catalog, signedAt);
   const signature = sign(null, payload, key);

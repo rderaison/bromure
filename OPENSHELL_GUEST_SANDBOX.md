@@ -192,6 +192,14 @@ and publishes it to the CDN; the app downloads the ones its workspaces need.
   `SentryModuleCatalog.signingPayload` build identical bytes). The app refuses unsigned or
   foreign-key catalogs, older ones than it has cached, paths outside the source's prefix, and
   any module whose bytes don't match; cached modules are re-hashed before every staging.
+  **Each module is also signed on its own** (same Sparkle key) over a domain-separated
+  statement: `bromure-sentry-module-v1`, sourceHash, kernel, sha256, size. Never over the raw
+  `.ko` bytes: Sparkle signs raw update archives, so a raw-bytes signature would let a module
+  pass for a signed update. The signature sits in the catalog entry and in a detached
+  `<module>.ko.sig` beside it on the CDN; the app refuses a module without a valid one even
+  under a valid catalog, and a merge refuses to keep an entry it can't re-verify.
+  (Kernel-native module signing isn't used: the guest kernel only trusts Canonical's keys and
+  MOK enrolments, and the sentry loads before lockdown, so it isn't needed.)
   `BROMURE_SENTRY_CATALOG_BASE` points it at a test server (unsigned accepted there, like
   `BROMURE_IMAGE_CATALOG_BASE`).
 - **CI** (`Jenkinsfile.sentry`, daily, kube-builder-a): for this checkout's source and the last

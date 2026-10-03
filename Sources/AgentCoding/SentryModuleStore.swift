@@ -19,6 +19,28 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
         /// Informational (unsigned): the headers package it was built against.
         public var headers: String?
         public var builtAt: String?
+        /// base64 ed25519 over `moduleSigningPayload` (Sparkle key): the
+        /// module's own signature, so it verifies without trusting whichever
+        /// catalog listed it.
+        public var signature: String?
+    }
+
+    /// Domain separator for a module's own signature. Never sign raw `.ko`
+    /// bytes with this key: Sparkle signs raw update archives, so that would
+    /// let a module pass for a signed update.
+    public static let moduleMagic = "bromure-sentry-module-v1"
+
+    /// tools/make-sentry-catalog.mjs `moduleSigningPayload`, byte for byte.
+    public static func moduleSigningPayload(sourceHash: String, _ m: Module) -> Data {
+        Data([moduleMagic, "sourceHash=\(sourceHash)", "kernel=\(m.kernel)",
+              "sha256=\(m.sha256.lowercased())", "bytes=\(m.bytes)"].joined(separator: "\n").utf8)
+    }
+
+    public func isModuleSignatureValid(_ m: Module, publicKeyBase64: String) -> Bool {
+        guard let s = m.signature, let sig = Data(base64Encoded: s),
+              let keyData = Data(base64Encoded: publicKeyBase64),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyData) else { return false }
+        return key.isValidSignature(sig, for: Self.moduleSigningPayload(sourceHash: sourceHash, m))
     }
 
     public struct Signature: Codable, Equatable, Sendable {
@@ -226,11 +248,18 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// The cached module for `kernel`, only if it still matches the catalog.
     public func verifiedModule(kernel: String, hash: String) -> Data? {
         guard SentryModuleCatalog.isKernelName(kernel),
-              let entry = cachedCatalog(hash)?.module(for: kernel),
+              let catalog = cachedCatalog(hash), let entry = catalog.module(for: kernel),
+              moduleTrusted(entry, in: catalog),
               let data = try? Data(contentsOf: cacheFile(kernel, hash)),
               data.count == entry.bytes, Self.sha256Hex(data) == entry.sha256.lowercased()
         else { return nil }
         return data
+    }
+
+    /// A module must carry its own valid signature (production); test
+    /// servers (`BROMURE_SENTRY_CATALOG_BASE`) may serve unsigned ones.
+    private func moduleTrusted(_ m: SentryModuleCatalog.Module, in c: SentryModuleCatalog) -> Bool {
+        !requireSignature || c.isModuleSignatureValid(m, publicKeyBase64: publicKeyBase64)
     }
 
     /// Make sure `kernel`'s module is cached. Returns nil on success, else why
@@ -261,6 +290,10 @@ public final class SentryModuleStore: @unchecked Sendable {
         guard let catalog else { return "no module catalog for this Bromure version (offline?)" }
         guard let entry = catalog.module(for: kernel) else {
             return "no module published for \(kernel) yet"
+        }
+        guard moduleTrusted(entry, in: catalog) else {
+            Self.log("REJECTED the \(kernel) module: missing or invalid module signature")
+            return "the \(kernel) module isn't signed by Bromure"
         }
         let url = base.appendingPathComponent(entry.path)
         guard let (data, response) = try? await session.data(from: url),
