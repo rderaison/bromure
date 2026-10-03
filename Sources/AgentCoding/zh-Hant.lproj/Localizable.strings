@@ -3624,3 +3624,6 @@
 "Mark as Done" = "標示為完成";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "將任務原樣移到「完成」——不合併任何內容，工作樹及其分支保留。";
 "Confirm" = "確認";
+"Created %@" = "建立於 %@";
+"Modified %@" = "修改於 %@";
+"Updated %@" = "更新於 %@";

@@ -3621,3 +3621,6 @@
 "Mark as Done" = "Marquer comme terminé";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Passe la tâche à Terminé telle quelle — rien n’est fusionné, et le worktree et sa branche restent.";
 "Confirm" = "Confirmer";
+"Created %@" = "Créée %@";
+"Modified %@" = "Modifiée %@";
+"Updated %@" = "Mise à jour %@";

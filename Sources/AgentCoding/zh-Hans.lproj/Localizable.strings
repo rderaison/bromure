@@ -3621,3 +3621,6 @@
 "Mark as Done" = "标记为完成";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "将任务原样移到“完成”——不合并任何内容，工作树及其分支保留。";
 "Confirm" = "确认";
+"Created %@" = "创建于 %@";
+"Modified %@" = "修改于 %@";
+"Updated %@" = "更新于 %@";
