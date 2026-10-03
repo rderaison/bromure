@@ -236,7 +236,8 @@ final class WorkspaceBrowserController {
         // the PAC's SOCKS host) is deterministic before boot.
         let pool = VMPool(config: config, storageDir: storageDir,
                           isolatePeers: false, requireImageVersion: false,
-                          pinnedOctet: remoteProxy != nil ? FatClient.browserSwitchOctet : nil)
+                          pinnedOctet: remoteProxy != nil ? FatClient.browserSwitchOctet : nil,
+                          experimentalGPU: false)
         self.pool = pool
 
         // Persistent profiles: an encrypted per-workspace disk holds Chromium's
@@ -332,7 +333,11 @@ final class WorkspaceBrowserController {
         }
         return VMConfig(
             homePage: homePage,
-            // WebGL/WebGPU on (software GL via llvmpipe): the agent frequently
+            // No GPU acceleration (no host-GPU Metal renderer, Chromium runs
+            // --disable-gpu): WebGL below falls back to SwiftShader on the CPU.
+            enableGPU: false,
+            enableMetalRenderer: false,
+            // WebGL/WebGPU on (software GL via SwiftShader): the agent frequently
             // needs to view a WebGL/canvas app it just built. Without this the
             // guest config-agent passes --disable-webgl --disable-3d-apis.
             enableWebGL: true,

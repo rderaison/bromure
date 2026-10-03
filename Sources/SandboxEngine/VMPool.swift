@@ -733,6 +733,12 @@ public final class VMPool {
             extraChromeFlags = (extraChromeFlags + " --disable-gpu-compositing")
                 .trimmingCharacters(in: .whitespaces)
         }
+        // GPU off (--disable-gpu) with WebGL on: Chromium no longer falls back
+        // to SwiftShader for WebGL on its own, so WebGL would silently vanish.
+        if !config.enableGPU, config.enableWebGL {
+            extraChromeFlags = (extraChromeFlags + " --enable-unsafe-swiftshader")
+                .trimmingCharacters(in: .whitespaces)
+        }
         // Profile opt-out of strict site isolation (Performance pane). The
         // switch is the only host-side lever: `--disable-features=
         // SitePerProcess` is overridden by config-agent's later
