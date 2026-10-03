@@ -101,7 +101,18 @@ echo "workdir-content"  > "$WORK/workdir/file"
 # case "read_only nested inside a read_write parent".) So this suite must never
 # put a broad writable path above its fixtures -- an earlier version listed /tmp
 # as read_write and every "denied" assertion silently passed through it.
-SYSTEM_RO='"/usr","/bin","/lib","/etc","/proc","/dev/urandom","/dev/tty"'
+# The agent's HOME is granted, because a real workspace grants it: sandboxd
+# adds `run_as_home` to every launch (see note_addition in bromure-sandboxd).
+# Without it `git init` dies rc=128 -- measured, from outside the pane:
+#
+#   warning: unable to access '/home/ubuntu/.gitconfig': Permission denied
+#   fatal: unknown error occurred while reading the configuration files
+#
+# which is not a sandbox finding at all, it is this fixture granting less than
+# production does. Section 12's plant step was hiding that behind a 2>/dev/null
+# and reporting "planted" with no repository; the host measured `git init`
+# working fine in a real strict workspace.
+SYSTEM_RO='"/usr","/bin","/lib","/etc","/proc","/dev/urandom","/dev/tty","'"$HOME"'"'
 SYSTEM_RW='"/dev/null"'
 
 full_spec() {

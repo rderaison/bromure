@@ -582,6 +582,18 @@ run_case_once() {
     sudo rm -rf "$WORK/meta" "$WORK/run" "$WORK/home" "$WORK/nosudo" "$WORK/sudo1" \
                 "$WORK/etc" "$WORK/strict-run"
     mkdir -p "$WORK/meta" "$WORK/run" "$WORK/home" "$WORK/nosudo" "$WORK/sudo1" \
+    # hostname.txt holding THIS machine's hostname, which is production's steady
+    # state: the host sets the hostname at boot and stages the matching file, so
+    # `task_set_hostname` returns at its first guard and writes nothing.
+    #
+    # Without it the task wants a hostname it can never reach -- it writes
+    # /etc/hostname and /etc/hosts with HARDCODED paths (unlike
+    # task_openshell_advisor_host, which honours BROMURE_HOSTS_FILE), the sandbox
+    # denies both because /etc is read-only, the hostname therefore never changes,
+    # the guard never trips, and it retries for the life of the session. That drip
+    # was 2 of the denials I wrongly reported as a product issue; the host
+    # measured zero in a real workspace, for exactly this reason.
+    hostname > "$WORK/meta/hostname.txt"
              "$WORK/workdir"
     # The literal NONE stages no spec at all: a strict-only workspace, which is
     # the Phase-4 sandbox that predates this work and has no supervisor.
@@ -1251,6 +1263,25 @@ if den:
     print("  FAIL an idle workspace produced %d sandbox_denied event(s):" % len(den))
     for what, n in by.most_common(8):
         print("         %s  x%d" % (what, n))
+    # NAME the caller. `comm` alone ("install", "tee") sent me down two wrong
+    # diagnoses -- both are helpers that half a dozen agentd tasks invoke. The
+    # log already holds `exec` events carrying argv, so correlating on pid says
+    # which command line it actually was, and its parent says which task.
+    execs = {r.get("pid"): r for r in rows if r.get("kind") == "exec"}
+    print("         -- callers, from the exec events in the same log:")
+    for r in den[:6]:
+        pid, ppid = r.get("pid"), None
+        e = execs.get(pid)
+        if e:
+            ppid = e.get("ppid")
+            print("         pid %s argv: %s" % (pid, (e.get("argv") or "?")[:96]))
+        else:
+            print("         pid %s: no exec event captured (started before the "
+                  "sentry, or exec'd outside the cgroup)" % pid)
+        pe = execs.get(ppid)
+        if pe:
+            print("           parent %s argv: %s"
+                  % (ppid, (pe.get("argv") or "?")[:96]))
     sys.exit(1)
 print("  ok   an idle workspace produced ZERO sandbox_denied events")
 if sudo_gain:
@@ -1367,7 +1398,19 @@ PY
     sleep 1
 }
 
-SYSTEM_RO='"/usr","/bin","/lib","/etc","/proc","/dev/urandom","/dev/tty","/run/utmp"'
+# `/mnt/bromure-meta` is granted, because sandboxd's ADDITIONS_READ_ONLY grants
+# the meta share in every real workspace. This suite points $META at a temp
+# directory, so sandboxd granted THAT instead -- and anything reading the real
+# path was denied. That is what produced "13 sandbox_denied in a 60s idle
+# window", which I reported as a product issue and which the host could not
+# reproduce: in a real workspace those files are readable and an idle minute
+# gives zero denials.
+#
+# Granting it here makes the idle assertion mean what it claims. The lesson is
+# narrower than "the test was wrong": I checked that the test discounted
+# session-start denials, found it did, and used that to vouch for the whole
+# finding -- which did not follow.
+SYSTEM_RO='"/usr","/bin","/lib","/etc","/proc","/dev/urandom","/dev/tty","/run/utmp","/mnt/bromure-meta"'
 # The same list WITHOUT /dev/urandom, for the case that proves OpenShell's
 # baseline enrichment supplies it rather than the policy.
 SYSTEM_RO_NO_URANDOM='"/usr","/bin","/lib","/etc","/proc","/dev/tty","/run/utmp"'
