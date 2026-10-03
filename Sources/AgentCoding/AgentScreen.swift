@@ -47,7 +47,25 @@ enum AgentScreen {
     /// back to an unnumbered list (the cursor row and the rows aligned with
     /// it) when the dialog doesn't number its rows.
     static func liveMenu(_ lines: [String], after from: Int) -> Menu? {
-        numberedMenu(lines, after: from) ?? unnumberedMenu(lines, after: from)
+        // A dialog replaces the agent's input box, so its cursor row is the
+        // LAST cursor glyph on screen. One below it — the input box, even
+        // bare ("❯" once trailing blanks are trimmed) — means the row is the
+        // user's own message echoed in the conversation ("❯ What is…?"
+        // wrapped onto a second, aligned line read as two options: every
+        // question showed as a card while the agent started thinking).
+        let lastGlyph = lines.indices.last { $0 > from && glyphRow(lines[$0]) }
+        guard let menu = numberedMenu(lines, after: from) ?? unnumberedMenu(lines, after: from)
+        else { return nil }
+        if let lastGlyph, lastGlyph > menu.lastOffset { return nil }
+        return menu
+    }
+
+    /// A line that starts with a cursor glyph — a highlighted row, or an
+    /// input box's prompt with nothing typed in it.
+    private static func glyphRow(_ line: String) -> Bool {
+        let t = unboxed(line).trimmingCharacters(in: .whitespaces)
+        guard let g = t.first, cursorGlyphs.contains(g) else { return false }
+        return t.count == 1 || t.dropFirst().first.map { $0 == " " || $0 == "\u{00a0}" } == true
     }
 
     private static func numberedMenu(_ lines: [String], after from: Int) -> Menu? {
