@@ -2463,6 +2463,12 @@ final class SharedBrowserVMOwner {
     }
     var presentationWindow: NSWindow? { presentationSession?.window }
 
+    func hasOtherOpenWindow(than session: BrowserSession) -> Bool {
+        windows.contains { index, other in
+            other !== session && !closingWindows.contains(index) && !other.closing
+        }
+    }
+
     init(root: BrowserSession, warm: VMPool.WarmVM, socket: VZVirtioSocketDevice) {
         self.root = root; self.warm = warm
         controller = SharedWindowControllerBridge(socketDevice: socket)
@@ -2728,7 +2734,7 @@ final class SharedBrowserVMOwner {
                     root.sharedOwner = nil
                     await root.teardown()
                 }
-            } catch { report(error) }
+            } catch { report(error, presentAlert: false) }
         }
     }
 
@@ -2780,8 +2786,9 @@ final class SharedBrowserVMOwner {
         } catch { print("[shared-window] Browser shutdown could not be verified: \(error)") }
     }
 
-    private func report(_ error: Error) {
+    private func report(_ error: Error, presentAlert: Bool = true) {
         print("[shared-window] \(error)")
+        guard presentAlert else { return }
         let alert = NSAlert(); alert.messageText = "Shared browser window"; alert.informativeText = error.localizedDescription
         if let window = windows.values.first(where: { !$0.closing })?.window { alert.beginSheetModal(for: window) }
     }
@@ -5208,6 +5215,11 @@ private final class SessionDelegateHelper: NSObject, VZVirtualMachineDelegate, N
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let session else { return true }
         if session.closing || session.confirmed { return true }
+        if session.sharedOwner?.hasOtherOpenWindow(than: session) == true {
+            guard session.promptSaveTraceIfNeeded() else { return false }
+            session.confirmed = true
+            return true
+        }
         // Skip the prompt when the user previously checked "Remember my decision"
         // on the Close button. Cancel intentionally can't be remembered — that
         // would make the window unclosable.
