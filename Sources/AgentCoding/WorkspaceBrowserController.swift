@@ -236,7 +236,8 @@ final class WorkspaceBrowserController {
         // the PAC's SOCKS host) is deterministic before boot.
         let pool = VMPool(config: config, storageDir: storageDir,
                           isolatePeers: false, requireImageVersion: false,
-                          pinnedOctet: remoteProxy != nil ? FatClient.browserSwitchOctet : nil)
+                          pinnedOctet: remoteProxy != nil ? FatClient.browserSwitchOctet : nil,
+                          experimentalGPU: false)
         self.pool = pool
 
         // Persistent profiles: an encrypted per-workspace disk holds Chromium's
@@ -335,6 +336,8 @@ final class WorkspaceBrowserController {
             // WebGL/WebGPU on (software GL via llvmpipe): the agent frequently
             // needs to view a WebGL/canvas app it just built. Without this the
             // guest config-agent passes --disable-webgl --disable-3d-apis.
+            // AC presents Apple's VZ scanout, not the custom Metal surfaces.
+            enableMetalRenderer: false,
             enableWebGL: true,
             // Per-workspace permission toggles (Settings → Browser). The host
             // file-transfer bridge carries bytes both ways — uploads (host→guest)

@@ -345,27 +345,30 @@ def resolve_user_agent(cfg):
 def graphics_backend(cfg):
     """Resolve the host-selected device backend, preserving legacy defaults.
 
-    A request for VirGL does not prove acceleration: the host must configure
-    the device before boot and verify the renderer separately. Profile GPU
-    policy takes precedence over device selection.
+    Both explicit host opt-in and a device with negotiated VirGL features
+    are required. A stale config/image cannot enable the patched Mesa/video
+    stack on Apple's standard VZ device. This is capability evidence, not
+    proof that rendering or decoding succeeds. Profile policy takes priority.
     """
-    if cfg.get("graphicsBackend") == "virgl" and not cfg.get("disableGPU"):
+    if (cfg.get("graphicsBackend") == "virgl" and not cfg.get("disableGPU")
+            and virgl_video_device() is not None):
         return "virgl"
     return "software"
 
 
-def virgl_video_device():
+def virgl_video_device(sysfs_root="/sys/class/drm",
+                       mesa_marker="/opt/bromure/mesa-virgl/graphics-build.txt"):
     """Select the render node whose negotiated virtio features include VirGL."""
     import glob
-    if not os.path.isfile("/opt/bromure/mesa-virgl/graphics-build.txt"):
+    if not os.path.isfile(mesa_marker):
         return None
-    for node in sorted(glob.glob("/sys/class/drm/renderD*")):
+    for node in sorted(glob.glob(os.path.join(sysfs_root, "renderD*"))):
         for features in [node + "/device/features"] + glob.glob(node + "/device/virtio*/features"):
             try:
                 with open(features) as stream:
                     bits = stream.read().strip()
                 # Linux virtio sysfs prints features in bit-index order.
-                if len(bits) >= 32 and bits[0] == "1":
+                if len(bits) >= 32 and set(bits) <= {"0", "1"} and bits[0] == "1":
                     return "/dev/dri/" + os.path.basename(node)
             except OSError:
                 continue

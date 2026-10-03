@@ -32,12 +32,13 @@ config = load_script("config-agent")
 diagnostics = load_script("graphics-diagnostics")
 
 
-def chrome_env(cfg):
+def chrome_env(cfg, virgl_device="/dev/dri/renderD129"):
     stream = io.StringIO()
     # Exercise the actual config writer, without guest filesystem writes or
     # spawning an installed browser.
     with patch("builtins.open") as mocked_open, \
-            patch.object(config, "write_chrome_extension_forcelist"):
+            patch.object(config, "write_chrome_extension_forcelist"), \
+            patch.object(config, "virgl_video_device", return_value=virgl_device):
         mocked_open.return_value.__enter__.return_value = stream
         config.write_chrome_env(cfg)
     return stream.getvalue()
@@ -85,6 +86,37 @@ class GuestGraphicsConfigTests(unittest.TestCase):
                 expected = ["--no-first-run"]
                 if value and value.strip(): expected.append("--user-agent=" + value.strip())
                 self.assertEqual(args, expected, (browser, value))
+
+    def test_virgl_request_without_negotiated_device_stays_software(self):
+        backend, software, flags = shell_environment(chrome_env({
+            "graphicsBackend": "virgl", "gpuAccel": True,
+        }, virgl_device=None))
+        self.assertEqual((backend, software), ("software", "1"))
+        self.assertFalse(any("AcceleratedVideoDecodeLinuxGL" in f for f in flags))
+        self.assertFalse(any("hardware-video-device-path" in f for f in flags))
+
+    def test_device_alone_never_enables_virgl(self):
+        self.assertEqual(shell_environment(chrome_env({}, virgl_device="/dev/dri/renderD129"))[:2],
+                         ("software", "1"))
+
+    def test_actual_sysfs_feature_probe_requires_negotiated_virgl_and_mesa(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "graphics-build.txt"
+            node = root / "drm/renderD129/device/virtio9"
+            node.mkdir(parents=True)
+            features = node / "features"
+            marker.write_text("virgl-fence-reference=1\n")
+            for bits, expected in [("0" * 64, None), ("1" + "0" * 63, "/dev/dri/renderD129"),
+                                   ("1", None), ("1x" + "0" * 62, None)]:
+                features.write_text(bits + "\n")
+                self.assertEqual(config.virgl_video_device(str(root / "drm"), str(marker)), expected)
+            features.write_text("1" + "0" * 63)
+            marker.unlink()
+            self.assertIsNone(config.virgl_video_device(str(root / "drm"), str(marker)))
+            marker.touch()
+            features.unlink()
+            self.assertIsNone(config.virgl_video_device(str(root / "drm"), str(marker)))
 
     def test_old_host_keeps_software_gl_and_existing_flags(self):
         backend, software, flags = shell_environment(chrome_env({"gpuAccel": True}))
