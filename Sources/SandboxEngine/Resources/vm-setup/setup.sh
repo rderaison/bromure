@@ -960,8 +960,14 @@ done
 # connect-at-startup VPN is configured — prevents IP leak during handshake).
 mkdir -p /mnt/opt/bromure/splash
 install_config splash/splash.html /mnt/opt/bromure/splash/splash.html
-install_config splash/night.jpg   /mnt/opt/bromure/splash/night.jpg
-install_config splash/day.jpg     /mnt/opt/bromure/splash/day.jpg
+mkdir -p /mnt/opt/bromure/splash/fonts
+for font in Manrope-SemiBold.ttf InterTight.woff2 FragmentMono.woff2; do
+    install_config "splash/fonts/$font" "/mnt/opt/bromure/splash/fonts/$font"
+done
+mkdir -p /mnt/opt/bromure/splash/licenses
+for license in Manrope-OFL.txt InterTight-OFL.txt FragmentMono-OFL.txt ASSETS.txt; do
+    install_config "splash/licenses/$license" "/mnt/opt/bromure/splash/licenses/$license"
+done
 
 # Native messaging hosts (link sender + file picker + trace + corporate guard)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts
