@@ -2909,6 +2909,7 @@ final class BrowserSession {
            let gpuView = try? HostGPUFrameView(gpuFrame: vmView.bounds) {
             gpuView.autoresizingMask = [.width, .height]
             gpuView.guestDisplayScale = Double(VMConfig.resolvedDisplayScale())
+            gpuView.limitsStartupScale = true
             gpuView.hiddenTopRows = config.nativeChromeInset
             gpuView.displaySizeChanged = { [weak graphics] width, height in
                 graphics?.resizeDisplay(width: width, height: height)
@@ -2929,8 +2930,11 @@ final class BrowserSession {
 
         }
 
-        let windowWidth = CGFloat(config.displayWidth) / 2
-        let windowHeight = CGFloat(config.displayHeight) / (warmVM.graphicsSession == nil ? 1 : 2)
+        // Both renderer paths use framebuffer pixels. Convert both axes to
+        // points once, using the same scale sent to Chromium.
+        let displayScale = CGFloat(max(VMConfig.resolvedDisplayScale(), 1))
+        let windowWidth = CGFloat(config.displayWidth) / displayScale
+        let windowHeight = CGFloat(config.displayHeight) / displayScale
 
         // Wrap vmView in a drop target that accepts file drags from macOS.
         // The drop target — and the VZ scanout — span the FULL framebuffer,

@@ -16,6 +16,8 @@ if [[ -z "$renderer" && ${BROMURE_BUILD_GPU_RENDERER:-auto} != 0 && $(uname -m) 
 fi
 [[ -n "$renderer" ]] || exit 0
 [[ -x "$renderer/Contents/MacOS/renderer" ]] || { echo 'Invalid renderer XPC bundle' >&2; exit 1; }
+protocol=$(/usr/libexec/PlistBuddy -c 'Print :BromureRendererProtocolVersion' "$renderer/Contents/Info.plist" 2>/dev/null || true)
+[[ "$protocol" == 2 ]] || { echo 'Outdated GPU renderer bundle: rebuild with tools/gpu/package-renderer-xpc.sh; remove any stale BROMURE_RENDERER_XPC override.' >&2; exit 1; }
 codesign --verify --deep --strict "$renderer"
 mkdir -p "$contents/XPCServices"
 service="$contents/XPCServices/io.bromure.gpu.renderer.broker.xpc"

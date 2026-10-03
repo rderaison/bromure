@@ -23,6 +23,8 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private var importedFrameGeneration: UInt64 = 0
     private var diagnosticSnapshotCount = 0
     public var guestDisplayScale: Double = 1
+    /// Do not enlarge boot-sized pixels while the first window modeset settles.
+    public var limitsStartupScale = false
     public var displayHeightAlignment: Int = 1
     public var hiddenTopRows = 0
     public var displaySizeChanged: ((Int, Int) -> Void)? {
@@ -181,6 +183,13 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
             throw Self.failure("Cannot import GPU display surface")
         }
         self.texture = texture
+        if limitsStartupScale {
+            let targetScale = max(guestDisplayScale, 1)
+            if abs(Double(width) - bounds.width * targetScale) < 8 &&
+               abs(Double(height) - bounds.height * targetScale) < max(targetScale, 1) {
+                limitsStartupScale = false
+            }
+        }
         importedFrameGeneration &+= 1
         if let wanted = lastRequestedDisplaySize, wanted.0 == width, wanted.1 == height {
             lastRequestedDisplaySize = nil
@@ -266,7 +275,8 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         let crop = hiddenTopRows > 0 && visible.maxY < bounds.maxY
             ? min(CGFloat(hiddenTopRows), max(size.height - 1, 0)) : 0
         let target = crop > 0 ? visible : bounds
-        let scale = min(target.width / max(size.width, 1), target.height / max(size.height - crop, 1))
+        let fittedScale = min(target.width / max(size.width, 1), target.height / max(size.height - crop, 1))
+        let scale = limitsStartupScale ? min(fittedScale, 1 / max(guestDisplayScale, 1)) : fittedScale
         let width = size.width * scale, contentHeight = (size.height - crop) * scale
         return NSRect(x: target.midX - width / 2, y: target.midY - contentHeight / 2,
                       width: width, height: size.height * scale)

@@ -23,6 +23,19 @@ public struct HostGPUCursor { public var width, height, hotX, hotY: Int; public 
     @MainActor static func wait(_ seconds: Double) { RunLoop.main.run(until: Date(timeIntervalSinceNow: seconds)) }
     @MainActor static func main() throws {
         _ = NSApplication.shared
+        let startup = try HostGPUFrameView(gpuFrame: NSRect(x:0,y:0,width:200,height:120))
+        startup.guestDisplayScale = 2
+        startup.limitsStartupScale = true
+        try startup.present(surface(200,120,0xff0088ff))
+        let bootRect = startup.guestContentRect(for: NSSize(width:200,height:120))
+        precondition(bootRect.width == 100 && bootRect.height == 60,
+                     "startup framebuffer must not receive a second Retina enlargement")
+        try startup.present(surface(400,240,0xff0088ff))
+        precondition(!startup.limitsStartupScale, "matching initial mode releases startup scale cap")
+        startup.setFrameSize(NSSize(width:300,height:180))
+        let resizeRect = startup.guestContentRect(for: NSSize(width:400,height:240))
+        precondition(resizeRect.width == 300 && resizeRect.height == 180,
+                     "ordinary later resizing still scales the retained image")
         let v = try HostGPUFrameView(gpuFrame: NSRect(x: 0, y: 0, width: 100, height: 100))
         v.guestDisplayScale = 2
         v.hiddenTopRows = 16
