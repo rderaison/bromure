@@ -19,7 +19,7 @@ public final class LinuxImageManager {
     /// the xtradeb PPA as a native deb, and glibc means Cloudflare WARP
     /// (and soon official Google Chrome) install as normal debs — the
     /// gcompat/resolv-stub compat layer is gone.
-    public static let imageVersion = "501"
+    public static let imageVersion = "502"
 
     /// Human description of the image — surfaces in
     /// browser-img-catalog.json (via `bromure init-foss-image`'s
@@ -64,6 +64,14 @@ public final class LinuxImageManager {
         guard Self.validGraphicsCapabilities(data),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return json["pointerProtocolVersion"] as? Int == 1 && json["pointerPort"] as? Int == 5821
+    }
+
+    /// Older images remain usable through the single-output graphics path.
+    public var supportsSharedWindows: Bool {
+        guard supportsExperimentalVirgl,
+              let data = try? Data(contentsOf: graphicsCapabilitiesURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["sharedWindowProtocolVersion"] as? Int == 1 && json["controllerPort"] as? Int == 5832
     }
 
     static func validGraphicsCapabilities(_ data: Data) -> Bool {

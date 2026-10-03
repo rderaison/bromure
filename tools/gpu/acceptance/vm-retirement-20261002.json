@@ -1,0 +1,10 @@
+{
+  "source": "Sources/SandboxEngine/VMPool.swift",
+  "sourceSHA256": "d20df8d8ca7404b52cd60c666ab9628067db328a6e7e228db5a30153c1e0c31a",
+  "routineSHA256": "8034ace58f6e9dd8e6d674319a00ee0d53f52b9c9443be00c49389ae1facce79",
+  "generatedSHA256": "2a3d5acdbca6e8de8c6fe516d0a1c73a50e91c3e7ee17236c8b8839ece402a2a",
+  "scope": "Actual source routine and owner token; fake VM/resources, real Swift Tasks and30s deadline",
+  "passed": true,
+  "stdout": "RETIREMENT_CONCURRENT_COPIES_PASS\nRETIREMENT_TRANSITIONS_PASS\nRETIREMENT_MISSING_LATE_CALLBACK_PASS\nRETIREMENT_CANCELLED_WAITER_PASS\n[VMPool] Stop failed; retaining ownership: Error Domain=fakeStop Code=1 \"(null)\"\nRETIREMENT_STOP_ERROR_PASS\n[VMPool] Cleanup timed out; owner will reap after VM stops\nRETIREMENT_TIMEOUT_LATE_REAP_PASS elapsed=30.03940062498441\nBROMURE_VM_RETIREMENT_ACTUAL_ROUTINE_PASS\n",
+  "stderr": ""
+}

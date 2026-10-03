@@ -1,0 +1,155 @@
+{
+  "date": "2026-10-02",
+  "hostRAMGiB": 64,
+  "hostLogicalCPUs": 18,
+  "guestVCPUs": 9,
+  "maximumRealRenderedWindowsTested": 16,
+  "singleXorgScreenLimit": 16,
+  "runs": [
+    {
+      "count": 8,
+      "guestMemoryGiB": 4,
+      "exitCode": 0,
+      "accepted": true,
+      "lifecyclePassed": true,
+      "sourcePixelPasses": 8,
+      "animationFPS": [
+        60.002532033556115,
+        60.00240009600383,
+        59.93589957155327,
+        60.002400096003846,
+        59.83595087854901,
+        59.835751528377,
+        59.86907386072282,
+        59.90258334055186
+      ],
+      "peakHostMatchedRSSMiB": 6395.203125,
+      "logSHA256": "df9a392b100edef87197b5dc2f1950998ed6d8116b2a12728ab4947d98f3dbde",
+      "probeSHA256": "0ca7d251e3ccf2283f2ad71a4628d49316750f80de46297802970ff3587f0716",
+      "binarySHA256": "658680a92ca5f583b128509e34713d3f0e114af9efa6af3ee4474a76a889dfcd",
+      "rawResults": "/private/tmp/bromure-multigpu-scale-results/8/results.json",
+      "rawResultsSHA256": "f001b4f13cada621f6490da9561e0462cdcbb81fe8453af9321ca3acb1afb3db",
+      "diagnostics": null
+    },
+    {
+      "count": 16,
+      "guestMemoryGiB": 4,
+      "exitCode": 1,
+      "accepted": false,
+      "lifecyclePassed": false,
+      "sourcePixelPasses": 0,
+      "animationFPS": [],
+      "peakHostMatchedRSSMiB": 8357.265625,
+      "logSHA256": "ec529d341ab9f6e1284f8c9c3e4d1859a28ff39ffd212bf9c5a47a37256b8aed",
+      "probeSHA256": "0ca7d251e3ccf2283f2ad71a4628d49316750f80de46297802970ff3587f0716",
+      "binarySHA256": "658680a92ca5f583b128509e34713d3f0e114af9efa6af3ee4474a76a889dfcd",
+      "rawResults": "/private/tmp/bromure-multigpu-scale-results/16/results.json",
+      "rawResultsSHA256": "11357083998541a5002cb7b321f0aae5324bbaac66ec0c9c78f1ea634e18f3a3",
+      "diagnostics": null
+    },
+    {
+      "count": 16,
+      "guestMemoryGiB": 8,
+      "exitCode": 0,
+      "accepted": true,
+      "lifecyclePassed": true,
+      "sourcePixelPasses": 16,
+      "animationFPS": [
+        60.00220008066963,
+        59.969215802554686,
+        59.96906542928384,
+        59.93573076256383,
+        59.969016008395656,
+        59.93573076256384,
+        59.935930556990805,
+        59.935699888391,
+        59.835751528376996,
+        59.8026346475476,
+        59.83572676240383,
+        59.80243540837234,
+        59.83577626680697,
+        59.80239209568383,
+        59.80263464754759,
+        59.7359073538032
+      ],
+      "peakHostMatchedRSSMiB": 9479.75,
+      "logSHA256": "735a1847439b91aeb0719af38c4e1f5658864bded40802dbe3b273fd7e4fbd69",
+      "probeSHA256": "0a1098ba1f4dcf4039b82a665ef14b8205e54564a06883ba6dc94fcc451f1dc5",
+      "binarySHA256": "658680a92ca5f583b128509e34713d3f0e114af9efa6af3ee4474a76a889dfcd",
+      "rawResults": "/private/tmp/bromure-multigpu-scale-results/16-8gb/results.json",
+      "rawResultsSHA256": "72563ec7539f64afd55b31159f4e95aa7ff2482f608349844523be68b07cd352",
+      "diagnostics": {
+        "xorgVersion": "2:21.1.12-1ubuntu1.8",
+        "minAvailableKiB": 3180824,
+        "kernelOOM": [],
+        "oomKills": 0
+      }
+    },
+    {
+      "count": 16,
+      "guestMemoryGiB": 4,
+      "exitCode": 1,
+      "accepted": false,
+      "lifecyclePassed": false,
+      "sourcePixelPasses": 0,
+      "animationFPS": [],
+      "peakHostMatchedRSSMiB": 7803.1875,
+      "logSHA256": "99c5cd0acf0b426af2a9e6d72337f7212686d0c9ba8007a68d3d09c66638e02b",
+      "probeSHA256": "0a1098ba1f4dcf4039b82a665ef14b8205e54564a06883ba6dc94fcc451f1dc5",
+      "binarySHA256": "658680a92ca5f583b128509e34713d3f0e114af9efa6af3ee4474a76a889dfcd",
+      "rawResults": "/private/tmp/bromure-multigpu-scale-results/16-4gb-diagnostic/results.json",
+      "rawResultsSHA256": "4fcb1cf29d2ca743af1b92cee417c0cf2ea5b0ebf6cfea883dc7c1f8070dd9e5",
+      "diagnostics": {
+        "xorgVersion": "2:21.1.12-1ubuntu1.8",
+        "minAvailableKiB": 1620,
+        "kernelOOM": [],
+        "oomKills": 0
+      }
+    }
+  ],
+  "fourWindowInitialRun": {
+    "exitCode": 0,
+    "rAFRateRange": [
+      59.97,
+      60.01
+    ],
+    "fullLog": "/private/tmp/bromure-multigpu-scale4.log",
+    "logSHA256": "287e72306f5d0c8d0410f88441325471667bbf2bf20caac90aa92c0c6a1b944d"
+  },
+  "configurationValidation": {
+    "countsAccepted": [
+      2,
+      4,
+      8,
+      16,
+      24,
+      32,
+      48,
+      64,
+      128,
+      256
+    ],
+    "note": "Minimal configuration validation only; does not prove boot feasibility."
+  },
+  "minimalBootProbe": {
+    "DRIVER_OKCount": 24,
+    "firstFailedCount": 25,
+    "otherFailedCounts": [
+      26,
+      28,
+      30,
+      32,
+      64
+    ],
+    "note": "Read-only guest, no VirGL capsets or rendering; maximum depends on other configured devices. Not a universal GPU-count API guarantee."
+  },
+  "limitations": [
+    "Per-browser rAF callback cadence during a simple full-canvas clear animation is not an onscreen GPU-frame or heavy-web benchmark.",
+    "Windows overlap; this does not measure a physical 16-monitor desktop.",
+    "Inputs are direct view handler NSEvents plus direct bridge wheels, not manual AppKit hit-testing.",
+    "Resize assertion covers changed geometry on first two outputs only.",
+    "Host RSS sums all matching Bromure/Virtualization processes and may include unrelated sessions or shared pages.",
+    "16/4GiB failed with severe memory pressure but no kernel OOM kill was recorded.",
+    "This independent-screen prototype uses separate Chromium browser processes; shared-process File New Window implementation remains separate work."
+  ]
+}

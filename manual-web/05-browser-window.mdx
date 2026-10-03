@@ -6,9 +6,9 @@ order: 5
 
 # The Browser Window
 
-Every Bromure window is a separate browser running in its own Linux virtual machine. What you see in the window is that browser's page; the tabs, address bar, and buttons around it are drawn by macOS and talk to the browser inside the VM. This chapter describes that window chrome, the menus, the keyboard, and the dialogs you meet while browsing. It is for everyone who uses Bromure day to day.
+On macOS 27, with Metal enabled and an image that supports shared windows, windows of the same profile share one Linux VM and one Chromium browser process. Each macOS window has its own tabs and display. Closing one window leaves the others running; the VM stops when the last window closes or you quit Bromure. Other profiles use separate VMs. Older macOS versions and images keep the original window model. What you see in the window is that browser's page; the tabs, address bar, and buttons around it are drawn by macOS and talk to the browser inside the VM. This chapter describes that window chrome, the menus, the keyboard, and the dialogs you meet while browsing. It is for everyone who uses Bromure day to day.
 
-How windows relate to profiles — which profile a window runs, and why a persistent profile has only one window — is covered in [Profiles](06-profiles.mdx). What happens inside the VM is described in [Concepts & Architecture](04-concepts.mdx).
+How windows relate to profiles — which profile a window runs, and how its windows share saved or temporary browsing data — is covered in [Profiles](06-profiles.mdx). What happens inside the VM is described in [Concepts & Architecture](04-concepts.mdx).
 
 ## The window at a glance
 
@@ -20,7 +20,7 @@ A browser window has three parts:
 
 If the profile has a color, a thin border of that color (3 points) runs around the whole page, so you can tell at a glance which profile a window belongs to. Profiles without a color (such as the built-in **Private Browsing** profile) have no border.
 
-A window can't be made smaller than 800 × 600 points. Each new window opens centered, offset slightly from the previous one so they don't stack exactly on top of each other.
+Bromure remembers the size of the last resized browser window for new windows and future launches. Fullscreen dimensions are not saved, and restored sizes fit the current screen. A window can't be made smaller than 800 × 600 points. Each new window opens centered, offset slightly from the previous one so they don't stack exactly on top of each other.
 
 With Native Tabs on, the window's title text is hidden, but it still appears in the **Window** menu and in Mission Control as **Bromure — *profile name*** (for example **Bromure — Work**).
 
@@ -37,6 +37,10 @@ Native Tabs is turned off automatically when you enable browser extensions for a
 - The browser inside the VM receives every key you press while its window is in front, including system shortcuts such as ⌘Tab and ⌘Space.
 
 The rest of this chapter describes windows with Native Tabs on.
+
+## Address completion
+
+As you type a URL, Bromure uses the current profile's Chromium history to complete a matching address. The suggested suffix is selected: keep typing to replace it, or press Return to use the completed URL. Backspace does not immediately put a deleted suffix back. History remains inside that profile's VM; another profile's history is never used.
 
 ## The native tab bar
 

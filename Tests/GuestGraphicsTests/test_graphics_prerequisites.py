@@ -42,8 +42,24 @@ class GraphicsPrerequisitesTests(unittest.TestCase):
         # Missing optional package metadata doesn't defeat actual loadability.
         self.assertEqual(report["packages"], {})
 
+    def test_shared_window_contract_is_optional_but_complete_when_advertised(self):
+        marker = json.loads((VM_SETUP / 'configs/graphics-capabilities.json').read_text())
+        self.assertEqual(marker['sharedWindowProtocolVersion'], 1)
+        self.assertEqual(marker['controllerPort'], 5832)
+        self.assertFalse(self.report(missing_guest='/usr/local/bin/shared_windows.py')['readyForGuestProbe'])
+        self.assertFalse(self.report(missing_guest='/usr/local/bin/tab-agent.py')['readyForGuestProbe'])
+        self.assertFalse(self.report(missing_guest='/usr/local/bin/cdp-agent.py')['readyForGuestProbe'])
+        for changes in ({'controllerPort': 1}, {'sharedWindowProtocolVersion': True},
+                        {'sharedWindowProtocolVersion': 2}):
+            self.assertTrue(prerequisites.contract_issues(dict(marker, **changes)))
+        marker.pop('sharedWindowProtocolVersion')
+        self.assertTrue(prerequisites.contract_issues(marker))
+        marker.pop('controllerPort')
+        self.assertFalse(prerequisites.contract_issues(marker))
+
     def test_broken_egl_or_browser_fails_packaging_gate(self):
-        for kwargs in ({"missing_library": "libEGL_mesa.so.0"}, {"browser_exit": 127}):
+        for kwargs in ({"missing_library": "libEGL_mesa.so.0"},
+                       {"missing_library": "libXss.so.1"}, {"browser_exit": 127}):
             with self.subTest(kwargs=kwargs):
                 report = self.report(**kwargs)
                 self.assertFalse(report["readyForGuestProbe"])

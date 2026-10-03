@@ -58,6 +58,8 @@ Host → guest:
   {"cmd":"back","id":"T"}
   {"cmd":"forward","id":"T"}
   {"cmd":"mouse_park"}    # cursor left the visible area; clear hover state
+  {"cmd":"query_history","request_id":"R","query":"exa","limit":8}
+  # Replies history_suggestions with same request_id/query, status, items.
 
 Started from xinitrc when NATIVE_CHROME=1.
 """
@@ -77,6 +79,7 @@ import sys
 import threading
 import time
 from urllib.parse import urlparse, urljoin
+from pathlib import Path
 
 # Hard gate on whether printing is honoured. Set from chrome-env at agent
 # launch (xinitrc sources chrome-env into its env, which propagates through
@@ -89,6 +92,7 @@ _ALLOW_PRINTING = os.environ.get("ALLOW_PRINTING") == "1"
 # else stops a malformed id from sliding into header injection or path
 # traversal if a future bug ever lets one through unvalidated.
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9-]+$")
+_shared = None  # Explicit shared_windows boot only; one agent per profile VM.
 
 
 def _is_safe_id(s):
@@ -934,10 +938,100 @@ def _history_snapshot():
             return {"recently_closed": [], "recently_visited": []}
 
 
+def query_chromium_history(query, limit=8):
+    """Read Chromium's own history, without opening a page or modifying it.
+
+    The profile path is launch configuration, never an RPC argument. Reads
+    include committed WAL records (do not use immutable=1 on a live database).
+    A busy/large/missing database yields an explicit empty response; callers
+    must not retain suggestions for an earlier query after that response.
+    """
+    if (not isinstance(query, str) or len(query) > 512
+            or any(ord(c) < 32 for c in query)
+            or type(limit) is not int or not 1 <= limit <= 10):
+        return 'invalid', []
+    needle = query.strip().casefold()
+    if not needle:
+        return 'ok', []
+    deadline = time.monotonic() + 0.100
+    conn = None
+    try:
+        path = Path(_chromium_profile_dir()) / 'Default' / 'History'
+        conn = sqlite3.connect(path.absolute().as_uri() + '?mode=ro',
+                               uri=True, timeout=0.020)
+        conn.execute('PRAGMA query_only=ON')
+        conn.execute('PRAGMA trusted_schema=OFF')
+        conn.execute('PRAGMA cache_size=-512')
+        conn.execute('PRAGMA temp_store=MEMORY')
+        # Bound even an exceptionally fast machine's full-table scan. Do not
+        # materialize the table, copy the database, or keep a stale cache.
+        steps = [0]
+        def budget():
+            steps[0] += 500
+            return steps[0] > 2_000_000 or time.monotonic() >= deadline
+        conn.set_progress_handler(budget, 500)
+        conn.create_function('history_fold', 1,
+                             lambda text: text.casefold() if isinstance(text, str) else '')
+        rows = conn.execute('''
+            SELECT url, substr(title, 1, 512) FROM urls
+            WHERE hidden=0 AND length(url) BETWEEN 1 AND 8192
+              AND (title IS NULL OR length(title)<=16384)
+              AND (url LIKE 'http://%' OR url LIKE 'https://%')
+              AND (instr(history_fold(url), ?) > 0
+                   OR instr(history_fold(title), ?) > 0)
+            ORDER BY CASE
+              WHEN instr(history_fold(url), ?)=1 THEN 0
+              WHEN instr(history_fold(url), 'https://' || ?)=1
+                OR instr(history_fold(url), 'http://' || ?)=1
+                OR instr(history_fold(url), 'https://www.' || ?)=1
+                OR instr(history_fold(url), 'http://www.' || ?)=1 THEN 1
+              ELSE 2 END,
+              typed_count DESC, last_visit_time DESC, visit_count DESC, url ASC
+            LIMIT ?
+        ''', (needle, needle, needle, needle, needle, needle, needle, limit))
+        items = []
+        encoded_bytes = 0
+        for url, title in rows:
+            try:
+                parsed = urlparse(url)
+                safe = (parsed.scheme in ('http', 'https') and parsed.hostname
+                        and parsed.username is None and parsed.password is None
+                        and not any(ord(c) < 32 or ord(c) == 127 for c in url))
+            except ValueError:
+                safe = False
+            if not safe:
+                continue
+            item = {'url': url, 'title': title or url[:512]}
+            encoded_bytes += len(json.dumps(item).encode('utf-8'))
+            if encoded_bytes > 24 * 1024:
+                break
+            items.append(item)
+        return 'ok', items
+    except (sqlite3.Error, OSError, ValueError):
+        # No database path, query text, or browsing data in diagnostic logs.
+        return ('timeout' if time.monotonic() >= deadline else 'unavailable'), []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def handle_history_query(msg, link):
+    request_id = msg.get('request_id')
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+        return
+    query = msg.get('query')
+    status, items = query_chromium_history(query, msg.get('limit', 8))
+    link.send({'event': 'history_suggestions', 'request_id': request_id,
+               'query': query if isinstance(query, str) and len(query) <= 512 else '',
+               'status': status, 'items': items})
+
+
 def handle_cmd(msg, targets_by_id, link):
     cmd = msg.get("cmd")
     tid = msg.get("id")
-    if cmd == "activate" and _is_safe_id(tid):
+    if cmd == 'query_history':
+        handle_history_query(msg, link)
+    elif cmd == "activate" and _is_safe_id(tid):
         cdp_simple_post(f"/json/activate/{tid}")
         _set_active(tid)
     elif cmd == "close" and _is_safe_id(tid):
@@ -957,7 +1051,15 @@ def handle_cmd(msg, targets_by_id, link):
         except Exception as e:
             log(f"close_active: list targets failed: {e}")
             return
-        active_id = active_target_id(fresh)
+        if _shared is not None:
+            wid = msg['windowId']
+            fresh = [t for t in fresh if _shared.target_windows.get(t['id']) == wid]
+            visible = {t['id']: tab_state(t['webSocketDebuggerUrl'])[0]
+                       for t in fresh if t.get('webSocketDebuggerUrl')}
+            from shared_windows import active_by_window
+            active_id = active_by_window({wid: fresh}, visible, _shared.active).get(wid)
+        else:
+            active_id = active_target_id(fresh)
         if active_id and _is_safe_id(active_id):
             cdp_simple_post(f"/json/close/{active_id}")
             if _get_active() == active_id:
@@ -1036,7 +1138,7 @@ def handle_cmd(msg, targets_by_id, link):
         # page (and any y=0 dropdown / hover menu would fire). Send a CDP
         # mouseMoved to (-1, -1) on the active page so Chromium treats it as
         # "cursor left the viewport" and tears down hover state.
-        tid = _get_active()
+        tid = _shared.active.get(msg['windowId']) if _shared is not None else _get_active()
         if not tid:
             return
         t = _target_for(tid, targets_by_id)
@@ -1049,7 +1151,7 @@ def handle_cmd(msg, targets_by_id, link):
         })
     elif cmd == "new":
         url = msg.get("url") or "about:blank"
-        new_tid = create_new_tab(url)
+        new_tid = (_shared.new_tab(msg['windowId'], url) if _shared is not None else create_new_tab(url))
         if not new_tid:
             return
         _set_active(new_tid, ttl=_NEW_TAB_TRUST_TTL)
@@ -1062,6 +1164,7 @@ def handle_cmd(msg, targets_by_id, link):
             "title": "",
             "url": url,
             "active": True,
+            **({'windowId': msg['windowId']} if _shared is not None else {}),
         })
     elif cmd == "navigate" and _is_safe_id(tid):
         url = msg.get("url")
@@ -1070,7 +1173,7 @@ def handle_cmd(msg, targets_by_id, link):
         t = _target_for(tid, targets_by_id)
         if not t:
             log(f"navigate: target {tid} not found; falling back to new tab")
-            new_tid = create_new_tab(url)
+            new_tid = (_shared.new_tab(msg['windowId'], url) if _shared is not None else create_new_tab(url))
             if new_tid:
                 _set_active(new_tid, ttl=_NEW_TAB_TRUST_TTL)
             return
@@ -1104,16 +1207,46 @@ def handle_cmd(msg, targets_by_id, link):
 # Main poll loop
 # ---------------------------------------------------------------------------
 
+SHORTCUT_KEYS = frozenset({
+    "t", "w", "l", "r", "p", "h", "[", "]", "{", "}",
+    "n", "private-window", "o", "app-settings", "minimize", "hide-others",
+    "quit", "bookmarks-manager", "history",
+})
+
+
+def read_shortcut(conn, timeout=1.0):
+    """One bounded ASCII token, framed by helper connection close.
+
+    TCP reads can split named tokens. Never dispatch a valid prefix before EOF,
+    and keep a wall deadline so a partial sender cannot monopolize the listener.
+    """
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('shortcut read deadline exceeded')
+        conn.settimeout(remaining)
+        chunk = conn.recv(33 - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > 32:
+            return None
+    try:
+        key = data.decode('ascii')
+    except UnicodeDecodeError:
+        return None
+    return key if key in SHORTCUT_KEYS else None
+
+
 def shortcut_listener(link):
-    """Relay browser-chrome shortcuts that Openbox grabbed in the guest back
-    to the macOS host. While the VM holds keyboard focus the VZ view forwards
-    every chord to the guest before AppKit can swallow it, so Openbox grabs
-    ⌘T/⌘W/⌘L/⌘R/⌘P (which the Cmd↔Ctrl swap turns into Ctrl+… that Chromium
-    would act on) and runs `bromure-hostkey <k>`, which connects here and
-    sends the bare key letter. We forward it over vsock so the host owns the
-    chord. Localhost-only listener; only an allowlisted key letter is
-    relayed."""
-    allowed = {"t", "w", "l", "r", "p", "h", "[", "]", "{", "}"}
+    """Relay allowlisted native app actions from Openbox to the host.
+
+    Cmd↔Ctrl maps host chords to guest Control chords. Only native-chrome's
+    Openbox configuration grabs them; editing and legacy Chromium stay local.
+    The helper closes its loopback connection after writing one action token.
+    """
     # Debounce: a held chord autorepeats in the guest X server (xset r rate),
     # firing the Openbox keybind — and thus this listener — many times for one
     # intentional press. Collapse repeats of the same key within this window so
@@ -1132,25 +1265,25 @@ def shortcut_listener(link):
     while True:
         try:
             conn, _ = srv.accept()
-            conn.settimeout(1)
             try:
-                data = conn.recv(8)
+                key = read_shortcut(conn)
             finally:
                 conn.close()
-            key = data.decode("utf-8", "ignore").strip()
-            if key in allowed:
+            if key is not None:
                 now = time.monotonic()
-                if now - last_fire.get(key, 0.0) < debounce:
+                if key in last_fire and now - last_fire[key] < debounce:
                     continue
                 last_fire[key] = now
                 log(f"shortcut -> host: {key}")
-                link.send({"event": "shortcut", "key": key})
+                link.send({"event": "shortcut", "key": key,
+                           **({'windowId': _shared.focused_window} if _shared is not None else {})})
         except Exception as e:
             log(f"shortcut listener: {e}")
             time.sleep(0.1)
 
 
 def main():
+    global _shared
     # Wait for Chromium
     log("waiting for Chromium CDP…")
     for _ in range(180):
@@ -1166,6 +1299,20 @@ def main():
         log("CDP never came up; exiting")
         return
     log("CDP ready")
+
+    from pathlib import Path
+    # This module is installed alongside the agent, but only imported on an
+    # explicitly marked VM. A regular profile retains its original behavior.
+    if any(word.startswith('bromure.shared_windows=') for word in Path('/proc/cmdline').read_text().split()):
+        from shared_windows import Controller, enabled, cdp_call
+        enabled(Path('/proc/cmdline').read_text())
+
+        def browser_call(method, params):
+            ws = browser_ws_url()
+            return cdp_call(ws, method, params) if ws else None
+
+        _shared = Controller(cdp_list_targets, browser_call, scale=int(os.environ.get('DISPLAY_SCALE') or '2'))
+        threading.Thread(target=_shared.serve, daemon=True).start()
 
     link = HostLink()
     link.connect()
@@ -1183,7 +1330,44 @@ def main():
         log(f"initial target seed failed: {e}")
 
     def on_cmd(msg):
-        handle_cmd(msg, targets_by_id, link)
+        # Profile-global read: no CDP refresh, window activation, or shared
+        # controller lock is required in either native-window architecture.
+        if msg.get('cmd') == 'query_history':
+            handle_history_query(msg, link)
+            return
+        if _shared is None:
+            handle_cmd(msg, targets_by_id, link)
+            return
+        with _shared.lock:
+            try:
+                _shared.refresh()
+                cmd, tid, wid = msg.get('cmd'), msg.get('id'), msg.get('windowId')
+                if cmd in ('new', 'navigate'):
+                    from shared_windows import navigation_url
+                    msg = dict(msg, url=navigation_url(msg.get('url') or 'about:blank'))
+                if tid is not None:
+                    if tid not in _shared.target_windows:
+                        raise ValueError('unknown target; refusing ambiguous window fallback')
+                    if wid is None:
+                        wid = _shared.target_windows[tid]
+                        msg = dict(msg, windowId=wid)
+                if cmd in ('new', 'close_active', 'key_chord', 'mouse_park') and wid is None:
+                    raise ValueError('shared window command requires windowId')
+                if wid is not None:
+                    if type(wid) is not int or wid not in _shared.groups:
+                        raise ValueError('unknown windowId')
+                    if tid is not None and _shared.target_windows.get(tid) != wid:
+                        raise ValueError('target/window mismatch')
+                if cmd == 'key_chord':
+                    _shared.focus(wid)
+                handle_cmd(msg, targets_by_id, link)
+                if cmd == 'activate' and tid in _shared.target_windows:
+                    _shared.active[_shared.target_windows[tid]] = tid
+                    _shared.focused_window = _shared.target_windows[tid]
+            except (ValueError, OSError, RuntimeError) as error:
+                log('shared window command rejected: ' + str(error))
+                link.send({'event': 'window_error', 'windowId': msg.get('windowId'),
+                           'request_id': msg.get('request_id'), 'error': str(error)[:512]})
 
     threading.Thread(target=link.reader_loop, args=(on_cmd,), daemon=True).start()
     threading.Thread(target=shortcut_listener, args=(link,), daemon=True).start()
@@ -1238,7 +1422,24 @@ def main():
                 states[t["id"]] = ("", "")
 
         visibility = {tid: vis for tid, (vis, _) in states.items()}
-        active_id = active_target_id(targets, visibility)
+        if _shared is not None:
+            from shared_windows import active_by_window
+            try:
+                with _shared.lock:
+                    groups, target_windows = _shared.refresh(targets)
+                    if {t['id'] for t in targets} != set(target_windows):
+                        # Reconciliation observed a newer set. Restart this
+                        # read-only poll rather than emit old rows with new IDs.
+                        raise RuntimeError('target list changed during shared tab poll')
+                    _shared.active = active_by_window(groups, visibility, _shared.active)
+                    active_ids = set(_shared.active.values())
+            except (ValueError, OSError, RuntimeError) as error:
+                log('shared window grouping failed: ' + str(error))
+                time.sleep(POLL_INTERVAL)
+                continue
+        else:
+            active_ids = {active_target_id(targets, visibility)}
+            target_windows = {}
 
         current_ids = set()
         for t in targets:
@@ -1254,7 +1455,8 @@ def main():
                 prev is None
                 or prev.get("title") != title
                 or prev.get("url") != url
-                or prev.get("active") != (tid == active_id)
+                or prev.get("active") != (tid in active_ids)
+                or prev.get("windowId") != target_windows.get(tid)
                 or prev.get("camera") != using_camera
                 or prev.get("microphone") != using_microphone
             )
@@ -1264,7 +1466,8 @@ def main():
                     "id": tid,
                     "title": title,
                     "url": url,
-                    "active": tid == active_id,
+                    "active": tid in active_ids,
+                    **({'windowId': target_windows.get(tid)} if _shared is not None else {}),
                     "using_camera": using_camera,
                     "using_microphone": using_microphone,
                 })
@@ -1281,7 +1484,8 @@ def main():
             known[tid] = {
                 "title": title,
                 "url": url,
-                "active": tid == active_id,
+                "active": tid in active_ids,
+                "windowId": target_windows.get(tid),
                 "camera": using_camera,
                 "microphone": using_microphone,
             }
@@ -1290,7 +1494,8 @@ def main():
             if tid not in current_ids:
                 gone = known.get(tid, {})
                 _record_close(gone.get("title", ""), gone.get("url", ""))
-                link.send({"event": "remove", "id": tid})
+                link.send({"event": "remove", "id": tid,
+                           **({'windowId': gone.get('windowId')} if _shared is not None else {})})
                 known.pop(tid, None)
 
         time.sleep(POLL_INTERVAL)

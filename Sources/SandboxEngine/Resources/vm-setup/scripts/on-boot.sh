@@ -16,6 +16,19 @@ modprobe virtiofs 2>/dev/null
 modprobe loop 2>/dev/null
 mkdir -p /mnt/share
 
+# Explicit multi-GPU experiment only. Xorg must know its independent screens
+# before claim-time configuration arrives; ordinary boots take no new path.
+if grep -Eq '(^|[[:space:]])bromure\.experimental_multigpu=' /proc/cmdline; then
+    modprobe virtio_gpu 2>/dev/null || true
+    _gpu_attempt=0
+    while ! /usr/local/bin/experimental-multigpu.py prepare > /tmp/bromure/multigpu-prepare.log 2>&1; do
+        _gpu_attempt=$((_gpu_attempt + 1))
+        [ "$_gpu_attempt" -ge 10 ] && break
+        sleep 1
+    done
+    cat /tmp/bromure/multigpu-prepare.log > /dev/hvc0
+fi
+
 # apt over IPv4 only. Newer images bake this in; an older one gets it
 # here, since a LAN can hand the VM a v6 address and route with no v6
 # egress behind them, and apt then waits on every mirror's AAAA record.

@@ -1,0 +1,31 @@
+{
+  "scope": "Startup scaling and stale renderer packaging; not general shared-window acceptance",
+  "sourceSHA256": {
+    "Sources/Browser/SafariSandbox.swift": "745a3da14dbe06b0a62dac84e238bd22ad1c3d7b89503ee0fa6a092c19968337",
+    "Sources/SandboxEngine/HostGPUFrameView.swift": "f3fa35ea47f69e6f70e86e9c277ff00d7a0cbf622cdcf15c9a1a50088b762c83",
+    "Sources/SandboxEngine/MacOS27RendererClient.swift": "8e08df1fcde1966b85ae5951fc47162bd06f0af06818b24589f514cb8e00ef18",
+    "tools/gpu/package-renderer-xpc.sh": "e5a01cf79d76edb7a0314da5546a581e1011beb5f05245972c2f751689c4784a",
+    "tools/gpu/embed-renderer-xpc.sh": "e7c013ad5b9cfe93867f93cb485fa682b070ef67f1fabff41b630a45189ffa22",
+    "tools/gpu/test-frame-handoff.swift": "a4c9d6eb4c8f6cc3be09fedf70b368edfe068226586d5f30b3c6ba92db58b500",
+    "tools/gpu/validate-renderer-xpc.m": "3c73b23a84d0de3dd88fdf2c9f6115044b2f3c188e3a51dc154363cf1bce0282"
+  },
+  "checks": {
+    "releaseBuild": "PASS",
+    "frameHandoffIncludingStartupRetinaAndLaterResize": "PASS",
+    "staleBundleEmbedRejected": "PASS",
+    "freshRenderer16ScanoutInitAndTwoIndependentWorkers": "PASS",
+    "singleOutputSignedLocalAppPublished502": "exit 0, Metal selected, 92 frames delivered; audio disabled",
+    "twoOutputLive": "Metal selected, boot 1.8s, core proof passed; final secondary source pixel check FAILED (white instead of expected colour), exit 1"
+  },
+  "limitations": [
+    "No reproduction of user XPC startup failure on freshly rebuilt renderer; stale local bundle rejected multi-output command, but not proof of exact user failure cause.",
+    "No notarized release produced by this validation.",
+    "Frame geometry regression is real imported Metal texture/state coverage, not physical screen acceptance."
+  ],
+  "logSHA256": {
+    "/tmp/bromure-startup-scale-test.log": "33c01618d6fc8bc503ffbf91ae873ee39e83ec8aebadd2bffb3e35093166ed5a",
+    "/tmp/bromure-final-renderer-probe.log": "979cc66fe94eac6fd6be9f6bf7df33ea54227587a63da14f67ecad4a7a4e8362",
+    "/tmp/bromure-startup-live.log": "ff59df320fa4f9fa894f61fa94472138a39dd10105100e1267f6ec5c3b41800a",
+    "/tmp/bromure-startup-single-live.log": "a50e5644627d98a1605d66a9fee59f2be3975ca6545abed6f945d18b7722b394"
+  }
+}

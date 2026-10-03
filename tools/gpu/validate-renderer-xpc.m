@@ -23,6 +23,7 @@ int main(void)
         uint32_t resource[] = {9, 2, 1, (1 << 1) | (1 << 18), 64, 64, 1, 1, 0, 0, 0, 0};
         uint32_t attach[] = {9, 0};
         uint32_t geometry[] = {64, 64};
+        uint32_t count[] = {16};
         uint32_t scanout[] = {0, 0, 64, 64, 0, 9};
         uint32_t flush[] = {0, 0, 64, 64, 9, 0};
         uint32_t stream[] = {
@@ -33,6 +34,7 @@ int main(void)
         uint32_t submit[2 + sizeof(stream) / 4];
         submit[0] = sizeof(stream); submit[1] = 0; memcpy(submit + 2, stream, sizeof(stream));
         NSArray<NSData *> *commands = @[
+            request(0xffff0021, 0, 0, count, 1),
             request(0xffff0020, 0, 0, geometry, 2),
             request(0x200, 7, 0, create, 18), request(0x204, 0, 0, resource, 12),
             request(0x202, 7, 0, attach, 2), request(0x207, 7, 1, submit, sizeof(submit) / 4),

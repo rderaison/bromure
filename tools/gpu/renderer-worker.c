@@ -23,15 +23,22 @@ void renderer_worker_fence(uint32_t fence) { retired_fence = fence; }
 static int wait_for_gpu(uint32_t token, uint32_t context)
 {
     if (virgl_renderer_create_fence((int)token, context)) return 0;
-    struct timespec start, now, interval = {0, 1000000};
+    struct timespec start, now, interval = {0, 50000};
     clock_gettime(CLOCK_MONOTONIC, &start);
-    do {
+    for (;;) {
         virgl_renderer_poll();
         if (retired_fence == token) return 1;
-        nanosleep(&interval, NULL);
         clock_gettime(CLOCK_MONOTONIC, &now);
-    } while (now.tv_sec - start.tv_sec < 5);
-    return 0;
+        int64_t elapsed = (int64_t)(now.tv_sec - start.tv_sec) * 1000000000 +
+                          now.tv_nsec - start.tv_nsec;
+        if (elapsed >= 5000000000LL) return 0;
+        // Most Metal fences complete well below a millisecond. A fixed 1ms
+        // sleep serializes that delay into every fenced guest command. Poll
+        // briefly at lower latency, then back off for genuinely long work.
+        interval.tv_nsec = elapsed < 1000000 ? 50000 :
+                           elapsed < 5000000 ? 250000 : 1000000;
+        nanosleep(&interval, NULL);
+    }
 }
 static uint32_t load32(const uint8_t *p)
 { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -84,13 +91,17 @@ int run_renderer_worker(int output_fd)
     struct iovec backing[MAX_RESOURCES] = {0};
     uint64_t total_backing = 0;
     uint64_t gpu_limit = 1073741824, staging_limit = 1073741824, resource_limit = 268435456;
+    uint64_t texture_pixel_limit = 33554432;
     uint64_t physical_memory = 8589934592; size_t memory_size = sizeof(physical_memory);
     if (sysctlbyname("hw.memsize", &physical_memory, &memory_size, NULL, 0)) physical_memory = 8589934592;
     // Both pools are bounded by one eighth of host RAM, with a 1 GiB floor.
     uint64_t ram_ceiling = physical_memory / 8 / 268435456 * 268435456;
     if (ram_ceiling < 1073741824) ram_ceiling = 1073741824;
-    uint32_t display_width = 0, display_height = 0, scanout_resource = 0;
-    uint32_t scanout_x = 0, scanout_y = 0, scanout_width = 0, scanout_height = 0;
+    struct scanout_state {
+        uint32_t display_x, display_y, display_width, display_height, enabled;
+        uint32_t resource, x, y, width, height;
+    } scanouts[16] = {0};
+    uint32_t scanout_count = 1;
     // One ordered worker per process; keep the bounded submission buffer off the stack.
     _Alignas(8) static uint8_t request[MAX_REQUEST];
     _Alignas(8) uint8_t response[MAX_FRAME];
@@ -118,9 +129,12 @@ int run_renderer_worker(int output_fd)
         case 0x100: // GET_DISPLAY_INFO: geometry is configured by the host before VM boot.
             if (length != 24) break;
             response_length = 24 + 384;
-            if (display_width) {
-                store32(response + 32, display_width); store32(response + 36, display_height);
-                store32(response + 40, 1);
+            for (uint32_t i = 0; i < scanout_count; ++i) {
+                struct scanout_state *s = &scanouts[i];
+                uint32_t base = 24 + i * 24;
+                store32(response + base, s->display_x); store32(response + base + 4, s->display_y);
+                store32(response + base + 8, s->display_width); store32(response + base + 12, s->display_height);
+                store32(response + base + 16, s->enabled);
             }
             result = 0x1101;
             break;
@@ -204,7 +218,7 @@ int run_renderer_worker(int output_fd)
             if (!args.width || args.width > max_width || !args.height || args.height > 8192 ||
                 !args.depth || args.depth > 256 || !args.array_size || args.array_size > 256 ||
                 args.last_level > 13 || args.nr_samples > 8 || args.flags & ~1u ||
-                (args.target != 0 && (uint64_t)args.width * args.height * args.depth * args.array_size > 33554432)) break;
+                (args.target != 0 && (uint64_t)args.width * args.height * args.depth * args.array_size > texture_pixel_limit)) break;
             // Account common browser formats by storage size. A worst-case
             // fallback bounds other formats; only mipmapped resources double.
             uint32_t texel_bytes = 32;
@@ -248,7 +262,8 @@ int run_renderer_worker(int output_fd)
                 total_resource_bytes -= resource_bytes[slot]; resource_bytes[slot] = 0;
                 total_backing -= backing[slot].iov_len;
                 free(backing[slot].iov_base); backing[slot] = (struct iovec){0};
-                if (scanout_resource == id) scanout_resource = 0;
+                for (uint32_t i = 0; i < scanout_count; ++i)
+                    if (scanouts[i].resource == id) scanouts[i].resource = 0;
             } else {
                 for (int i = 0; i < MAX_CONTEXTS; ++i) if (contexts[i] == context && context) has_context = 1;
                 if (!has_context) { result = 0x1204; break; }
@@ -294,8 +309,10 @@ int run_renderer_worker(int output_fd)
         case 0x104: { // RESOURCE_FLUSH
             if (length != 48) break;
             uint32_t id = load32(request + (type == 0x103 ? 44 : 40));
-            if (type == 0x103 && load32(request + 40)) { result = 0x1202; break; }
-            if (type == 0x103 && !id) { scanout_resource = 0; result = 0x1100; break; }
+            uint32_t output = type == 0x103 ? load32(request + 40) : 0;
+            if (output >= scanout_count) { result = 0x1202; break; }
+            struct scanout_state *s = &scanouts[output];
+            if (type == 0x103 && !id) { s->resource = 0; result = 0x1100; break; }
             struct virgl_renderer_resource_info_ext info = {0};
             if (!id || virgl_renderer_resource_get_info_ext(id, &info)) { result = 0x1203; break; }
             uint32_t x = load32(request + 24), y = load32(request + 28);
@@ -303,19 +320,19 @@ int run_renderer_worker(int output_fd)
             if (x > info.base.width || y > info.base.height || width > info.base.width - x ||
                 height > info.base.height - y || !width || !height) break;
             if (type == 0x103) {
-                scanout_resource = id;
-                scanout_x = x; scanout_y = y;
-                scanout_width = width; scanout_height = height;
+                s->resource = id;
+                s->x = x; s->y = y;
+                s->width = width; s->height = height;
             }
             // SET_SCANOUT binds the framebuffer; RESOURCE_FLUSH publishes its contents.
             // Publishing on SET exposes the modesetting buffer before guest repaint.
-            if (type == 0x104 && id == scanout_resource) {
+            if (type == 0x104 && s->enabled && id == s->resource &&
+                (uint64_t)x < (uint64_t)s->x + s->width && (uint64_t)s->x < (uint64_t)x + width &&
+                (uint64_t)y < (uint64_t)s->y + s->height && (uint64_t)s->y < (uint64_t)y + height) {
                 if (++fence_token == 0) ++fence_token;
                 if (!wait_for_gpu(fence_token, 0)) return 1;
                 if (info.native_type != VIRGL_NATIVE_HANDLE_METAL_TEXTURE || !info.native_handle ||
-                    !renderer_capture_surface_region(info.native_handle, scanout_x, scanout_y,
-                                                     scanout_width, scanout_height)) { result = 0x1200; break; }
-
+                    !renderer_capture_surface_region(info.native_handle, s->x, s->y, s->width, s->height)) { result = 0x1200; break; }
             }
             result = 0x1100; break;
         }
@@ -372,7 +389,7 @@ int run_renderer_worker(int output_fd)
             memset(backing, 0, sizeof(backing)); total_backing = 0;
             memset(resources, 0, sizeof(resources)); memset(resource_bytes, 0, sizeof(resource_bytes));
             total_resource_bytes = 0; result = 0x1100;
-            scanout_resource = 0;
+            for (uint32_t i = 0; i < scanout_count; ++i) scanouts[i].resource = 0;
             break;
         case 0xffff0002: { // Trusted test only: verify a red 64x64 native texture.
             if (length != 32 || flags || context) break;
@@ -392,10 +409,12 @@ int run_renderer_worker(int output_fd)
             result = renderer_capture_surface(info.native_handle) ? 0x1100 : 0x1200;
             break;
         }
-        case 0xffff0020: { // Host-only display geometry; guest control allowlist excludes this.
+        case 0xffff0020: // Legacy primary geometry.
+        case 0xffff0022: { // Trusted composite root budget; does not alter connectors.
             if (length != 32 || flags || context) break;
             uint32_t width = load32(request + 24), height = load32(request + 28);
-            if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > 33554432) break;
+            uint64_t maximum_pixels = type == 0xffff0022 ? 67108864 : 33554432;
+            if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > maximum_pixels) break;
             uint64_t pixels = (uint64_t)width * height, quantum = 268435456;
             uint64_t wanted_gpu = (pixels * 64 + quantum - 1) / quantum * quantum;
             uint64_t wanted_staging = (pixels * 48 + quantum - 1) / quantum * quantum;
@@ -406,9 +425,62 @@ int run_renderer_worker(int output_fd)
             // Preserve capacity while shrinking; resources release naturally.
             if (wanted_gpu > gpu_limit) gpu_limit = wanted_gpu;
             if (wanted_staging > staging_limit) staging_limit = wanted_staging;
-            if (pixels > 16777216) resource_limit = 536870912;
-            display_width = width; display_height = height; result = 0x1100;
+            if (pixels > 16777216 && resource_limit < 536870912) resource_limit = 536870912;
+            if (type == 0xffff0022 && pixels > 33554432) {
+                resource_limit = 1073741824;
+                if (pixels > texture_pixel_limit) texture_pixel_limit = pixels;
+            }
+            if (type == 0xffff0020) {
+                scanouts[0].display_width = width; scanouts[0].display_height = height;
+                scanouts[0].enabled = 1;
+            }
+            result = 0x1100;
             break;
+        }
+        case 0xffff0021: { // Host-only scanout count, fixed before resources/VM boot.
+            if (length != 28 || flags || context) break;
+            uint32_t count = load32(request + 24);
+            if (!count || count > 16 || total_resource_bytes || total_backing) break;
+            for (uint32_t i = 0; i < scanout_count; ++i) if (scanouts[i].resource) goto reply;
+            if (count < scanout_count) memset(scanouts + count, 0, (16 - count) * sizeof(scanouts[0]));
+            scanout_count = count; result = 0x1100; break;
+        }
+        case 0xffff0023: { // Host-only snapshot of one bound scanout; no guest native handles.
+            if (length != 28 || flags || context) break;
+            uint32_t index = load32(request + 24);
+            if (index >= scanout_count) { result = 0x1202; break; }
+            struct scanout_state *s = &scanouts[index];
+            if (!s->enabled || !s->resource) { result = 0x1100; break; }
+            struct virgl_renderer_resource_info_ext info = {0};
+            if (virgl_renderer_resource_get_info_ext(s->resource, &info)) { result = 0x1203; break; }
+            if (s->x > info.base.width || s->y > info.base.height || !s->width || !s->height ||
+                s->width > info.base.width - s->x || s->height > info.base.height - s->y) break;
+            if (++fence_token == 0) ++fence_token;
+            if (!wait_for_gpu(fence_token, 0)) return 1;
+            result = info.native_type == VIRGL_NATIVE_HANDLE_METAL_TEXTURE && info.native_handle &&
+                renderer_capture_surface_region(info.native_handle, s->x, s->y, s->width, s->height)
+                ? 0x1100 : 0x1200;
+            break;
+        }
+        case 0xffff0024: { // Host-only preferred output geometry. Budget is set by root geometry (0020).
+            if (length != 48 || flags || context) break;
+            uint32_t index = load32(request + 24), width = load32(request + 28), height = load32(request + 32);
+            uint32_t enabled = load32(request + 36), x = load32(request + 40), y = load32(request + 44);
+            if (index >= scanout_count) { result = 0x1202; break; }
+            if (enabled > 1 || !width || !height || width > 8192 || height > 8192 ||
+                x > 8192 - width || y > 8192 - height || (uint64_t)width * height > 33554432) break;
+            uint32_t root_width = enabled ? x + width : 0, root_height = enabled ? y + height : 0;
+            for (uint32_t i = 0; i < scanout_count; ++i) if (i != index && scanouts[i].enabled) {
+                uint32_t right = scanouts[i].display_x + scanouts[i].display_width;
+                uint32_t bottom = scanouts[i].display_y + scanouts[i].display_height;
+                if (right > root_width) root_width = right;
+                if (bottom > root_height) root_height = bottom;
+            }
+            if ((uint64_t)root_width * root_height > texture_pixel_limit) break;
+            struct scanout_state *s = &scanouts[index];
+            s->display_x = x; s->display_y = y; s->display_width = width; s->display_height = height;
+            s->enabled = enabled;
+            result = 0x1100; break;
         }
         case 0xffff0030: { // Host-only diagnostics, excluded from guest allowlist.
             if (length != 24 || flags || context) break;

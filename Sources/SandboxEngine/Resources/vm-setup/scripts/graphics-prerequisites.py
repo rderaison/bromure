@@ -17,12 +17,13 @@ import sysconfig
 
 PACKAGES = (
     "libgl1-mesa-dri", "mesa-libgallium", "libegl-mesa0", "libglx-mesa0",
-    "libgbm1", "libegl1", "libgles2", "mesa-utils", "chromium",
+    "libgbm1", "libegl1", "libgles2", "mesa-utils", "libxss1", "chromium",
     "google-chrome-stable", "mesa-va-drivers", "libva2", "libva-drm2", "vainfo",
 )
 LIBRARIES = (
     "libEGL.so.1", "libEGL_mesa.so.0", "libGLESv2.so.2",
     "libGLX_mesa.so.0", "libgbm.so.1",
+    "libXss.so.1",  # Display-health/idle diagnostics use XScreenSaverQueryInfo.
 )
 CAPABILITIES = Path("/etc/bromure/graphics-capabilities.json")
 MESA_ROOT = Path("/opt/bromure/mesa-virgl")
@@ -116,6 +117,12 @@ def contract_issues(capabilities):
                 or type(capabilities.get("pointerPort")) is not int
                 or capabilities["pointerPort"] != 5821):
             return ["Unsupported pointer configuration contract"]
+    if "sharedWindowProtocolVersion" in capabilities or "controllerPort" in capabilities:
+        if (type(capabilities.get("sharedWindowProtocolVersion")) is not int
+                or capabilities["sharedWindowProtocolVersion"] != 1
+                or type(capabilities.get("controllerPort")) is not int
+                or capabilities["controllerPort"] != 5832):
+            return ["Unsupported shared-window configuration contract"]
     return []
 
 
@@ -197,6 +204,10 @@ def collect_report(browser):
         "note": "Packaging check only; run graphics-diagnostics.py in X, verify Chromium and host Metal separately.",
     }
     # Additive marker: older/software images without this protocol stay valid.
+    if isinstance(capabilities, dict) and "sharedWindowProtocolVersion" in capabilities:
+        for path in ("/usr/local/bin/shared_windows.py", "/usr/local/bin/tab-agent.py",
+                     "/usr/local/bin/cdp-agent.py", "/usr/local/bin/cjk-input-agent.py"):
+            report["guestFiles"][path] = os.access(path, os.X_OK)
     if isinstance(capabilities, dict) and "pointerProtocolVersion" in capabilities:
         report["guestFiles"]["/usr/local/bin/pointer-agent.py"] = os.access(
             "/usr/local/bin/pointer-agent.py", os.X_OK)

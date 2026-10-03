@@ -1,6 +1,6 @@
 ---
 title: "Concepts & Architecture"
-description: "How Bromure works: the host and the guest, one VM per window and the pre-warmed VM pool, the base image and APFS clones, ephemeral and persistent profiles, what persists, the host-guest services and their vsock ports, NAT and bridged networking, and idle suspend."
+description: "How Bromure works: the host and the guest, shared windows per profile and the pre-warmed VM pool, the base image and APFS clones, ephemeral and persistent profiles, what persists, the host-guest services and their vsock ports, NAT and bridged networking, and idle suspend."
 order: 4
 ---
 
@@ -17,13 +17,15 @@ Two computers are involved in every Bromure window:
 
 What you see in a window is the guest's screen, drawn into a Mac window. Your keystrokes, clicks, trackpad gestures and scrolling are passed into the guest; the guest never gets direct access to your Mac.
 
-## One VM per window
+## VMs and windows
 
-Each browser window has its own guest VM. Opening a window starts a VM; closing the window shuts it down and deletes it. Windows never share a VM, so they never share memory, cookies, cache or a file system.
+On macOS 27, with Metal enabled and a compatible guest image, windows of the same profile share one VM and one browser process. Each window has its own tabs and display. Closing a window keeps the other windows running; closing the last window shuts down the VM. Different profiles always use separate VMs.
+
+Older macOS versions, images without shared-window support, and profiles with Metal disabled use the original window model.
 
 ### The pre-warmed VM
 
-Booting a Linux VM takes several seconds, so Bromure keeps one VM booted in advance. When you open a window, Bromure:
+Booting a Linux VM takes several seconds, so Bromure keeps one VM booted in advance. When a profile needs a new VM, Bromure:
 
 1. Takes the waiting VM.
 2. Applies the window's profile to it: which browser to start, the home page, the language, which host services to enable, network rules, VPN, and so on.
@@ -77,7 +79,7 @@ The one setting that changes a profile's nature is **Retain Browsing Data** in t
 - **Ephemeral profile** (**Retain Browsing Data** off). Nothing survives the window. Every window starts empty — no cookies, no history, no bookmarks — and is erased when it closes. You can open as many windows of an ephemeral profile as you like; each is its own VM. The built-in **Private Browsing** profile is ephemeral.
 - **Persistent profile** (**Retain Browsing Data** on). The profile has a **profile disk**: a separate 1 GB disk image, `~/Library/Application Support/Bromure/profiles/<UUID>/image/profile.img`, attached to the VM when the window opens. The browser keeps its user data there — bookmarks, history, cookies, saved passwords, and the open tabs if you choose to restore them. Everything else in the VM is still thrown away when the window closes. New profiles you create are persistent.
 
-A profile disk can be attached to only one VM at a time, so **a persistent profile has at most one window**. Opening it again brings the existing window to the front; use tabs inside it.
+A profile disk can be attached to only one VM at a time. Shared-window support lets several windows use that same VM and browser. On older systems, a persistent profile has at most one window; opening it again brings the existing window to the front.
 
 ### Encryption
 

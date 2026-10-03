@@ -9,7 +9,12 @@ final class PointerWireQueue {
     var isEmpty: Bool { frames.isEmpty }
 
     func enqueue(x: Double, y: Double, buttons: Int, coalescingMotion: Bool = false) -> Bool {
-        let frame = (data: Data("{\"x\":\(x),\"y\":\(y),\"buttons\":\(buttons)}\n".utf8), motion: coalescingMotion)
+        enqueueFrame(Data("{\"x\":\(x),\"y\":\(y),\"buttons\":\(buttons)}\n".utf8), coalescingMotion: coalescingMotion)
+    }
+
+    func enqueueFrame(_ data: Data, coalescingMotion: Bool = false) -> Bool {
+        guard data.count <= 1025, data.last == 10 else { return false }
+        let frame = (data: data, motion: coalescingMotion)
         if coalescingMotion, frames.last?.motion == true, frames.count > 1 || offset == 0 {
             frames[frames.count - 1] = frame
             return true

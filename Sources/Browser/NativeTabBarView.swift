@@ -89,6 +89,7 @@ final class NativeTabBarModel {
     /// origin. Wired by ``BrowserSession`` to ``TabBridge.fetchCertificate``.
     /// SiteInfoPopover invokes this when the user opens it on an HTTPS site.
     var fetchCertificate: ((String) async -> [Data])?
+    var fetchHistorySuggestions: ((String) async -> [TabBridge.HistoryEntry])?
 
     /// Called when the user presses the close "×" on a tab.
     var onClose: ((String) -> Void)?
@@ -130,6 +131,7 @@ final class NativeTabBarModel {
     /// Chip menu actions. All resolve through the app delegate; the
     /// session only forwards.
     var onOpenProfile: ((UUID) -> Void)?
+    var onManageProfiles: (() -> Void)?
     var onNewProfile: (() -> Void)?
     var onEditProfile: (() -> Void)?
     var onDeleteProfile: (() -> Void)?
@@ -464,6 +466,7 @@ private struct ActiveTabPill: View {
                     else { return nil }
                     return url
                 },
+                suggestions: model.fetchHistorySuggestions,
                 onSubmit: { model.onNavigate?(model.pendingAddress) }
             )
             .frame(maxWidth: .infinity)
@@ -1002,6 +1005,7 @@ private struct AddressField: NSViewRepresentable {
     /// Supplies the full (with-scheme) URL to swap in on focus, or nil to keep
     /// the shown value. Used by BromureAddressField.becomeFirstResponder.
     var editValue: (() -> String?)?
+    var suggestions: ((String) async -> [TabBridge.HistoryEntry])?
     let onSubmit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -1119,6 +1123,8 @@ private struct AddressField: NSViewRepresentable {
         // would call the host's "revert to domain" handler and stomp on the
         // URL the user just navigated to, until the guest catches up.
         var didSubmit = false
+        var completionTask: Task<Void, Never>?
+        var completionGeneration = 0
 
         init(_ parent: AddressField) { self.parent = parent }
 
@@ -1132,6 +1138,7 @@ private struct AddressField: NSViewRepresentable {
             field.alignment = .left
         }
         func controlTextDidEndEditing(_ obj: Notification) {
+            completionTask?.cancel(); completionGeneration += 1
             parent.isEditing = false
             // Restore the display alignment (centred for the active pill)
             // now that editing is over. Fires on both blur and Enter/submit,
@@ -1145,8 +1152,49 @@ private struct AddressField: NSViewRepresentable {
             didSubmit = false
         }
         func controlTextDidChange(_ obj: Notification) {
-            if let field = obj.object as? NSTextField {
-                parent.text = field.stringValue
+            completionTask?.cancel(); completionGeneration += 1
+            guard let field = obj.object as? NSTextField else { return }
+            let typed = field.stringValue
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil {
+                let editor = field.currentEditor() as? NSTextView
+                NSLog("[HistoryCompletion] entry typed=%@ editor=%@ marked=%@ selection=%@ fetch=%@ event=%@", typed, String(describing: editor), String(editor?.hasMarkedText() ?? false), String(describing: editor?.selectedRange()), String(parent.suggestions != nil), String(describing: NSApp.currentEvent?.type))
+            }
+            parent.text = typed
+            guard let editor = field.currentEditor() as? NSTextView,
+                  !editor.hasMarkedText(), editor.selectedRange().length == 0,
+                  editor.selectedRange().location == (typed as NSString).length,
+                  typed.count >= 2, !typed.contains(where: { $0.isWhitespace }),
+                  (NSApp.currentEvent?.type != .keyDown ||
+                   (NSApp.currentEvent?.keyCode != 51 && NSApp.currentEvent?.keyCode != 117)),
+                  let fetch = parent.suggestions else { return }
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil { NSLog("[HistoryCompletion] schedule %@", typed) }
+            let generation = completionGeneration
+            completionTask = Task { @MainActor [weak self, weak field] in
+                do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+                let matches = await fetch(typed)
+                if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil {
+                    NSLog("[HistoryCompletion] reply count=%d cancelled=%@ editing=%@ generation=%d/%d field=%@ selection=%@", matches.count, String(Task.isCancelled), String(self?.parent.isEditing ?? false), self?.completionGeneration ?? -1, generation, field?.stringValue ?? "nil", String(describing: (field?.currentEditor() as? NSTextView)?.selectedRange()))
+                }
+                guard !Task.isCancelled, let self, let field,
+                      self.completionGeneration == generation, self.parent.isEditing,
+                      field.stringValue == typed, let editor = field.currentEditor() as? NSTextView,
+                      !editor.hasMarkedText(), editor.selectedRange().length == 0,
+                      editor.selectedRange().location == (typed as NSString).length else { return }
+                let candidates = matches.flatMap { entry -> [String] in
+                    if typed.contains("://") { return [entry.url] }
+                    let bare = entry.url.replacingOccurrences(of: "^https?://", with: "", options: .regularExpression)
+                    return bare.hasPrefix("www.") ? [bare, String(bare.dropFirst(4))] : [bare]
+                }
+                guard let value = candidates.compactMap({ candidate -> String? in
+                    guard let match = candidate.range(of: typed, options: [.anchored, .caseInsensitive]),
+                          match.upperBound < candidate.endIndex else { return nil }
+                    return typed + candidate[match.upperBound...]
+                }).first else { return }
+                let prefix = (typed as NSString).length
+                editor.string = value
+                field.stringValue = value
+                editor.setSelectedRange(NSRange(location: prefix, length: (value as NSString).length - prefix))
+                self.parent.text = value
             }
         }
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

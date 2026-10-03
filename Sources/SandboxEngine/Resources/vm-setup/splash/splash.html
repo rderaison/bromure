@@ -2,182 +2,152 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; connect-src 'self' file:; img-src 'self' data: file:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; connect-src 'self' file:; img-src 'self' data: file:; font-src 'self' file:;">
 <title>Bromure — Connecting VPN</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  /* Tokens — match bromure.io. Dark by default; the
-     `prefers-color-scheme: light` block overrides for light mode and
-     swaps the bg image to day.jpg. No gradients. */
+  /* Bromure 2026 Brand Guide, supplied by bromure_web: offline assets only. */
+  @font-face { font-family: Manrope; src: url('fonts/Manrope-SemiBold.ttf') format('truetype'); font-weight: 600; font-display: swap; }
+  @font-face { font-family: 'Inter Tight'; src: url('fonts/InterTight.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+  @font-face { font-family: 'Fragment Mono'; src: url('fonts/FragmentMono.woff2') format('woff2'); font-weight: 400; font-display: swap; }
   :root {
-    --bg:         hsl(220, 40%, 5%);
-    --fg:         hsl(0, 0%, 98%);
-    --muted-fg:   hsl(220, 12%, 65%);
-    --accent:     hsl(30, 80%, 55%);
-    --border:     hsla(0, 0%, 100%, 0.08);
-    --card-bg:    hsla(255, 255%, 255%, 0.04);
-    --msg-bg:     hsla(0, 0%, 0%, 0.30);
-    --bg-image:   url('night.jpg');
-    --tint-rgb:   5, 8, 18;
+    color-scheme: light dark;
+    --bg: #000000;
+    --fg: #FFFFFF;
+    --muted-fg: #9AA5C4;
+    --accent: #93AEFF;
+    --accent-text: #000000;
+    --accent-strong: #93AEFF;
+    --border: #222840;
+    --panel: #0E1220;
   }
   @media (prefers-color-scheme: light) {
     :root {
-      --bg:       hsl(210, 40%, 97%);
-      --fg:       hsl(220, 40%, 12%);
-      --muted-fg: hsl(220, 12%, 38%);
-      --accent:   hsl(30, 85%, 42%);
-      --border:   hsla(220, 18%, 16%, 0.10);
-      --card-bg:  hsla(0, 0%, 100%, 0.65);
-      --msg-bg:   hsla(220, 18%, 92%, 0.85);
-      --bg-image: url('day.jpg');
-      --tint-rgb: 245, 247, 250;
+      --bg: #FFFFFF;
+      --fg: #000000;
+      --muted-fg: #55618A;
+      --accent: #5866FE;
+      --accent-text: #FFFFFF;
+      --accent-strong: #33497B;
+      --border: #DCE2F8;
+      --panel: #F4F6FD;
     }
   }
-
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; width: 100%; }
+  html, body { min-height: 100%; width: 100%; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif;
-    background-color: var(--bg);
+    font-family: 'Inter Tight', system-ui, sans-serif;
+    background: var(--bg);
     color: var(--fg);
     -webkit-font-smoothing: antialiased;
-    overflow: hidden;
-    position: relative;
-  }
-  .bg {
-    position: absolute; inset: 0;
-    background-image: var(--bg-image);
-    background-size: cover;
-    background-position: center;
-    background-repeat: no-repeat;
-  }
-  /* Flat translucent tint instead of the old vertical gradient — keeps
-     the photo readable while letting `--bg` tone through enough that
-     the card sits comfortably over either day.jpg or night.jpg. */
-  .bg-overlay {
-    position: absolute; inset: 0;
-    background-color: rgba(var(--tint-rgb), 0.55);
   }
   .stage {
-    position: relative; z-index: 1;
-    width: 100%; height: 100%;
+    min-height: 100vh;
     display: flex; align-items: center; justify-content: center;
-    padding: 48px 24px;
+    padding: 32px 24px;
   }
   .card {
     width: 100%; max-width: 560px;
-    background: var(--card-bg);
-    -webkit-backdrop-filter: blur(14px) saturate(1.2);
-    backdrop-filter: blur(14px) saturate(1.2);
+    background: var(--panel);
     border: 1px solid var(--border);
-    border-radius: 24px;
-    padding: 56px 48px;
+    padding: 40px;
     text-align: center;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
   }
   .brand {
-    font-size: 14px;
-    font-weight: 600;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    opacity: 0.65;
-    margin-bottom: 32px;
-    color: var(--accent);
-  }
-  /* Solid accent — the bromure_web `.gradient-text` class is no longer
-     a gradient. Keep this hook so the title can pick up the accent. */
-  .accent { color: var(--accent); letter-spacing: -0.02em; }
-  h1 {
-    font-size: 32px;
-    font-weight: 700;
-    letter-spacing: -0.022em;
-    line-height: 1.15;
-    margin-bottom: 14px;
+    display: flex; align-items: center; gap: 12px;
+    font-family: Manrope, system-ui, sans-serif;
+    font-size: 26px; font-weight: 600; letter-spacing: -0.03em;
     color: var(--fg);
+    margin-bottom: 40px;
+  }
+  .brand svg { display: block; width: 211px; height: 32px; max-width: 100%; }
+  .accent { color: var(--accent); }
+  h1 {
+    font-family: Manrope, system-ui, sans-serif;
+    font-size: clamp(26px, 4vw, 32px);
+    font-weight: 600; letter-spacing: -0.03em;
+    line-height: 1.2; margin-bottom: 16px;
+    overflow-wrap: anywhere; text-wrap: balance;
   }
   p {
-    font-size: 16px;
-    color: var(--muted-fg);
-    line-height: 1.55;
-    max-width: 420px;
-    margin: 0 auto;
+    font-size: 16px; color: var(--muted-fg); line-height: 1.6;
+    max-width: 420px; margin: 0 auto;
   }
-
-  /* Spinner — single-tone arc on a faint track. */
   .spinner {
-    width: 64px; height: 64px;
-    margin: 0 auto 28px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 1.1s linear infinite;
+    width: 48px; height: 48px; margin: 0 auto 24px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 1.1s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* Error — solid disk, no gradient. */
   .error-icon {
-    width: 64px; height: 64px;
-    margin: 0 auto 28px;
-    border-radius: 50%;
-    background: hsl(0, 75%, 50%);
-    color: white;
+    width: 48px; height: 48px; margin: 0 auto 24px;
+    border: 1px solid var(--border); color: var(--accent-strong);
     display: flex; align-items: center; justify-content: center;
-    font-size: 36px;
-    font-weight: 600;
-    box-shadow: 0 10px 30px hsla(0, 75%, 40%, 0.30);
+    font-family: Manrope, system-ui, sans-serif; font-size: 28px;
   }
   .msg {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 13px;
-    text-align: left;
-    background: var(--msg-bg);
-    border: 1px solid var(--border);
-    padding: 14px 18px;
-    border-radius: 12px;
-    margin: 24px auto 20px;
-    max-width: 440px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 30vh;
-    overflow: auto;
-    line-height: 1.55;
-    color: var(--fg);
+    font-family: 'Fragment Mono', ui-monospace, monospace;
+    font-size: 13px; font-variant-numeric: tabular-nums;
+    text-align: left; background: var(--bg);
+    border: 1px solid var(--border); padding: 16px;
+    margin: 24px auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 30vh; overflow: auto; line-height: 1.6;
   }
   .hint { font-size: 14px; margin-bottom: 28px; }
   .btn {
-    -webkit-appearance: none; appearance: none;
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 12px 28px;
-    border-radius: 999px;
-    background: var(--accent);
-    color: white;
-    border: none;
-    font-size: 15px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    box-shadow: 0 8px 24px hsla(30, 80%, 55%, 0.30);
-    transition: transform 0.12s ease, opacity 0.12s ease;
+    appearance: none; display: block; margin-left: auto;
+    padding: 12px 24px; border: 1px solid var(--accent);
+    background: var(--accent); color: var(--accent-text);
+    font-family: Manrope, system-ui, sans-serif;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: background-color 150ms ease-out, color 150ms ease-out;
   }
-  .btn:hover { opacity: 0.92; transform: scale(1.03); }
-  .btn:active { opacity: 0.85; transform: scale(0.99); }
-
+  .btn:hover, .btn:active { background: var(--bg); color: var(--accent-strong); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
   .hidden { display: none !important; }
+  @media (max-width: 480px) {
+    .stage { padding: 20px 16px; }
+    .card { padding: 28px 24px; }
+    .brand { margin-bottom: 32px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+    .btn { transition: none; }
+  }
 </style>
 </head>
 <body>
-<div class="bg"></div>
-<div class="bg-overlay"></div>
 <div class="stage">
   <div class="card">
-    <div class="brand">Bromure</div>
+    <div class="brand" role="img" aria-label="Bromure"><svg
+      viewBox="228.0 265.0 1045.0 158.7"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      focusable="false"
+    >
+    <g fill="#5866FE">
+      <path d="M265.83 339.969C276.641 333.424 285.339 323.802 290.724 312.278H308.513C313.897 323.816 322.61 333.424 333.407 339.969C334.483 340.612 335.714 340.934 336.973 340.934H373.138C374.397 340.934 375.628 340.612 376.705 339.969C387.515 333.424 396.214 323.802 401.598 312.278H419.388C424.772 323.816 433.485 333.424 444.281 339.969C445.358 340.612 446.589 340.934 447.847 340.934H482.111C477.105 305.873 446.966 278.923 410.507 278.923C388.243 278.923 368.342 288.993 355.07 304.81C341.798 288.993 321.897 278.923 299.632 278.923C263.173 278.923 233.021 305.873 228 340.948H262.264C263.522 340.948 264.753 340.626 265.83 339.983V339.969Z" />
+      <path d="M447.484 362.444C434.631 369.255 424.408 380.261 418.604 393.715H402.396C396.606 380.275 386.369 369.255 373.516 362.444C372.803 362.066 372.034 361.828 371.237 361.73C371.237 361.702 371.237 361.689 371.237 361.661H338.861C338.861 361.661 338.861 361.702 338.861 361.73C338.064 361.828 337.294 362.066 336.581 362.444C323.729 369.255 313.506 380.261 307.702 393.715H291.493C285.703 380.275 275.466 369.255 262.613 362.444C261.62 361.912 260.502 361.661 259.383 361.661H228C233.021 396.721 263.173 423.685 299.632 423.685C321.897 423.685 341.798 413.616 355.07 397.798C368.342 413.616 388.243 423.685 410.507 423.685C446.966 423.685 477.105 396.735 482.139 361.661H450.728C449.61 361.661 448.491 361.912 447.498 362.444H447.484Z" />
+    </g>
+    <g fill="currentColor">
+      <path d="M604.921 417.857C597.72 417.857 591.931 416.645 587.556 414.222C583.181 411.732 579.816 408.938 577.46 405.842C575.104 402.679 573.287 400.087 572.008 398.068H569.989V415.434H553.431V265H570.594V320.529H572.008C573.287 318.577 575.07 316.087 577.359 313.058C579.647 309.962 582.945 307.202 587.253 304.779C591.561 302.356 597.383 301.144 604.72 301.144C614.21 301.144 622.556 303.534 629.758 308.313C636.96 313.024 642.58 319.755 646.619 328.505C650.725 337.188 652.778 347.452 652.778 359.299C652.778 371.212 650.758 381.578 646.72 390.395C642.681 399.145 637.061 405.909 629.859 410.688C622.657 415.467 614.345 417.857 604.921 417.857ZM602.7 402.308C609.902 402.308 615.926 400.39 620.773 396.554C625.619 392.65 629.253 387.433 631.676 380.905C634.167 374.376 635.412 367.106 635.412 359.097C635.412 351.154 634.2 343.986 631.777 337.592C629.354 331.198 625.72 326.116 620.873 322.346C616.095 318.577 610.037 316.693 602.7 316.693C595.633 316.693 589.71 318.476 584.931 322.044C580.152 325.544 576.517 330.491 574.027 336.885C571.604 343.212 570.392 350.616 570.392 359.097C570.392 367.578 571.638 375.082 574.128 381.611C576.618 388.073 580.253 393.155 585.032 396.857C589.878 400.491 595.768 402.308 602.7 402.308Z" />
+      <path d="M667.47 415.434V302.558H684.027V319.721H685.239C687.325 314.135 691.061 309.625 696.446 306.193C701.898 302.693 707.989 300.943 714.72 300.943C715.999 300.943 717.58 300.976 719.465 301.043C721.35 301.043 722.797 301.077 723.806 301.144V318.712C723.201 318.577 721.854 318.375 719.768 318.106C717.681 317.837 715.46 317.702 713.104 317.702C707.652 317.702 702.773 318.846 698.465 321.135C694.157 323.423 690.758 326.553 688.268 330.524C685.845 334.496 684.633 339.039 684.633 344.154V415.434H667.47Z" />
+      <path d="M774.845 417.857C764.681 417.857 755.763 415.434 748.09 410.587C740.417 405.741 734.426 398.943 730.119 390.193C725.878 381.443 723.758 371.279 723.758 359.702C723.758 347.924 725.878 337.659 730.119 328.909C734.426 320.092 740.417 313.26 748.09 308.414C755.763 303.568 764.681 301.144 774.845 301.144C785.076 301.144 794.028 303.568 801.701 308.414C809.374 313.26 815.364 320.092 819.672 328.909C823.98 337.659 826.134 347.924 826.134 359.702C826.134 371.279 823.98 381.443 819.672 390.193C815.364 398.943 809.374 405.741 801.701 410.587C794.028 415.434 785.076 417.857 774.845 417.857ZM774.845 402.308C782.653 402.308 789.047 400.323 794.028 396.352C799.008 392.381 802.71 387.164 805.133 380.703C807.557 374.174 808.768 367.174 808.768 359.702C808.768 352.097 807.557 345.029 805.133 338.5C802.71 331.972 799.008 326.722 794.028 322.75C789.047 318.712 782.653 316.693 774.845 316.693C767.172 316.693 760.845 318.712 755.864 322.75C750.883 326.722 747.181 331.972 744.758 338.5C742.335 345.029 741.123 352.097 741.123 359.702C741.123 367.174 742.335 374.174 744.758 380.703C747.181 387.164 750.883 392.381 755.864 396.352C760.845 400.323 767.172 402.308 774.845 402.308Z" />
+      <path d="M840.826 415.434V302.558H857.383V320.327H858.999C861.355 314.27 865.157 309.558 870.407 306.193C875.658 302.827 881.951 301.144 889.287 301.144C896.691 301.144 902.85 302.827 907.763 306.193C912.744 309.558 916.614 314.27 919.374 320.327H920.586C923.547 314.471 927.889 309.827 933.61 306.394C939.398 302.894 946.297 301.144 954.307 301.144C964.403 301.144 972.682 304.308 979.144 310.635C985.605 316.895 988.836 326.654 988.836 339.914V415.434H971.471V339.914C971.471 331.568 969.182 325.611 964.605 322.044C960.028 318.476 954.644 316.693 948.451 316.693C940.576 316.693 934.451 319.116 930.076 323.962C925.768 328.741 923.615 334.731 923.615 341.933V415.434H905.845V338.097C905.845 331.702 903.792 326.553 899.686 322.649C895.581 318.678 890.23 316.693 883.633 316.693C879.124 316.693 874.917 317.904 871.013 320.327C867.109 322.75 863.946 326.082 861.523 330.322C859.167 334.563 857.989 339.443 857.989 344.962V415.434H840.826Z" />
+      <path d="M1080.06 369.395V302.558H1097.22V415.434H1080.06V396.251H1078.85C1076.15 401.972 1072.01 406.852 1066.43 410.89C1060.91 414.929 1053.87 416.914 1045.33 416.847C1038.26 416.847 1032 415.333 1026.55 412.304C1021.1 409.208 1016.79 404.496 1013.62 398.169C1010.53 391.842 1008.98 383.866 1008.98 374.241V302.558H1026.14V373.231C1026.14 381.376 1028.47 387.905 1033.11 392.818C1037.82 397.732 1043.78 400.155 1050.98 400.087C1055.29 400.087 1059.66 399.01 1064.11 396.857C1068.61 394.635 1072.38 391.27 1075.41 386.76C1078.51 382.183 1080.06 376.395 1080.06 369.395Z" />
+      <path d="M1117.36 415.434V302.558H1133.92V319.721H1135.13C1137.22 314.135 1140.96 309.625 1146.34 306.193C1151.79 302.693 1157.88 300.943 1164.62 300.943C1165.89 300.943 1167.48 300.976 1169.36 301.043C1171.24 301.043 1172.69 301.077 1173.7 301.144V318.712C1173.1 318.577 1171.75 318.375 1169.66 318.106C1167.58 317.837 1165.36 317.702 1163 317.702C1157.55 317.702 1152.67 318.846 1148.36 321.135C1144.05 323.423 1140.65 326.553 1138.16 330.524C1135.74 334.496 1134.53 339.039 1134.53 344.154V415.434H1117.36Z" />
+      <path d="M1226.36 417.857C1215.52 417.857 1206.13 415.434 1198.19 410.587C1190.31 405.741 1184.25 398.977 1180.01 390.294C1175.77 381.544 1173.65 371.414 1173.65 359.904C1173.65 348.327 1175.74 338.13 1179.91 329.313C1184.09 320.496 1189.94 313.596 1197.48 308.616C1205.09 303.635 1213.97 301.144 1224.13 301.144C1229.99 301.144 1235.81 302.12 1241.6 304.072C1247.39 306.024 1252.64 309.188 1257.35 313.563C1262.13 317.938 1265.93 323.726 1268.76 330.928C1271.59 338.13 1273 346.981 1273 357.481V364.953H1185.97V350.01H1263.61L1255.63 355.664C1255.63 348.125 1254.46 341.428 1252.1 335.573C1249.75 329.717 1246.21 325.106 1241.5 321.741C1236.86 318.375 1231.07 316.693 1224.13 316.693C1217.2 316.693 1211.24 318.409 1206.26 321.842C1201.35 325.207 1197.58 329.616 1194.96 335.068C1192.33 340.52 1191.02 346.375 1191.02 352.635V362.529C1191.02 371.078 1192.5 378.313 1195.46 384.236C1198.42 390.159 1202.56 394.669 1207.88 397.765C1213.2 400.794 1219.36 402.308 1226.36 402.308C1230.87 402.308 1234.97 401.669 1238.67 400.39C1242.37 399.044 1245.57 397.058 1248.26 394.433C1250.96 391.741 1253.01 388.443 1254.42 384.539L1271.18 389.385C1269.43 395.039 1266.47 400.02 1262.3 404.328C1258.19 408.568 1253.08 411.9 1246.95 414.323C1240.83 416.679 1233.96 417.857 1226.36 417.857Z" />
+    </g>
+    </svg></div>
 
-    <div id="loading">
+    <div id="loading" role="status" aria-live="polite">
       <div class="spinner" aria-hidden="true"></div>
       <h1><span id="t-title" class="accent">Connecting to VPN</span></h1>
       <p id="t-subtitle">Your browser session will start automatically once the VPN is ready.</p>
     </div>
 
-    <div id="error" class="hidden">
+    <div id="error" class="hidden" role="alert">
       <div class="error-icon" aria-hidden="true">!</div>
       <h1 id="t-error-title">VPN connection failed</h1>
       <div class="msg" id="msg">Unknown error</div>
