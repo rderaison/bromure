@@ -8,10 +8,14 @@ import Darwin
 public final class SharedWindowControllerBridge {
     public static let vsockPort: UInt32 = 5832
     private let device: VZVirtioSocketDevice
+    private weak var virtualMachine: VZVirtualMachine?
     private var nextID = 1
     private var busy = false
     private var epoch: String?
-    public init(socketDevice: VZVirtioSocketDevice) { device = socketDevice }
+    public init(socketDevice: VZVirtioSocketDevice, virtualMachine: VZVirtualMachine? = nil) {
+        device = socketDevice
+        self.virtualMachine = virtualMachine
+    }
 
     public func request(_ command: String, fields: [String: Any] = [:]) async throws -> [String: Any] {
         guard ["attachPrimary", "list", "create", "resize", "close", "focus", "shutdown"].contains(command),
@@ -19,6 +23,20 @@ public final class SharedWindowControllerBridge {
             throw Self.failure("Invalid or overlapping shared-window request")
         }
         busy = true; defer { busy = false }
+        // Activation starts an asynchronous resume. Never connect while VZ is
+        // transitioning, and never replay a mutation to recover from that race.
+        if let vm = virtualMachine {
+            let deadline = ProcessInfo.processInfo.systemUptime + 10
+            while vm.state == .paused || vm.state == .resuming || vm.state == .pausing {
+                guard ProcessInfo.processInfo.systemUptime < deadline else {
+                    throw Self.failure("Timed out waiting for the browser VM to resume")
+                }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            guard vm.state == .running else {
+                throw Self.failure("Browser VM is not running")
+            }
+        }
         let id = nextID; nextID += 1
         var message = fields; message["id"] = id; message["cmd"] = command
         var data = try JSONSerialization.data(withJSONObject: message, options: [.sortedKeys])

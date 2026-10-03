@@ -2471,7 +2471,7 @@ final class SharedBrowserVMOwner {
 
     init(root: BrowserSession, warm: VMPool.WarmVM, socket: VZVirtioSocketDevice) {
         self.root = root; self.warm = warm
-        controller = SharedWindowControllerBridge(socketDevice: socket)
+        controller = SharedWindowControllerBridge(socketDevice: socket, virtualMachine: warm.vm)
         windows[0] = root
         sizes[0] = (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
         root.sharedOwner = self
