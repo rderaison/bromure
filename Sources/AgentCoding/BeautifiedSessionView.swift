@@ -1376,6 +1376,18 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Answer a generic modal picker with one of its options, or dismiss it
     /// (Esc — every Claude Code nudge takes it as "not now"). Optimistic:
     /// the card goes, the next scan confirms the screen moved on.
+    /// Answer a checklist with the boxes the user left ticked (Space on each
+    /// row that changes, then its button), or dismiss it (Esc).
+    func answerChecklist(_ want: [Bool]?) {
+        guard let p = prompt, p.kind == .checklist, let list = p.checklist else { return }
+        withAnimation(.easeOut(duration: 0.2)) { prompt = nil }
+        let keys = want.map { AgentScreen.checklistKeys(list, want: $0) } ?? ["Escape"]
+        Task { [weak self] in
+            await self?.provider.pressKeys(keys)
+            await self?.rescanSoon()
+        }
+    }
+
     func answerPicker(_ index: Int?) {
         guard let p = prompt, p.kind == .picker else { return }
         withAnimation(.easeOut(duration: 0.2)) { prompt = nil }
@@ -2471,6 +2483,7 @@ struct BeautifiedSessionView: View {
                                        onOpenProviderSettings: model.signInProvider == nil ? model.openProviderSettings : nil,
                                        onTrust: { model.trustFolder() },
                                        onPick: { model.answerPicker($0) },
+                                       onChecklist: { model.answerChecklist($0) },
                                        onMethod: { model.chooseLoginMethod($0) },
                                        onOpenURL: { model.openLoginURL() },
                                        onSubmitCode: { model.submitLoginCode($0) })
@@ -2958,7 +2971,7 @@ func terminalTail(_ screen: String, _ n: Int = 45) -> [String] {
 /// Claude's trust dialog is likewise answerable inline (its arrow list puts
 /// "Yes, I trust this folder" one Down from the default "No, exit").
 struct TerminalPrompt: Equatable {
-    enum Kind: Equatable { case trust, login, picker }
+    enum Kind: Equatable { case trust, login, picker, checklist }
     let kind: Kind
     /// Trust: the folder path. (Login carries its state in the fields below.)
     var detail: String = ""
@@ -2982,12 +2995,16 @@ struct TerminalPrompt: Equatable {
     var title: String = ""
     var options: [LoginOption] = []
     var selectedOption: Int? = nil
+    /// Checklist — a multi-select ("Select any you wish to enable."): its
+    /// rows (`options`) and their check boxes as they stand on screen.
+    var checklist: AgentScreen.Checklist? = nil
 
     var headline: String {
         switch kind {
         case .trust: return NSLocalizedString("The agent is waiting for you to trust this folder", comment: "prompt")
         case .login: return NSLocalizedString("Sign in to Claude", comment: "prompt")
-        case .picker: return title.isEmpty ? NSLocalizedString("The agent is asking", comment: "prompt") : title
+        case .picker, .checklist:
+            return title.isEmpty ? NSLocalizedString("The agent is asking", comment: "prompt") : title
         }
     }
 
@@ -3061,6 +3078,19 @@ struct TerminalPrompt: Equatable {
         // doesn't matter, so it holds in any language and through rewording.
         // The card shows what's asked and relays the user's pick; it never
         // answers on its own.
+        // A checklist ("2 new MCP servers found in this project — Select any
+        // you wish to enable."): Enter on a row only ticks it there, so a
+        // one-pick card could never submit it. Its own card holds the ticks
+        // and relays them, then the button.
+        if let list = AgentScreen.checklist(lines) {
+            // Its heading is the box's first line ("2 new MCP servers found
+            // in this project"), the rest what it explains.
+            let body = AgentScreen.context(lines, before: list.firstOffset, title: "")
+                .split(separator: "\n").map(String.init)
+            return TerminalPrompt(kind: .checklist,
+                                  detail: body.dropFirst().joined(separator: "\n"),
+                                  title: body.first ?? "", options: list.options, checklist: list)
+        }
         if let menu = AgentScreen.liveMenu(lines, after: -1) {
             // Claude's AskUserQuestion picker: its own card answers it.
             let footer = lines[(menu.lastOffset + 1)...].joined(separator: " ")
@@ -3376,17 +3406,22 @@ private struct PromptCard: View {
     var onTrust: () -> Void = {}
     /// Picker: the option's index, or nil to dismiss (Esc).
     var onPick: (Int?) -> Void = { _ in }
+    /// Checklist: the boxes to leave ticked, or nil to dismiss (Esc).
+    var onChecklist: ([Bool]?) -> Void = { _ in }
     var onMethod: (Int) -> Void = { _ in }
     var onOpenURL: () -> Void = {}
     var onSubmitCode: (String) -> Void = { _ in }
 
     @State private var code = ""
+    /// The checklist's boxes as the user sets them here (start: the screen's).
+    @State private var ticks: [Bool] = []
 
     private var icon: String {
         switch prompt.kind {
         case .login: return "person.badge.key.fill"
         case .trust: return "hand.raised.fill"
         case .picker: return "questionmark.circle.fill"
+        case .checklist: return "checklist"
         }
     }
 
@@ -3401,6 +3436,7 @@ private struct PromptCard: View {
                 case .trust: trustBody
                 case .login: loginBody
                 case .picker: pickerBody
+                case .checklist: checklistBody
                 }
             }
             Spacer(minLength: 0)
@@ -3440,6 +3476,54 @@ private struct PromptCard: View {
     /// rows whose labels wrap: a row of AppKit `.bordered` buttons with long
     /// labels (/model) overflowed a narrow room cell, and each truncation
     /// re-invalidated the lazy transcript's layout — a main-thread livelock.
+    @ViewBuilder private var checklistBody: some View {
+        let start = prompt.checklist?.checked ?? []
+        if !prompt.detail.isEmpty {
+            Text(prompt.detail)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(6).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        ForEach(Array(prompt.options.enumerated()), id: \.offset) { i, option in
+            let on = ticks.indices.contains(i) ? ticks[i] : (start.indices.contains(i) && start[i])
+            Button {
+                if ticks.count != start.count { ticks = start }
+                if ticks.indices.contains(i) { ticks[i].toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: on ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 14))
+                        .foregroundStyle(on ? Color.orange : Color.secondary)
+                    Text(option.label).font(.system(size: 12, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(on ? Color.orange.opacity(0.10) : Color.primary.opacity(0.04)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        HStack(spacing: 10) {
+            Button {
+                onChecklist(ticks.count == start.count ? ticks : start)
+            } label: {
+                Text(prompt.checklist?.submitLabel ?? NSLocalizedString("Confirm", comment: "prompt checklist"))
+            }
+            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            Button(NSLocalizedString("Dismiss", comment: "prompt picker (Esc)")) { onChecklist(nil) }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.top, 2)
+        .onChange(of: prompt.checklist?.checked ?? []) { _, now in ticks = now }
+        .onAppear { if ticks.count != start.count { ticks = start } }
+    }
+
     @ViewBuilder private var pickerBody: some View {
         if !prompt.detail.isEmpty {
             // What's being asked about: the command, the blocked action.

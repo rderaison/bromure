@@ -34,6 +34,12 @@ final class QuickTaskPanel {
 
         func profile(_ id: UUID) -> Profile? { profiles.first { $0.id == id } }
 
+        /// The workspace a task belongs to: its assignee's, when it's queued
+        /// for a session — else the one it was started from.
+        func workspace(for assignment: TaskAssignment?, else fallback: UUID) -> UUID {
+            choices.workspace(for: assignment) ?? fallback
+        }
+
         @MainActor
         static func local(_ d: ACAppDelegate) -> Target {
             let current = d.unifiedWindow?.listModel.selectedSessionID.flatMap { d.agentSessionStore.session($0) }
@@ -55,7 +61,7 @@ final class QuickTaskPanel {
                 .map { s -> TaskAssigneeChoices.Session in
                     let b = SessionHome.bucket(for: s, in: c.listModel)
                     return .init(id: s.id, label: label(s), workspace: c.profile(for: s.profileID)?.name ?? "",
-                                 busy: b == .working || b == .needsYou)
+                                 busy: b == .working || b == .needsYou, profileID: s.profileID)
                 }
             let rooms = c.roomStore.rooms.filter { $0.archivedAt == nil }
                 .map { TaskAssigneeChoices.Room(id: $0.id, name: $0.name) }
@@ -188,6 +194,7 @@ final class QuickTaskPanel {
         guard let target else { return }
         var t = task
         t.stage = .backlog
+        t.profileID = target.workspace(for: t.assignment, else: t.profileID)
         target.save(t)
         if plan {
             target.plan(t.id)
@@ -200,6 +207,7 @@ final class QuickTaskPanel {
     private func add(title: String, details: String, assignment: TaskAssignment?,
                      profileID: UUID, folder: String, tool: Profile.Tool?) {
         guard let target else { return }
+        let profileID = target.workspace(for: assignment, else: profileID)
         let profile = target.profile(profileID)
         let task = CodingTask(title: title, details: details, profileID: profileID,
                               repoPath: folder, tool: tool ?? profile?.tool ?? .claude,
@@ -380,7 +388,8 @@ struct QuickTaskView: View {
 
     /// ⇥⇥: grow into the full editor with what's typed so far.
     private func expand() {
-        var t = CodingTask(title: trimmed, details: details, profileID: profileID,
+        var t = CodingTask(title: trimmed, details: details,
+                           profileID: choices.workspace(for: assignment) ?? profileID,
                            repoPath: folder, tool: tool, stage: .backlog)
         t.assignment = assignment
         onExpand()

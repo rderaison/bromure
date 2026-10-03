@@ -3612,3 +3612,15 @@
 "Ask %@ to Merge into %@" = "%@ bitten, in %@ zu mergen";
 "Ask %@ to Merge" = "%@ bitten zu mergen";
 "Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "Bittet den Agenten, der die Aufgabe erledigt hat, seinen Branch dort zu mergen, wo er gearbeitet hat; die Karte wird erledigt, sobald er Bescheid gibt. Gedrückt halten für Squash, Pull-Request und andere Branches.";
+"%@ merges %@ into…" = "%@ mergt %@ in …";
+"%@ — where it started" = "%@ – wo es begann";
+"Loading branches…" = "Branches werden geladen …";
+"Squash into one commit" = "Zu einem Commit zusammenfassen";
+"Ask %@ to Merge into…" = "%@ bitten, zu mergen in …";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Wählen Sie den Branch: Der Agent, der die Arbeit erledigt hat, mergt sie dort, wo er gearbeitet hat; die Karte wird erledigt, sobald er Bescheid gibt.";
+"Mark as Done" = "Als erledigt markieren";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Setzt die Aufgabe unverändert auf Erledigt – nichts wird gemergt, Worktree und Branch bleiben bestehen.";
+"Confirm" = "Bestätigen";
+"Created %@" = "Erstellt %@";
+"Modified %@" = "Geändert %@";
+"Updated %@" = "Aktualisiert %@";

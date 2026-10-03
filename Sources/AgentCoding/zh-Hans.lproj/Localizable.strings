@@ -3612,3 +3612,15 @@
 "Ask %@ to Merge into %@" = "请 %@ 合并到 %@";
 "Ask %@ to Merge" = "请 %@ 合并";
 "Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "请完成任务的代理在其工作的地方合并它的分支；它回报后卡片即标记为完成。按住可选择压缩合并、拉取请求或其他分支。";
+"%@ merges %@ into…" = "%@ 将 %@ 合并到…";
+"%@ — where it started" = "%@ — 开始工作的地方";
+"Loading branches…" = "正在加载分支…";
+"Squash into one commit" = "压缩为一个提交";
+"Ask %@ to Merge into…" = "请 %@ 合并到…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "选择分支：完成工作的代理会在其工作的地方合并，它回报后卡片即标记为完成。";
+"Mark as Done" = "标记为完成";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "将任务原样移到“完成”——不合并任何内容，工作树及其分支保留。";
+"Confirm" = "确认";
+"Created %@" = "创建于 %@";
+"Modified %@" = "修改于 %@";
+"Updated %@" = "更新于 %@";

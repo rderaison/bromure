@@ -304,8 +304,7 @@ struct AutomationListRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(Color.primary.opacity(hovering ? 0.055 : 0.03), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.08)))
+        .modifier(FloatingCardBackground(cornerRadius: 12, hovering: hovering))
         .contentShape(RoundedRectangle(cornerRadius: 12))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onEdit)
@@ -487,8 +486,7 @@ struct WatchSummaryRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(Color.primary.opacity(hovering ? 0.055 : 0.03), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.08)))
+        .modifier(FloatingCardBackground(cornerRadius: 12, hovering: hovering))
         .contentShape(RoundedRectangle(cornerRadius: 12))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onOpen)

@@ -3223,6 +3223,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     closeNoMerge: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.closeWithoutMerge(id)
                     },
+                    markDone: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.markDone(id)
+                    },
                     delete: { [weak self] id in
                         self?.acDelegate?.codingTaskStore.remove(id)
                         self?.acDelegate?.codingTaskEngine.pumpQueue()

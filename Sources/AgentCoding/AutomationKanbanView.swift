@@ -453,6 +453,22 @@ struct GlassCapsule: ViewModifier {
     }
 }
 
+/// A card floating on a board's backdrop — the task board's look: solid,
+/// softly shadowed, lifted a little under the pointer.
+struct FloatingCardBackground: ViewModifier {
+    var cornerRadius: CGFloat = 12
+    var hovering = false
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content.background(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(Color.platformControlBackground.opacity(scheme == .dark ? 0.85 : 0.96))
+                .shadow(color: .black.opacity(hovering ? 0.12 : 0.05),
+                        radius: hovering ? 10 : 4, y: hovering ? 4 : 2))
+    }
+}
+
 /// A board's backdrop: the window colour washed with a few soft tints, so
 /// glass and cards have something to sit on.
 struct BoardBackdrop: View {

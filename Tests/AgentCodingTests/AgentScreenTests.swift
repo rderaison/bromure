@@ -277,6 +277,46 @@ struct AgentScreenTests {
         #expect(c == nil, "\(String(describing: c))")
     }
 
+    @Test("The user's own wrapped message echoed above the input box is not a dialog (real capture)")
+    func echoedQuestionIsNotADialog() {
+        // Claude 2.1.276, first seconds of a turn: the question wraps onto an
+        // aligned second line, and the input box below is a bare "❯" once
+        // trailing blanks are trimmed. Read as a two-option menu, it raised a
+        // card titled with the question on every turn.
+        let screen = """
+        ✻ Crunched for 9s · done 12:04 PM
+
+        ❯ What is the difference between a process and a thread? Answer in about 200
+          words.
+
+        ✶ Wibbling… (3s · ↓ 1 tokens)
+        ────────────────────────────────────────────────────────────────────────────────
+        ❯
+        ────────────────────────────────────────────────────────────────────────────────
+          ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+        """
+        #expect(TerminalPrompt.detect(inScreen: screen, agent: "claude") == nil)
+        // The same, wrapped on a question mark — no sentence to tell the
+        // continuation from an option.
+        let question = screen.replacingOccurrences(
+            of: "❯ What is the difference between a process and a thread? Answer in about 200\n  words.",
+            with: "❯ Can you explain the difference between a process and a thread in this\n  codebase?")
+        #expect(question.contains("  codebase?"))
+        #expect(TerminalPrompt.detect(inScreen: question, agent: "claude") == nil)
+        // A numbered message the user sent, echoed the same way.
+        let numbered = """
+        ❯ 1. rename the module
+          2. update the tests
+
+        ✶ Thinking…
+        ────────────────────────────────────────────────────────────────────────────────
+        ❯
+        ────────────────────────────────────────────────────────────────────────────────
+          ? for shortcuts
+        """
+        #expect(TerminalPrompt.detect(inScreen: numbered, agent: "claude") == nil)
+    }
+
     // MARK: Sign-in shapes
 
     @Test("A device-code sign-in (Grok) is a login card with its code, from shapes and Grok's words")

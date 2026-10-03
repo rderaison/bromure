@@ -47,6 +47,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var reviewViewed: [String: String]?
 
     var createdAt: Date
+    /// When the task last changed (the store stamps it). nil: not since
+    /// it was created.
+    var updatedAt: Date?
     var startedAt: Date?
     /// When the agent last reported done (entered Testing).
     var testingAt: Date?
@@ -305,6 +308,9 @@ struct TaskAssigneeChoices: Equatable, Sendable {
         let label: String
         let workspace: String
         let busy: Bool
+        /// Its workspace: a task queued for it is that workspace's (the
+        /// card's chip, review, merge), whatever the editor defaulted to.
+        var profileID: UUID? = nil
     }
     struct Room: Identifiable, Equatable, Sendable, Hashable {
         let id: UUID
@@ -312,6 +318,14 @@ struct TaskAssigneeChoices: Equatable, Sendable {
     }
     var sessions: [Session] = []
     var rooms: [Room] = []
+
+    /// The workspace a task queued this way belongs to: the session's, when
+    /// it goes to one (nil: a room, the Switchboard, a new agent — keep the
+    /// task's own).
+    func workspace(for assignment: TaskAssignment?) -> UUID? {
+        guard let a = assignment, a.kind == .session else { return nil }
+        return sessions.first { $0.id == a.id }?.profileID
+    }
 }
 
 /// One piece of review feedback on a task's changes. `file` scopes a
@@ -370,7 +384,9 @@ final class CodingTaskStore {
 
     func upsert(_ task: CodingTask) {
         if let i = tasks.firstIndex(where: { $0.id == task.id }) {
-            tasks[i] = task
+            var t = task
+            if !Self.sameContent(tasks[i], t) { t.updatedAt = Date() }
+            tasks[i] = t
         } else {
             tasks.insert(task, at: 0)
         }
@@ -401,8 +417,18 @@ final class CodingTaskStore {
     /// In-place update + save; no-op when the task is gone.
     func mutate(_ id: UUID, _ change: (inout CodingTask) -> Void) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let before = tasks[i]
         change(&tasks[i])
+        if !Self.sameContent(before, tasks[i]) { tasks[i].updatedAt = Date() }
         save()
+    }
+
+    /// Equal apart from when they last changed — a save that changes
+    /// nothing doesn't count as a modification.
+    static func sameContent(_ a: CodingTask, _ b: CodingTask) -> Bool {
+        var a = a, b = b
+        a.updatedAt = nil; b.updatedAt = nil
+        return a == b
     }
 
     /// Fat-client mirror: replace the whole task list from a remote
@@ -1293,19 +1319,8 @@ final class CodingTaskEngine {
             guard let delegate, Self.isSafeBranch(branch) else {
                 return (nil, nil, nil)
             }
-            let root = ScheduledAutomationEngine.guestPath(repoPath)
-            let q = "'" + root.replacingOccurrences(of: "'", with: "'\\''") + "'"
-            let cmd = "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); "
-                + "[ -n \"$root\" ] || exit 0; "
-                + "dir=$(git -C \"$root\" worktree list --porcelain 2>/dev/null "
-                + "| awk -v b='refs/heads/\(branch)' "
-                + "'/^worktree /{d=substr($0,10)} $0==\"branch \" b {print d; exit}'); "
-                + "reg=\"$HOME/.bromure/worktrees/$(basename \"$root\")/.registry\"; "
-                + "parent=$(awk -F'\\x1f' -v b='\(branch)' '$1==b {print $2; exit}' "
-                + "\"$reg\" 2>/dev/null); "
-                + "[ -n \"$parent\" ] || parent=$(git -C \"$root\" rev-parse "
-                + "--abbrev-ref HEAD 2>/dev/null); "
-                + "printf '%s\\n%s\\n%s\\n' \"$dir\" \"$parent\" \"$root\""
+            let cmd = Self.worktreeMetadataCommand(
+                repoPath: ScheduledAutomationEngine.guestPath(repoPath), branch: branch)
             guard let out = try? await delegate.guestExec(
                 profileID: profileID, command: cmd, timeout: 15) else {
                 return (nil, nil, nil)
@@ -1316,6 +1331,35 @@ final class CodingTaskEngine {
                 lines.indices.contains(i) && !lines[i].isEmpty ? lines[i] : nil
             }
             return (v(0), v(1), v(2))
+    }
+
+    /// The guest command behind `resolveWorktreeMetadata`: prints the
+    /// branch's worktree dir, its parent branch and the repo root. The
+    /// parent is the one the registry recorded when the board made the
+    /// worktree; failing that (a task an agent did in a worktree of its
+    /// own), the branch the work forked from — the one `branch` is the
+    /// fewest commits ahead of, other task branches aside, the checked-out
+    /// one on a tie. The folder's HEAD alone named whatever that checkout
+    /// happened to be on, not where the work came from.
+    nonisolated static func worktreeMetadataCommand(repoPath: String, branch: String) -> String {
+        let q = "'" + repoPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); "
+            + "[ -n \"$root\" ] || exit 0; "
+            + "dir=$(git -C \"$root\" worktree list --porcelain 2>/dev/null "
+            + "| awk -v b='refs/heads/\(branch)' "
+            + "'/^worktree /{d=substr($0,10)} $0==\"branch \" b {print d; exit}'); "
+            + "reg=\"$HOME/.bromure/worktrees/$(basename \"$root\")/.registry\"; "
+            + "parent=$(awk -F'\\x1f' -v b='\(branch)' '$1==b {print $2; exit}' "
+            + "\"$reg\" 2>/dev/null); "
+            + "if [ -z \"$parent\" ]; then "
+            + "best=999999; "
+            + "head=$(git -C \"$root\" rev-parse --abbrev-ref HEAD 2>/dev/null); "
+            + "for b in \"$head\" $(git -C \"$root\" for-each-ref --count=300 --format='%(refname:short)' refs/heads/); do "
+            + "case \"$b\" in ''|HEAD|wt/*|\"\(branch)\") continue;; esac; "
+            + "n=$(git -C \"$root\" rev-list --count \"$b..\(branch)\" 2>/dev/null) || continue; "
+            + "if [ \"$n\" -lt \"$best\" ]; then best=$n; parent=$b; fi; "
+            + "done; fi; "
+            + "printf '%s\\n%s\\n%s\\n' \"$dir\" \"$parent\" \"$root\""
     }
 
     /// Immediate hand-to-review for the board_ready_for_review MCP tool: a
@@ -2563,6 +2607,23 @@ final class CodingTaskEngine {
     /// worktree + branch go away like a merged task's would — "abandoned"
     /// means exactly that, and the archived transcript keeps the durable
     /// record of what the agent did.
+    /// Done as it stands — nothing merged, nothing removed: the worktree and
+    /// its branch stay exactly where they are (merged by hand, or kept).
+    /// Only the transcript is archived, as for any finished task.
+    func markDone(_ taskID: UUID) {
+        guard let task = store.task(taskID), task.stage == .testing else { return }
+        store.mutate(taskID) {
+            $0.stage = .done
+            $0.completedAt = Date()
+            $0.merged = false
+            $0.mergingAt = nil
+            $0.lastError = nil
+        }
+        BACDebug.log("tasks", "“\(task.title)”: marked done")
+        pumpQueue()
+        archiveTranscriptThenCleanup(taskID, removeWorktree: false)
+    }
+
     func closeWithoutMerge(_ taskID: UUID) {
         store.mutate(taskID) {
             $0.stage = .done

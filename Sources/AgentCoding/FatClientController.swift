@@ -3746,6 +3746,7 @@ final class RemoteHostWindow: NSWindow {
                 self?.controller.taskCommand(id, "merge", body: body)
             },
             openPR: { [weak self] id in self?.controller.taskCommand(id, "open-pr") },
+            markDone: { [weak self] id in self?.controller.taskCommand(id, "mark-done") },
             fetchBranches: { [weak self] task in
                 guard let self, let root = task.rootRepo, !root.isEmpty else { return [] }
                 let cmd = "git -C '" + root.replacingOccurrences(of: "'", with: "'\\''")
@@ -4003,6 +4004,7 @@ final class RemoteHostWindow: NSWindow {
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
                     merge: { c.taskCommand($0, "merge") },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
+                    markDone: { c.taskCommand($0, "mark-done") },
                     delete: { c.deleteTask($0) },
                     save: { c.upsertTask($0) },
                     validate: { task in
@@ -4023,7 +4025,8 @@ final class RemoteHostWindow: NSWindow {
                                 .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
                                 .prefix(40)
                                 .map { .init(id: $0.id, label: $0.nickname.map { "@" + $0 } ?? $0.title,
-                                             workspace: c.profile(for: $0.profileID)?.name ?? "", busy: false) },
+                                             workspace: c.profile(for: $0.profileID)?.name ?? "", busy: false,
+                                             profileID: $0.profileID) },
                             rooms: c.roomStore.rooms.filter { $0.archivedAt == nil }
                                 .map { .init(id: $0.id, name: $0.name) })
                     },
