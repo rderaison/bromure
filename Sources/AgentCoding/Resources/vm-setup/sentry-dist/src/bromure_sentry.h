@@ -67,8 +67,50 @@ enum bromure_sentry_kind {
 	 * the agent that caused it even for processes that started before this
 	 * module loaded. */
 	BSK_NET_FLOW = 19,
+	/* A locally originated packet carried the container mark, so something
+	 * in the guest tried to pass its own traffic off as a container's. The
+	 * mark was cleared before the packet left; this says who tried.
+	 *
+	 * Only emitted when the hook runs in TASK context. On a softirq --
+	 * a TCP retransmit, a delayed ACK -- `current` is whatever thread was
+	 * interrupted, and naming it would accuse an innocent process. The
+	 * tally counts every clearing either way, so the count is complete and
+	 * the attribution is never invented. */
+	BSK_CONTAINER_MARK_FORGED = 20,
+	/* Something installed or changed a traffic-control qdisc, filter or
+	 * action. Reported because `tc` is the one way left to forge the
+	 * container mark: an egress qdisc action runs inside
+	 * `__dev_queue_xmit`, AFTER netfilter has finished, so there is no
+	 * later hook for the sentry to take. Measured: a `pedit` filter stamps
+	 * DSCP 43 on local traffic and the POSTROUTING hook cannot undo it.
+	 *
+	 * So this kind makes the attempt VISIBLE rather than stopping it, and
+	 * the host revokes the container exemption on seeing one. Measured as
+	 * safe to act on: nothing on this image calls these paths legitimately
+	 * -- not idle, not `docker run`, not `docker network create`, not a
+	 * dockerd restart. Docker attaches a veth's default qdisc without
+	 * going through tc's netlink interface. */
+	BSK_TC_CHANGE = 21,
 	BSK_MAX
 };
+
+/* The DSCP the sentry stamps on forwarded (container) traffic, and strips from
+ * anything locally originated that carries it.
+ *
+ * 43 = 0b101011, in the local/experimental pool (RFC 2474 §6: xxxx11), so it
+ * collides with no standard class -- EF is 46, the AFxy classes are 10..38, CS0..7
+ * are multiples of 8. A workspace that genuinely marks its own traffic for QoS
+ * is untouched unless it picks exactly this value.
+ *
+ * Why a kernel module and not an iptables rule, an alias IP or a port range:
+ * every one of those is settable by guest root, and the host has to be able to
+ * BELIEVE the label. The sentry's hooks sit outside iptables (so `iptables -F`
+ * and Docker's own chain rewrites cannot remove them) and lockdown keeps the
+ * module loaded, so the mark is the one property of a packet the guest cannot
+ * forge. The host still only trusts it when the sentry is attested running and
+ * announced this exact value in its hello.
+ */
+#define BROMURE_SENTRY_CONTAINER_DSCP 43
 
 /* `proto` on a BSK_NET_FLOW. The host renders the string. */
 enum bromure_sentry_proto {
@@ -109,6 +151,10 @@ enum bromure_sentry_op {
 	BSO_TRUNCATE,
 	BSO_BIND,
 	BSO_CONNECT,
+	/* BSK_TC_CHANGE: which half of traffic control was touched. */
+	BSO_TC_QDISC,
+	BSO_TC_FILTER,
+	BSO_TC_ACTION,
 	BSO_MAX
 };
 
@@ -157,6 +203,12 @@ struct bromure_sentry_event {
 	__u8  addr_family;
 	__u8  truncated;	/* the path or argv below was cut short */
 	char  comm[BROMURE_SENTRY_COMM_LEN];
+	/* BSK_TC_CHANGE: the interface the change was aimed at, resolved from
+	 * the netlink message's `tcm_ifindex`. Its own field rather than
+	 * reusing `arg`, which carries the qdisc/filter KIND -- both are
+	 * wanted, and packing two values into one string is how a host ends up
+	 * parsing prose. IFNAMSIZ is 16, the same as comm. */
+	char  dev[BROMURE_SENTRY_COMM_LEN];
 	char  path[BROMURE_SENTRY_PATH_LEN];	/* exe path, mount source, … */
 	char  arg[BROMURE_SENTRY_ARG_LEN];	/* argv[0], module name, … */
 	/* The command line, args joined by single spaces. Last, and the largest
@@ -203,6 +255,13 @@ enum bromure_sentry_tally {
 	 * datagram connects to 127.0.0.53, the systemd-resolved stub -- three
 	 * per `sudo`, each from a short-lived pid the dedup cannot fold. */
 	BST_FLOW_LOCAL,
+	/* Forwarded packets stamped with the container mark. Per PACKET, not per
+	 * flow: this is the one counter in the module on a true data path, and
+	 * it is what tells the host "containers are actually running here". */
+	BST_CONTAINER_MARKED,
+	/* Locally originated packets whose container mark was stripped. Above
+	 * zero means a guest process tried to impersonate container traffic. */
+	BST_MARK_FORGED,
 	BST_MAX
 };
 

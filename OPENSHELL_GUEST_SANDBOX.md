@@ -140,6 +140,38 @@ That leaves no bpffs pin, BPF link or perf fd to detach, and no kernel command-l
 so no image bump. BPF-LSM (for true Landlock attribution) stays an optional future upgrade
 that would need `lsm=…,bpf` and therefore an image bump.
 
+## Container traffic exempt from the MiTM
+
+Per-workspace option "Don't intercept container traffic" (`Profile.containerTrafficDirect`).
+Containers are NAT'd behind the guest's own address, so after MASQUERADE the host switch can't
+tell a container's packet from the guest's own (measured: same source address, both). The
+label has to come from something root in the guest can't forge, so the **sentry module** sets
+it:
+
+- **DSCP 43** (`VMNetSwitch.containerDSCP`, local/experimental pool) on packets the guest
+  forwards from a **veth or bridge port**, in one netfilter hook at POSTROUTING with the last
+  priority (after NAT and after any iptables rule root can add). Packets originated in the
+  guest (`skb_iif == 0`) or arriving via any other device (a TUN a root process could use to
+  re-inject its own traffic) have DSCP 43 cleared. MASQUERADE preserves it (measured).
+- The hello announces `container_mark: 43`; heartbeats count marked and forgery-cleared
+  packets; a forgery attempt is a `container_mark_forged` event (tampering, weight 10).
+- The **switch** reads and **always strips** the mark on egress (it never leaves the host), and
+  skips the MiTM diversion for a marked packet only when the workspace's option is on **and**
+  that VM's sentry is connected and announced the mark (`KernelSentryService.noteContainerMark`
+  → `VMNetSwitch.setContainerTrafficDirect`). No sentry, no exemption: fail closed. The L4
+  firewall still applies; the flow is logged with `layer: "container"`.
+- **`tc` can defeat the hook** (measured: an egress `pedit` action rewrites DSCP inside
+  `__dev_queue_xmit`, after netfilter; root only). So the sentry reports every `tc_change`
+  (filter/qdisc/action), and one after the boot phase **revokes the exemption for the rest of
+  that boot** (`KernelSentryService.revokeContainerMark`): container traffic goes back to the
+  proxy and a tampering alarm (weight 10) says why. The next boot's first hello re-arms it.
+- Not applied (`effectiveContainerTrafficDirect`) without the sentry, or when the OpenShell
+  policy has request-level (L7) rules, which only the MiTM can enforce.
+- agentd stops injecting proxy settings into containers when `$META/containers-direct`
+  exists; dockerd's own proxy stays, so image pulls are still checked.
+- Lost for container traffic: credential brokering, supply-chain checks on in-container
+  installs, prompt-injection/PII scanning, per-request logs. Lineage still sees the flows.
+
 ## Module distribution
 
 Modules are **not** in the app or in git. `Jenkinsfile.sentry` builds one per Ubuntu kernel

@@ -103,6 +103,9 @@ public final class VMNetSwitch: @unchecked Sendable {
         public let proto: UInt8          // 6 = TCP, 17 = UDP
         public let port: UInt16
         public let denied: Bool          // true = blocked by the policy
+        /// Container traffic the workspace exempts from interception (the
+        /// guest sentry's DSCP mark): firewall applied, MiTM skipped.
+        public var containerDirect: Bool = false
     }
     public typealias EgressObserver = @Sendable (EgressEvent) -> Void
     private var egressObserver: EgressObserver?
@@ -1009,6 +1012,47 @@ public final class VMNetSwitch: @unchecked Sendable {
     private var quarantinedPorts: Set<Int> = []
     private var egressByteCounts: [Int: UInt64] = [:]
 
+    /// DSCP value the guest kernel sentry stamps on traffic the guest
+    /// FORWARDS (containers: Docker bridges, pods, anything behind a veth) and
+    /// clears from everything the guest originates, so only real container
+    /// traffic carries it. Lockdown keeps the module loaded, so root can't
+    /// forge it.
+    public static let containerDSCP: UInt8 = 43
+    /// Workspaces whose container traffic skips the MiTM. Set only while the
+    /// VM's sentry is attested running with the container mark (fail closed:
+    /// without the sentry the mark could be forged, so it's not honoured).
+    private var containerDirectProfiles: Set<UUID> = []
+
+    public func setContainerTrafficDirect(_ enabled: Bool, profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if enabled { containerDirectProfiles.insert(profileID) } else { containerDirectProfiles.remove(profileID) }
+    }
+
+    public func isContainerTrafficDirect(profileID: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return containerDirectProfiles.contains(profileID)
+    }
+
+    /// Read and strip the container DSCP mark from an IPv4 header at `ip`
+    /// (fixing the header checksum incrementally, RFC 1624), so it never leaves
+    /// the host. Returns whether the mark was present.
+    public static func takeContainerMark(_ buf: UnsafeMutablePointer<UInt8>, ip: Int) -> Bool {
+        let tos = buf[ip + 1]
+        guard tos >> 2 == containerDSCP else { return false }
+        let newTOS = tos & 0x03                        // keep ECN, clear DSCP
+        let oldWord = UInt16(buf[ip]) << 8 | UInt16(tos)
+        let newWord = UInt16(buf[ip]) << 8 | UInt16(newTOS)
+        let oldSum = UInt16(buf[ip + 10]) << 8 | UInt16(buf[ip + 11])
+        // HC' = ~(~HC + ~m + m')
+        var sum = UInt32(~oldSum) + UInt32(~oldWord) + UInt32(newWord)
+        sum = (sum & 0xFFFF) + (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16)
+        let newSum = ~UInt16(sum & 0xFFFF)
+        buf[ip + 1] = newTOS
+        buf[ip + 10] = UInt8(newSum >> 8); buf[ip + 11] = UInt8(newSum & 0xFF)
+        return true
+    }
+
     /// Toggle transparent interception for a VM's port mid-session. When
     /// disabled, off-subnet flows are never diverted into the MiTM (the L4
     /// firewall still applies).
@@ -1064,8 +1108,13 @@ public final class VMNetSwitch: @unchecked Sendable {
         // separate control (bridgePeers), not this firewall.
         guard (dstIP & subnetMask) != (gatewayIP & subnetMask) else { return false }
 
-        let g = portGovernance(srcPortID)
+        var g = portGovernance(srcPortID)
         guard let pid = g.pid else { return false }          // non-session → native
+        // Container traffic: strip the sentry's mark always (it must never
+        // leave the host), and skip the MiTM when the workspace allows it.
+        // The firewall below still applies.
+        let containerDirect = Self.takeContainerMark(buf, ip: 14) && isContainerTrafficDirect(profileID: pid)
+        if containerDirect { g.interceptor = nil; g.interceptPorts = [] }
 
         // Outbound volume per VM, for the watchdog's exfiltration signal
         // (counted here, independent of the proxy's own accounting).
@@ -1157,7 +1206,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         }
 
         fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                   proto: proto, port: dport, denied: false)
+                   proto: proto, port: dport, denied: false, containerDirect: containerDirect)
 
         // Allowed: divert intercepted TCP into the MiTM (the SNI layer re-checks
         // the host + `web` rules); otherwise let the native switch forward it.
@@ -1206,7 +1255,7 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Fire the observer for a new flow, deduped per (port, dstIP, port, proto),
     /// separately for allow vs deny so a state change re-logs.
     private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
-                            proto: UInt8, port: UInt16, denied: Bool) {
+                            proto: UInt8, port: UInt16, denied: Bool, containerDirect: Bool = false) {
         let key = EgressKey(portID: portID, dstIP: dstIP, dstPort: port, proto: denied ? proto | 0x80 : proto)
         lock.lock()
         let now = Date()
@@ -1219,7 +1268,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         egressSeen[key] = now
         lock.unlock()
         observer(EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
-                             proto: proto, port: port, denied: denied))
+                             proto: proto, port: port, denied: denied, containerDirect: containerDirect))
     }
 
     /// (proto, dstIP, dstPort) for a unicast IPv4 TCP/UDP frame (first fragment

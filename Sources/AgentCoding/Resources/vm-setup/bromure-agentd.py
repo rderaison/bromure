@@ -4756,6 +4756,29 @@ _ENV_EXTRACT_CMD = (
     "| grep -vE '^(PATH|PWD|SHLVL|_|SHELL|HOME|HOSTNAME)='") % {"meta": META}
 
 
+CONTAINERS_DIRECT_MARKER = os.path.join(META, "containers-direct")
+
+
+def containers_direct():
+    """True when this workspace opted out of intercepting CONTAINER traffic.
+
+    The host stages the marker when the profile option is on. With it present,
+    containers are not pointed at the MITM proxy, so they connect out directly
+    and the switch recognises them by the sentry's DSCP mark instead -- a label
+    guest root cannot forge, which is the whole reason the option can be
+    offered at all.
+
+    **dockerd's own proxy is NOT affected**, deliberately: image pulls stay
+    inspected, so the supply-chain checks still see every layer that enters the
+    VM. Only the traffic of the containers themselves goes direct.
+
+    Read on every call rather than cached at startup: the host can stage or
+    remove the marker while the workspace is running, and a cached answer would
+    leave containers proxied (or not) until the next boot.
+    """
+    return os.path.exists(CONTAINERS_DIRECT_MARKER)
+
+
 def _docker_run(arg):
     """Launch a container with host-injected env/proxy forwarding.
 
@@ -4784,13 +4807,33 @@ def _docker_run(arg):
         if ef is None:
             fd, ef = tempfile.mkstemp()
             os.close(fd)
+        direct = containers_direct()
         try:
             with open(ef, "a") as f:
                 for ln in _PROXY_ENV_LINES:
+                    # With `containers-direct` staged, the PROXY variables are
+                    # withheld and nothing else is. Pointing a container at
+                    # the MITM while the workspace has opted out would defeat
+                    # the option silently -- the traffic would still be
+                    # intercepted and the user would have no way to tell.
+                    #
+                    # The CA and SSL_CERT_* lines stay: they cost nothing when
+                    # unused, and stripping them would break an image that
+                    # expects the bundle for its own reasons.
+                    if direct and ln.split("=", 1)[0].lower() in (
+                            "http_proxy", "https_proxy", "no_proxy"):
+                        continue
                     f.write(ln + "\n")
         except OSError:
             pass
-        extra = extra + " --add-host=host.docker.internal:host-gateway"
+        if direct:
+            log("session", "containers-direct: container proxy env withheld "
+                           "(dockerd's own proxy is unchanged, so image pulls "
+                           "are still inspected)")
+        else:
+            # Only needed to make `host.docker.internal` resolve for the proxy
+            # address, so it goes with the proxy.
+            extra = extra + " --add-host=host.docker.internal:host-gateway"
         if os.access("/etc/ssl/certs/ca-certificates.crt", os.R_OK):
             extra += (" -v /etc/ssl/certs/ca-certificates.crt:"
                       "/etc/ssl/certs/ca-certificates.crt:ro")

@@ -1222,7 +1222,7 @@ cannot be closed from userland.
 
 ### 4.2 What is captured
 
-39 **capture** probes (27 kprobes and 12 kretprobes), plus one more on the
+38 **capture** probes (26 kprobes and 12 kretprobes), plus one more on the
 module's own canary function, which captures nothing and exists only to prove the others
 are firing (§4.5). The counts in `probes.armed`/`probes.total` and the hello's
 probe list are the capture probes; the canary reports separately, as
@@ -1243,7 +1243,6 @@ reports rather than refusing to load.
 | `kexec_attempt` | `__arm64_sys_kexec_{load,file_load}` |
 | `lockdown_change_attempt` | kretprobe on `lockdown_write`, rejected writes only |
 | `mount`, `unshare`, `setns` | the corresponding `__arm64_sys_*` |
-| `connect` | `security_socket_connect` (kernel `sockaddr`) — superseded by `net_flow`, kept for the host's cross-check |
 | `net_flow` | `tcp_connect`; `udp{,v6}_sendmsg`; `ping_v{4,6}_sendmsg`; `raw{,v6}_sendmsg` — seven probes, one kind (§4.3c) |
 | `file_open_denied` | kretprobe on `security_file_open`, `-EACCES`/`-EPERM` only |
 
@@ -1643,6 +1642,25 @@ tool call produced it.
 | `ping_v4_sendmsg`, `ping_v6_sendmsg` | ICMP, ICMPv6 | a ping socket's first send |
 | `raw_sendmsg`, `rawv6_sendmsg` | RAW | a raw socket's first send |
 
+#### The `connect` kind is retired
+
+`security_socket_connect` is no longer probed and `connect` is no longer
+emitted. `net_flow` reports the same connection with strictly more — the
+protocol, the source port, the process's start time, the ancestor chain — and
+**folds repeats**, where `connect` had no dedup at all and emitted one event per
+call. That made it the noisiest kind in the module: before the loopback filter,
+every `sudo` on the machine produced three of them.
+
+It survived two rounds past being redundant because the host said it might be
+feeding an attestor cross-check, and removing something another side may depend
+on is not a guest-side call. Once the host confirmed nothing consumed it, the
+probe, its handler and its renderer went; `BSK_CONNECT_UNUSED = 13` stays in the
+ABI so the number can never come to mean something else, which is the same
+convention `BSK_FILE_OPEN_DENIED_UNUSED = 14` follows. The suites assert that a
+`connect()` now produces **only** a `net_flow`, and that
+`security_socket_connect` is not among the registered probes — because "no
+`connect` events arrived" would also be true of a probe that simply never fired.
+
 **A datagram connect is not a packet, so it is not probed.** `connect()` on a
 UDP socket only records where that socket would send if it ever sends. The first
 version watched `ip4_datagram_connect`/`ip6_datagram_connect` and put rows on the
@@ -1916,6 +1934,132 @@ costs orders of magnitude more, so the proportional cost in a workload is far
 smaller. The allowed path of the hot denial hook pays nothing — the staging
 buffer is claimed *after* the early returns, so an allowed `security_file_open`
 does not touch it.
+
+### 4.3d The container mark
+
+A workspace can opt out of MITM interception for *container* traffic. That is
+only offerable if the host can tell a container's packets from the guest's own,
+and every label the guest could apply — an alias IP, a port range, an iptables
+mark — is settable by guest root. So the sentry applies it, from a netfilter
+hook outside iptables, in a module lockdown keeps loaded. **DSCP 43**
+(`0b101011`, in RFC 2474's local/experimental pool, so it collides with no
+standard class — EF is 46, the AF classes 10–38, CS0–7 multiples of 8).
+
+#### "Forwarded" is the container test, measured
+
+In a Bromure VM the guest forwards only for containers. One capture on the
+egress interface, with a mangle rule standing in for the hook, a container ping
+and a guest curl running together:
+
+```
+172.28.66.5 -> 1.1.1.1   DSCP 43 (tos 0xac)  x3    container, forwarded + MASQUERADEd
+172.28.66.5 -> 1.1.1.1   DSCP 0  (tos 0x00)  x11   the guest's own curl
+```
+
+Three facts at once: NAT does not touch TOS, so the mark survives MASQUERADE;
+the guest's own traffic is unmarked even with the hook active; and **both leave
+with the same source address**, which is why a label is needed at all — after
+NAT the host has nothing else to tell them apart by.
+
+#### One hook, on POSTROUTING, and why the obvious design was wrong
+
+The first design marked on `NF_INET_FORWARD` and cleared forgeries on
+`NF_INET_LOCAL_OUT`, both at `NF_IP_PRI_LAST`. **That had a forgery hole.**
+LOCAL_OUT runs *before* POSTROUTING, so root could add
+
+```
+iptables -t mangle -A POSTROUTING -j DSCP --set-dscp 43
+```
+
+which runs after the clear and stamps the mark back on its own traffic. "Last
+in the chain we chose" is not the same as last.
+
+One hook on **POSTROUTING** at `NF_IP_PRI_LAST` is after nat (priority 100) and
+after every iptables rule anyone can add. It decides from the **ingress
+device**, the one property of a packet iptables cannot rewrite:
+
+| `skb_iif` | verdict |
+|---|---|
+| 0 — originated here | clear |
+| a bridge, a bridge port, or a veth | mark |
+| anything else | clear |
+
+The device *type* check closes a second hole: **a TUN device**. Root can create
+a tun, route its own traffic into it and write packets back from userspace, and
+those arrive with a non-zero `skb_iif` — "forwarded" by any naive test.
+Requiring a bridge or veth means the only way to earn the mark is to actually be
+behind one, which is what a container is.
+
+Measured which device: `-i docker0` in mangle FORWARD counted a container's
+packets, so the IP layer sees them arrive on the **bridge**, not the veth —
+hence `netif_is_bridge_master` and not only `netif_is_bridge_port`. The veth
+kind is accepted too, for CNIs that wire pods with veths and no bridge.
+
+Verified live, module loaded, all four at once: container → 43, guest → 0,
+`setsockopt(IP_TOS, 0xAC)` → 0, root's mangle POSTROUTING rule → 0. For the tun,
+the counters are the proof rather than a capture: `marked: 2` (only the real
+container) and `forged_cleared: 6` (every injected packet stripped). A first
+attempt at that test proved nothing — Docker sets `FORWARD policy DROP`, so the
+tun packets never reached POSTROUTING at all, and "no marked packet on the wire"
+was indistinguishable from "no packet on the wire".
+
+#### The accusation requires the socket's own TOS
+
+The forgery event first named whichever process sent a marked packet. With a
+global mangle rule active that meant `forged_cleared: 36` and events accusing
+`curl` and the coding agent itself — **neither had ever touched `IP_TOS`**. One
+root rule made every process on the box look guilty, which in a security UI is
+worse than no event at all.
+
+At POSTROUTING the packet cannot say who set the field; the socket can
+(`IP_TOS`/`IPV6_TCLASS` is recorded on it). So the **tally** counts every
+clearing — the alarm stays complete — and the **event** fires only when the
+socket itself asked for the mark. Re-measured: 24 clearings, exactly one process
+named, the one that really called `setsockopt`.
+
+The same principle governs context: the event is emitted only `in_task()`. On a
+softirq — a retransmit, a delayed ACK — `current` is whatever thread was
+interrupted, and naming it would accuse a process that did nothing.
+
+#### `tc` can defeat it, so `tc` is reported
+
+An egress qdisc action runs inside `__dev_queue_xmit`, **after** netfilter has
+finished, so there is no later hook to take. Measured, with the hook active:
+
+```
+tc filter add dev enp0s1 ... action pedit ex munge ip dsfield set 0xac
+guest curl -> DSCP 43 on the wire        (DSCP 0 immediately before and after)
+```
+
+This is not a priority that can be out-bid. So `BSK_TC_CHANGE` reports the
+attempt instead — `tc_modify_qdisc`, `tc_new_tfilter` and `tc_ctl_action`, with
+`op` ∈ {qdisc, filter, action}, the `dev` resolved from the message's
+`tcm_ifindex` and the `kind` from its `TCA_KIND` attribute. The netlink message
+is already kernel memory, so parsing needs no faulting copy — which is what made
+`kind` cheap enough to include. Emitted unfolded and immediately, because the
+host revokes the container exemption on the first one.
+
+**Measured safe to act on**, which matters when the consequence is a revocation:
+nothing on this image calls those paths legitimately — not 12 s idle, not
+`docker run`, not `docker network create` with a container on that network, not
+a dockerd restart. Docker attaches a veth's default qdisc without going through
+tc's netlink interface. Not tested: kind/k8s, where a CNI that installs an
+egress qdisc (Cilium's bandwidth manager, for one) *would* trip it.
+
+#### The agentd half
+
+With `$META/containers-direct` staged, `_docker_run` withholds the proxy
+variables from containers so they connect out directly — otherwise they would
+still reach the MITM at `host.docker.internal:65534` and the option would do
+nothing while appearing to work. **dockerd's own proxy drop-in is untouched**,
+deliberately: image pulls stay inspected, so the supply-chain checks still see
+every layer entering the VM. Only the containers' own traffic goes direct.
+
+Exactly six variables are withheld (`http_proxy`, `https_proxy`, `no_proxy` and
+their upper-case forms); the nine CA/SSL variables are kept, since they cost
+nothing unused and an image may expect the bundle for its own reasons. The
+marker is read on every call rather than cached, so the host can turn the option
+on or off while the workspace runs.
 
 ### 4.4 Tamper resistance
 
@@ -2232,6 +2376,7 @@ on its own merits, but nothing here waits on it.
 | `tests/test_idmap.py` | idmapped mount remap, namespace privacy, honest degradation |
 | `tests/test_sandbox.sh` §26 | the HTTP bridge's client preamble, over a **real** vsock on `VMADDR_CID_LOCAL`: the exact line, the newline and version, docker peers, the kill switch, a malformed `accept()` address, that it is the first thing the host reads and the client's bytes follow it byte for byte, that ssh is *not* prefixed, and that sentryd and agentd read the same proxy port from the same file |
 | `tests/test_net_flow.sh` | **fresh VM only.** Drives `ping`, a bound ping socket with a known echo id, a raw-socket echo request, `curl`, a bare TCP connect, connected and unconnected UDP, `dig`/`nc` when installed, IPv6 when routable — and asserts a `net_flow` for each whose `chain` names the shell that spawned it. Also: no event per packet, loopback counted not emitted, a ping socket reporting its send rather than its connect, `argv` and its truncation flag, `start_ns` against `/proc`, chain order and depth, no stack-frame warning in the build, and the per-connect/send cost with the module loaded against unloaded. Since the first live run it also asserts that **one process's three destinations are three events** (the dedup-key regression), that a proxied `curl` to loopback *is* reported while every other loopback port stays suppressed, and that `ping`'s own UDP source-address probe is reported as what it is rather than treated as a mislabel |
+| `tests/test_container_mark.sh` | **needs a loadable module and docker.** The mark on a container's traffic and its absence on the guest's; three forgery paths (`IP_TOS`, a mangle POSTROUTING rule, a tun-injected packet) each ending at DSCP 0; `tc` qdisc/filter changes each producing one `tc_change` with its `dev` and `kind`, and `docker run`/`network create` producing none; the hello's `container_mark` and tc probes; that no innocent process is accused; and agentd's `containers-direct` handling, including that dockerd's own proxy survives |
 | `tests/test_lockdown.sh` | before/after table for ~20 kernel surfaces |
 
 ### Not proven by execution

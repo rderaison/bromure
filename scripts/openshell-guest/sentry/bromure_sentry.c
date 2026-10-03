@@ -58,6 +58,15 @@
 #include <linux/notifier.h>
 #include <net/sock.h>
 #include <net/ipv6.h>
+#include <linux/netfilter.h>
+#include <linux/netfilter_ipv4.h>
+#include <linux/netfilter_ipv6.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <net/dsfield.h>
+#include <linux/netlink.h>
+#include <net/netlink.h>
+#include <linux/rtnetlink.h>
 
 #include "bromure_sentry.h"
 
@@ -503,6 +512,9 @@ static const char *sentry_op_name(u8 op)
 	switch (op) {
 	case BSO_OPEN_READ:	return "open_read";
 	case BSO_OPEN_WRITE:	return "open_write";
+	case BSO_TC_QDISC:	return "qdisc";
+	case BSO_TC_FILTER:	return "filter";
+	case BSO_TC_ACTION:	return "action";
 	case BSO_OPEN_EXEC:	return "open_exec";
 	case BSO_CREATE:	return "create";
 	case BSO_MKDIR:		return "mkdir";
@@ -552,6 +564,8 @@ static const char *sentry_kind_name(u32 kind)
 	case BSK_CRED_GAIN:			return "cred_gain";
 	case BSK_SANDBOX_DENIED:		return "sandbox_denied";
 	case BSK_NET_FLOW:			return "net_flow";
+	case BSK_CONTAINER_MARK_FORGED:		return "container_mark_forged";
+	case BSK_TC_CHANGE:			return "tc_change";
 	case BSK_SECCOMP_DENIED:		return "seccomp_denied";
 	case BSK_LANDLOCK_DENIED:		return "landlock_denied";
 	default:				return "unknown";
@@ -702,6 +716,28 @@ static int sentry_render_event(struct sentry_scratch *scratch, char *out,
 		if (event->icmp_type != 0xff)
 			used += scnprintf(out + used, out_len - used,
 					  ",\"icmp_type\":%u", event->icmp_type);
+		break;
+	}
+	case BSK_TC_CHANGE: {
+		char dev[BROMURE_SENTRY_COMM_LEN * 6 + 1];
+
+		sentry_json_escape(dev, sizeof(dev), event->dev,
+				   sizeof(event->dev));
+		/* `op` is rendered HERE and not once for every kind: it is only
+		 * emitted inside the cases that set it, and a global `op` would
+		 * put `"op":"none"` on every exec and flow in the stream. */
+		used += scnprintf(out + used, out_len - used,
+				  ",\"op\":\"%s\"", sentry_op_name(event->op));
+		/* `dev` and `tc_kind` are omitted rather than guessed when the
+		 * message did not carry them -- an action message has no
+		 * ifindex at all. `tc_kind` is what tells a `pedit` apart from
+		 * an ordinary `prio`. */
+		if (dev[0])
+			used += scnprintf(out + used, out_len - used,
+					  ",\"dev\":\"%s\"", dev);
+		if (arg[0])
+			used += scnprintf(out + used, out_len - used,
+					  ",\"tc_kind\":\"%s\"", arg);
 		break;
 	}
 	case BSK_SECCOMP_DENIED:
@@ -877,10 +913,12 @@ static int sentry_send_hello(struct socket *sock)
 			"{\"type\":\"hello\",\"v\":%d,\"conn\":%u,"
 			"\"secret\":\"%s\",\"boot_id\":\"%s\","
 			"\"kernel\":\"%s\",\"module\":\"%s\",\"abi\":%d,"
-			"\"landlock_abi\":%d,\"probes\":[",
+			"\"landlock_abi\":%d,\"container_mark\":%d,"
+			"\"probes\":[",
 			1, index, sentry_secret_hex, sentry_boot_id,
 			init_utsname()->release, SENTRY_VERSION,
-			BROMURE_SENTRY_ABI, sentry_landlock_abi);
+			BROMURE_SENTRY_ABI, sentry_landlock_abi,
+			BROMURE_SENTRY_CONTAINER_DSCP);
 	} else {
 		if (sentry_proof(proof, sizeof(proof), index) != 0) {
 			kfree(json);
@@ -890,10 +928,12 @@ static int sentry_send_hello(struct socket *sock)
 			"{\"type\":\"hello\",\"v\":%d,\"conn\":%u,"
 			"\"proof\":\"%s\",\"boot_id\":\"%s\","
 			"\"kernel\":\"%s\",\"module\":\"%s\",\"abi\":%d,"
-			"\"landlock_abi\":%d,\"probes\":[",
+			"\"landlock_abi\":%d,\"container_mark\":%d,"
+			"\"probes\":[",
 			1, index, proof, sentry_boot_id,
 			init_utsname()->release, SENTRY_VERSION,
-			BROMURE_SENTRY_ABI, sentry_landlock_abi);
+			BROMURE_SENTRY_ABI, sentry_landlock_abi,
+			BROMURE_SENTRY_CONTAINER_DSCP);
 	}
 	len += sentry_probe_list(json + len, SENTRY_JSON_MAX - len);
 	len += scnprintf(json + len, SENTRY_JSON_MAX - len, "]}");
@@ -926,7 +966,11 @@ static int sentry_send_heartbeat(struct socket *sock, u64 seq)
 		 * those apart. */
 		"\"sandbox\":{\"allowed_file_ops\":%llu,\"denied_file_ops\":%llu,"
 		"\"denied_syscalls\":%llu,\"caps_in_userns\":%llu},"
-		"\"flows\":{\"local_suppressed\":%llu}}",
+		"\"flows\":{\"local_suppressed\":%llu},"
+		/* `marked` is per PACKET and says containers are really running
+		 * here; `forged_cleared` above zero says a guest process tried
+		 * to pass its own traffic off as a container's. */
+		"\"containers\":{\"marked\":%llu,\"forged_cleared\":%llu}}",
 		seq, ktime_get_ns(),
 		(u64)atomic64_read(&state.dropped),
 		(u64)atomic64_read(&state.rate_limited),
@@ -942,7 +986,9 @@ static int sentry_send_heartbeat(struct socket *sock, u64 seq)
 		(u64)atomic64_read(&state.tallies[BST_FILE_DENIED]),
 		(u64)atomic64_read(&state.tallies[BST_SYSCALL_DENIED]),
 		(u64)atomic64_read(&state.tallies[BST_CAPS_IN_USERNS]),
-		(u64)atomic64_read(&state.tallies[BST_FLOW_LOCAL]));
+		(u64)atomic64_read(&state.tallies[BST_FLOW_LOCAL]),
+		(u64)atomic64_read(&state.tallies[BST_CONTAINER_MARKED]),
+		(u64)atomic64_read(&state.tallies[BST_MARK_FORGED]));
 	return sentry_send_frame(sock, json, len);
 }
 
@@ -2129,6 +2175,353 @@ static void sentry_emit_denial(struct bromure_sentry_event *event)
 		sentry_submit(event);
 }
 
+struct sentry_tc_probe {
+	const char *symbol;
+	u8 op;
+	struct kprobe probe;
+	bool registered;
+};
+
+/* -------- traffic control changes ---------------------------------------- */
+/*
+ * `tc` is the one remaining way to forge the container mark, and the sentry
+ * cannot stop it: an egress qdisc action runs inside `__dev_queue_xmit`, after
+ * netfilter is finished, so there is no later hook to take. Measured, with the
+ * POSTROUTING hook active:
+ *
+ *   tc filter add ... action pedit ex munge ip dsfield set 0xac
+ *   guest curl -> DSCP 43 on the wire        (DSCP 0 immediately before)
+ *
+ * So this reports the attempt instead. The host revokes the container
+ * exemption for the rest of the boot when it sees one, which is why the signal
+ * has to be free of false positives -- measured on this image: idle,
+ * `docker run`, `docker network create` with a container on that network, and
+ * a dockerd restart produce NONE of these. Docker attaches a veth's default
+ * qdisc without going through tc's netlink path.
+ *
+ * All three handlers take `(struct sk_buff *skb, struct nlmsghdr *n, ...)`, so
+ * the message is arg1. It is kernel memory -- netlink has already copied it in
+ * -- so parsing needs no faulting copy, which is what made `kind` cheap enough
+ * to include after all.
+ */
+static void sentry_tc_describe(struct bromure_sentry_event *event,
+			       struct nlmsghdr *n, u8 op)
+{
+	struct tcmsg *tcm;
+	struct nlattr *kind;
+
+	event->op = op;
+	if (!n)
+		return;
+	/* An action message is a `tcamsg` and carries no ifindex, so only
+	 * qdisc and filter messages can name a device. */
+	if (op == BSO_TC_ACTION)
+		return;
+	/* Trust nothing about the length: a short message would have us read
+	 * past the end of the buffer netlink allocated. */
+	if (n->nlmsg_len < NLMSG_LENGTH(sizeof(struct tcmsg)))
+		return;
+	tcm = nlmsg_data(n);
+	if (tcm->tcm_ifindex > 0) {
+		struct net_device *dev;
+
+		rcu_read_lock();
+		dev = dev_get_by_index_rcu(&init_net, tcm->tcm_ifindex);
+		if (dev)
+			strscpy(event->dev, dev->name, sizeof(event->dev));
+		rcu_read_unlock();
+	}
+	kind = nla_find(nlmsg_attrdata(n, sizeof(struct tcmsg)),
+			nlmsg_attrlen(n, sizeof(struct tcmsg)), TCA_KIND);
+	if (kind && nla_len(kind) > 0)
+		strscpy(event->arg, nla_data(kind),
+			min_t(size_t, (size_t)nla_len(kind), sizeof(event->arg)));
+}
+
+static int sentry_kp_tc(struct kprobe *probe, struct pt_regs *regs)
+{
+	struct sentry_tc_probe *entry =
+		container_of(probe, struct sentry_tc_probe, probe);
+	struct bromure_sentry_event *event = sentry_probe_event();
+
+	sentry_fill_common(event, BSK_TC_CHANGE);
+	sentry_fill_exe(event);
+	sentry_tc_describe(event, (struct nlmsghdr *)regs->regs[1], entry->op);
+	/* Unfolded and immediate: these are rare, and the host acts on the
+	 * first one. Folding would delay the very event it revokes on. */
+	sentry_submit(event);
+	return 0;
+}
+
+static struct sentry_tc_probe sentry_tc_probes[] = {
+	{ .symbol = "tc_modify_qdisc", .op = BSO_TC_QDISC },
+	{ .symbol = "tc_new_tfilter",  .op = BSO_TC_FILTER },
+	/* `tc actions add` goes through its own netlink handler rather than the
+	 * filter one, so it needs its own probe or standalone actions would be
+	 * invisible. */
+	{ .symbol = "tc_ctl_action",   .op = BSO_TC_ACTION },
+};
+
+/* -------- the container mark ---------------------------------------------- */
+/*
+ * A label on container traffic that guest root cannot forge, so the host can
+ * decide not to intercept it.
+ *
+ * In a Bromure VM the guest forwards packets only for containers -- Docker
+ * bridges, kind/k8s pods, anything behind a veth. Its own processes never
+ * traverse FORWARD. So "was this forwarded?" IS the container test, and it
+ * needs no process lookup, no cgroup walk and no per-packet attribution.
+ *
+ * Measured on this image before any of it was written, with a mangle rule
+ * standing in for the FORWARD hook, one capture, container ping and guest curl
+ * together:
+ *
+ *   172.28.66.5 -> 1.1.1.1   DSCP 43 (tos 0xac)  x3   container, MASQUERADEd
+ *   172.28.66.5 -> 1.1.1.1   DSCP 0  (tos 0x00)  x11  the guest's own curl
+ *
+ * Three facts in that one capture: NAT does not touch TOS, so the mark
+ * survives MASQUERADE to the wire; the guest's own traffic is unmarked even
+ * with the hook active, because it never reaches FORWARD; and both flows leave
+ * with the SAME source address, which is exactly why the host needs a label at
+ * all -- after NAT it has nothing else to tell them apart by.
+ *
+ * ONE hook, on POSTROUTING, at `NF_IP_PRI_LAST`. The first design used two --
+ * mark on FORWARD, clear on LOCAL_OUT -- and it had a forgery hole: LOCAL_OUT
+ * runs BEFORE POSTROUTING, so root could add
+ *
+ *     iptables -t mangle -A POSTROUTING -j DSCP --set-dscp 43
+ *
+ * which runs after the clear and stamps the mark back onto its own traffic.
+ * "Last in the chain we chose" is not the same as last. POSTROUTING at
+ * PRI_LAST is after nat (priority 100) and after any iptables rule anyone can
+ * add, so it genuinely is the final netfilter word.
+ *
+ * It decides from the INGRESS DEVICE, which is the part iptables cannot
+ * rewrite:
+ *
+ *   skb_iif == 0            -> originated here. Clear.
+ *   a bridge, a bridge port,
+ *   or a veth               -> came from behind a veth, i.e. a container. Mark.
+ *   anything else           -> clear.
+ *
+ * The device TYPE check is what closes a second hole: a TUN device. Root can
+ * create a tun, route its own traffic into it and write packets back from
+ * userspace, and those arrive with a non-zero `skb_iif` -- "forwarded" by any
+ * naive test. Requiring a bridge or veth means the only way to earn the mark
+ * is to actually be behind one, which is what a container is and what the
+ * option permits by definition.
+ *
+ * Measured which device: `-i docker0` in mangle FORWARD counted a container's
+ * packets, so the IP layer sees them arrive on the BRIDGE, not on the veth --
+ * hence `netif_is_bridge_master` and not only `netif_is_bridge_port`. The veth
+ * kind is accepted too, for CNIs that wire pods with veths and no bridge.
+ */
+/* Make the packet carry `dscp`. Returns true if it does when we are done,
+ * whether or not a write was needed. */
+static bool sentry_set_dscp(struct sk_buff *skb, u8 pf, u8 dscp)
+{
+	/* ECN lives in the low two bits of the same byte and belongs to the
+	 * transport, not to us -- so the mask keeps it and only the DSCP field
+	 * is replaced. */
+	const u8 keep_ecn = 0x03;
+
+	if (pf == NFPROTO_IPV4) {
+		struct iphdr *iph;
+
+		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
+			return false;
+		if (ipv4_get_dsfield(ip_hdr(skb)) >> 2 == dscp)
+			return true;			/* already right */
+		if (skb_ensure_writable(skb, sizeof(struct iphdr)))
+			return false;
+		iph = ip_hdr(skb);
+		/* The kernel's own helper, not a hand-rolled `csum_replace2`:
+		 * it recomputes the header checksum as part of the write, and
+		 * getting that arithmetic subtly wrong would produce packets
+		 * the next hop silently discards. */
+		ipv4_change_dsfield(iph, keep_ecn, dscp << 2);
+		return true;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	if (pf == NFPROTO_IPV6) {
+		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
+			return false;
+		if (ipv6_get_dsfield(ipv6_hdr(skb)) >> 2 == dscp)
+			return true;
+		if (skb_ensure_writable(skb, sizeof(struct ipv6hdr)))
+			return false;
+		/* No checksum in the IPv6 header; the traffic class straddles
+		 * bytes 0 and 1 and the helper handles the nibbles. */
+		ipv6_change_dsfield(ipv6_hdr(skb), keep_ecn, dscp << 2);
+		return true;
+	}
+#endif
+	return false;
+}
+
+/* Did this packet arrive from behind a veth, i.e. from a container?
+ *
+ * The ingress device is the one property of a packet that guest root cannot
+ * rewrite: iptables can set marks, addresses, ports and TOS, but not where the
+ * packet came in. See the block comment above for the TUN hole this closes.
+ */
+static bool sentry_from_container(const struct sk_buff *skb,
+				  const struct nf_hook_state *st)
+{
+	struct net_device *dev;
+	bool container = false;
+
+	if (!skb->skb_iif)
+		return false;		/* nothing arrived on a device */
+
+	rcu_read_lock();
+	dev = dev_get_by_index_rcu(st->net, skb->skb_iif);
+	if (dev) {
+		if (netif_is_bridge_master(dev) || netif_is_bridge_port(dev))
+			container = true;
+		else if (dev->rtnl_link_ops && dev->rtnl_link_ops->kind &&
+			 !strcmp(dev->rtnl_link_ops->kind, "veth"))
+			container = true;
+	}
+	rcu_read_unlock();
+	return container;
+}
+
+static bool sentry_has_mark(const struct sk_buff *skb, u8 pf)
+{
+	if (pf == NFPROTO_IPV4) {
+		if (!pskb_may_pull((struct sk_buff *)skb, sizeof(struct iphdr)))
+			return false;
+		return ipv4_get_dsfield(ip_hdr(skb)) >> 2 ==
+		       BROMURE_SENTRY_CONTAINER_DSCP;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	if (pf == NFPROTO_IPV6) {
+		if (!pskb_may_pull((struct sk_buff *)skb, sizeof(struct ipv6hdr)))
+			return false;
+		return ipv6_get_dsfield(ipv6_hdr(skb)) >> 2 ==
+		       BROMURE_SENTRY_CONTAINER_DSCP;
+	}
+#endif
+	return false;
+}
+
+/* Staging for the forgery event.
+ *
+ * NOT `sentry_probe_event()`. That buffer is sound only inside a kprobe
+ * handler, where preemption is disabled and the kprobe framework refuses
+ * same-CPU re-entry -- neither of which holds in a netfilter hook, which runs
+ * in softirq or in process context and is preemptible in the latter. Using it
+ * here would be the exact unsoundness its own comment warns about.
+ *
+ * So: a buffer of its own, borrowed with interrupts off. The hook is short and
+ * a forgery is rare and rate-limited, so the window is tiny; `depth` catches
+ * the nested case and counts it rather than emitting a torn event.
+ */
+struct sentry_nf_slot {
+	struct bromure_sentry_event event;
+	unsigned int depth;
+};
+static DEFINE_PER_CPU(struct sentry_nf_slot, sentry_nf_slot);
+
+/* Did the SOCKET ask for our mark, or did something downstream stamp it on?
+ *
+ * This distinction is not a nicety. Measured on a live load: one root-added
+ *
+ *     iptables -t mangle -A POSTROUTING -j DSCP --set-dscp 43
+ *
+ * marked every locally originated packet on the box, so the hook cleared 36 of
+ * them and the events named `curl` and the coding agent itself -- neither of
+ * which had ever touched IP_TOS. One rule made every process look guilty.
+ *
+ * At POSTROUTING the packet cannot tell you who set the field. The socket can:
+ * `IP_TOS`/`IPV6_TCLASS` is recorded on it, so a process that genuinely asked
+ * for the mark is distinguishable from one whose packet merely passed through
+ * somebody else's rule. The TALLY counts every clearing either way, so the
+ * alarm is complete; only the ACCUSATION requires the socket's own word.
+ */
+static bool sentry_socket_asked_for_mark(const struct nf_hook_state *st)
+{
+	const struct sock *sk = st->sk;
+
+	if (!sk)
+		return false;
+	if (st->pf == NFPROTO_IPV4 && sk->sk_family == AF_INET)
+		return inet_sk(sk)->tos >> 2 == BROMURE_SENTRY_CONTAINER_DSCP;
+#if IS_ENABLED(CONFIG_IPV6)
+	if (st->pf == NFPROTO_IPV6 && sk->sk_family == AF_INET6) {
+		const struct ipv6_pinfo *np = inet6_sk(sk);
+
+		return np && np->tclass >> 2 == BROMURE_SENTRY_CONTAINER_DSCP;
+	}
+#endif
+	return false;
+}
+
+static void sentry_report_forgery(void)
+{
+	struct sentry_nf_slot *slot;
+	unsigned long flags;
+
+	/* Task context only. On a softirq -- a retransmit, a delayed ACK --
+	 * `current` is whatever thread the interrupt landed on, and naming it
+	 * would accuse a process that did nothing. The tally above is already
+	 * complete; this only adds a name when there is a real one to give. */
+	if (!in_task())
+		return;
+
+	local_irq_save(flags);
+	slot = this_cpu_ptr(&sentry_nf_slot);
+	if (slot->depth) {
+		local_irq_restore(flags);
+		return;
+	}
+	slot->depth = 1;
+	sentry_fill_common(&slot->event, BSK_CONTAINER_MARK_FORGED);
+	slot->event.aux1 = BROMURE_SENTRY_CONTAINER_DSCP;
+	sentry_fill_exe(&slot->event);
+	/* Folded per (pid, exe) like a denial: a process hammering the socket
+	 * option produces one row with a count, not a flood. */
+	sentry_emit_denial(&slot->event);
+	slot->depth = 0;
+	local_irq_restore(flags);
+}
+
+static unsigned int sentry_nf_postrouting(void *priv, struct sk_buff *skb,
+					  const struct nf_hook_state *st)
+{
+	if (sentry_from_container(skb, st)) {
+		if (sentry_set_dscp(skb, st->pf, BROMURE_SENTRY_CONTAINER_DSCP))
+			sentry_tally(BST_CONTAINER_MARKED);
+		return NF_ACCEPT;
+	}
+	/* Not a container's. Only ever touch OUR value: a workspace using DSCP
+	 * for real QoS -- EF is 46, the AF classes 10..38, CS0-7 multiples of
+	 * 8 -- is left exactly alone. */
+	if (!sentry_has_mark(skb, st->pf))
+		return NF_ACCEPT;		/* the overwhelmingly common case */
+	if (sentry_set_dscp(skb, st->pf, 0)) {
+		sentry_tally(BST_MARK_FORGED);
+		/* Named only when the socket itself asked for the mark. A
+		 * packet carrying it because of a global iptables rule is
+		 * still counted above -- the host sees the clearing happened --
+		 * but no process is accused of something a rule did. */
+		if (sentry_socket_asked_for_mark(st))
+			sentry_report_forgery();
+	}
+	return NF_ACCEPT;
+}
+
+static struct nf_hook_ops sentry_nf_ops[] = {
+	{ .hook = sentry_nf_postrouting, .pf = NFPROTO_IPV4,
+	  .hooknum = NF_INET_POST_ROUTING, .priority = NF_IP_PRI_LAST },
+#if IS_ENABLED(CONFIG_IPV6)
+	{ .hook = sentry_nf_postrouting, .pf = NFPROTO_IPV6,
+	  .hooknum = NF_INET_POST_ROUTING, .priority = NF_IP6_PRI_LAST },
+#endif
+};
+static bool sentry_nf_registered;
+
 /* -------- the probes ---------------------------------------------- */
 
 /* `instance->rp` does not exist on this kernel: the instance carries a holder,
@@ -2772,6 +3165,18 @@ static void sentry_probe_health(int *armed, int *total, u64 *missed, bool *canar
 		if (!kprobe_disabled(&entry->probe))
 			(*armed)++;
 	}
+	for (i = 0; i < ARRAY_SIZE(sentry_tc_probes); i++) {
+		struct sentry_tc_probe *entry = &sentry_tc_probes[i];
+
+		if (!entry->registered)
+			continue;
+		(*total)++;
+		*missed += entry->probe.nmissed;
+		if (kprobe_ftrace(&entry->probe))
+			(*ftrace)++;
+		if (!kprobe_disabled(&entry->probe))
+			(*armed)++;
+	}
 	for (i = 0; i < ARRAY_SIZE(sentry_flow_probes); i++) {
 		struct sentry_flow_probe *entry = &sentry_flow_probes[i];
 
@@ -2846,6 +3251,13 @@ static int sentry_probe_list(char *out, size_t out_len)
 				  first ? "" : ",", sentry_flow_probes[i].symbol);
 		first = false;
 	}
+	for (i = 0; i < ARRAY_SIZE(sentry_tc_probes); i++) {
+		if (!sentry_tc_probes[i].registered)
+			continue;
+		used += scnprintf(out + used, out_len - used, "%s\"%s\"",
+				  first ? "" : ",", sentry_tc_probes[i].symbol);
+		first = false;
+	}
 	for (i = 0; i < ARRAY_SIZE(sentry_denial_probes); i++) {
 		if (!sentry_denial_probes[i].registered)
 			continue;
@@ -2892,6 +3304,24 @@ static int sentry_register_probes(int *armed, int *missing)
 	} else {
 		pr_warn(SENTRY_NAME ": canary probe unavailable; blinding via the "
 			"global kprobe switch will not be detectable\n");
+	}
+
+	for (i = 0; i < ARRAY_SIZE(sentry_tc_probes); i++) {
+		struct sentry_tc_probe *entry = &sentry_tc_probes[i];
+
+		entry->probe.symbol_name = entry->symbol;
+		entry->probe.pre_handler = sentry_kp_tc;
+		if (register_kprobe(&entry->probe) == 0) {
+			entry->registered = true;
+			(*armed)++;
+		} else {
+			/* Losing one of these means a `tc` path the host cannot
+			 * see, which it would otherwise read as "no tampering".
+			 * The hello's probe list is what tells it which. */
+			(*missing)++;
+			pr_warn(SENTRY_NAME ": tc probe %s unavailable\n",
+				entry->symbol);
+		}
 	}
 
 	for (i = 0; i < ARRAY_SIZE(sentry_flow_probes); i++) {
@@ -3074,6 +3504,28 @@ static int __init sentry_init(void)
 		return rc;
 	}
 
+	/* The container mark. `nf_register_net_hook` puts these OUTSIDE
+	 * iptables, so `iptables -F` and Docker's own chain rewrites cannot
+	 * remove them, and lockdown keeps the module loaded -- which together
+	 * are what make the mark something the host can believe.
+	 *
+	 * A failure here is NOT fatal to the module. The sentry's job is
+	 * reporting; losing the mark costs a workspace the option to skip
+	 * interception for containers, and the host fails closed on that by
+	 * only trusting a mark the hello announced. Taking the whole sentry
+	 * down instead would turn a lost feature into a blind guest.
+	 */
+	rc = nf_register_net_hooks(&init_net, sentry_nf_ops,
+				   ARRAY_SIZE(sentry_nf_ops));
+	if (rc) {
+		pr_warn(SENTRY_NAME ": container mark unavailable: "
+			"nf_register_net_hooks failed (%d)\n", rc);
+	} else {
+		sentry_nf_registered = true;
+		pr_info(SENTRY_NAME ": marking forwarded traffic DSCP %d\n",
+			BROMURE_SENTRY_CONTAINER_DSCP);
+	}
+
 	register_reboot_notifier(&sentry_reboot_nb);
 
 	state.thread = kthread_run(sentry_thread, NULL, SENTRY_NAME);
@@ -3171,9 +3623,22 @@ static void __exit sentry_exit(void)
 		if (sentry_flow_probes[i].registered)
 			unregister_kprobe(&sentry_flow_probes[i].probe);
 	}
+	for (i = 0; i < ARRAY_SIZE(sentry_tc_probes); i++) {
+		if (sentry_tc_probes[i].registered)
+			unregister_kprobe(&sentry_tc_probes[i].probe);
+	}
 	for (i = 0; i < ARRAY_SIZE(sentry_denial_probes); i++) {
 		if (sentry_denial_probes[i].registered)
 			unregister_kretprobe(&sentry_denial_probes[i].rp);
+	}
+	/* Before the flush: stop generating forgery events, then let the ones
+	 * already folded into a slot out. `nf_unregister_net_hooks` waits for
+	 * in-flight hooks to finish, so nothing is mid-`sentry_emit_denial`
+	 * when the flush runs. */
+	if (sentry_nf_registered) {
+		nf_unregister_net_hooks(&init_net, sentry_nf_ops,
+					ARRAY_SIZE(sentry_nf_ops));
+		sentry_nf_registered = false;
 	}
 	/* Anything still held in a dedup slot goes out now rather than being
 	 * discarded: a denial that happened is a denial the host should see,

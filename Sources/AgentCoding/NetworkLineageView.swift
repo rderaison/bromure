@@ -370,6 +370,7 @@ struct NetworkLineageView: View {
         case "l7": return NSLocalizedString("request policy (L7)", comment: "network lineage layer")
         case "identity": return NSLocalizedString("binary identity", comment: "network lineage layer")
         case "proxy": return NSLocalizedString("proxy", comment: "network lineage layer")
+        case "container": return NSLocalizedString("container, not intercepted", comment: "network lineage layer")
         default: return layer
         }
     }

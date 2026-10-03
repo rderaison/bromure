@@ -620,6 +620,14 @@ public final class SessionDisk {
                         try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: dest.path)
                     }
                 }
+                // Containers bypass the proxy (the sentry marks their traffic;
+                // the switch skips the MiTM): agentd stops pointing them at it.
+                let containersDirect = tmp.appendingPathComponent("containers-direct")
+                if profile.effectiveContainerTrafficDirect {
+                    try "1\n".writeIfChanged(to: containersDirect)
+                } else {
+                    try? fm.removeItem(at: containersDirect)
+                }
                 let marker = tmp.appendingPathComponent("strict-sandbox")
                 if profile.effectiveStrictSandbox {
                     try "1\n".writeIfChanged(to: marker)

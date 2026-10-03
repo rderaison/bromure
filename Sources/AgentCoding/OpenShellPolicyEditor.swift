@@ -296,6 +296,16 @@ struct OpenShellPolicyEditor: View {
             }
             Text("Streams security events (process launches, privilege changes, module and BPF loads, sandbox denials) from the VM's kernel to Bromure, outside anything the agent can stop; after it starts, the kernel is locked so not even root in the VM can load code to interfere. Silence or a gap in the stream is treated as tampering by the watchdog. “Required” won't start agent sessions without it. Takes effect at the next VM start.")
                 .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Don't intercept container traffic", isOn: $draft.containerTrafficDirect)
+                    .disabled(draft.effectiveKernelSentry == .off)
+                Text("Traffic from containers in this VM (Docker, pods) goes out directly instead of through Bromure's proxy. The firewall still applies, and image pulls are still checked. Inside containers you lose credential brokering (Bromure's stand-in tokens aren't swapped for real ones), package checks, prompt-injection and PII scanning, and per-request logs. The kernel sentry marks container traffic in a way processes in the VM can't fake, so this needs the sentry on; without it, container traffic is intercepted as usual. Takes effect at the next VM start.")
+                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if draft.containerTrafficDirect, draft.effectiveKernelSentry != .off, !draft.effectiveContainerTrafficDirect {
+                    Text("Not applied: this policy has request-level (L7) rules, which only the proxy can enforce, so container traffic stays intercepted.")
+                        .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+            }
             if draft.effectiveKernelSentry != .off, let snap = KernelSentryService.shared.snapshot(draft.id) {
                 Text("Sentry: " + (snap.connected ? "connected" + (snap.kernel.map { " · kernel \($0)" } ?? "") : "not connected")
                      + (snap.dropped > 0 ? " · \(snap.dropped) event(s) dropped under load" : ""))

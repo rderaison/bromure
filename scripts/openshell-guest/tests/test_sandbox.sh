@@ -789,7 +789,22 @@ git config core.fsmonitor "sh -c 'echo pwned-by-fsmonitor > $MARKER'" 2>/dev/nul
 mkdir -p .git/hooks
 printf '#!/bin/sh\necho pwned-by-hook > $MARKER\n' > .git/hooks/post-checkout
 chmod +x .git/hooks/post-checkout 2>/dev/null
-echo planted
+# "planted" only if there is a REAL repo. `git init`'s failure used to be
+# swallowed by 2>/dev/null, and `mkdir -p .git/hooks` then fabricated a .git
+# directory -- so this step reported success while leaving no repository, and
+# the only symptom was the unconfined control failing later with "not a git
+# repository", eighty lines away from the cause. It had been green for rounds.
+#
+# WHY the repo is not created is still open, and three attempts to instrument it
+# from in here all failed, each differently: /tmp is not in the policy, a file
+# under $WORK/scratch came back empty, and a `$( )` in this heredoc runs on the
+# HOST at write time because the heredoc is deliberately unquoted so $WORK
+# expands. Diagnose it from outside the pane instead of from inside it.
+if [ -f .git/HEAD ]; then
+    echo planted
+else
+    echo NO-REPO
+fi
 PROBE
 check "the agent can plant its payloads inside the sandbox" "$(in_pane)" "planted"
 
@@ -839,12 +854,26 @@ fi
 # section proves nothing at all.
 sudo rm -f "$MARKER"
 ( cd "$WORK/workdir/repo" && git -c core.fsmonitor="sh -c 'echo proof > $MARKER'" \
-    status --porcelain > /dev/null 2>&1 )
+    status --porcelain > /tmp/fsmon-control.log 2>&1 )
 if [ -e "$MARKER" ]; then
     ok "the same payload DOES fire when git is run unconfined (the test is real)"
 else
+    # Say WHY, not just that it failed. "This section proves nothing" sends the
+    # next reader looking at the sandbox when the cause is usually the
+    # control's own setup -- a missing repo, an unwritable marker directory, or
+    # a git that declined the hook. Verified separately that the payload does
+    # fire in a fresh repo on this image, in every variation of prior-config
+    # and populated-index, so the interesting information is the state here.
     bad "the unconfined control did not fire; this section proves nothing"
+    printf '       repo dir:      %s\n' \
+        "$([ -d "$WORK/workdir/repo" ] && echo present || echo MISSING)"
+    printf '       marker parent: %s (writable: %s)\n' \
+        "$(dirname "$MARKER")" \
+        "$([ -w "$(dirname "$MARKER")" ] && echo yes || echo NO)"
+    printf '       git said:      %s\n' \
+        "$(tr '\n' ' ' < /tmp/fsmon-control.log 2>/dev/null | cut -c1-140)"
 fi
+rm -f /tmp/fsmon-control.log
 sudo rm -f "$MARKER"
 
 # Defense in depth: agentd's own git flags must neutralize it even unconfined.
@@ -2215,6 +2244,7 @@ START=$(date +%s)
 sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
     BROMURE_SENTRY_WAIT_S=20 BROMURE_SENTRY_NO_LOCKDOWN=1 \
     /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/bg.log" 2>&1
+sudo rmmod bromure_sentry 2>/dev/null   # each sub-case starts from "not loaded"
 ELAPSED=$(( $(date +%s) - START ))
 if [ "$ELAPSED" -le 3 ]; then
     ok "best_effort returns in ${ELAPSED}s, so the session is not held up"
@@ -2254,6 +2284,7 @@ START=$(date +%s)
 sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
     BROMURE_SENTRY_WAIT_S=20 BROMURE_SENTRY_NO_LOCKDOWN=1 \
     /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/wait.log" 2>&1
+sudo rmmod bromure_sentry 2>/dev/null   # each sub-case starts from "not loaded"
 ELAPSED=$(( $(date +%s) - START ))
 wait $DROPPER 2>/dev/null
 if grep -q "the host delivered a module" "$SENTRY_W/wait.log"; then
@@ -2261,11 +2292,17 @@ if grep -q "the host delivered a module" "$SENTRY_W/wait.log"; then
 else
     bad "the inline wait missed the delivered module: $(tail -3 "$SENTRY_W/wait.log" | tr '\n' ' ')"
 fi
-# The load itself cannot be asserted here: this VM is at lockdown integrity and
-# refuses unsigned modules, so insmod fails whatever the module is. What matters
-# for THIS test is that the file was found and handed to the loader.
-if grep -qE "insmod failed|already loaded|running" "$SENTRY_W/wait.log"; then
-    ok "and handed it to the loader (the load itself needs a fresh VM)"
+# What matters for THIS test is that the file was found and handed to the
+# loader, which is true whether the load then succeeds or not: at lockdown
+# `integrity` insmod fails whatever the module is, and at `none` it succeeds.
+# Both outcomes are accepted deliberately -- asserting the FAILURE, as an
+# earlier version effectively did, encoded the machine's limitation as the
+# expected result, and the assertion then broke the moment the machine could
+# actually load a module.
+if grep -qE "insmod failed|already loaded|running|loaded" "$SENTRY_W/wait.log"; then
+    ok "and handed it to the loader (either outcome: it loads here or not)"
+else
+    bad "the module was never handed to the loader: $(tail -2 "$SENTRY_W/wait.log" | tr '\n' ' ')"
 fi
 rm -f "$KO"
 printf '{"version":1,"sentry":{"enabled":true}}' \
@@ -2295,6 +2332,7 @@ START=$(date +%s)
 sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
     BROMURE_SENTRY_WAIT_S=45 BROMURE_SENTRY_NO_LOCKDOWN=1 \
     /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/marker.log" 2>&1
+sudo rmmod bromure_sentry 2>/dev/null   # each sub-case starts from "not loaded"
 ELAPSED=$(( $(date +%s) - START ))
 wait $DROPPER 2>/dev/null
 # 45s budget, marker at +2s, then a local build attempt (which fails fast here
@@ -2330,6 +2368,7 @@ cp "$ROOT/sentry/bromure_sentry.ko" \
 sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
     BROMURE_SENTRY_WAIT_S=10 BROMURE_SENTRY_NO_LOCKDOWN=1 \
     /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/both.log" 2>&1
+sudo rmmod bromure_sentry 2>/dev/null   # each sub-case starts from "not loaded"
 if grep -qE "insmod failed|already loaded|running \(prebuilt" "$SENTRY_W/both.log"; then
     ok "a staged module beats a stale 'none is coming' marker"
 else
@@ -2353,6 +2392,7 @@ START=$(date +%s)
 sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
     BROMURE_SENTRY_WAIT_S=3 BROMURE_SENTRY_NO_LOCKDOWN=1 \
     /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/timeout.log" 2>&1
+sudo rmmod bromure_sentry 2>/dev/null   # each sub-case starts from "not loaded"
 ELAPSED=$(( $(date +%s) - START ))
 check "a timeout ends as unavailable, not waiting" "$(sentry_state)" "unavailable"
 REASON=$(sentry_reason)
@@ -2379,6 +2419,7 @@ sudo systemctl reset-failed bromure-sentry-await 2>/dev/null
 sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
     BROMURE_SENTRY_WAIT_S=3 BROMURE_SENTRY_NO_LOCKDOWN=1 \
     /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/bgtimeout.log" 2>&1
+sudo rmmod bromure_sentry 2>/dev/null   # each sub-case starts from "not loaded"
 waited=0
 while [ "$waited" -lt 90 ]; do
     [ "$(sentry_state)" != "waiting" ] && break

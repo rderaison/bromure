@@ -66,6 +66,12 @@ banner "network lineage"
 run_suite "network lineage (needs a fresh VM, or a tool/route was missing)" \
     "$HERE/test_net_flow.sh"
 
+banner "container mark"
+# Also 77-on-skip: it must LOAD the module to test a netfilter hook, and it
+# needs docker.
+run_suite "container mark (needs a loadable module and docker)" \
+    "$HERE/test_container_mark.sh"
+
 banner "strict revocation leaves nothing on disk"
 run_suite "strict revocation" "$HERE/test_strict.sh"
 

@@ -2917,7 +2917,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let pid = ev.profileID {
                 BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
                     "action": .string(action),
-                    "layer": .string("l4"),
+                    // "container": a container's flow the workspace exempts
+                    // from interception (firewall applied, no MiTM).
+                    "layer": .string(ev.containerDirect ? "container" : "l4"),
                     "proto": .string(proto),
                     "host": .of(ev.hostnames.first),
                     "ip": .string(UtunPacket.ipString(ev.dstIP)),
@@ -3094,6 +3096,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // (a paused, quarantined or suspended VM sends nothing).
             let running = KernelSentryRunState()
             KernelSentryService.shared.vmRunningProvider = { running.isRunning($0) }
+            // Container-traffic exemption, as applied (thread-safe snapshot of
+            // the profiles; re-evaluated when it changes).
+            let containerDirect = KernelSentryRunState()
+            KernelSentryService.shared.containerDirectProvider = { containerDirect.isRunning($0) }
             KernelSentryService.shared.pinDirectory = { [weak self] in self?.store.profileDirectory(for: $0) }
             wireSentryModules()
             // `.common` modes: the watchdog's quarantine alert is a modal, and
@@ -3105,6 +3111,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     running.set(Set(self.runningSessions.compactMap { pid, s in
                         s.sandbox.vm?.state == .running ? pid : nil
                     }))
+                    let direct = Set(self.profiles.filter(\.effectiveContainerTrafficDirect).map(\.id))
+                    let changed = containerDirect.replace(direct)
+                    for id in changed { KernelSentryService.shared.refreshContainerDirect(profileID: id) }
                 }
             }
             RunLoop.main.add(runTimer, forMode: .common)

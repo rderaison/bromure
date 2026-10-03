@@ -37,6 +37,48 @@ public final class KernelSentryService: @unchecked Sendable {
     /// set by the app. A VM that isn't running sends nothing, and that isn't
     /// silence.
     public var vmRunningProvider: (@Sendable (UUID) -> Bool) = { _ in true }
+    /// Whether the workspace exempts container traffic from the MiTM
+    /// (`Profile.effectiveContainerTrafficDirect`); set by the app.
+    public var containerDirectProvider: (@Sendable (UUID) -> Bool) = { _ in false }
+    /// VMs whose connected sentry announced the container mark.
+    private var containerMarked: Set<UUID> = []
+    /// VMs where the mark can no longer be trusted this boot: someone changed
+    /// egress traffic control (`tc`), which can rewrite DSCP after the
+    /// sentry's netfilter hook. Cleared by the next boot's hello.
+    private var containerMarkRevoked: Set<UUID> = []
+
+    /// The switch honours the container mark only while this VM's sentry is
+    /// connected and stamps it, and the workspace allows it: without the
+    /// sentry, a guest could forge the mark. Re-run when the option changes.
+    public func refreshContainerDirect(profileID: UUID) {
+        lock.lock()
+        let marked = containerMarked.contains(profileID) && !containerMarkRevoked.contains(profileID)
+        lock.unlock()
+        let on = marked && containerDirectProvider(profileID)
+        VMNetSwitch.shared.setContainerTrafficDirect(on, profileID: profileID)
+    }
+
+    /// Egress traffic control changed in this VM after boot: stop honouring
+    /// the container mark until the VM reboots.
+    func revokeContainerMark(profileID: UUID) -> Bool {
+        lock.lock()
+        let first = containerMarkRevoked.insert(profileID).inserted
+        lock.unlock()
+        refreshContainerDirect(profileID: profileID)
+        return first
+    }
+
+    /// A new boot's hello: the revocation was for the previous boot.
+    func rearmContainerMark(profileID: UUID) {
+        lock.lock(); containerMarkRevoked.remove(profileID); lock.unlock()
+    }
+
+    func noteContainerMark(profileID: UUID, active: Bool) {
+        lock.lock()
+        if active { containerMarked.insert(profileID) } else { containerMarked.remove(profileID) }
+        lock.unlock()
+        refreshContainerDirect(profileID: profileID)
+    }
     /// The workspace's directory, where the sentry pin survives a host restart.
     @MainActor public var pinDirectory: ((Profile) -> URL?)?
 
@@ -133,6 +175,13 @@ public final class KernelSentryService: @unchecked Sendable {
         case "bpf_load":
             return fromInit ? nil : (10, "tampering")
         case "kexec_attempt":
+            return (10, "tampering")
+        case "tc_change":
+            // Rare and root-only; can rewrite packets after netfilter.
+            return (3, "tampering")
+        case "container_mark_forged":
+            // A guest process set the container DSCP itself to dodge the MiTM
+            // (the sentry cleared it): an escape attempt.
             return (10, "tampering")
         case "ptrace":
             return (3, "privilege")
@@ -366,6 +415,9 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             return
         }
         persistPin()
+        if conn == 0 { KernelSentryService.shared.rearmContainerMark(profileID: profileID) }
+        KernelSentryService.shared.noteContainerMark(
+            profileID: profileID, active: (hello["container_mark"] as? Int) == Int(VMNetSwitch.containerDSCP))
         var data: [String: AnyJSON] = ["state": .string("connected")]
         if let k = info.kernel { data["kernel"] = .string(k) }
         if let m = info.module { data["module"] = .string(m) }
@@ -382,6 +434,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
         lock.unlock()
         close(cfd)
         if wasOurs {
+            KernelSentryService.shared.noteContainerMark(profileID: profileID, active: false)
             emit("sentry.state", ["state": .string("disconnected")])
         }
     }
@@ -466,6 +519,16 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
             lock.lock(); let first = !reportedStuckBoot; reportedStuckBoot = true; lock.unlock()
             if first {
                 alarm("sentry_boot_phase", "the kernel sentry still labels events as boot-time \(Int(KernelSentryService.bootBudget))s after the VM started", weight: 0)
+            }
+        }
+        // Egress traffic control (`tc`) changed after boot: it can rewrite the
+        // container mark after the sentry's hook, so the mark is untrusted for
+        // the rest of this boot and container traffic goes back to the proxy.
+        if kind == "tc_change", (fields["phase"] as? String) != "boot" {
+            let who = "\(frame["comm"] as? String ?? "?") (pid \(frame["pid"] as? Int ?? 0))"
+            if KernelSentryService.shared.revokeContainerMark(profileID: profileID),
+               KernelSentryService.shared.containerDirectProvider(profileID) {
+                alarm("tampering", "\(who) changed the VM's egress traffic control (tc \(frame["op"] as? String ?? "change")), which could fake the container mark: container traffic is intercepted again until the VM restarts", weight: 10)
             }
         }
         // Network lineage: the process tree (exec) and each flow (net_flow).
@@ -693,5 +756,12 @@ final class KernelSentryRunState: @unchecked Sendable {
     private let lock = NSLock()
     private var running: Set<UUID> = []
     func set(_ s: Set<UUID>) { lock.lock(); running = s; lock.unlock() }
+    /// Replace the set; returns the ids whose membership changed.
+    func replace(_ s: Set<UUID>) -> Set<UUID> {
+        lock.lock(); defer { lock.unlock() }
+        let changed = running.symmetricDifference(s)
+        running = s
+        return changed
+    }
     func isRunning(_ id: UUID) -> Bool { lock.lock(); defer { lock.unlock() }; return running.contains(id) }
 }
