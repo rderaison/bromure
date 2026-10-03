@@ -3621,3 +3621,6 @@
 "Mark as Done" = "完了にする";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "タスクをそのまま完了にします。何もマージされず、ワークツリーとブランチは残ります。";
 "Confirm" = "確認";
+"Created %@" = "作成 %@";
+"Modified %@" = "変更 %@";
+"Updated %@" = "更新 %@";
