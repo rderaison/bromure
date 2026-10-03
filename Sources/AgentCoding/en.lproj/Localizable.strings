@@ -3655,3 +3655,4 @@
 "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back.";
 "Mark as Done" = "Mark as Done";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay.";
+"Confirm" = "Confirm";

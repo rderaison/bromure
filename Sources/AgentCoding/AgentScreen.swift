@@ -99,6 +99,97 @@ enum AgentScreen {
                     firstOffset: rows.first ?? cursorAt, lastOffset: last, numbered: false)
     }
 
+    /// A checklist the agent put up ("Select any you wish to enable."): rows
+    /// with a check box — "❯ [✔] playwright", "  [ ] github", numbered or
+    /// not — and, usually, a button row under them ("Enable selected").
+    /// Enter on a row there only ticks it; the button submits.
+    struct Checklist: Equatable {
+        var options: [LoginOption]
+        var checked: [Bool]
+        /// The row the cursor is on (0-based); nil = on the button.
+        var cursor: Int?
+        /// The button's label, when the list has one (else Enter submits).
+        var submitLabel: String?
+        var firstOffset: Int
+        var lastOffset: Int
+    }
+
+    static func checklist(_ lines: [String]) -> Checklist? {
+        struct Row { let at: Int; let label: String; let checked: Bool; let cursor: Bool }
+        func row(_ i: Int) -> Row? {
+            var s = Substring(unboxed(lines[i]).trimmingCharacters(in: .whitespaces))
+            var cursor = false
+            if let g = s.first, cursorGlyphs.contains(g) || g == ">" {
+                cursor = true
+                s = s.dropFirst().drop(while: { $0 == " " || $0 == "\u{00a0}" })
+            }
+            let digits = s.prefix(while: \.isNumber)
+            if !digits.isEmpty, s.dropFirst(digits.count).first == "." {
+                s = s.dropFirst(digits.count + 1).drop(while: { $0 == " " })
+            }
+            guard s.first == "[", s.count >= 4 else { return nil }
+            let mark = s[s.index(after: s.startIndex)]
+            guard s[s.index(s.startIndex, offsetBy: 2)] == "]" else { return nil }
+            let ticks: Set<Character> = ["✔", "✓", "x", "X", "*", "■", "●"]
+            guard mark == " " || ticks.contains(mark) else { return nil }
+            let label = s.dropFirst(3).trimmingCharacters(in: .whitespaces)
+            guard !label.isEmpty else { return nil }
+            return Row(at: i, label: label, checked: mark != " ", cursor: cursor)
+        }
+        // The last run of check rows on screen.
+        guard let lastAt = lines.indices.last(where: { row($0) != nil }) else { return nil }
+        var rows: [Row] = []
+        var i = lastAt
+        while i >= 0, let r = row(i) { rows.insert(r, at: 0); i -= 1 }
+        // The button: the first glyph row under the list, without a box.
+        var submit: String?
+        var submitFocused = false
+        var end = lastAt
+        if let b = lines.indices.first(where: { $0 > lastAt && !unboxed(lines[$0]).trimmingCharacters(in: .whitespaces).isEmpty }),
+           b <= lastAt + 2, !isRule(lines[b]) {
+            var t = Substring(unboxed(lines[b]).trimmingCharacters(in: .whitespaces))
+            if let g = t.first, cursorGlyphs.contains(g) {
+                submitFocused = true
+                t = t.dropFirst().drop(while: { $0 == " " || $0 == "\u{00a0}" })
+            }
+            // A short label, not a sentence (a footer explains the keys).
+            if !t.isEmpty, t.count <= 40, !t.contains("·"), !t.hasSuffix(".") {
+                submit = String(t)
+                end = b
+            } else {
+                submitFocused = false
+            }
+        }
+        guard tailIsFooter(lines, after: end) else { return nil }
+        let cursor = rows.firstIndex(where: \.cursor)
+        guard cursor != nil || submitFocused else { return nil }   // a live dialog has focus somewhere
+        return Checklist(options: rows.enumerated().map { LoginOption(index: $0.offset + 1, label: $0.element.label) },
+                         checked: rows.map(\.checked), cursor: cursor, submitLabel: submit,
+                         firstOffset: rows.first?.at ?? lastAt, lastOffset: end)
+    }
+
+    /// The keystrokes that make a checklist read `want`, then submit it:
+    /// to each row that has to change, Space; then Down onto the button and
+    /// Enter (without a button, Enter on a row submits). Positions: rows
+    /// 0…n-1, the button n — Down from the last row reaches it, Up from it
+    /// goes back to the last row.
+    static func checklistKeys(_ c: Checklist, want: [Bool]) -> [String] {
+        let n = c.checked.count
+        var at = c.cursor ?? n
+        var keys: [String] = []
+        func move(to i: Int) {
+            keys += Array(repeating: i > at ? "Down" : "Up", count: abs(i - at))
+            at = i
+        }
+        for i in 0..<n where i < want.count && want[i] != c.checked[i] {
+            move(to: i)
+            keys.append("Space")
+        }
+        if c.submitLabel != nil { move(to: n) }
+        keys.append("Enter")
+        return keys
+    }
+
     /// Below the list: at most a few footer lines, blanks and box edges.
     private static func tailIsFooter(_ lines: [String], after last: Int) -> Bool {
         guard last + 1 < lines.count else { return true }
