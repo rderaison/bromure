@@ -1072,6 +1072,7 @@ private struct BacklogTaskCard: View {
                 HStack(spacing: 6) {
                     WorkspaceChip(name: workspaceName, accentHex: accentHex)
                         .layoutPriority(-1)
+                    TaskDateLabel(task: task)
                     Spacer(minLength: 4)
                     if let onAssign, !planningLive {
                         Button(action: onAssign) {
@@ -1378,6 +1379,7 @@ private struct AssignedTaskCard: View {
                     .foregroundStyle(.indigo)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Capsule().fill(Color.indigo.opacity(0.12)))
+                    TaskDateLabel(task: task)
                     Spacer(minLength: 4)
                     if task.pendingQuestion != nil {
                         CardStatusPill(text: NSLocalizedString("Question", comment: "task card"),
@@ -1465,6 +1467,7 @@ private struct InProgressTaskCard: View {
                     HStack(spacing: 6) {
                         WorkspaceChip(name: workspaceName, accentHex: accentHex)
                             .layoutPriority(-1)
+                        TaskDateLabel(task: task)
                         Spacer(minLength: 4)
                         if status == .needsInput {
                             CardStatusPill(text: NSLocalizedString("Needs you", comment: "task card"),
@@ -1554,6 +1557,7 @@ private struct TestingTaskCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     WorkspaceChip(name: workspaceName, accentHex: accentHex)
+                    TaskDateLabel(task: task)
                     Spacer(minLength: 4)
                     if unsent > 0 {
                         CardStatusPill(text: String(format: NSLocalizedString("%d comment(s)", comment: "task card"),
@@ -1786,6 +1790,9 @@ struct TaskEditorSheet: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
+                if !isNew {
+                    TaskDateLabel(task: task, full: true)
+                }
                 if task.stage != .backlog {
                     Text(task.stage.rawValue.capitalized)
                         .font(.system(size: 10.5, weight: .semibold))
@@ -2164,5 +2171,52 @@ private struct EditorChrome: ViewModifier {
         } else {
             content.background(BoardBackdrop(tints: [.blue, .purple, .indigo]))
         }
+    }
+}
+
+
+/// When a task was created, and last changed: a compact relative date on
+/// cards ("Updated 5 min ago"), both dates in the tooltip; written out in
+/// the task's details (`full`).
+struct TaskDateLabel: View {
+    let task: CodingTask
+    var full = false
+
+    private var modified: Date? {
+        task.updatedAt.flatMap { $0.timeIntervalSince(task.createdAt) > 1 ? $0 : nil }
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: full ? 11 : 10))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize()
+            .help(tooltip)
+    }
+
+    private var text: String {
+        if full {
+            let created = String(format: NSLocalizedString("Created %@", comment: "task date"),
+                                 task.createdAt.formatted(date: .abbreviated, time: .shortened))
+            guard let m = modified else { return created }
+            return created + "  ·  " + String(format: NSLocalizedString("Modified %@", comment: "task date"),
+                                              m.formatted(date: .abbreviated, time: .shortened))
+        }
+        let rel = { (d: Date) in d.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated)) }
+        if let m = modified {
+            return String(format: NSLocalizedString("Updated %@", comment: "task date"), rel(m))
+        }
+        return String(format: NSLocalizedString("Created %@", comment: "task date"), rel(task.createdAt))
+    }
+
+    private var tooltip: String {
+        var lines = [String(format: NSLocalizedString("Created %@", comment: "task date"),
+                            task.createdAt.formatted(date: .long, time: .shortened))]
+        if let m = modified {
+            lines.append(String(format: NSLocalizedString("Modified %@", comment: "task date"),
+                                m.formatted(date: .long, time: .shortened)))
+        }
+        return lines.joined(separator: "\n")
     }
 }

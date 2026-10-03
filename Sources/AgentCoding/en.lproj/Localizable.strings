@@ -3656,3 +3656,6 @@
 "Mark as Done" = "Mark as Done";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay.";
 "Confirm" = "Confirm";
+"Created %@" = "Created %@";
+"Modified %@" = "Modified %@";
+"Updated %@" = "Updated %@";

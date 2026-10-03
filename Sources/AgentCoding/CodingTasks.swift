@@ -47,6 +47,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var reviewViewed: [String: String]?
 
     var createdAt: Date
+    /// When the task last changed (the store stamps it). nil: not since
+    /// it was created.
+    var updatedAt: Date?
     var startedAt: Date?
     /// When the agent last reported done (entered Testing).
     var testingAt: Date?
@@ -381,7 +384,9 @@ final class CodingTaskStore {
 
     func upsert(_ task: CodingTask) {
         if let i = tasks.firstIndex(where: { $0.id == task.id }) {
-            tasks[i] = task
+            var t = task
+            if !Self.sameContent(tasks[i], t) { t.updatedAt = Date() }
+            tasks[i] = t
         } else {
             tasks.insert(task, at: 0)
         }
@@ -412,8 +417,18 @@ final class CodingTaskStore {
     /// In-place update + save; no-op when the task is gone.
     func mutate(_ id: UUID, _ change: (inout CodingTask) -> Void) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let before = tasks[i]
         change(&tasks[i])
+        if !Self.sameContent(before, tasks[i]) { tasks[i].updatedAt = Date() }
         save()
+    }
+
+    /// Equal apart from when they last changed — a save that changes
+    /// nothing doesn't count as a modification.
+    static func sameContent(_ a: CodingTask, _ b: CodingTask) -> Bool {
+        var a = a, b = b
+        a.updatedAt = nil; b.updatedAt = nil
+        return a == b
     }
 
     /// Fat-client mirror: replace the whole task list from a remote
