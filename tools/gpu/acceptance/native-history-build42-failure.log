@@ -1,0 +1,84 @@
+[MACPool] claimed (reused): 02:84:ba:f6:5e:23 (1/4 in use)
+[VMPool] Sandboxed VirGL/Metal renderer selected (1 GPU devices)
+[VMPool] Boot detected in 1.8s
+[VMPool] claim: got warm VM (state=1)
+[VMPool] claim: balloon deflated
+[VMPool] claim: network filtering applied
+[VMPool] claim: fs share configured, applying config...
+[VMPool] Applying config: homePage='about:blank' forceDarkMode=false adBlocking=false
+[VMPool] config-agent responded: OK
+[VMPool] applyConfig total: 0.2s
+[VMPool] claim: config applied, returning VM
+[VM 1] xinitrc: eth0 mtu=1280[VM 1] 
+[CDPBridge] vsock pool listening on port 5200
+[VMAutoSuspend] armed — idle threshold: 180s, mode: automatic, low-power-mode: false
+[VM 1] xinitrc: EXTRA_FLAGS=--hardware-video-device-path=/dev/dri/renderD129 --render-node-override=/dev/dri/renderD129 --proxy-server=http://127.0.0.1:3128 --proxy-bypass-list=<-loopback> --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --enable-smooth-scrolling --use-angle=gles --load-extension=/opt/bromure/extensions/file-picker,/opt/bromure/extensions/webrtc-block --disable-extensions-except=/opt/bromure/extensions/file-picker,/opt/bromure/extensions/webrtc-block --user-data-dir=/home/chrome/.6088CEBD-1DB9-4ED8-843E-BE41DCBFD3E3 --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --force-webrtc-ip-handling-policy=disable_non_proxied_udp --enforce-webrtc-ip-permission-check --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,VaapiIgnoreDriverChecks,WebAuthenticationNewPasskeyUI --disable-features=LcdText,UseOutOfProcessVideoDecoding,PreferV4L2VideoAcceleration,ResolutionBasedDecoderPriority CHROME_URL=about:blank SWAP_CMD_CTRL=1
+[VM 1] BROMURE_NET_NO_TRAFFIC[VM 1] 
+[VMAutoSuspend] blocked: mode=automatic lpm=false, idle 0s / 180s
+2026-10-02 12:37:02.572 bromure[91115:10036177] [GPU upload] bytes=111892788 requests=2123
+2026-10-02 12:37:02.573 bromure[91115:10036177] [GPU budget] resources=43 GPU=99466704 staging=75194368 peakGPU=206028912 peakStaging=145309696
+2026-10-02 12:37:02.573 bromure[91115:10036177] [GPU budget] limits GPU=1073741824 staging=1073741824 resource=268435456
+[VM 1] export BROMURE_TEST_VM=1[VM 1] 
+[?2004l[?2004hroot@bromure:~# [VM 1] stty -echo
+[?2004l[VM 1] [?2004h[VM 1] root@bromure:~# [?2004l
+[?2004h[VM 1] > [?2004l
+[VM 1] [?2004h> [?2004l
+[VM 1] [?2004h> [?2004l
+[VM 1] [?2004h> [?2004l[VM 1] 
+[?2004h> [?2004l[VM 1] 
+[?2004h> [?2004l[VM 1] 
+[?2004h> [?2004l[VM 1] 
+[?2004h> [?2004l
+[?2004h> [VM 1] [?2004l
+[VM 1] [?2004h[VM 1] root@bromure:~# [?2004l
+[VM 1] [?2004h[VM 1] root@bromure:~# python3 /tmp/bromure-gpu-probe.py
+[?2004l[VM 1] BROMURE_PROFILE_HISTORY_VISITS 7[VM 1] 
+BROMURE_GPU_ACCEPTANCE_PASS
+[VM 1] [?2004h[VM 1] root@bromure:~# [VM 1] echo BROMURE_GPU_DIAGNOSTIC; DISPLAY=:0 XAUTHORITY=/home/chrome/.Xauthority /usr/local/bin/graphics-diagnostics.py; python3 -c 'import runpy,json,urllib.request; m=runpy.run_path("/usr/local/bin/tab-agent.py"); v=json.load(urllib.request.urlopen("http://127.0.0.1:9222/json/version")); print(json.dumps(m["cdp_ws_call"](v["webSocketDebuggerUrl"],"SystemInfo.getInfo")))'; cat /tmp/startx.log | grep -E '(GL implementation|EGL|egl|ANGLE|Gpu|gpu_process|GL context)' | tail -30; echo BROMURE_GPU_DIAGNOSTIC_END[VM 1] 
+[?2004lBROMURE_GPU_DIAGNOSTIC
+[VM 1] {[VM 1] 
+  "configVersion": 1,
+  "requestedBackend": "virgl",
+  "drmRenderNodes": [
+    {
+      "node": "/dev/dri/renderD128",
+      "driver": "virtio-pci",
+      "device": "0x1050",
+      "vendor": "0x1af4"[VM 1] 
+    },
+    {
+      "node": "/dev/dri/renderD129",
+      "driver": "virtio-pci",
+      "device": "0x1050",
+      "vendor": "0x1af4"
+    }
+  ],
+  "guestReportsVirgl": true,[VM 1] 
+  "hostGPUVerified": null,
+  "note": "GLX probe only. Verify Chromium via chrome://gpu and host GPU activity separately.",
+  "renderer": "virgl",
+  "probeExitCode": 0,
+  "glxInfo": "name of display: :0\ndisplay: :0  screen: 0\ndirect rendering: Yes\nExtended renderer info (GLX_MESA_query_renderer):\n    Vendor: Mesa (0x1af4)\n    Device: virgl (0x1010)\n    Version: 25.2.8\n    Accelerated: yes\n    Video memory: 0MB\n    Unified memory: no\n    Preferred profile: compat (0x2)\n    Max core profile version: 0.0\n    Max compat profile version: 2.1\n    Max GLES1 profile version: 1.1\n    Max GLES[23] profile version: 3.0\nOpenGL vendor string: Mesa\nOpenGL renderer string: virgl\nOpenGL version string: 2.1 Mesa 25.2.8\nOpenGL shading language version string: 1.20\n\nOpenGL ES profile version string: OpenGL ES 3.0 Mesa 25.2.8\nOpenGL ES profile shading language version string: OpenGL ES GLSL ES 3.00\n\n",
+  "probeError": ""
+}[VM 1] 
+[VM 1] {"gpu": {"devices": [{"vendorId": 0, "deviceId": 0, "vendorString": "Google Inc. (Mesa)", "deviceString": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)", "driverVendor": "Mesa", "driverVersion": "25.2.8"}], "auxAttributes": {"amdSwitchable": false, "canSupportThreadedTextureMailbox": false, "directRenderingVersion": "", "displayType": "ANGLE_OPENGLES", "glExtensions": "GL_AMD_performance_monitor GL_ANGLE_blob_cache GL_ANGLE_client_arrays GL_ANGLE_compressed_texture_etc GL_ANGLE_depth_texture GL_ANGLE_framebuffer_blit GL_ANGLE_framebuffer_multisample GL_ANGLE_get_serialized_context_string GL_ANGLE_get_tex_level_parameter GL_ANGLE_instanced_arrays GL_ANGLE_memory_size GL_ANGLE_program_binary_readiness_query GL_ANGLE_program_cache_control GL_ANGLE_renderability_validation GL_ANGLE_request_extension GL_ANGLE_robust_client_memory GL_ANGLE_texture_compression_dxt3 GL_ANGLE_texture_compression_dxt5 GL_ANGLE_translated_shader_source GL_ARM_rgba8 GL_CHROMIUM_bind_generates_resource GL_CHROMIUM_bind_uniform_location GL_CHROMIUM_copy_texture GL_CHROMIUM_lose_context GL_EXT_blend_func_extended GL_EXT_blend_minmax GL_EXT_clip_control GL_EXT_color_buffer_float GL_EXT_color_buffer_half_float GL_EXT_compressed_ETC1_RGB8_sub_texture GL_EXT_conservative_depth GL_EXT_debug_label GL_EXT_debug_marker GL_EXT_depth_clamp GL_EXT_discard_framebuffer GL_EXT_disjoint_timer_query GL_EXT_draw_buffers GL_EXT_draw_buffers_indexed GL_EXT_float_blend GL_EXT_frag_depth GL_EXT_instanced_arrays GL_EXT_map_buffer_range GL_EXT_occlusion_query_boolean GL_EXT_polygon_offset_clamp GL_EXT_read_format_bgra GL_EXT_render_snorm GL_EXT_sRGB GL_EXT_shadow_samplers GL_EXT_texture_border_clamp GL_EXT_texture_compression_bptc GL_EXT_texture_compression_dxt1 GL_EXT_texture_compression_rgtc GL_EXT_texture_compression_s3tc_srgb GL_EXT_texture_filter_anisotropic GL_EXT_texture_format_BGRA8888 GL_EXT_texture_rg GL_EXT_texture_sRGB_R8 GL_EXT_texture_sRGB_RG8 GL_EXT_texture_sRGB_decode GL_EXT_texture_storage GL_EXT_texture_type_2_10_10_10_REV GL_EXT_unpack_subimage G[VM 1] L_KHR_debug GL_KHR_parallel_shader_compile GL_KHR_texture_compression_astc_ldr GL_KHR_texture_compression_astc_sliced_3d GL_MESA_framebuffer_flip_y GL_NV_fence GL_NV_framebuffer_blit GL_NV_pack_subimage GL_NV_pixel_buffer_object GL_NV_read_depth GL_NV_read_stencil GL_OES_EGL_image GL_OES_EGL_image_external GL_OES_EGL_image_external_essl3 GL_OES_compressed_ETC1_RGB8_texture GL_OES_depth24 GL_OES_draw_buffers_indexed GL_OES_element_index_uint GL_OES_fbo_render_mipmap GL_OES_get_program_binary GL_OES_mapbuffer GL_OES_packed_depth_stencil GL_OES_required_internalformat GL_OES_rgb8_rgba8 GL_OES_standard_derivatives GL_OES_surfaceless_context GL_OES_texture_3D GL_OES_texture_border_clamp GL_OES_texture_float GL_OES_texture_float_linear GL_OES_texture_half_float GL_OES_texture_half_float_linear GL_OES_texture_npot GL_OES_texture_stencil8 GL_OES_vertex_array_object ", "glImplementationParts": "(gl=egl-angle,angle=opengles)", "glRenderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8)", "glResetNotificationStrategy": 0, "glVendor": "Google Inc. (Mesa)", "glVersion": "OpenGL ES 3.0 (ANGLE 2.1 git hash: unknown hash)", "glWsExtensions": "EGL_KHR_create_context EGL_KHR_get_all_proc_addresses EGL_ANGLE_create_context_webgl_compatibility EGL_CHROMIUM_create_context_bind_generates_resource EGL_CHROMIUM_sync_control EGL_ANGLE_sync_control_rate EGL_EXT_pixel_format_float EGL_KHR_surfaceless_context EGL_ANGLE_display_texture_share_group EGL_ANGLE_display_semaphore_share_group EGL_ANGLE_create_context_client_arrays EGL_ANGLE_program_cache_control EGL_ANGLE_robust_resource_initialization EGL_ANGLE_create_context_extensions_enabled EGL_ANDROID_blob_cache EGL_ANDROID_recordable EGL_ANGLE_create_context_backwards_compatible EGL_KHR_create_context_no_error EGL_NOK_texture_from_pixmap EGL_KHR_reusable_sync EGL_ANGLE_context_virtualization EGL_ANGLE_memory_usage_report EGL_ANGLE_create_context_passthrough_shaders ", "glWsVendor": "Google Inc. (Mesa)", "glWsVersion": "1.5 (ANGLE 2.1 git hash: unknown hash)", "hardwareSupportsVulkan": false, "inProcessGpu": false, "initializationTime": 0.046198, "isAsan": false, "isClangCoverage": false, "jpegDecodeAcceleratorSupported": false, "maxMsaaSamples": "8", "optimus": false, "passthroughCmdDecoder": true, "pixelShaderVersion": "3.00", "processCrashCount": 0, "sandboxed": false, "skiaBackendType": "GaneshGL", "subpixelFontRendering": true, "targetCpuBits": 64, "vertexShaderVersion": "3.00", "visibilityCallbackCallCount": 0}, "featureStatus": {"2d_canvas": "enabled", "direct_rendering_display_compositor": "disabled_off_ok", "gpu_compositing": "enabled", "multiple_raster_threads": "enabled_on", "opengl": "enabled_on", "rasterization": "enabled_force", "raw_draw": "disabled_off_ok", "skia_graphite": "disabled_off", "trees_in_viz": "disabled_off", "video_decode": "enabled", "video_encode": "disabled_software", "vulkan": "disabled_off", "webgl": "enabled", "webgpu": "enabled", "webgpu_on_vk_via_gl_interop": "enabled", "webnn": "disabled_off"}, "driverBugWorkarounds": ["enable_webgl_timer_query_extensions", "exit_on_context_lost", "disabled_extension_GL_KHR_blend_equation_advanced", "disabled_extension_GL_KHR_blend_equation_advanced_coherent"], "videoDecoding": [], "videoEncoding": []}, "modelName": "", "modelVersion": "", "commandLine": "/usr/lib/chromium/chromium --disable-dev-shm-usage --disable-background-networking --disable-extensions-except --user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 --no-first-run --no-default-browser-check --disable-pings --force-device-scale-factor=2 --disable-vulkan --font-render-hinting=none --lang=en-US --hardware-video-device-path=/dev/dri/renderD129 --render-node-override=/dev/dri/renderD129 --proxy-server=http://127.0.0.1:3128 --proxy-bypass-list=<-loopback> --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --enable-smooth-scrolling --use-angle=gles --load-extension=/opt/bromure/extensions/file-picker,/opt/bromure/extensions/webrtc-block --disable-extensions-except=/opt/bromure/extensions/file-picker,/opt/bromure/extensions/webrtc-block --user-data-dir=/home/chrome/.6088CEBD-1DB9-4ED8-843E-BE41DCBFD3E3 --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --force-webrtc-ip-handling-policy=disable_non_proxied_udp --enforce-webrtc-ip-permission-check --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,VaapiIgnoreDriverChecks,WebAuthenticationNewPasskeyUI --disable-features=LcdText,UseOutOfProcessVideoDecoding,PreferV4L2VideoAcceleration,ResolutionBasedDecoderPriority --ozone-platform=x11 --flag-switches-begin --flag-switches-end about:blank"}
+[VM 1] BROMURE_GPU_DIAGNOSTIC_END[VM 1] 
+[?2004hroot@bromure:~# [VMPool] Network diagnosis: noTraffic
+2026-10-02 12:37:12.574 bromure[91115:10035776] [GPU upload] bytes=111892788 requests=2123
+2026-10-02 12:37:12.574 bromure[91115:10035776] [GPU budget] resources=43 GPU=99466704 staging=75194368 peakGPU=206028912 peakStaging=145309696
+2026-10-02 12:37:12.574 bromure[91115:10035776] [GPU budget] limits GPU=1073741824 staging=1073741824 resource=268435456
+*** Terminating app due to uncaught exception 'NSInternalInconsistencyException', reason: 'Invalid message sent to event "NSEvent: type=KitDefined loc=(0,624) time=166436.0 flags=0 win=0x7c8d000c80 winNum=1671 ctxt=0x0 subtype=4 data1=1148190720 data2=1142685696"'
+*** First throw call stack:
+(
+	0   CoreFoundation                      0x000000019e90a8c0 __exceptionPreprocess + 176
+	1   libobjc.A.dylib                     0x000000019e36860c objc_exception_throw + 88
+	2   Foundation                          0x00000001a00514d8 -[NSCalendarDate initWithCoder:] + 0
+	3   AppKit                              0x00000001a2ff1c64 -[NSEvent keyCode] + 140
+	4   bromure                             0x00000001048520e8 $s7bromure12AddressField33_969FFCDFCDAFE28EF9EB884249C652ACLLV11CoordinatorC20controlTextDidChangeyy10Foundation12NotificationVF + 828
+	5   bromure                             0x000000010483c05c $s7bromure12AddressField33_969FFCDFCDAFE28EF9EB884249C652ACLLV11CoordinatorC26controlTextDidBeginEditingyy10Foundation12NotificationVFToTm + 120
+	6   bromure                             0x00000001048c8790 $s7bromure14BrowserSessionC28checkNativeHistoryCompletionyS2SYaKFTY2_ + 464
+	7   bromure                             0x00000001047d7a01 $s7bromure10GPUBrowserV6browse33_DB9A1417DC819429FDCD41041284E381LLyyYaKFyyYaKcfU8_TQ4_ + 1
+	8   bromure                             0x000000010478eeed $sxIeAgHr_xs5Error_pIegHrzo_s8SendableRzs5NeverORs_r0_lTRyt_Tg5TA.53TQ0_ + 1
+	9   libswift_Concurrency.dylib          0x00000002cb0d6d41 _ZL23completeTaskWithClosurePN5swift12AsyncContextEPNS_10SwiftErrorE + 1
+)
+libc++abi: terminating due to uncaught exception of type NSException

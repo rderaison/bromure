@@ -25,6 +25,8 @@ public final class CJKInputBridge {
     private static let vsockPort: UInt32 = 5007
 
     private weak var socketDevice: VZVirtioSocketDevice?
+    public var targetProvider: (() -> String?)?
+    public var deliveryGate: ((@escaping () -> Void) -> Void)?
     private var inputView: CJKInputView?
     private var observation: NSObjectProtocol?
     private var debounceTimer: Timer?
@@ -129,6 +131,17 @@ public final class CJKInputBridge {
     // MARK: - Message delivery to guest
 
     private func sendMessage(_ message: [String: String]) {
+        var message = message
+        if let targetProvider {
+            guard let target = targetProvider() else { return }
+            message["targetId"] = target
+        }
+        if let deliveryGate {
+            deliveryGate { [weak self] in self?.deliverMessage(message) }
+        } else { deliverMessage(message) }
+    }
+
+    private func deliverMessage(_ message: [String: String]) {
         guard let device = socketDevice else { return }
         guard let jsonData = try? JSONSerialization.data(withJSONObject: message),
               let jsonString = String(data: jsonData, encoding: .utf8) else { return }

@@ -2,6 +2,7 @@
 """Read-only, bounded Chromium/OOM diagnostic. Run as root for full visibility.
 
 python3 guest-memory-trace.py --seconds 1200 --interval 1 > memory.jsonl
+Add --gpu-threads for bounded thread CPU/wait samples during throughput diagnosis.
 No process control, kernel settings, or production service installation.
 RSS sums are not unique memory; disappearing PIDs do not establish exit cause.
 """
@@ -46,6 +47,36 @@ def identity(text):
     return int(tail[19])
 
 
+def cpu_counters(text):
+    """Cumulative /proc ticks/faults; caller correlates PID/starttime and time."""
+    tail = text[text.rfind(')') + 1:].split()
+    if len(tail) < 20:
+        raise ValueError('incomplete process stat')
+    return dict(state=tail[0], user_ticks=int(tail[11]), system_ticks=int(tail[12]),
+                minor_faults=int(tail[7]), major_faults=int(tail[9]))
+
+
+def gpu_threads(base):
+    rows, errors = [], []
+    try:
+        tasks = sorted((base / 'task').iterdir(), key=lambda p: int(p.name))
+    except (OSError, ValueError) as error:
+        return dict(error=str(error))
+    for task in tasks[:64]:
+        try:
+            stat = read(task / 'stat', 8192)
+            start = identity(stat)
+            row = dict(tid=int(task.name), start_ticks=start,
+                       name=read(task / 'comm', 256).strip(),
+                       wchan=read(task / 'wchan', 256).strip(), **cpu_counters(stat))
+            if identity(read(task / 'stat', 8192)) != start:
+                raise ValueError('TID reused during snapshot')
+            rows.append(row)
+        except (OSError, ValueError) as error:
+            errors.append(dict(tid=task.name, error=str(error)))
+    return dict(threads=rows, errors=errors, truncated=len(tasks) > 64)
+
+
 def emit(kind, **values):
     print(json.dumps(dict(kind=kind, wall_ns=time.time_ns(),
                           monotonic_ns=time.monotonic_ns(), **values)), flush=True)
@@ -76,7 +107,7 @@ def process_roles(argv):
              if arg.startswith(('--type=', '--utility-sub-type='))], 'argv')
 
 
-def snapshot_process(pid, detailed):
+def snapshot_process(pid, detailed, include_gpu_threads=False):
     base = PROC / str(pid)
     argv = read(base / 'cmdline').split('\0')
     roles, role_source = process_roles(argv)
@@ -90,11 +121,12 @@ def snapshot_process(pid, detailed):
     if not (any(token in name for name in names for token in ('chrome', 'chromium'))
             or '--type=gpu-process' in roles):
         return None
-    start = identity(read(base / 'stat'))
+    stat = read(base / 'stat')
+    start = identity(stat)
     status = fields(read(base / 'status'))
     data = dict(pid=pid, start_ticks=start, executable=executable or argv[0],
                 argv0=argv[0],
-                role=roles, role_source=role_source,
+                role=roles, role_source=role_source, cpu=cpu_counters(stat),
                 status_kib={k: v for k, v in status.items()
                             if k.startswith(('Vm', 'Rss'))},
                 threads=status.get('Threads'), ppid=status.get('PPid'),
@@ -142,6 +174,8 @@ def snapshot_process(pid, detailed):
         data['open_files_limit'] = [line for line in read(base / 'limits').splitlines()
                                     if line.startswith('Max open files')]
         data['cgroup_memory'] = cgroup_memory(pid)
+        if include_gpu_threads and '--type=gpu-process' in roles:
+            data['gpu_threads'] = gpu_threads(base)
     if identity(read(base / 'stat')) != start:
         raise ValueError('PID reused during snapshot')
     return data
@@ -167,6 +201,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seconds', type=float, default=1200)
     parser.add_argument('--interval', type=float, default=1)
+    parser.add_argument('--gpu-threads', action='store_true',
+                        help='Every5s sample up to64 GPU threads: CPU ticks, names and wchan; no stacks/grabs')
     args = parser.parse_args()
     if not 1 <= args.seconds <= 3600 or not .25 <= args.interval <= 30:
         parser.error('seconds must be 1..3600; interval .25..30')
@@ -176,7 +212,8 @@ def main():
     signal.setitimer(signal.ITIMER_REAL, args.seconds + 5)
     deadline = time.monotonic() + args.seconds
     emit('ready', uid=os.geteuid(), boot_id=read(PROC / 'sys/kernel/random/boot_id').strip(),
-         seconds=args.seconds, interval=args.interval)
+         seconds=args.seconds, interval=args.interval, clock_ticks_per_second=os.sysconf('SC_CLK_TCK'),
+         gpu_threads=args.gpu_threads)
     previous = set()
     last_detail = last_kernel = float('-inf')
     while time.monotonic() < deadline:
@@ -189,7 +226,7 @@ def main():
         candidates = sorted(int(p.name) for p in PROC.iterdir() if p.name.isdigit())
         for pid in candidates[:4096]:
             try:
-                record = snapshot_process(pid, detailed)
+                record = snapshot_process(pid, detailed, args.gpu_threads)
                 if record:
                     records.append(record)
             except (OSError, ValueError) as error:

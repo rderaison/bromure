@@ -1,0 +1,87 @@
+{
+  "date": "2026-10-02",
+  "scope": "Private two-output display/controller core; production New Window integration pending",
+  "coreAccepted": true,
+  "productionAccepted": false,
+  "branch": "feature/macos27-gpu",
+  "guestCandidateCommit": "a270e0d7",
+  "sourceGuestTipAfterTrial": "4388d131",
+  "image": "/private/tmp/bromure-shared-window-test-image-v3",
+  "imageVersionMetadata": 500,
+  "imageQualification": "Private image includes prior501 Mesa fixes and explicit shared-window candidate; no published image changed.",
+  "hostSourceSHA256": {
+    "Sources/SandboxEngine/MacOS27GPUSession.swift": "99aa49f09f13be18cf62e04d5e3fff716ffb133efdf14be792b55d31de3943c1",
+    "Sources/SandboxEngine/MacOS27RendererClient.swift": "4ef98bf34b3df73b51c2613b55a10314e43f9310b8da5b75ed9b8e29de08f8ae",
+    "Sources/SandboxEngine/RendererCommandProcessor.swift": "d6849afb505895d28d9eb5083e99d0ccb8bf78bce0b2c7b1b3bf70a59188410f",
+    "Sources/SandboxEngine/SharedWindowControllerBridge.swift": "bcdb353abba993712ac6d1d2a6143d0221b4db685fda6beb18fa43263033c00f",
+    "Sources/SandboxEngine/VMConfig.swift": "5dc7a170127e20f08cc3135aa071ddd4809edde1accd837c810a9eb3d30ea913",
+    "Sources/SandboxEngine/VMPool.swift": "345381273ab72006e971e2da1746e5eb44bf6d495be70189d817f2e8bd2ed45e",
+    "Sources/Browser/GPUBrowser.swift": "fe48f0f4a54c3d99b4029d7f3c96502a3ebe41f7334cc0c80a43fb1aafdbe086",
+    "Sources/Browser/SharedWindowProof.swift": "53d272070603adac9f68ad199ef7c169e518c07084a1a3ad66e8afeb1d63cb85",
+    "tools/gpu/renderer-worker.c": "e0980efe15884e42bf9bdb4eb0fad513bd7b86ad5a41dd897b74ca8b11e26aa9",
+    "tools/gpu/guest-shared-window-check.py": "9b6a177a392baa18e9c306a0bebfc1288c530d4133c614f424ccf66ff12e6661"
+  },
+  "binary": "/private/tmp/bromure-shared-window-preview/preview.MK1Cdr/Bromure GPU Preview.app/Contents/MacOS/bromure",
+  "customGPUs": 1,
+  "scanouts": 2,
+  "rootPixels": [
+    2560,
+    900
+  ],
+  "outputs": [
+    "Virtual-2",
+    "Virtual-3"
+  ],
+  "drmCard": "/dev/dri/card1",
+  "browserWindows": [
+    1039806252,
+    1039806259
+  ],
+  "browserProcessBeforeAfter": {
+    "pid": 775,
+    "startTicks": 276,
+    "sameCommandLine": true,
+    "count": 1
+  },
+  "guestWebGLPixels": [
+    [
+      22,
+      160,
+      74,
+      255
+    ],
+    [
+      32,
+      84,
+      210,
+      255
+    ]
+  ],
+  "hostSecondOutput": {
+    "size": [
+      1280,
+      900
+    ],
+    "centerRGB": [
+      32,
+      84,
+      210
+    ]
+  },
+  "checks": {
+    "realMetalWorkerTests": 23,
+    "DarwinSharedGuestTests": 15,
+    "releaseBuild": true,
+    "liveProcessExit": 0
+  },
+  "log": "/private/tmp/bromure-shared-window-proof-2.log",
+  "logSHA256": "623b22a9a206f73874025ea0432ea8d098d25813f9e77ae10c45b6e26d4d0e4b",
+  "limitations": [
+    "Host pixel assertion covers second-output center in source IOSurface, not physical screen capture.",
+    "No claim for per-window native input, scoped tab UI, resize, close lifecycle or shared cookies.",
+    "Normal File New Window is not wired; only explicit gpu-browser diagnostic uses this proof.",
+    "Initial failed trial retained separately: JavaScript fixture placeholder corrupted COLOR_BUFFER_BIT; corrected trial passed unchanged runtime candidate.",
+    "GPU and per-resource ceilings unchanged; root bounding box remains32MiPixels."
+  ],
+  "binarySHA256": "fcbb5e7579e4326774c61271d77949821386104474107f7114856e8c0a7716a1"
+}

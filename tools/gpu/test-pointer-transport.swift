@@ -13,7 +13,16 @@ import Darwin
         var size: Int32 = 1024
         precondition(setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &size, socklen_t(MemoryLayout.size(ofValue: size))) == 0)
         let queue = PointerWireQueue()
-        for i in 0..<256 { precondition(queue.enqueue(x: Double(i) / 256, y: 0.5, buttons: i % 8)) }
+        precondition(!queue.enqueueFrame(Data("{}".utf8)))
+        precondition(!queue.enqueueFrame(Data(repeating: 32, count: 1025) + Data([10])))
+        for i in 0..<256 {
+            if i % 2 == 0 {
+                precondition(queue.enqueue(x: Double(i) / 256, y: 0.5, buttons: i % 8))
+            } else {
+                let frame = Data("{\"display\":1,\"x\":\(Double(i) / 256),\"y\":0.5,\"buttons\":\(i % 8)}\n".utf8)
+                precondition(queue.enqueueFrame(frame))
+            }
+        }
         precondition(!queue.enqueue(x: 0, y: 0, buttons: 0))
         var received = Data(), blocked = false
         var bytes = [UInt8](repeating: 0, count: 127)
@@ -33,6 +42,7 @@ import Darwin
         for (i, line) in lines.enumerated() {
             let value = try JSONSerialization.jsonObject(with: Data(line)) as! [String: Any]
             precondition(value["buttons"] as! Int == i % 8)
+            if i % 2 == 1 { precondition(value["display"] as! Int == 1) }
             precondition(value["x"] as! Double == Double(i) / 256)
         }
         for i in 0..<1000 {

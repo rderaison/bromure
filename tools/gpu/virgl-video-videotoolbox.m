@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <time.h>
 
 #define VIDEO_MAX_BYTES (8u * 1024u * 1024u)
 #define VIDEO_MAX_DIMENSION 4096u
@@ -23,17 +24,48 @@ struct virgl_video_codec {
     unsigned char parameters[8192];
     size_t parameters_length;
     OSStatus error;
+    uint32_t diagnostic_id;
+    unsigned frame_count;
 };
 struct virgl_video_buffer {
     struct virgl_video_create_buffer_args args;
     CVPixelBufferRef image;
     uint32_t id;
+    uint64_t reserved_bytes;
 };
 static struct virgl_video_callbacks callbacks;
 static unsigned codec_count, buffer_count;
+static uint64_t video_buffer_bytes;
+// Charge every live buffer before a decoded image exists. Two bytes per pixel,
+// with padded rows/heights, conservatively cover the retained NV12 image.
+static uint64_t video_buffer_reservation(unsigned width, unsigned height) {
+    return (((uint64_t)width + 255) & ~UINT64_C(255)) *
+           (((uint64_t)height + 15) & ~UINT64_C(15)) * 2;
+}
+static uint64_t video_buffer_budget(void) {
+    uint64_t budget = [[NSProcessInfo processInfo] physicalMemory] / 32;
+    if (budget < (UINT64_C(128) << 20)) budget = UINT64_C(128) << 20;
+    if (budget > (UINT64_C(512) << 20)) budget = UINT64_C(512) << 20;
+    return budget;
+}
 static uint32_t next_buffer_id;
 static unsigned decoded_frames;
+static uint32_t next_codec_id;
+static double video_milliseconds(void) {
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000.0 + now.tv_nsec / 1000000.0;
+}
 static id<MTLComputePipelineState> split_pipeline;
+static id<MTLCommandQueue> video_queue;
+static unsigned planar_copies;
+static unsigned plane_copies;
+// Renderer commands are serialized. Reuse the queue while preserving the
+// completion wait before guest texture consumers can run.
+static id<MTLCommandQueue> retained_video_queue(id<MTLDevice> device) {
+    if (video_queue && video_queue.device != device) { [video_queue release]; video_queue = nil; }
+    if (!video_queue) video_queue = [device newCommandQueue];
+    return [video_queue retain];
+}
 static bool initialized;
 static bool supported(enum pipe_video_profile profile) {
     return profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE ||
@@ -182,18 +214,25 @@ static void decoded(void *cookie, void *frame, OSStatus status, VTDecodeInfoFlag
     if (CVPixelBufferGetWidth(image) != b->args.width || CVPixelBufferGetHeight(image) != b->args.height ||
         CVPixelBufferGetPixelFormatType(image) != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
         !CVPixelBufferGetIOSurface(image)) { c->error = -1; return; }
+    size_t actual_bytes = IOSurfaceGetAllocSize(CVPixelBufferGetIOSurface(image));
+    if (!actual_bytes || actual_bytes > b->reserved_bytes) {
+        os_log_error(OS_LOG_DEFAULT, "VideoToolbox decoded surface exceeds buffer reservation codec=%u", c->diagnostic_id);
+        c->error = -1; return;
+    }
     if (b->image) CVPixelBufferRelease(b->image);
     b->image = CVPixelBufferRetain(image);
 }
 static bool configure(struct virgl_video_codec *c, const uint8_t *sps, size_t ns,
                        const uint8_t *pps, size_t np) {
+    double started = video_milliseconds();
     if (!ns || !np || ns + np > sizeof(c->parameters) - 8) return false;
     uint8_t key[8192]; uint32_t sizes[2] = {(uint32_t)ns, (uint32_t)np};
     memcpy(key, sizes, 8); memcpy(key + 8, sps, ns); memcpy(key + 8 + ns, pps, np);
     size_t length = 8 + ns + np;
     if (c->session && c->parameters_length == length && !memcmp(c->parameters, key, length)) return true;
     CMVideoFormatDescriptionRef format = NULL; const uint8_t *sets[2] = {sps, pps}; size_t lengths[2] = {ns, np};
-    if (CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, 2, sets, lengths, 4, &format)) return false;
+    OSStatus format_status = CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, 2, sets, lengths, 4, &format);
+    if (format_status) { c->error = format_status; return false; }
     CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(format);
     if (dims.width != (int)c->args.width || dims.height != (int)c->args.height) { os_log(OS_LOG_DEFAULT, "VideoToolbox format dimensions %dx%d expected %ux%u",dims.width,dims.height,c->args.width,c->args.height); CFRelease(format); return false; }
     if (c->session && VTDecompressionSessionCanAcceptFormatDescription(c->session, format)) {
@@ -209,7 +248,13 @@ static bool configure(struct virgl_video_codec *c, const uint8_t *sps, size_t ns
         NSDictionary *attrs = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
             (id)kCVPixelBufferIOSurfacePropertiesKey: @{}, (id)kCVPixelBufferMetalCompatibilityKey: @YES};
         VTDecompressionOutputCallbackRecord cb = {decoded, c};
-        if (VTDecompressionSessionCreate(NULL, format, (CFDictionaryRef)spec, (CFDictionaryRef)attrs, &cb, &c->session)) return false;
+        OSStatus create_status = VTDecompressionSessionCreate(NULL, format, (CFDictionaryRef)spec, (CFDictionaryRef)attrs, &cb, &c->session);
+        if (create_status) {
+            c->error = create_status;
+            os_log_error(OS_LOG_DEFAULT, "VideoToolbox session create failed codec=%u status=%d liveCodecs=%u liveBuffers=%u ms=%.3f",
+                         c->diagnostic_id, (int)create_status, codec_count, buffer_count, video_milliseconds() - started);
+            return false;
+        }
     }
     CFTypeRef hardware = NULL;
     OSStatus status = VTSessionCopyProperty(c->session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, NULL, &hardware);
@@ -217,7 +262,7 @@ static bool configure(struct virgl_video_codec *c, const uint8_t *sps, size_t ns
     if (hardware) CFRelease(hardware);
     if (!available) { VTDecompressionSessionInvalidate(c->session); CFRelease(c->session); c->session = NULL; return false; }
     memcpy(c->parameters, key, length); c->parameters_length = length;
-    os_log(OS_LOG_DEFAULT, "VideoToolbox hardware H.264 decoder active (%ux%u)", c->args.width, c->args.height);
+    os_log(OS_LOG_DEFAULT, "VideoToolbox hardware H.264 decoder active (%ux%u) codec=%u setupMs=%.3f liveCodecs=%u liveBuffers=%u", c->args.width, c->args.height, c->diagnostic_id, video_milliseconds() - started, codec_count, buffer_count);
     return true;
 }
 
@@ -226,7 +271,7 @@ int virgl_video_init(int drm_fd, struct virgl_video_callbacks *cbs, unsigned fla
     if (!cbs || !VTIsHardwareDecodeSupported(kCMVideoCodecType_H264)) return -1;
     callbacks = *cbs; initialized = true; return 0;
 }
-void virgl_video_destroy(void) { initialized = false; memset(&callbacks, 0, sizeof(callbacks)); [split_pipeline release]; split_pipeline = nil; }
+void virgl_video_destroy(void) { initialized = false; memset(&callbacks, 0, sizeof(callbacks)); [split_pipeline release]; split_pipeline = nil; [video_queue release]; video_queue = nil; }
 int virgl_video_fill_caps(union virgl_caps *caps) {
     if (!initialized || !caps) return -1;
     caps->v2.num_video_caps = 0;
@@ -246,12 +291,17 @@ struct virgl_video_codec *virgl_video_create_codec(const struct virgl_video_crea
         args->chroma_format != PIPE_VIDEO_CHROMA_FORMAT_420 || !args->width || !args->height ||
         args->width > VIDEO_MAX_DIMENSION || args->height > VIDEO_MAX_DIMENSION ||
         ((args->width + 15) / 16) * ((args->height + 15) / 16) > 36864 ||
-        (args->width & 1) || (args->height & 1) || args->max_references > 16 || codec_count >= 16) return NULL;
-    struct virgl_video_codec *c = calloc(1, sizeof(*c)); if (c) { c->args = *args; ++codec_count; } return c;
+        (args->width & 1) || (args->height & 1) || args->max_references > 16 || codec_count >= 16) {
+        os_log_error(OS_LOG_DEFAULT, "VideoToolbox codec rejected liveCodecs=%u liveBuffers=%u", codec_count, buffer_count);
+        return NULL;
+    }
+    struct virgl_video_codec *c = calloc(1, sizeof(*c)); if (c) { c->args = *args; if (++next_codec_id == 0) ++next_codec_id; c->diagnostic_id = next_codec_id; ++codec_count; } return c;
 }
 void virgl_video_destroy_codec(struct virgl_video_codec *c) {
     if (!c) return;
     if (c->session) { VTDecompressionSessionWaitForAsynchronousFrames(c->session); VTDecompressionSessionInvalidate(c->session); CFRelease(c->session); }
+    os_log(OS_LOG_DEFAULT, "VideoToolbox codec destroyed codec=%u frames=%u remainingCodecs=%u liveBuffers=%u",
+           c->diagnostic_id, c->frame_count, codec_count ? codec_count - 1 : 0, buffer_count);
     if (c->format) CFRelease(c->format); free(c); if (codec_count) --codec_count;
 }
 enum pipe_video_profile virgl_video_codec_profile(const struct virgl_video_codec *c) { return c ? c->args.profile : PIPE_VIDEO_PROFILE_UNKNOWN; }
@@ -259,14 +309,22 @@ void *virgl_video_codec_opaque_data(struct virgl_video_codec *c) { return c ? c-
 struct virgl_video_buffer *virgl_video_create_buffer(const struct virgl_video_create_buffer_args *args) {
     if (!initialized || !args || (args->format != PIPE_FORMAT_NV12 && args->format != PIPE_FORMAT_IYUV && args->format != PIPE_FORMAT_YV12 && args->format != PIPE_FORMAT_B8G8R8A8_UNORM && args->format != PIPE_FORMAT_R8G8B8A8_UNORM) || args->interlaced || !args->width || !args->height ||
         args->width > VIDEO_MAX_DIMENSION || args->height > VIDEO_MAX_DIMENSION ||
-        ((args->width + 15) / 16) * ((args->height + 15) / 16) > 36864 || (args->width & 1) || (args->height & 1) || buffer_count >= 128) {
+        ((args->width + 15) / 16) * ((args->height + 15) / 16) > 36864 || (args->width & 1) || (args->height & 1) || buffer_count >= 512) {
         if (args) virgl_error("VideoToolbox buffer rejected format=%u expected=%u size=%ux%u interlaced=%u ready=%u count=%u\n", args->format, PIPE_FORMAT_NV12, args->width, args->height, args->interlaced, initialized, buffer_count);
         return NULL;
     }
+    uint64_t reservation = video_buffer_reservation(args->width, args->height);
+    uint64_t budget = video_buffer_budget();
+    if (video_buffer_bytes > budget || reservation > budget - video_buffer_bytes) {
+        os_log_error(OS_LOG_DEFAULT, "VideoToolbox buffer budget rejected count=%u bytes=%llu requested=%llu limit=%llu",
+                     buffer_count, (unsigned long long)video_buffer_bytes,
+                     (unsigned long long)reservation, (unsigned long long)budget);
+        return NULL;
+    }
     struct virgl_video_buffer *b = calloc(1, sizeof(*b));
-    if (b) { b->args = *args; if (++next_buffer_id == 0) ++next_buffer_id; b->id = next_buffer_id; ++buffer_count; } return b;
+    if (b) { b->args = *args; b->reserved_bytes = reservation; video_buffer_bytes += reservation; if (++next_buffer_id == 0) ++next_buffer_id; b->id = next_buffer_id; ++buffer_count; } return b;
 }
-void virgl_video_destroy_buffer(struct virgl_video_buffer *b) { if (!b) return; if (b->image) CVPixelBufferRelease(b->image); free(b); if (buffer_count) --buffer_count; }
+void virgl_video_destroy_buffer(struct virgl_video_buffer *b) { if (!b) return; if (b->image) CVPixelBufferRelease(b->image); video_buffer_bytes -= b->reserved_bytes; free(b); if (buffer_count) --buffer_count; }
 uint32_t virgl_video_buffer_id(const struct virgl_video_buffer *b) { return b ? b->id : UINT32_MAX; }
 void *virgl_video_buffer_opaque_data(struct virgl_video_buffer *b) { return b ? b->args.opaque : NULL; }
 int virgl_video_begin_frame(struct virgl_video_codec *c, struct virgl_video_buffer *b) {
@@ -286,6 +344,7 @@ int virgl_video_decode_bitstream(struct virgl_video_codec *c, struct virgl_video
                                   const void * const *buffers, const unsigned *sizes) {
     if (!c || !b || !desc || !count || count > 128 || !buffers || !sizes || desc->base.protected_playback || desc->base.key_size ||
         desc->base.profile != c->args.profile || desc->h264.field_pic_flag) return -1;
+    double started = video_milliseconds();
     size_t total = 0; for (unsigned i = 0; i < count; ++i) { if (!buffers[i] || sizes[i] > VIDEO_MAX_BYTES - total) return -1; total += sizes[i]; }
     if (!total) return -1;
     uint8_t *data = malloc(total), *avcc = malloc(total + 512); if (!data || !avcc) { free(data); free(avcc); return -1; }
@@ -320,11 +379,21 @@ int virgl_video_decode_bitstream(struct virgl_video_codec *c, struct virgl_video
         valid = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, out, NULL, NULL, 0, out, 0, &block) == 0 &&
                 CMBlockBufferReplaceDataBytes(avcc, block, 0, out) == 0;
         if (valid) valid = CMSampleBufferCreateReady(NULL, block, c->format, 1, 0, NULL, 1, &out, &sample) == 0;
-        if (valid) valid = VTDecompressionSessionDecodeFrame(c->session, sample, 0, b, NULL) == 0 &&
-                          VTDecompressionSessionWaitForAsynchronousFrames(c->session) == 0 && !c->error && b->image;
+        if (valid) {
+            OSStatus decode_status = VTDecompressionSessionDecodeFrame(c->session, sample, 0, b, NULL);
+            OSStatus wait_status = decode_status ? 0 : VTDecompressionSessionWaitForAsynchronousFrames(c->session);
+            if (decode_status || wait_status) c->error = decode_status ? decode_status : wait_status;
+            valid = !c->error && b->image;
+        }
     }
     if (sample) CFRelease(sample); if (block) CFRelease(block); free(avcc); free(data);
-    if (!valid) os_log_error(OS_LOG_DEFAULT, "VideoToolbox frame rejected status=%d image=%d", (int)c->error, b->image != NULL);
+    double elapsed = video_milliseconds() - started;
+    ++c->frame_count;
+    if (c->frame_count == 1 || (c->frame_count <= 50 && c->frame_count % 10 == 0) ||
+        (elapsed >= 20 && c->frame_count % 30 == 0))
+        os_log(OS_LOG_DEFAULT, "VideoToolbox decode timing codec=%u frame=%u ms=%.3f liveCodecs=%u liveBuffers=%u",
+               c->diagnostic_id, c->frame_count, elapsed, codec_count, buffer_count);
+    if (!valid) os_log_error(OS_LOG_DEFAULT, "VideoToolbox frame rejected codec=%u frame=%u status=%d image=%d", c->diagnostic_id, c->frame_count, (int)c->error, b->image != NULL);
     return valid ? 0 : -1;
 }
 int virgl_video_encode_bitstream(struct virgl_video_codec *c, struct virgl_video_buffer *b, const union virgl_picture_desc *d) { (void)c; (void)b; (void)d; return -1; }
@@ -347,6 +416,7 @@ void virgl_video_copy_result(struct virgl_video_codec *codec, int result) {
 // No guest pointer, cross-process native handle, or decoded CPU frame copy.
 int virgl_video_copy_plane(void *native_surface, unsigned plane, void *native_texture) {
     @autoreleasepool {
+        double started = video_milliseconds();
         IOSurfaceRef surface = native_surface; id<MTLTexture> destination = (id<MTLTexture>)native_texture;
         if (!surface || !destination || plane > 1 || IOSurfaceGetPlaneCount(surface) != 2) return -1;
         MTLPixelFormat format = plane ? MTLPixelFormatRG8Unorm : MTLPixelFormatR8Unorm;
@@ -355,7 +425,7 @@ int virgl_video_copy_plane(void *native_surface, unsigned plane, void *native_te
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
         d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> source = [destination.device newTextureWithDescriptor:d iosurface:surface plane:plane];
-        id<MTLCommandQueue> queue = [destination.device newCommandQueue];
+        id<MTLCommandQueue> queue = retained_video_queue(destination.device);
         id<MTLCommandBuffer> command = [queue commandBuffer]; id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
         bool valid = source && queue && command && blit;
         if (valid) {
@@ -363,12 +433,19 @@ int virgl_video_copy_plane(void *native_surface, unsigned plane, void *native_te
                       sourceSize:MTLSizeMake(width,height,1) toTexture:destination destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
             [blit endEncoding]; [command commit]; [command waitUntilCompleted]; valid = command.status == MTLCommandBufferStatusCompleted;
         }
-        [source release]; [queue release]; return valid ? 0 : -1;
+        [source release]; [queue release];
+        unsigned copy = ++plane_copies;
+        double elapsed = video_milliseconds() - started;
+        if (copy == 1 || copy == 50 || (elapsed >= 10 && copy % 30 == 0))
+            os_log(OS_LOG_DEFAULT, "VideoToolbox plane copy=%u plane=%u ms=%.3f valid=%u liveBuffers=%u",
+                   copy, plane, elapsed, valid, buffer_count);
+        return valid ? 0 : -1;
     }
 }
 
 int virgl_video_copy_planar(void *native_surface, void *native_y, void *native_u, void *native_v) {
     @autoreleasepool {
+        double started = video_milliseconds();
         IOSurfaceRef surface = native_surface;
         id<MTLTexture> y = (id<MTLTexture>)native_y, u = (id<MTLTexture>)native_u, v = (id<MTLTexture>)native_v;
         if (!surface || !y || !u || !v || IOSurfaceGetPlaneCount(surface) != 2) return -1;
@@ -403,7 +480,7 @@ int virgl_video_copy_planar(void *native_surface, void *native_y, void *native_u
             [library release]; [function release];
         }
         id<MTLComputePipelineState> pipeline = [split_pipeline retain];
-        id<MTLCommandQueue> queue = [y.device newCommandQueue];
+        id<MTLCommandQueue> queue = retained_video_queue(y.device);
         id<MTLCommandBuffer> command = [queue commandBuffer];
         bool valid = source_y && source_uv && temp_u && temp_v && pipeline && command;
         if (valid) {
@@ -428,6 +505,11 @@ int virgl_video_copy_planar(void *native_surface, void *native_y, void *native_u
         }
         [source_y release]; [source_uv release]; [temp_u release]; [temp_v release];
         [pipeline release]; [queue release];
+        unsigned copy = ++planar_copies;
+        double elapsed = video_milliseconds() - started;
+        if (copy == 1 || copy == 50 || (elapsed >= 10 && copy % 30 == 0))
+            os_log(OS_LOG_DEFAULT, "VideoToolbox planar copy=%u ms=%.3f valid=%u liveBuffers=%u",
+                   copy, elapsed, valid, buffer_count);
         return valid ? 0 : -1;
     }
 }

@@ -18,8 +18,18 @@
          before AppKit can intercept them, so host-side interception alone
          loses the race. The Cmd↔Ctrl swap maps the Mac ⌘ to Ctrl here.
          ⌘H (Ctrl+H) is grabbed so it Hides Bromure (macOS) instead of opening
-         Chromium's History; ⇧⌘H (S-C-h) is NOT grabbed, so it still reaches
-         the guest for the History page. -->
+         Chromium's History; ⇧⌘H and ⌘Y request the host History action.
+         Editing/zoom/find, ⌘D and ⇧⌘B remain Chromium-owned. -->
+    <keybind key="C-n"><action name="Execute"><command>/usr/local/bin/bromure-hostkey n</command></action></keybind>
+    <keybind key="S-C-n"><action name="Execute"><command>/usr/local/bin/bromure-hostkey private-window</command></action></keybind>
+    <keybind key="C-o"><action name="Execute"><command>/usr/local/bin/bromure-hostkey o</command></action></keybind>
+    <keybind key="C-comma"><action name="Execute"><command>/usr/local/bin/bromure-hostkey app-settings</command></action></keybind>
+    <keybind key="C-m"><action name="Execute"><command>/usr/local/bin/bromure-hostkey minimize</command></action></keybind>
+    <keybind key="C-A-h"><action name="Execute"><command>/usr/local/bin/bromure-hostkey hide-others</command></action></keybind>
+    <keybind key="C-q"><action name="Execute"><command>/usr/local/bin/bromure-hostkey quit</command></action></keybind>
+    <keybind key="C-A-b"><action name="Execute"><command>/usr/local/bin/bromure-hostkey bookmarks-manager</command></action></keybind>
+    <keybind key="C-y"><action name="Execute"><command>/usr/local/bin/bromure-hostkey history</command></action></keybind>
+    <keybind key="S-C-h"><action name="Execute"><command>/usr/local/bin/bromure-hostkey history</command></action></keybind>
     <keybind key="C-t"><action name="Execute"><command>/usr/local/bin/bromure-hostkey t</command></action></keybind>
     <keybind key="C-w"><action name="Execute"><command>/usr/local/bin/bromure-hostkey w</command></action></keybind>
     <keybind key="C-l"><action name="Execute"><command>/usr/local/bin/bromure-hostkey l</command></action></keybind>

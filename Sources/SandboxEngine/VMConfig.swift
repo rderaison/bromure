@@ -35,6 +35,12 @@ public struct VMConfig {
     /// Memory in bytes.
     public var memorySize: UInt64
 
+    /// Experimental custom GPU devices in one VM. Production sessions use one.
+    public var experimentalGPUCount: Int = 1
+
+    /// Opt-in multiple outputs sharing one GPU and Chromium profile.
+    public var sharedWindowScanoutCount: Int = 1
+
     /// Display width in pixels.
     public var displayWidth: Int
 

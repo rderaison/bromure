@@ -1,0 +1,12 @@
+{
+  "viewSHA256": "723dbe5ce9b79e04c256bf0ed012e0713b16121b465e1db49a3d7eb378e6be9f",
+  "bridgeSHA256": "1bee42b262d7799e87ac27d75e793cf8e77657dba4d52e444eda4e2855861dcd",
+  "blockSHA256": "60e876a1291d4e3698e6db757b00e4e5d34badbf9917e20776e72eda7c1eb550",
+  "methodSHA256": "f004c477610649ca34710e149b9e1b4ee66bef640cdc3e957ad8db710b56fc41",
+  "generatedSHA256": "aeb8d5786546863b41320bf70f2c6db3666a330c3130bc5939514285ddf8567a",
+  "sourceRoutingChecks": true,
+  "scope": "Actual completion block, Foundation, fake fields; routing and edit guards checked statically, not native input",
+  "passed": true,
+  "stdout": "COMPLETION_CASE_PASS case\nCOMPLETION_CASE_PASS full-scheme\nCOMPLETION_CASE_PASS scheme-mismatch\nCOMPLETION_CASE_PASS www-fallback\nCOMPLETION_CASE_PASS www-preserved\nCOMPLETION_CASE_PASS www-full-scheme\nCOMPLETION_CASE_PASS ranked-first\nCOMPLETION_CASE_PASS skip-nonprefix\nCOMPLETION_CASE_PASS exact-no-suffix\nCOMPLETION_CASE_PASS no-match\nCOMPLETION_CASE_PASS empty-reply\nCOMPLETION_CASE_PASS canonical-shorter-candidate\nCOMPLETION_CASE_PASS canonical-longer-candidate\nCOMPLETION_CASE_PASS surrogate-pair\nCOMPLETION_CASE_PASS japanese\nCOMPLETION_CASE_PASS casefold-length-shrink\nBROMURE_HISTORY_COMPLETION_ACTUAL_BLOCK_PASS\n",
+  "stderr": ""
+}

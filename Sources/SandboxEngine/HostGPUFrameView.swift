@@ -23,6 +23,7 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private var importedFrameGeneration: UInt64 = 0
     private var diagnosticSnapshotCount = 0
     public var guestDisplayScale: Double = 1
+    public var displayHeightAlignment: Int = 1
     public var hiddenTopRows = 0
     public var displaySizeChanged: ((Int, Int) -> Void)? {
         didSet { schedulePendingDisplayResize() }
@@ -39,6 +40,7 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private var resizeProgressExpired = false
     private var resizeRequestSequence: UInt64 = 0
     private var resizeHandoffUntil: Double = 0
+    private var sharedDesktopResizeOperations: Set<UUID> = []
     /// Completed GPU submissions; this is not confirmed on-screen presentation.
     public private(set) var presentedFrameCount = 0
     public var currentFrameSize: NSSize? {
@@ -131,7 +133,7 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         // The progress timeout permits another request; it does not establish
         // that the guest completed this mode. Old-size clears can arrive later.
         let differsFromRequestedMode = lastRequestedDisplaySize.map { $0.0 != width || $0.1 != height } ?? false
-        let resizeEligible = texture.map { clearedResizeTask != nil || $0.width != width || $0.height != height || differsFromRequestedMode ||
+        let resizeEligible = texture.map { !sharedDesktopResizeOperations.isEmpty || clearedResizeTask != nil || $0.width != width || $0.height != height || differsFromRequestedMode ||
             ProcessInfo.processInfo.systemUptime < resizeHandoffUntil } ?? false
         let oldWidth = min(texture?.width ?? width, width)
         let oldHeight = min(texture?.height ?? height, height)
@@ -348,6 +350,24 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         scheduleDisplayResize()
     }
 
+    /// A sibling output can resize the shared X desktop and clear this output
+    /// even when this view's dimensions are unchanged. Keep the same bounded
+    /// repaint policy; an existing candidate's deadline is never restarted.
+    public func prepareForSharedDesktopResize() {
+        resizeHandoffUntil = ProcessInfo.processInfo.systemUptime + 0.75
+    }
+
+    public func beginSharedDesktopResize() -> UUID {
+        let token = UUID()
+        sharedDesktopResizeOperations.insert(token)
+        return token
+    }
+
+    public func endSharedDesktopResize(_ token: UUID) {
+        guard sharedDesktopResizeOperations.remove(token) != nil else { return }
+        prepareForSharedDesktopResize()
+    }
+
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         needsDisplay = true
@@ -358,7 +378,8 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         // GTF high-refresh modes use 8-pixel horizontal character cells. Request
         // that effective width explicitly, so paint acknowledgments are exact.
         let width = Int(min(max(bounds.width * guestDisplayScale, 64), 8192)) / 8 * 8
-        let height = Int(min(max(bounds.height * guestDisplayScale, 64), 8192))
+        let alignment = max(1, min(displayHeightAlignment, 8))
+        let height = Int(min(max(bounds.height * guestDisplayScale, 64), 8192)) / alignment * alignment
         if let last = lastDisplaySize, last.0 == width, last.1 == height { return }
         lastDisplaySize = (width, height)
         // Xorg can clear the old framebuffer before binding the new dimensions.

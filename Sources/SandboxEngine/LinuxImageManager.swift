@@ -66,6 +66,14 @@ public final class LinuxImageManager {
         return json["pointerProtocolVersion"] as? Int == 1 && json["pointerPort"] as? Int == 5821
     }
 
+    /// Older images remain usable through the single-output graphics path.
+    public var supportsSharedWindows: Bool {
+        guard supportsExperimentalVirgl,
+              let data = try? Data(contentsOf: graphicsCapabilitiesURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["sharedWindowProtocolVersion"] as? Int == 1 && json["controllerPort"] as? Int == 5832
+    }
+
     static func validGraphicsCapabilities(_ data: Data) -> Bool {
         guard data.count <= 8192,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

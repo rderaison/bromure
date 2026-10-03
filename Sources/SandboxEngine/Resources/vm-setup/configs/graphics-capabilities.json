@@ -6,6 +6,8 @@
   "chromiumVaapiRgbABI": 1,
   "pointerProtocolVersion": 1,
   "pointerPort": 5821,
+  "sharedWindowProtocolVersion": 1,
+  "controllerPort": 5832,
   "diagnosticCommand": "/usr/local/bin/graphics-diagnostics.py",
   "prerequisiteCommand": "/usr/local/bin/graphics-prerequisites.py"
 }

@@ -380,7 +380,7 @@ private struct WelcomePane: View {
                         NSLocalizedString("Each session starts from a clean image — or keep a profile when you want one.", comment: "Setup feature detail"))
                 feature("bolt.fill",
                         NSLocalizedString("Ready in a second", comment: "Setup feature title"),
-                        NSLocalizedString("A VM is always warmed up, so new windows open instantly.", comment: "Setup feature detail"))
+                        NSLocalizedString("Windows share the running browser when supported. New sessions start in a fresh VM.", comment: "Setup feature detail"))
             }
 
             Spacer(minLength: 0)
@@ -690,7 +690,7 @@ private struct BrandProgressBar: View {
 /// within seconds. Deliberately not the setup layout, so it never reads
 /// as a launcher. Rings ripple out from the mark while the pool's first
 /// VM boots.
-private struct StartingPanel: View {
+struct StartingPanel: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -731,7 +731,7 @@ private struct StartingPanel: View {
             VStack(spacing: 6) {
                 Text("Starting Bromure")
                     .font(.system(size: 15, weight: .semibold))
-                Text("Warming up a fresh VM. The first window after launch takes a few seconds longer.")
+                Text("Starting a fresh VM. Your browser will open in a few seconds.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

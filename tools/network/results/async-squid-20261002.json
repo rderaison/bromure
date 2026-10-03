@@ -1,0 +1,163 @@
+{
+  "date": "2026-10-02",
+  "platform": "Linux-6.8.0-139-generic-aarch64-with-glibc2.39",
+  "baseCommit": "836a3757",
+  "sourceSHA256": {
+    "tools/network/test-async-squid-netns.py": "fc036c710fdfbc0a74c3b99818a62a1d981d7569d1f4ff4fd2a7429937250b14",
+    "tools/network/async-squid-gateway.py": "6c0f587ca0c18210cd637842743cf86be94fc6256c4870b1fadee47d4a54608d",
+    "tools/network/async-squid-launch.py": "e76da5bfc115fe6355800186358038a23227a28394dd459fde48e92f24accddc",
+    "tools/network/test-async-squid.py": "ccf2b0ca559ce4bd82e066862f2626e54cf4382f8965fc3f3edde8744ebe8031",
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/config-agent.py": "88e8d9956617a08cea52278301d27d276d673cc5c79eccdbd85e693554e210d2",
+    "tools/network/results/async-squid-netns-20261002.log": "dee30a3008e5b9fdabe980b31f2da1911dad7efea91f1b55010ff061564ac8ce"
+  },
+  "packageSHA256": {
+    "squid_6.14-0ubuntu0.24.04.4_arm64.deb": "0c48d47ba5e88aa1019374a8b12c6c25e27319bac2eb4445abcdfad4105327d3",
+    "libltdl7_2.4.7-7build1_arm64.deb": "69f28804222d37670e19417cc21e54d5ec0ca3a149cbdbf0a5714d5e407e30d1",
+    "proxychains4_4.17-1_arm64.deb": "d8092d740b4922c4b5190ed6c19fc8a70a00f4f9bcccfdb50a33b3b519aea2ce",
+    "libecap3_1.0.1-3.4ubuntu2_arm64.deb": "671222bc8dc06c4cec112a5400b24a9b0239c91e38d563be515ec8973d634614",
+    "squid-common_6.14-0ubuntu0.24.04.4_all.deb": "e2f5d967ef71db67db1080a4f4aba0e2a6560e584318b3bf867e7fa84494bc12",
+    "squid-langpack_20220130-1_all.deb": "4c64f6e36577ca98ab6591e3d9209750f28a93daa1cc2b9b818579dc56fa50fa",
+    "libproxychains4_4.17-1_arm64.deb": "f5f57a48c1ac9b8638d6afa50829b1d6b84fd66dc283dc0a600fc3d4302de4cc"
+  },
+  "results": [
+    {
+      "test": "BROMURE_ASYNC_SQUID_NETNS_PASS",
+      "result": {
+        "ipv4": "CLIENT_PASS 1048582",
+        "ipv6": "CLIENT_PASS 262",
+        "loopback": "CLIENT_PASS 262",
+        "healthySeconds": 0.048092749988427386,
+        "pending": "CLIENT_PASS 262",
+        "uidIsolation": true,
+        "directGatewayRejected": true,
+        "afterSaturation": "CLIENT_PASS 262",
+        "boundedConnectionsAndDeadline": true,
+        "routerUnavailableFailsClosed": true,
+        "gatewayUnavailableFailsClosed": true,
+        "afterCleanup": "CLIENT_PASS 262",
+        "cleanup": true,
+        "requests": [
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18082
+          ],
+          [
+            "2001:db8::1",
+            18082
+          ],
+          [
+            "127.0.0.1",
+            18082
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18082
+          ]
+        ]
+      }
+    },
+    {
+      "test": "BROMURE_ROUTING_PARITY_PASS",
+      "result": {
+        "direct": 4,
+        "warp": 2,
+        "warpFailureClosed": true,
+        "scope": "unmodified router with synthetic WARP endpoint; no live VPN claim"
+      }
+    },
+    {
+      "test": "BROMURE_NATIVE_SQUID_GATEWAY_PASS",
+      "result": {
+        "healthyAndDNSSeconds": 0.005762292013969272,
+        "requests": [
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18082
+          ],
+          [
+            "2001:db8::1",
+            18082
+          ]
+        ],
+        "dnsSinkholeDenied": true,
+        "gatewayCrash": false,
+        "producerStoppedBeforeCleanup": true,
+        "supervisorExit": 0,
+        "logs": "/tmp/bromure-native-squid-xa_lv9gt"
+      }
+    },
+    {
+      "test": "BROMURE_NATIVE_SQUID_GATEWAY_PASS",
+      "result": {
+        "healthyAndDNSSeconds": 0.005582459009019658,
+        "requests": [
+          [
+            "198.18.0.1",
+            18081
+          ],
+          [
+            "198.18.0.1",
+            18082
+          ],
+          [
+            "2001:db8::1",
+            18082
+          ]
+        ],
+        "dnsSinkholeDenied": true,
+        "gatewayCrash": true,
+        "producerStoppedBeforeCleanup": true,
+        "supervisorExit": 1,
+        "logs": "/tmp/bromure-native-squid-ou2p1yk9"
+      }
+    }
+  ],
+  "portableTests": 5,
+  "guestGraphicsTests": 43,
+  "sharedWindowTests": 28,
+  "limitations": [
+    "Private Linux namespace; no Mac guest acceptance",
+    "Synthetic WARP endpoint, not real VPN",
+    "No production image installation or enablement"
+  ]
+}
