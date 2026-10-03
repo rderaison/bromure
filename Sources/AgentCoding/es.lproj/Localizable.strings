@@ -3622,3 +3622,4 @@
 "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Elige la rama: el agente que hizo el trabajo lo fusiona donde trabajó, y la tarjeta pasa a Hecho cuando informe.";
 "Mark as Done" = "Marcar como hecho";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Pasa la tarea a Hecho tal cual: no se fusiona nada y el worktree y su rama se quedan.";
+"Confirm" = "Confirmar";

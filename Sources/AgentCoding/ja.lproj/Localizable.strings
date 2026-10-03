@@ -3620,3 +3620,4 @@
 "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "ブランチを選んでください。作業したエージェントが作業した場所でマージし、報告があるとカードは完了になります。";
 "Mark as Done" = "完了にする";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "タスクをそのまま完了にします。何もマージされず、ワークツリーとブランチは残ります。";
+"Confirm" = "確認";

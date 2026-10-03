@@ -3620,3 +3620,4 @@
 "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Escolha o branch: o agente que fez o trabalho o mescla onde trabalhou, e o cartão vai para Concluído quando ele avisar.";
 "Mark as Done" = "Marcar como concluído";
 "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Move a tarefa para Concluído como está — nada é mesclado, e o worktree e seu branch permanecem.";
+"Confirm" = "Confirmar";
