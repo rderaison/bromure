@@ -298,11 +298,6 @@ def sh_escape(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
-# Fallback Chrome major if `chromium-browser --version` can't be read.
-# Only used on error; the live version is normally detected at runtime.
-_FALLBACK_CHROME_MAJOR = "142"
-
-
 CRX_DIR = "/opt/bromure/crx"
 
 
@@ -342,39 +337,9 @@ def browser_binary(cfg):
     return "google-chrome-stable" if cfg.get("browser") == "chrome" else "chromium-browser"
 
 
-def chromium_major_version(binary="chromium-browser"):
-    """Best-effort Chrome major version (e.g. '142') from the installed
-    browser, so a spoofed macOS UA reports a version consistent with the
-    real engine instead of a stale hardcoded one."""
-    try:
-        out = subprocess.run(
-            [binary, "--version"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout
-        m = re.search(r"\b(\d+)\.\d+\.\d+\.\d+\b", out)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
-    return _FALLBACK_CHROME_MAJOR
-
-
 def resolve_user_agent(cfg):
-    """Return the User-Agent string to hand Chromium.
-
-    A non-empty `userAgent` is used verbatim. Empty (the default) yields a
-    Chrome-on-macOS UA built from the real Chromium version, so sites see a
-    stock macOS Chrome instead of the Linux VM — matching the rest of
-    Bromure's de-fingerprinting (locale, platform)."""
-    custom = (cfg.get("userAgent") or "").strip()
-    if custom:
-        return custom
-    major = chromium_major_version(browser_binary(cfg))
-    return (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        f"Chrome/{major}.0.0.0 Safari/537.36"
-    )
+    """Empty means no override; each browser supplies its native identity."""
+    return (cfg.get("userAgent") or "").strip()
 
 
 def graphics_backend(cfg):

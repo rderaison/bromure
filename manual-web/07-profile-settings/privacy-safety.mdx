@@ -20,7 +20,7 @@ The **Privacy & Safety** category ("Control what this browser can access and sha
 | **AI Phishing Detection** (Beta) | Analyzes pages with an AI model to catch scams and phishing before you act on them. The page's URL, visible text and form structure are sent to a Bromure analysis server. Default: off. Requires **Retain Browsing Data** and a one-time consent. |
 | **Block Screen Capture** | Hides the profile's windows from screenshots, screen recordings and screen-sharing apps like Zoom. Default: off. |
 | **Send Link to Other Session** | Adds **Send Link to Other Session** to the browser's right-click menu, to open a link in another Bromure profile. Default: off (on for **File › New Profile…** profiles and the built-in **Private Browsing** profile). |
-| **User Agent** | How the browser identifies itself to websites. Leave it empty (placeholder "Chrome on macOS (default)") to appear as Chrome on macOS, or enter a custom user-agent string. Default: empty. |
+| **User Agent** | How the browser identifies itself to websites. Leave it empty (placeholder "Browser default (no override)") to use the selected browser’s own user agent, or enter a custom user-agent string. Default: empty. |
 
 All privacy and safety settings apply to an open window after a restart.
 
@@ -62,7 +62,7 @@ Right-click a link and choose **Send Link to Other Session** to open it in anoth
 
 ## User Agent
 
-By default Bromure presents a stock Chrome-on-macOS user agent that carries the real browser version, so websites don't see that the browser runs in a Linux VM. A custom string is sent exactly as you type it; clear the field to go back to the default.
+By default Bromure leaves the selected browser’s user agent unchanged. An empty field adds no override, whether you use Chromium or Google Chrome. Enter a custom string to override it; clear the field to restore the browser’s own default.
 
 ## Related chapters
 

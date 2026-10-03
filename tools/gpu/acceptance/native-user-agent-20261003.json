@@ -1,0 +1,48 @@
+{
+  "change": "Empty profile User-Agent leaves Chromium/Google Chrome native default unchanged; custom overrides retained",
+  "appVersion": "5.0.2",
+  "imageVersion": "502",
+  "guestTests": {
+    "passed": 44,
+    "scope": "Actual config writer and xinitrc launch branch exercised for both browser selections; empty/missing/whitespace/custom/spaced literal arguments"
+  },
+  "releaseBuild": "ARM64 Release PASS",
+  "publishedImage": {
+    "uuid": "726a23ed-9768-4905-967c-f736cd5fb32a",
+    "diskSHA256": "deffe0f5600478a70c405a7ae3ef6339a8194d18858e7bfca3fe699a59b82f17"
+  },
+  "live": {
+    "baseline": {
+      "log": "/private/tmp/bromure-cloudflare-guest-baseline2.log",
+      "logSHA256": "7e6ad2d2b3b8f998202e1642da1f223f8f8f4dcac9f089f9f128bd523872058a",
+      "identity": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "platform": "Linux x86_64",
+        "webdriver": false,
+        "language": "en-US",
+        "cookies": true
+      }
+    },
+    "candidate": {
+      "log": "/private/tmp/bromure-cloudflare-native-ua-candidate.log",
+      "logSHA256": "d463c3ec230e04c42ce565efcfba8a229864d3e61ffadffdd159a89641b25c9e",
+      "identity": {
+        "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "platform": "Linux x86_64",
+        "webdriver": false,
+        "language": "en-US",
+        "cookies": true
+      }
+    }
+  },
+  "limitations": [
+    "Live test used signed 5.0.1 diagnostic host against freshly downloaded published502 and a private clone with only config-agent changed",
+    "No automated CAPTCHA interaction performed",
+    "Candidate site navigation/readback timed out; Cloudflare challenge success is not established",
+    "Guest script requires rebuilt/reinstalled image; source change does not modify the already published image"
+  ],
+  "sourceSHA256": {
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/config-agent.py": "a4a20eacfee8b62aba8f2ba90ec2f995b980993c49c170058952f282cfc6d10e",
+    "tests/GuestGraphicsTests/test_guest_graphics.py": "e0dcbecfe114d3ce7c11bb00b9f86be80ab06a3f7d020e693cb9e09a887ac11e"
+  }
+}

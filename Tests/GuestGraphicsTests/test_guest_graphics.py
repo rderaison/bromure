@@ -35,9 +35,9 @@ diagnostics = load_script("graphics-diagnostics")
 def chrome_env(cfg):
     stream = io.StringIO()
     # Exercise the actual config writer, without guest filesystem writes or
-    # spawning an installed browser to discover its version.
+    # spawning an installed browser.
     with patch("builtins.open") as mocked_open, \
-            patch.object(config, "chromium_major_version", return_value="150"):
+            patch.object(config, "write_chrome_extension_forcelist"):
         mocked_open.return_value.__enter__.return_value = stream
         config.write_chrome_env(cfg)
     return stream.getvalue()
@@ -61,6 +61,31 @@ def shell_environment(contents, inherited=None):
 
 
 class GuestGraphicsConfigTests(unittest.TestCase):
+    def test_user_agent_default_and_custom_actual_launch_arguments(self):
+        xinitrc = (SCRIPTS / "xinitrc").read_text()
+        start = xinitrc.index('    if [ -n "$CHROME_UA" ]; then')
+        end = xinitrc.index('    fi', start) + len('    fi')
+        launch = xinitrc[start:end]
+        for browser in ("chromium", "chrome"):
+            for value in (None, "", "  ", "Custom browser agent/1.0", "Agent 'quoted' $(exit 9)"):
+                cfg = {"browser": browser, "userAgent": value}
+                contents = chrome_env(cfg)
+                with tempfile.TemporaryDirectory() as directory:
+                    directory = Path(directory)
+                    env_file = directory / "chrome-env"
+                    env_file.write_text(contents)
+                    executable = directory / "browser"
+                    executable.write_text('#!/bin/sh\nprintf "%s\\0" "$@"\n')
+                    executable.chmod(0o755)
+                    result = subprocess.run(["sh", "-c",
+                        '. "$1"; CHROME_CMD="$2 --no-first-run"; ' + launch,
+                        "ua-test", str(env_file), str(executable)],
+                        capture_output=True, check=True)
+                    args = result.stdout.decode().rstrip("\0").split("\0")
+                expected = ["--no-first-run"]
+                if value and value.strip(): expected.append("--user-agent=" + value.strip())
+                self.assertEqual(args, expected, (browser, value))
+
     def test_old_host_keeps_software_gl_and_existing_flags(self):
         backend, software, flags = shell_environment(chrome_env({"gpuAccel": True}))
         self.assertEqual((backend, software), ("software", "1"))
