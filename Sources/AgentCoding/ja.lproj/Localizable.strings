@@ -3679,3 +3679,10 @@
 "Available when the workspace is running" = "ワークスペースの実行中に利用できます";
 "Video available when the workspace is running" = "動画はワークスペースの実行中に表示できます";
 "Image available when the workspace is running" = "画像はワークスペースの実行中に表示できます";
+
+/* Fat client: link states (reconnecting / key rejected / host key changed) */
+"“%@” didn't accept this Mac's key" = "「%@」はこの Mac の鍵を受け付けませんでした";
+"“%@” presented a different host key" = "「%@」が異なるホスト鍵を提示しました";
+"Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection." = "この Mac が信頼した ID と一致しなくなりました。リモートの Mac を再インストールした場合は「リモートの Bromure に接続…」から接続し直して新しい鍵を確認してください。そうでない場合、接続が傍受されている可能性があります。";
+"Reconnecting to %@…" = "%@ に再接続中…";
+"The connection dropped. What you see is from just before; it picks up again on its own." = "接続が切れました。表示されているのは直前の状態です。接続は自動的に復旧します。";

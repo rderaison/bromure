@@ -21,10 +21,21 @@ final class BrowserMCPServer {
     /// Opens the browser pane + boots the VM (agent-initiated open).
     private let ensureBrowser: () -> Void
 
+    /// This server drives a browser the workspace VM can't reach over its LAN
+    /// — a fat client's own browser, answering through the SSH relay. The
+    /// guest shim's direct VM↔VM CDP path names an address on the CLIENT's
+    /// vmnet, which the server's workspace VM has no route to (Errno 111 /
+    /// unreachable), so `bromure/cdpEndpoint` answers `cdpViaHostCode` and the
+    /// shim sends its CDP tools through this channel instead.
+    private let cdpViaHost: Bool
+    static let cdpViaHostCode = -32010
+
     init(browser: @escaping () -> WorkspaceBrowserController?,
-         ensureBrowser: @escaping () -> Void) {
+         ensureBrowser: @escaping () -> Void,
+         cdpViaHost: Bool = false) {
         self.browser = browser
         self.ensureBrowser = ensureBrowser
+        self.cdpViaHost = cdpViaHost
     }
 
     // MARK: - JSON-RPC line handling
@@ -58,6 +69,8 @@ final class BrowserMCPServer {
             let args = params["arguments"] as? [String: Any] ?? [:]
             let result = await callTool(name: name, args: args)
             return respond(id: id, result: result)
+        case "bromure/cdpEndpoint" where cdpViaHost:
+            return respondError(id: id, code: Self.cdpViaHostCode, message: "cdp-via-host")
         case "bromure/cdpEndpoint":
             // Internal: the workspace VM's MCP shim asks where to reach this
             // browser VM's CDP over the vmnet LAN (VM↔VM TCP), so the host

@@ -143,6 +143,46 @@ private final class WindowColorBackingView: NSView {
     }
 }
 
+// MARK: - Stage split (chat | browser | files)
+
+/// The widths rules the chat stage and its right-hand panes share — the
+/// local window and a fat-client mirror both lay out chat | browser | files
+/// and must protect the chat the same way (B15/B19, WS-E). `area` is the
+/// width the three share (the window minus the sidebar).
+enum StageSplit {
+    /// The chat's floor: below ~360 pt a prompt wraps to a word a line and
+    /// the header can't fit, so the side panes give way instead.
+    static let chatMinWidth: CGFloat = 360
+    /// Chromium's minimum window width (B18). A window too narrow for chat +
+    /// browser squeezes it further (the chat's floor wins) and the browser
+    /// overscans its display to keep the page whole.
+    static let browserMinWidth: CGFloat = BrowserDisplaySizing.minPaneWidth
+    static let browserMaxWidth: CGFloat = 1400
+
+    /// The widest the browser may be: never so wide the chat drops under its
+    /// floor, nor past the hard max — never under the browser's own floor
+    /// either (the 999 chat floor then squeezes it, see `chatFloor`).
+    static func clampBrowser(_ desired: CGFloat, area: CGFloat, fileWidth: CGFloat) -> CGFloat {
+        let available = area - fileWidth - chatMinWidth
+        return max(browserMinWidth, min(desired, min(browserMaxWidth, available)))
+    }
+
+    /// Opening the browser where chat + browser + files can't all fit folds
+    /// the Files pane in the same move.
+    static func foldsFiles(area: CGFloat, fileWidth: CGFloat) -> Bool {
+        area > 0 && fileWidth > 0 && area - fileWidth - chatMinWidth < browserMinWidth
+    }
+
+    /// The chat's floor as a constraint: beats the pane widths (which are
+    /// high-but-not-required), yields last.
+    @MainActor
+    static func chatFloor(_ view: NSView) -> NSLayoutConstraint {
+        let c = view.widthAnchor.constraint(greaterThanOrEqualToConstant: chatMinWidth)
+        c.priority = .init(999)
+        return c
+    }
+}
+
 // MARK: - Unified window
 
 /// The shared, unpeel-style window: a left source-list of every running VM with
@@ -360,18 +400,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// the page used to be clipped on the right. Only a window too narrow to
     /// hold chat + browser squeezes it further (the chat's floor wins); the
     /// browser then overscans its display to keep the page whole.
-    static let browserPaneMinWidth: CGFloat = BrowserDisplaySizing.minPaneWidth
+    static let browserPaneMinWidth: CGFloat = StageSplit.browserMinWidth
     /// Dragging the pane under this closes it; between this and the floor
     /// the drag just holds at the floor.
     private static let browserPaneCloseWidth: CGFloat = 380
-    private static let browserPaneMaxWidth: CGFloat = 1400
     private static let browserPaneDefaultWidth: CGFloat = 640
     /// Floor the terminal/pane slot keeps when the browser pane is open —
     /// the clamp that stops the pane from growing the window off-screen.
     /// It is also the chat's floor: below ~360 pt a prompt wraps to a word
     /// a line and the header can't fit (B15), so the side panes give way
     /// (the Files pane doesn't pop open, the browser closes it) instead.
-    static let terminalSlotMinWidth: CGFloat = 360
+    static let terminalSlotMinWidth: CGFloat = StageSplit.chatMinWidth
     private static let browserPaneWidthKey = "ac.browserPaneWidth"
 
     init(acDelegate: ACAppDelegate) {
@@ -706,8 +745,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self.expandedBrowserPaneWidth = w
             UserDefaults.standard.set(w, forKey: Self.browserPaneWidthKey)
         }
-        let paneSlotMin = paneSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.terminalSlotMinWidth)
-        paneSlotMin.priority = .init(999)   // beats the pane width, yields last
+        let paneSlotMin = StageSplit.chatFloor(paneSlot)   // beats the pane width, yields last
         NSLayoutConstraint.activate([
             // The task header sits above the pane, spanning the pane's width
             // (never the right-hand browser/file splits).
@@ -1032,6 +1070,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// fight the user's choice.
     func ensureBrowserForMCP(_ id: Profile.ID) {
         let controller = browserController(for: id)
+        browserRouteLog("server ensure \(id.uuidString.prefix(8)) onStage=\((liveSessionOnStage?.profileID ?? selectedID) == id) paneOpen=\(browserPaneOpen) state=\(controller.state)")
         if (liveSessionOnStage?.profileID ?? selectedID) == id, !browserPaneOpen, controller.state == .idle {
             // Opens the pane AND boots via showBrowser → setVisible(true).
             setBrowserPaneOpen(true, animated: true)
@@ -1089,21 +1128,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserPaneOpenSessions.removeAll()
         shownBrowser = nil
         guard !controllers.isEmpty else { return }
-        // Bounded, like stopSession's suspend/shutdown watchdogs: `vm.stop()`
-        // can hang against a wedged guest, and quit is parked in
-        // `.terminateLater` until we return — an unbounded wait would trade the
-        // orphaned-VM bug for an app that never exits. Best effort, then go.
-        await withTaskGroup(of: Void.self) { race in
-            race.addTask { @MainActor in
-                await withTaskGroup(of: Void.self) { group in
-                    for c in controllers {
-                        group.addTask { @MainActor in await c.stopAndWait() }
-                    }
-                }
+        // NOT bounded here: the caller (AppDelegate.teardownAllBrowserVMs)
+        // wraps every window's teardown in one QuitDeadline. A task-group race
+        // against a sleep can't bound this — the group awaits the stop child
+        // regardless (QH-1).
+        await withTaskGroup(of: Void.self) { group in
+            for c in controllers {
+                group.addTask { @MainActor in await c.stopAndWait() }
             }
-            race.addTask { try? await Task.sleep(nanoseconds: 15_000_000_000) }
-            _ = await race.next()
-            race.cancelAll()
         }
     }
 
@@ -1176,9 +1208,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// past the screen instead of squeezing the terminal.
     private func clampedBrowserPaneWidth(_ desired: CGFloat, fileWidth: CGFloat? = nil) -> CGFloat {
         let fileW = fileWidth ?? (filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0)
-        let available = stage.bounds.width - fileW - Self.terminalSlotMinWidth
-        return max(Self.browserPaneMinWidth,
-                   min(desired, min(Self.browserPaneMaxWidth, available)))
+        return StageSplit.clampBrowser(desired, area: stage.bounds.width, fileWidth: fileW)
     }
 
     /// Reconcile the pane UI + browser visibility to the SELECTED
@@ -1211,8 +1241,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         var foldFiles = false
         let stageW = stage.bounds.width
         if open, filePaneOpen, stageW > 0, browserPaneWidthConstraint?.constant == 0 {
-            let fileW = filePaneWidthConstraint?.constant ?? 0
-            foldFiles = stageW - fileW - Self.terminalSlotMinWidth < Self.browserPaneMinWidth
+            foldFiles = StageSplit.foldsFiles(area: stageW, fileWidth: filePaneWidthConstraint?.constant ?? 0)
         }
         if foldFiles {
             filePaneOpen = false
@@ -1270,10 +1299,24 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             model: pane.model))
         acDelegate?.registerPane(pane)
         acDelegate?.refreshSidebar()
-        if selectIt || selectedID == nil {
+        // Nothing picked yet: the first machine takes the stage — unless the
+        // stage already shows something that isn't a machine (a session's
+        // rest page, a room, a board…). A quiet add (a fat client's or an
+        // agent's start) then mounted its raw terminal over the user's
+        // session: `selectedID` is nil while an off machine's session rests.
+        if selectIt || (selectedID == nil && !stageShowsNonMachineSurface) {
             select(profileID: pane.profile.id)
         }
         updateEmptyState()
+    }
+
+    /// The stage holds a session, the new-session screen, a room, a board, a
+    /// dashboard, the grid or the automation editor — not a bare machine.
+    var stageShowsNonMachineSurface: Bool {
+        selectedSessionID != nil || listModel.newSessionSelected || listModel.selectedRoomID != nil
+            || listModel.automationBoardSelected || listModel.taskBoardSelected || listModel.gridSelected
+            || vmDashboardSelectedID != nil || dockerSelectedID != nil
+            || kubeSelectedID != nil || registrySelectedID != nil || automationEditorVisible
     }
 
     /// Remove a profile's pane from the sidebar + stage. Does NOT touch the VM.
@@ -1320,6 +1363,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Select a VM: show its framebuffer in the stage and focus it.
     func select(profileID id: Profile.ID) {
         guard let pane = pane(id) else { return }
+        // Mounting another machine's pane under a session's header left the
+        // stage incoherent (header of the session, body of the other
+        // machine's raw terminal): that session is no longer what's shown.
+        if let sid = selectedSessionID, acDelegate?.sessionRecord(sid)?.profileID != id {
+            clearSessionStage()
+        }
         selectedID = id
         listModel.selectedID = id
         mountSelected(pane)

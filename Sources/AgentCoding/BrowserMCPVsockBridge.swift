@@ -99,6 +99,7 @@ final class BrowserMCPVsockBridge: NSObject {
                 // shim surfaced as "host channel unavailable".
                 relay.add(conn)
                 FatClientLog.log("browser-mcp: agent joined the fat-client relay (\(relay.agentCount) on it)")
+                browserRouteLog("agent → fat-client relay (\(relay.agentCount) on it)")
                 return
             }
             // The client hung up and the drop hasn't been processed yet:
@@ -106,6 +107,9 @@ final class BrowserMCPVsockBridge: NSObject {
             detachRemote()
         } else if relay != nil {
             FatClientLog.log("browser-mcp: agent served locally — the server's console was used last")
+            browserRouteLog("agent → server browser (relay up, but the server's console was used last)")
+        } else {
+            browserRouteLog("agent → server browser (no fat-client relay attached)")
         }
         let c = Connection(conn: conn, server: server) { [weak self] c in
             self?.connections.removeValue(forKey: ObjectIdentifier(c))

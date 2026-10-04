@@ -171,6 +171,14 @@ final class RoomStageController {
     /// Stopped members' last messages (the tail), for their resting cells.
     private(set) var resting: [UUID: [TranscriptItem]] = [:]
     @ObservationIgnored private var restingLoading: Set<UUID> = []
+    /// Members whose last read came back empty (a fat client's fetch failed:
+    /// tunnel reconnecting, the workspace still waking, a slow server), with
+    /// when to try again. Without a retry one failed read pinned the cell
+    /// to its opening message for as long as the room stayed on screen.
+    @ObservationIgnored private var restingRetry: [UUID: (attempts: Int, at: Date)] = [:]
+    /// Back-off between failed resting reads (attempt n waits n× this).
+    @ObservationIgnored var restingRetryDelay: TimeInterval = 3
+    static let restingMaxAttempts = 6
     @ObservationIgnored private var modelKeys: [UUID: String] = [:]
     @ObservationIgnored private var timer: Timer?
 
@@ -306,6 +314,11 @@ final class RoomStageController {
         page = min(page, max(0, pages.count - 1))
         // A member that went live will have more to show when it stops again.
         for id in models.keys where resting[id] != nil { resting[id] = nil }
+        // Failed resting reads, due again.
+        let now = Date()
+        for s in members where models[s.id] == nil && resting[s.id] == nil {
+            if let r = restingRetry[s.id], r.at <= now { loadResting(s) }
+        }
     }
 
     /// Read a stopped member's conversation once (cached copy first).
@@ -327,11 +340,33 @@ final class RoomStageController {
             let items = await Task.detached(priority: .userInitiated) {
                 data.map { AgentTranscript.parse($0, agent: agent) } ?? []
             }.value
+            restingLoading.remove(s.id)
+            guard data != nil else {
+                // Nothing came back: keep the opening-message placeholder
+                // (resting stays nil) and try again — `refresh` re-asks when due.
+                let attempts = (restingRetry[s.id]?.attempts ?? 0) + 1
+                if attempts < Self.restingMaxAttempts {
+                    restingRetry[s.id] = (attempts, Date().addingTimeInterval(restingRetryDelay * Double(attempts)))
+                } else {
+                    restingRetry[s.id] = nil
+                    resting[s.id] = []   // give up: the placeholder for good
+                }
+                return
+            }
+            restingRetry[s.id] = nil
             let tail = Array(items.suffix(40))
             resting[s.id] = tail
-            if data != nil { Self.restingCache[s.id] = (stamp, tail) }
-            restingLoading.remove(s.id)
+            Self.restingCache[s.id] = (stamp, tail)
         }
+    }
+
+    /// Debug read-back: what each resting member holds (-1 = not read yet).
+    var restingDebugState: [String: Int] {
+        var out: [String: Int] = [:]
+        for s in members where models[s.id] == nil {
+            out[s.id.uuidString] = resting[s.id]?.count ?? -1
+        }
+        return out
     }
 
     /// Stopped sessions' tails by session, with what they were read at.

@@ -50,6 +50,40 @@ final class RemoteHostController {
     /// Connection health, surfaced in the window chrome.
     var connected = false
     var lastError: String?
+    /// Why the link is down, when SSH said so (nil while connected, or when
+    /// the server answered but not with a snapshot). Only an auth/host-key
+    /// verdict needs the user; anything else is a drop that heals itself.
+    var linkVerdict: SSHDialer.DialVerdict?
+
+    /// What the window shows for the link's state.
+    enum LinkPresentation: Equatable {
+        case live
+        /// It was up before (the stage holds a mirrored snapshot) and dropped
+        /// for a transport reason — Wi-Fi, a sleep, the remote restarting
+        /// its remote access: a quiet "Reconnecting…" over the last content.
+        case reconnecting
+        /// Never connected yet in this window: the first-time screen (spinner,
+        /// then how to authorize this Mac's key if it doesn't come up).
+        case firstConnect
+        /// The remote rejected this Mac's key: the key-authorization help.
+        case needsKey
+        /// The remote's host key no longer matches the pinned one.
+        case hostKeyChanged
+    }
+
+    static func linkPresentation(connected: Bool, hasSnapshot: Bool,
+                                 verdict: SSHDialer.DialVerdict?) -> LinkPresentation {
+        if connected { return .live }
+        switch verdict {
+        case .authFailed?: return .needsKey
+        case .hostKeyChanged?: return .hostKeyChanged
+        default: return hasSnapshot ? .reconnecting : .firstConnect
+        }
+    }
+
+    var linkPresentation: LinkPresentation {
+        Self.linkPresentation(connected: connected, hasSnapshot: hasSnapshot, verdict: linkVerdict)
+    }
 
     /// Per-workspace tab models (live, shared into `VMEntry` by reference so the
     /// sidebar tab rows and the grid update together).
@@ -518,6 +552,7 @@ final class RemoteHostController {
         if !connected { FatClientLog.log("push: first snapshot") }
         connected = true
         lastError = nil
+        linkVerdict = nil
         peerFailStreak = 0
         apply(snapshot)
     }
@@ -545,6 +580,9 @@ final class RemoteHostController {
                 "GET", "/state",
                 extraHeaders: [("X-Bromure-Console-Idle-Ms",
                                 String(ConsolePresence.shared.idleMillis()))])
+            // No answer at all: what SSH said about the dial (auth rejected,
+            // host key changed, or plain unreachable).
+            let verdict = resp == nil ? SSHDialer.shared.lastDialVerdict(hostID: host.id) : nil
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.polling = false
@@ -552,6 +590,7 @@ final class RemoteHostController {
                     if !self.connected { FatClientLog.log("poll: connected, status 200") }
                     self.connected = true
                     self.lastError = nil
+                    self.linkVerdict = nil
                     self.peerFailStreak = 0
                     self.apply(resp.json)
                 } else {
@@ -560,6 +599,7 @@ final class RemoteHostController {
                     }
                     self.connected = false
                     self.lastError = "not reachable"
+                    if self.linkVerdict != verdict { self.linkVerdict = verdict }
                     if let pid = host.peerDeviceID {
                         self.peerFailStreak += 1
                         if self.peerFailStreak >= 3 {
@@ -1239,8 +1279,16 @@ final class RemoteHostController {
             wire.append(a.wireDictionary)
         }
         if !wire.isEmpty { body["attachments"] = wire }
+        // Starting a session here IS using this console: stamp the start with
+        // the presence header (any route parses it) so the server routes the
+        // new agent's browser to this client from its very first MCP
+        // connection, not only after the next (up to 5 s) heartbeat poll.
+        ConsolePresence.shared.noteMirror()
+        let idle = String(ConsolePresence.shared.idleMillis())
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/start", body: body)
+            try RemoteTransport.client(for: host).request(
+                "POST", "/agent-sessions/start", body: body,
+                extraHeaders: [("X-Bromure-Console-Idle-Ms", idle)])
         }.value
         pollOnce()
         guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
@@ -1352,8 +1400,11 @@ final class RemoteHostController {
     func fetchSessionTranscript(_ id: UUID) async -> Data? {
         let host = self.host
         let path = "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/transcript"
+        // The server may read the live file in a guest that is still waking
+        // (its own exec bound is 20 s) and ships the whole conversation:
+        // well past the 12 s default a control call gets.
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("GET", path)
+            try RemoteTransport.client(for: host).request("GET", path, recvTimeoutSeconds: 60)
         }.value
         guard let resp, resp.status == 200,
               let b64 = resp.json["transcript"] as? String, !b64.isEmpty,
@@ -2101,9 +2152,14 @@ struct RemoteConnectionStatusView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            if !controller.connected {
+            switch controller.linkPresentation {
+            case .live, .reconnecting:
+                // Reconnecting draws over the last content instead
+                // (RemoteReconnectingView); this screen stays hidden.
+                EmptyView()
+            case .firstConnect:
                 ProgressView().controlSize(.large)
-                Text(controller.hasSnapshot || controller.lastError == nil
+                Text(controller.lastError == nil
                      ? "Connecting to \(hostLabel)…"
                      : "Can't reach \(hostLabel)")
                     .font(.headline)
@@ -2120,6 +2176,23 @@ struct RemoteConnectionStatusView: View {
                         keyAuthorizationHint
                     }
                 }
+            case .needsKey:
+                Image(systemName: "key.slash")
+                    .font(.system(size: 30)).foregroundStyle(.secondary)
+                Text(String(format: NSLocalizedString("“%@” didn't accept this Mac's key", comment: "fat client link"),
+                            hostLabel))
+                    .font(.headline)
+                keyAuthorizationHint
+            case .hostKeyChanged:
+                Image(systemName: "exclamationmark.shield")
+                    .font(.system(size: 30)).foregroundStyle(.orange)
+                Text(String(format: NSLocalizedString("“%@” presented a different host key", comment: "fat client link"),
+                            hostLabel))
+                    .font(.headline)
+                Text(NSLocalizedString("Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection.", comment: "fat client link"))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 460)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2154,6 +2227,49 @@ struct RemoteConnectionStatusView: View {
 
     private var authorizeCommand: String {
         "bromure-ac remote key add '\(controller.clientPublicKey ?? "<generating key…>")'"
+    }
+}
+
+/// Over the last mirrored content while an established link is down for a
+/// transport reason: the sidebar and the stage stay readable (dimmed a touch),
+/// input is held off, and a small banner says it's coming back. The mirror
+/// redials on its own; nothing here needs the user.
+struct RemoteReconnectingView: View {
+    @Bindable var controller: RemoteHostController
+
+    private var hostLabel: String {
+        controller.host.isPeer ? controller.host.name : controller.host.connectLabel
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            // Holds the clicks: the controls under it would talk to a remote
+            // that isn't there.
+            Color.platformWindowBackground.opacity(0.35)
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(format: NSLocalizedString("Reconnecting to %@…", comment: "fat client link"),
+                                hostLabel))
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(NSLocalizedString("The connection dropped. What you see is from just before; it picks up again on its own.", comment: "fat client link"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: 420)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08)))
+            .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+            .padding(.top, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -2416,7 +2532,11 @@ final class RemoteRoomBackend: RoomStageBackend {
     }
 
     func restingTranscript(for s: AgentSession, ended: Bool) async -> Data? {
-        await window?.controller.fetchSessionTranscript(s.id)
+        // A fresh read from the server (its cached copy merged with the live
+        // file); the copy this client already downloaded when that fails.
+        guard let c = window?.controller else { return nil }
+        if let fresh = await c.fetchSessionTranscript(s.id) { return fresh }
+        return c.cachedTranscript(s.id)
     }
 
     func peerMentions(for s: AgentSession) -> [PeerMention] {
@@ -2480,6 +2600,8 @@ final class RemoteHostWindow: NSWindow {
     private let stage = NSView()
     private var sidebarHost: NSHostingView<SessionSidebar>!
     private var statusHost: NSHostingView<RemoteConnectionStatusView>!
+    /// The "Reconnecting…" layer over sidebar + stage (see RemoteReconnectingView).
+    private var reconnectHost: NSHostingView<RemoteReconnectingView>!
     private var gridView: GridStageView?
     private var termControllers: [Profile.ID: TerminalSessionController] = [:]
     private var mountedTermView: TerminalSurfaceView?
@@ -2749,9 +2871,38 @@ final class RemoteHostWindow: NSWindow {
         termControllers.removeAll()
         for (_, r) in browserRelays { r.stop() }
         browserRelays.removeAll()
+        // Closing the mirror window discards its local browser VM(s): stop()
+        // detaches the VM teardown (fine mid-session; quit awaits instead via
+        // teardownBrowserVMsAwaiting before it gets here).
         for (_, c) in browserControllers { c.stop() }
         browserControllers.removeAll()
         super.close()
+    }
+
+    /// True while any of this mirror's workspaces owns a booted (or booting)
+    /// local browser VM. Quit consults it alongside the local window's: the
+    /// mirror's browser is a VZ VM in THIS process, so leaving it out took
+    /// quit down the wrong path (QH-1).
+    var hasRunningBrowserVMs: Bool {
+        browserControllers.values.contains { $0.hasLiveVM }
+    }
+
+    /// Awaited teardown of every mirror browser VM, for the quit path. The
+    /// caller bounds it (QuitDeadline) — a wedged `vm.stop` must not hold quit.
+    func teardownBrowserVMsAwaiting() async {
+        for (_, r) in browserRelays { r.stop() }
+        browserRelays.removeAll()
+        let controllers = Array(browserControllers.values)
+        browserControllers.removeAll()
+        browserOpen.removeAll()
+        browserOpenSessions.removeAll()
+        shownBrowser = nil
+        guard !controllers.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for c in controllers {
+                group.addTask { @MainActor in await c.stopAndWait() }
+            }
+        }
     }
 
     /// ⌃⌘B toggles the browser pane, ⌃⌘E the file-explorer pane — mirroring
@@ -2945,6 +3096,9 @@ final class RemoteHostWindow: NSWindow {
         filePaneHost = fpHost
         content.addSubview(fpHost)
         filePaneWidthConstraint = fpHost.widthAnchor.constraint(equalToConstant: 0)
+        // High, not required: the chat's floor (StageSplit.chatFloor on the
+        // stage) outranks both side panes, as in the local window.
+        filePaneWidthConstraint.priority = .defaultHigh
         // The Grid takes the whole stage: the file pane folds while it's up
         // and comes back as it was (its open state is left alone).
         controller.listModel.onGridSelectedChange = { [weak self] grid in
@@ -2996,6 +3150,7 @@ final class RemoteHostWindow: NSWindow {
         content.addSubview(browser)
         browserPaneHost = browser
         browserWidthConstraint = browser.widthAnchor.constraint(equalToConstant: 0)
+        browserWidthConstraint.priority = .defaultHigh
         // 8pt drag strip over the browser pane's leading edge (terminal↔browser
         // boundary), like the local window's browserPaneResizeHandle.
         let browserHandle = SidebarResizeHandle()
@@ -3102,6 +3257,8 @@ final class RemoteHostWindow: NSWindow {
             stage.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
             stage.topAnchor.constraint(equalTo: sessionHeaderSlot.bottomAnchor),
             stage.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            // The chat (or room) keeps its floor; the browser then overscans.
+            StageSplit.chatFloor(stage),
             browser.trailingAnchor.constraint(equalTo: fpHost.leadingAnchor),
             browser.topAnchor.constraint(equalTo: content.topAnchor),
             browser.bottomAnchor.constraint(equalTo: content.bottomAnchor),
@@ -3119,24 +3276,39 @@ final class RemoteHostWindow: NSWindow {
             statusHost.topAnchor.constraint(equalTo: stage.topAnchor),
             statusHost.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
+        // Last, so it sits over everything: the whole window's content (the
+        // sidebar too) while an established link reconnects.
+        reconnectHost = NSHostingView(rootView: RemoteReconnectingView(controller: controller))
+        reconnectHost.translatesAutoresizingMaskIntoConstraints = false
+        reconnectHost.sizingOptions = []
+        reconnectHost.isHidden = true
+        content.addSubview(reconnectHost)
+        NSLayoutConstraint.activate([
+            reconnectHost.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            reconnectHost.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            reconnectHost.topAnchor.constraint(equalTo: content.topAnchor),
+            reconnectHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
     }
 
     // Browser-pane width bounds (mirror the local window).
     /// Chromium's minimum window width (B18); dragging under the close
     /// width closes the pane, between the two it holds at the floor.
-    private static let browserPaneMinWidth: CGFloat = BrowserDisplaySizing.minPaneWidth
+    private static let browserPaneMinWidth: CGFloat = StageSplit.browserMinWidth
     private static let browserPaneCloseWidth: CGFloat = 380
-    private static let terminalSlotMinWidth: CGFloat = 400
 
-    /// Clamp a proposed browser width so the terminal keeps its minimum and the
-    /// pane never exceeds the space left of the (possibly open) file pane.
-    private func clampBrowserWidth(_ desired: CGFloat) -> CGFloat {
-        guard let content = contentView else { return desired }
-        let fileW = filePaneOpen ? filePaneWidthConstraint.constant : 0
-        // 240 sidebar + terminal minimum + file pane = the space the browser
-        // may not eat into.
-        let available = content.bounds.width - 240 - Self.terminalSlotMinWidth - fileW
-        return max(Self.browserPaneMinWidth, min(desired, max(Self.browserPaneMinWidth, available)))
+    /// What chat + browser + files share: the window minus the sidebar.
+    private var stageSplitArea: CGFloat {
+        (contentView?.bounds.width ?? 0) - sidebarWidthConstraint.constant
+    }
+
+    /// Clamp a proposed browser width so the chat keeps its floor and the
+    /// pane never exceeds the space left of the (possibly open) file pane —
+    /// the local window's rule (StageSplit).
+    private func clampBrowserWidth(_ desired: CGFloat, fileWidth: CGFloat? = nil) -> CGFloat {
+        guard contentView != nil else { return desired }
+        let fileW = fileWidth ?? (filePaneOpen ? filePaneWidthConstraint.constant : 0)
+        return StageSplit.clampBrowser(desired, area: stageSplitArea, fileWidth: fileW)
     }
 
     /// Set the browser-pane width and keep the drag handle shown only while the
@@ -4824,6 +4996,10 @@ final class RemoteHostWindow: NSWindow {
         clearKubeDashboard()
         clearRegistryDashboard()
         clearSessionStage()   // also drops a previous room
+        // A workspace's browser doesn't follow into a room: it stays open on
+        // its own state (resumable) and comes back with that workspace. In
+        // the room the globe shows the focused cell's machine's browser.
+        hideShownBrowser()
         let model = controller.listModel
         model.gridSelected = false
         model.selectedRoomID = id
@@ -4980,6 +5156,10 @@ final class RemoteHostWindow: NSWindow {
 
     // MARK: E2E debug control surface (POST /debug/fatclient; debug-gated)
 
+    private static let debugReadBackActions: Set<String> = [
+        "get-mirror-state", "window-info", "focused", "trace-records", "shot", "fc-drop-images",
+    ]
+
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
     /// mutations tunnel to the server (asserted by polling the SERVER); UI-only
     /// actions return the client-side state the server's `/state` can't report
@@ -4987,6 +5167,11 @@ final class RemoteHostWindow: NSWindow {
     func debugPerform(_ action: String, _ p: [String: Any]) -> [String: Any] {
         debugDriving = true
         defer { debugDriving = false }
+        // A debug verb driving the mirror stands in for the user at it: count
+        // it as mirror-console use (reported to the server on the next poll),
+        // so console arbitration — e.g. where the agent's browser opens —
+        // behaves as if the user had clicked here. Read-backs don't count.
+        if !Self.debugReadBackActions.contains(action) { ConsolePresence.shared.noteMirror() }
         func resolveID() -> Profile.ID? {
             guard let key = p["workspace"] as? String else { return nil }
             if let u = UUID(uuidString: key) { return u }
@@ -5268,6 +5453,7 @@ final class RemoteHostWindow: NSWindow {
                     "layout": rc.layout.string, "page": rc.page, "pages": rc.pages.count,
                     "composerText": rc.targetModel?.composerText ?? "",
                     "switchboard": rc.switchboard?.id.uuidString ?? "",
+                    "resting": rc.restingDebugState,
                     "models": rc.models.map { id, m -> [String: Any] in
                         var st = m.debugHistoryState()
                         st["session"] = id.uuidString
@@ -5637,6 +5823,14 @@ final class RemoteHostWindow: NSWindow {
     /// specific workspace. Needs the tunnel up (subnet + SOCKS), so it no-ops
     /// until the first `/state` arrives.
     func toggleBrowser(for id: Profile.ID?) {
+        // A room spans machines: its globe is the focused cell's machine's
+        // browser — never whichever workspace was selected before the room.
+        if id == nil, let pid = browserWorkspaceForRoom {
+            if shownBrowser == pid, browserWidthConstraint.constant > 0 { setBrowserOpen(pid, false) }
+            else { setBrowserOpen(pid, true) }
+            return
+        }
+        if id == nil, controller.listModel.selectedRoomID != nil { return }
         // A session on stage: its own browser state — only a live one has one.
         if id == nil, selectedSessionID != nil || controller.listModel.newSessionSelected {
             guard let s = liveSessionOnStage else { return }
@@ -5684,7 +5878,12 @@ final class RemoteHostWindow: NSWindow {
             ])
             let initial = expandedBrowserWidth >= Self.browserPaneMinWidth
                 ? expandedBrowserWidth : max(480, frame.width * 0.42)
-            setBrowserWidth(clampBrowserWidth(initial))
+            // Browser + Files can't both fit beside the chat's floor: fold the
+            // Files pane in the same move (B15/B19, as in the local window).
+            let foldFiles = filePaneOpen
+                && StageSplit.foldsFiles(area: stageSplitArea, fileWidth: filePaneWidthConstraint.constant)
+            if foldFiles { setFilePaneOpen(false) }
+            setBrowserWidth(clampBrowserWidth(initial, fileWidth: foldFiles ? 0 : nil))
             ctl.setVisible(true)
             controller.listModel.browserPaneOpen = true
             // Relay the remote agent's browser MCP to this local browser.
@@ -5754,30 +5953,41 @@ final class RemoteHostWindow: NSWindow {
         guard state == .running || state == .booting else { return }
         let relay = BrowserMCPRelayClient(
             host: controller.host, vm: id.uuidString,
-            browser: { [weak self] in
-                // A browser request arrived from the remote agent — surface the
-                // local pane so the user sees what Claude opened, then hand back
-                // the controller that drives it.
+            browser: { [weak self] in self?.browserControllers[id] },
+            ensureBrowser: { [weak self] in
+                // The remote agent needs a browser that isn't up yet — boot it
+                // here, surfacing the pane the way the local window does.
                 self?.showBrowserForAgent(id)
-                return self?.browserControllers[id]
             })
         browserRelays[id] = relay
         relay.start()
     }
 
-    /// An agent-initiated browser request came in over the relay. Open this
-    /// workspace's browser in the pane when the user is looking at it; otherwise
-    /// create + remember it so switching to that workspace reveals it, without
-    /// hijacking the current view.
+    /// An agent tool call needs this workspace's browser and it isn't ready —
+    /// the local window's `ensureBrowserForMCP` rule, mirrored: when the agent
+    /// STARTS a browser for the workspace on stage, reveal the pane (they asked
+    /// the agent to browse — show it); a background workspace boots hidden, and
+    /// a browser whose pane the user closed stays closed (it just resumes).
+    /// With a room on stage: the machine of its focused cell, the only
+    /// browser the room may show beside it.
+    private var browserWorkspaceForRoom: Profile.ID? {
+        controller.listModel.selectedRoomID != nil ? controller.listModel.roomFocusProfileID : nil
+    }
+
     private func showBrowserForAgent(_ id: Profile.ID) {
-        if let s = liveSessionOnStage, s.profileID == id { browserOpenSessions[s.id] = id }
-        if controller.listModel.selectedID == id {
-            setBrowserOpen(id, true)   // idempotent — no-ops if already shown
-        } else {
-            browserOpen.insert(id)
-            controller.listModel.browserOpenWorkspaces = browserOpen   // keep the tint in sync
-            _ = browserController(for: id)
+        let onStage = controller.listModel.selectedRoomID != nil
+            ? browserWorkspaceForRoom == id
+            : (liveSessionOnStage?.profileID ?? controller.listModel.selectedID) == id
+        let starting = browserControllers[id].map { $0.state == .idle } ?? true
+        let paneShown = shownBrowser == id && browserWidthConstraint.constant > 0
+        FatClientLog.log("browser: agent wants \(id.uuidString.prefix(8)) onStage=\(onStage) starting=\(starting) shown=\(paneShown)")
+        browserRouteLog("mirror ensure \(id.uuidString.prefix(8)) onStage=\(onStage) starting=\(starting) shown=\(paneShown)")
+        if onStage, starting, !paneShown {
+            if let s = liveSessionOnStage, s.profileID == id { browserOpenSessions[s.id] = id }
+            setBrowserOpen(id, true)   // opens the pane AND boots (setVisible(true))
+            return
         }
+        browserController(for: id)?.ensureRunning()
     }
 
     /// Whether we've already offered the VPN this session (asked once, then the
@@ -6763,8 +6973,25 @@ final class RemoteHostWindow: NSWindow {
     private func refreshStageIfNeeded() {
         // Toggle the "not connected" overlay on/off (independent of revision so
         // it clears as soon as the first poll succeeds and re-shows on drop).
-        statusHost?.isHidden = controller.connected
-        stage.subviews.forEach { $0.isHidden = !controller.connected }
+        // A link that was up and dropped for a transport reason keeps the last
+        // content on screen under a "Reconnecting…" banner; the first-time /
+        // key-authorization screen is for a first connect or a key rejection.
+        // Room focus moved to another machine: its browser isn't this one.
+        if controller.listModel.selectedRoomID != nil, let shown = shownBrowser,
+           shown != browserWorkspaceForRoom {
+            hideShownBrowser()
+        }
+        let presentation = controller.linkPresentation
+        let reconnecting = presentation == .reconnecting
+        let contentShown = presentation == .live || reconnecting
+        statusHost?.isHidden = contentShown
+        stage.subviews.forEach { $0.isHidden = !contentShown }
+        if reconnectHost.isHidden == reconnecting {
+            reconnectHost.isHidden = !reconnecting
+            // Keystrokes must not land in a terminal or composer that can't
+            // reach the remote; the user clicks back in once it's up.
+            if reconnecting { makeFirstResponder(nil) }
+        }
         guard controller.revision != lastRevision else { return }
         lastRevision = controller.revision
         // Test hook: auto-select a named workspace once it's running.

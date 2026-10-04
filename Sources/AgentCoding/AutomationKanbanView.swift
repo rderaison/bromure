@@ -427,14 +427,42 @@ struct KanbanColumn<Content: View>: View {
 }
 
 /// The primary action of a board header ("New Task", "New Automation").
-/// Bordered prominent everywhere: `.glassProminent` lost its tint on the
-/// pale board backdrop (and in an inactive window), leaving a white "+"
-/// on near-white — the button read as plain text with a missing glyph.
+/// `.glassProminent` lost its tint on the pale board backdrop, and on the
+/// Mac `.borderedProminent` drops its fill in a window that isn't key — a
+/// fat-client mirror beside the local window, a headless snapshot — leaving
+/// the label's white "+" on a white button: plain text with a missing glyph.
+/// So the Mac draws the fill itself, accent-colored whatever the window's
+/// state (the same blue in the local window and in a mirror).
 struct ProminentGlassButton: ViewModifier {
     func body(content: Content) -> some View {
+        #if os(macOS)
+        content.buttonStyle(BoardPrimaryButtonStyle())
+        #else
         content.buttonStyle(.borderedProminent)
+        #endif
     }
 }
+
+#if os(macOS)
+/// An always-filled accent button (see `ProminentGlassButton`).
+struct BoardPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(nsColor: .controlAccentColor))
+                    .brightness(configuration.isPressed ? -0.08 : 0))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+#endif
 
 /// Liquid Glass on macOS 26 (a thin material before, and off the Mac).
 struct GlassCapsule: ViewModifier {

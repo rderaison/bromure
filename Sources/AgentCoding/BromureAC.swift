@@ -870,9 +870,13 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                     action: #selector(NSApplication.unhideAllApplications(_:)),
                     keyEquivalent: "")
     appMenu.addItem(NSMenuItem.separator())
-    appMenu.addItem(withTitle: String(format: L("Quit %@"), appName),
-                    action: #selector(NSApplication.terminate(_:)),
-                    keyEquivalent: "q")
+    // Not `NSApplication.terminate(_:)`: AppKit refuses that silently while a
+    // window has a sheet attached (QH-2). quitAction confirms, dismisses the
+    // sheets, and only then terminates.
+    let quitItem = appMenu.addItem(withTitle: String(format: L("Quit %@"), appName),
+                                   action: #selector(ACAppDelegate.quitAction(_:)),
+                                   keyEquivalent: "q")
+    quitItem.target = delegate
 
     // File menu — the standard first menu: start things, close the window.
     let fileMenuItem = NSMenuItem()
@@ -1557,10 +1561,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// socket's main-queue callout holds the whole control plane, and the
     /// client then reads "the server dropped the connection" while the
     /// server sits on "A newer base image is available" until someone at
-    /// the Mac answers it.
+    /// the Mac answers it. Quiet, like an agent's start: the booted workspace
+    /// joins this Mac's sidebar WITHOUT taking its stage — a non-quiet launch
+    /// selected the new pane, mounting the remote user's raw agent terminal
+    /// under whatever session this Mac's user had on stage (its header
+    /// stayed, its body swapped).
     func startProfileRemotely(_ id: Profile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
-        launch(profile, remoteInitiated: true)
+        launch(profile, remoteInitiated: true, quiet: true)
     }
 
     /// Automation-initiated start: boots an off workspace and resumes a
@@ -3269,6 +3277,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Before any window can put a sheet up: AppKit's own quit handler
+        // refuses silently while one is attached (QH-2).
+        installQuitAppleEventHandler()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Sessions-first UI + the beautified transcript are the defaults; a
         // user who flipped either off before keeps their choice (register
@@ -3307,6 +3321,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // streams land on the console used last (server window vs a fat
         // client), and re-route live streams the moment the user changes
         // seats — the guest shims reconnect and re-arbitrate.
+        // Input in a fat-client mirror window is console use for THAT remote
+        // (reported on its /state polls), not for this app's own workspaces.
+        ConsolePresence.shared.isMirrorWindow = { w in
+            w is RemoteHostWindow || w.sheetParent is RemoteHostWindow || w.parent is RemoteHostWindow
+        }
         ConsolePresence.shared.installLocalMonitor()
         ConsolePresence.shared.onFlip = { [weak self] in
             guard let self else { return }
@@ -6576,6 +6595,128 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         false
     }
 
+    // MARK: - Quit
+    //
+    // Entry points: the quit Apple Event (Dock, `osascript`, log-out/restart),
+    // which we handle ourselves (handleQuitAppleEvent); the Quit menu item and
+    // the status item's Quit (quitAction); the guest-bounced ⌘Q
+    // (performBouncedQuit). Each goes through `QuitFlow.request` first. AppKit
+    // refuses to terminate while any window has a sheet attached, and it does
+    // so without calling the delegate (QH-2), so sheets must be gone before
+    // `NSApp.terminate`.
+
+    /// Where the quit flow stands (see QuitFlow.Phase).
+    private var quitPhase: QuitFlow.Phase = .idle
+    /// Set once the user has confirmed (or nothing needed confirming) before
+    /// `NSApp.terminate`. applicationShouldTerminate uses it and doesn't ask a
+    /// second time.
+    private var quitPreconfirmed = false
+    /// The confirmation on screen, so a repeated Quit brings it forward.
+    private var quitAlert: NSAlert?
+
+    /// Install our handler for the core 'quit' Apple Event. AppKit's own
+    /// handler checks for attached sheets before the delegate and fails the
+    /// event with -128 ("App termination blocked by modal sheet" in the
+    /// unified log). Ours confirms, dismisses the sheets, then terminates.
+    @MainActor
+    private func installQuitAppleEventHandler() {
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(handleQuitAppleEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEQuitApplication))
+    }
+
+    @MainActor @objc private func handleQuitAppleEvent(_ event: NSAppleEventDescriptor,
+                                                       withReplyEvent reply: NSAppleEventDescriptor) {
+        // kAEQuitReason ('why?') is set on log-out / restart / shut-down.
+        let why = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))
+            ?? event.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason))
+        let source = why.map { "apple event (reason \(Self.fourCC($0.enumCodeValue)))" } ?? "apple event"
+        if !requestQuit(source: source) {
+            // What AppKit replies when a quit is refused: the sender sees -128.
+            reply.setParam(NSAppleEventDescriptor(int32: Int32(userCanceledErr)),
+                           forKeyword: AEKeyword(keyErrorNumber))
+        }
+    }
+
+    /// The Quit menu item (⌘Q) and the status item's Quit.
+    @MainActor @objc func quitAction(_ sender: Any?) {
+        requestQuit(source: "menu")
+    }
+
+    /// Run one quit request through QuitFlow. Returns false when the quit was
+    /// refused (the user cancelled, or AppKit wouldn't terminate). Returns
+    /// true when the app is terminating or a quit already in progress
+    /// absorbed the request. With `.terminateLater` it doesn't return at all
+    /// in the success case: `NSApp.terminate` exits the process.
+    @discardableResult @MainActor
+    private func requestQuit(source: String) -> Bool {
+        let sheets = attachedSheetCount()
+        let decision = QuitFlow.request(phase: quitPhase, attachedSheets: sheets)
+        AppLog.stamp("quit: requested via \(source) — phase \(quitPhase), \(sheets) sheet(s) attached → \(decision)")
+        switch decision {
+        case .refrontConfirmation:
+            NSApp.activate(ignoringOtherApps: true)
+            quitAlert?.window.makeKeyAndOrderFront(nil)
+            return true
+        case .awaitDrain:
+            // Never cancel or restart a drain that is already in progress.
+            // AppKit would answer this Quit with -128; we let it wait for the
+            // same quit instead.
+            FileHandle.standardError.write(Data(
+                "[quit] quit requested again while the VMs drain — still quitting\n".utf8))
+            return true
+        case .terminate:
+            NSApp.terminate(nil)
+        case .confirmThenDismissSheets:
+            guard runQuitConfirmation() else {
+                AppLog.stamp("quit: cancelled by the user (sheets left in place)")
+                quitRequested = false
+                return false
+            }
+            quitPreconfirmed = true
+            let dismissed = dismissAttachedSheets()
+            AppLog.stamp("quit: dismissed \(dismissed) sheet(s) blocking termination")
+            NSApp.terminate(nil)
+        }
+        // terminate returned, so this quit didn't happen: cancelled in
+        // applicationShouldTerminate, or blocked by AppKit (a sheet came back).
+        quitPreconfirmed = false
+        let left = attachedSheetCount()
+        if left > 0 {
+            AppLog.stamp("quit: AppKit refused to terminate — \(left) sheet(s) still attached")
+            FileHandle.standardError.write(Data(
+                "[quit] terminate refused: \(left) sheet(s) still attached\n".utf8))
+        }
+        return false
+    }
+
+    /// Sheets attached to any window, visible or not, including a sheet
+    /// stacked on another sheet.
+    @MainActor
+    private func attachedSheetCount() -> Int {
+        NSApp.windows.reduce(0) { $0 + ($1.attachedSheet != nil ? 1 : 0) }
+    }
+
+    /// End every attached sheet with `.abort`. Their completion handlers see
+    /// abort, which the remote-prompt sheets already treat as "answered
+    /// elsewhere". A queued sheet that attaches next is ended too. Returns
+    /// how many were ended.
+    @discardableResult @MainActor
+    private func dismissAttachedSheets() -> Int {
+        var ended = 0
+        for window in NSApp.windows {
+            var guardCount = 0
+            while let sheet = window.attachedSheet, guardCount < 16 {
+                guardCount += 1
+                window.endSheet(sheet, returnCode: .abort)
+                sheet.orderOut(nil)
+                ended += 1
+                if window.attachedSheet === sheet { break }   // refused to detach
+            }
+        }
+        return ended
+    }
+
     /// ⌘Q (and Quit menu) confirmation. Skip the prompt if no VMs are
     /// running — quitting an idle app should be friction-free.
     ///
@@ -6593,9 +6734,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // (not from a Task), so the `.terminateLater` nested runloop CAN service
         // the drain job. (The guest-bounced ⌘Q can't use this — see
         // performBouncedQuit — so it pre-drains and hits `.terminateNow`.)
-        guard confirmQuit() else {
-            quitRequested = false
-            return .terminateCancel
+        let phaseOnEntry = quitPhase
+        let confirmed: Bool
+        if phaseOnEntry != .idle {
+            confirmed = false   // the verdict is cancel regardless (see below)
+        } else if quitPreconfirmed {
+            quitPreconfirmed = false
+            confirmed = true
+        } else {
+            confirmed = runQuitConfirmation()
         }
         let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
         // Browser VMs live outside `runningSessions` (the window owns them), so
@@ -6603,17 +6750,137 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // browser up took `.terminateNow` and we exited with a VZ VM still
         // running, which is what left `handle_unresponsive_connection` crashes
         // behind after quit.
-        let browsersRunning = unifiedWindow?.hasRunningBrowserVMs ?? false
-        if running.isEmpty && !browsersRunning { return .terminateNow }
+        // Every window's: a fat-client mirror's browser pane is a VZ VM in this
+        // process too (QH-1 — only the local window's used to count).
+        let workRunning = !running.isEmpty || anyBrowserVMsRunning
+        let verdict = QuitFlow.shouldTerminate(phase: phaseOnEntry, confirmed: confirmed,
+                                               workRunning: workRunning)
+        switch verdict {
+        case .cancel:
+            if phaseOnEntry != .idle {
+                // A terminate is already owed by the drain, or the
+                // confirmation on screen will decide. Don't start a second
+                // quit (AppKit doesn't normally ask twice).
+                AppLog.stamp("quit: terminate asked again while \(phaseOnEntry) — the quit in progress continues")
+            } else {
+                AppLog.stamp("quit: cancelled by the user")
+                quitRequested = false
+            }
+            return .terminateCancel
+        case .now:
+            AppLog.stamp("quit: nothing running — terminating now")
+            return .terminateNow
+        case .later:
+            break
+        }
 
+        // From here on a reply is OWED: never leave `.terminateLater` pending.
+        // Every wait below is bounded, and a watchdog delivers the reply via a
+        // run-loop block if the drain Task can't (e.g. it never gets the main
+        // queue) — see armTerminateWatchdog.
+        quitPhase = .draining
+        terminateGeneration &+= 1
+        let generation = terminateGeneration
+        terminateReplyPending = true
+        AppLog.stamp("quit: draining \(running.count) VM(s)\(anyBrowserVMsRunning ? " + browser VM(s)" : "") — reply owed within \(Int(Self.terminateHardCap))s")
+        armTerminateWatchdog(generation: generation)
         Task { @MainActor in
             await self.drainRunningVMs()
             // Awaited, not detached: `applicationWillTerminate`'s teardown fires
             // a Task that never runs this late, orphaning the browser VM.
-            await self.unifiedWindow?.teardownBrowserVMsAwaiting()
-            NSApp.reply(toApplicationShouldTerminate: true)
+            await self.teardownAllBrowserVMs()
+            self.replyToPendingTerminate(generation: generation, reason: "drain complete")
         }
         return .terminateLater
+    }
+
+    /// Bumped per `.terminateLater`, so a stale watchdog never answers a later quit.
+    private var terminateGeneration: UInt = 0
+    /// True between returning `.terminateLater` and replying.
+    private var terminateReplyPending = false
+    /// Hard cap on the whole quit drain before we reply anyway. Covers the
+    /// longest legit path (a k8s node's 60 s poweroff grace + force stop + the
+    /// browser teardown deadline) with margin.
+    private static let terminateHardCap: TimeInterval = 100
+    /// Bound on tearing down every browser VM at quit.
+    static let browserTeardownDeadline: TimeInterval = 10
+
+    /// Reply to a pending `.terminateLater` exactly once.
+    @MainActor
+    private func replyToPendingTerminate(generation: UInt, reason: String) {
+        guard terminateReplyPending, generation == terminateGeneration else { return }
+        terminateReplyPending = false
+        quitPhase = .idle
+        AppLog.stamp("quit: replying to terminate (\(reason))")
+        NSApp.reply(toApplicationShouldTerminate: true)
+    }
+
+    /// Last-resort reply for a `.terminateLater` whose drain never finishes.
+    /// Scheduled off-main and delivered with `CFRunLoopPerformBlock` in the
+    /// common modes, NOT through the main dispatch queue / MainActor: if quit
+    /// was entered from inside a main-queue block, the nested
+    /// `.terminateLater` run loop never drains the main queue (it isn't
+    /// re-entrant), so a Task/`DispatchQueue.main` reply would never run. A
+    /// run-loop block is serviced by that nested loop (NSModalPanelRunLoopMode
+    /// is a common mode).
+    private func armTerminateWatchdog(generation: UInt) {
+        let cap = Self.terminateHardCap
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + cap) { [weak self] in
+            let main = CFRunLoopGetMain()
+            CFRunLoopPerformBlock(main, CFRunLoopMode.commonModes.rawValue) {
+                MainActor.assumeIsolated {
+                    guard let self, self.terminateReplyPending,
+                          generation == self.terminateGeneration else { return }
+                    FileHandle.standardError.write(Data(
+                        "[quit] drain did not finish within \(Int(cap))s — terminating anyway\n".utf8))
+                    self.replyToPendingTerminate(generation: generation, reason: "watchdog")
+                }
+            }
+            CFRunLoopWakeUp(main)
+        }
+    }
+
+    /// Any browser VM in this process: the local window's AND every fat-client
+    /// mirror window's (their browser panes boot local VZ VMs).
+    @MainActor
+    private var anyBrowserVMsRunning: Bool {
+        (unifiedWindow?.hasRunningBrowserVMs ?? false)
+            || remoteHostWindows.values.contains { $0.hasRunningBrowserVMs }
+    }
+
+    /// Awaited teardown of every browser VM (local + every mirror window), in
+    /// parallel, bounded by `browserTeardownDeadline`: a `vm.stop` that never
+    /// completes must not hold quit. Past the deadline we log and move on —
+    /// the abandoned stop keeps running until the process exits.
+    @MainActor
+    private func teardownAllBrowserVMs() async {
+        let local = unifiedWindow
+        let mirrors = Array(remoteHostWindows.values)
+        guard local != nil || !mirrors.isEmpty else { return }
+        await QuitDeadline.run(seconds: Self.browserTeardownDeadline,
+                               label: "browser VM teardown") { @MainActor in
+            await withTaskGroup(of: Void.self) { group in
+                if let local {
+                    group.addTask { @MainActor in await local.teardownBrowserVMsAwaiting() }
+                }
+                for w in mirrors {
+                    group.addTask { @MainActor in await w.teardownBrowserVMsAwaiting() }
+                }
+            }
+        }
+    }
+
+    /// confirmQuit with the phase held at `.confirming` while it is up, so a
+    /// Quit that arrives during its `runModal` brings it forward instead of
+    /// stacking a second one.
+    @MainActor
+    private func runQuitConfirmation() -> Bool {
+        let previous = quitPhase
+        quitPhase = .confirming
+        defer { quitPhase = previous; quitAlert = nil }
+        let ok = confirmQuit()
+        AppLog.stamp("quit: confirmation → \(ok ? "Quit" : "Cancel")")
+        return ok
     }
 
     /// The shared "N VMs running — quit anyway?" confirmation. Returns true to
@@ -6640,6 +6907,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // as "quitting doesn't work". Activating makes the sheet the thing
         // they're actually being asked about.
         NSApp.activate(ignoringOtherApps: true)
+        quitAlert = alert
         return alert.runModal() == .alertFirstButtonReturn
     }
 
@@ -6651,13 +6919,46 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// deadlock against this same actor).
     @MainActor
     private func performBouncedQuit() async {
-        guard confirmQuit() else {
+        let sheets = attachedSheetCount()
+        let decision = QuitFlow.request(phase: quitPhase, attachedSheets: sheets)
+        AppLog.stamp("quit: requested via guest ⌘Q — phase \(quitPhase), \(sheets) sheet(s) attached → \(decision)")
+        switch decision {
+        case .refrontConfirmation:
+            NSApp.activate(ignoringOtherApps: true)
+            quitAlert?.window.makeKeyAndOrderFront(nil)
+            quitRequested = false
+            return
+        case .awaitDrain:
+            quitRequested = false
+            return
+        case .terminate, .confirmThenDismissSheets:
+            break
+        }
+        guard runQuitConfirmation() else {
+            AppLog.stamp("quit: cancelled by the user")
             quitRequested = false
             return
         }
+        quitPhase = .draining
         await drainRunningVMs()
-        await unifiedWindow?.teardownBrowserVMsAwaiting()
+        await teardownAllBrowserVMs()
+        quitPhase = .idle
+        // A sheet that is up now (or appeared during the drain) would make
+        // terminate a silent no-op with every VM already stopped.
+        let dismissed = dismissAttachedSheets()
+        if dismissed > 0 { AppLog.stamp("quit: dismissed \(dismissed) sheet(s) blocking termination") }
+        quitPreconfirmed = true
         NSApp.terminate(nil)
+        // Still here: AppKit refused.
+        quitPreconfirmed = false
+        quitRequested = false
+        AppLog.stamp("quit: terminate returned after the guest ⌘Q drain — \(attachedSheetCount()) sheet(s) attached")
+    }
+
+    /// FourCC of an Apple Event enum code, for the log.
+    private static func fourCC(_ code: OSType) -> String {
+        let bytes = [24, 16, 8, 0].map { UInt8((code >> $0) & 0xff) }
+        return String(bytes: bytes, encoding: .macOSRoman) ?? String(code)
     }
 
     /// Stop every running VM in parallel on quit via `stopSession`, honoring
@@ -6676,9 +6977,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Bounded: a wedged VM whose `stop` completion never fires must not hold
+    /// the quit drain (it is the watchdogs' own fallback).
+    @MainActor
     private static func forceStop(_ vm: VZVirtualMachine) async {
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            vm.stop { _ in cont.resume() }
+        await QuitDeadline.run(seconds: 10, label: "force stop") { @MainActor in
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                vm.stop { _ in cont.resume() }
+            }
         }
     }
 
@@ -7855,10 +8161,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.showNewSession()
     }
 
-    /// ⌘K — the command palette, over whichever window has the focus.
     /// The user manual. `defaults write <bundle-id> help.manualURL <url>`
     /// points it elsewhere (a staging copy, a local build of manual/).
-    static let defaultManualURL = "https://bromure.io/docs"
+    static let defaultManualURL = "https://bromure.io/en/docs/agentic-coding"
 
     /// Help → Manual.
     @objc func openManualAction(_ sender: Any?) {
@@ -7866,6 +8171,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let url = URL(string: raw) { NSWorkspace.shared.open(url) }
     }
 
+    /// ⌘K — the command palette, over whichever window has the focus.
     @objc func commandPaletteAction(_ sender: Any?) {
         if let rw = keyRemoteWindow { rw.showCommandPalette(); return }
         let w = ensureUnifiedWindow()
@@ -10686,7 +10992,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if remoteInitiated, !preflightResolved, launchNeedsPreflightPrompt(profile) {
             Task { @MainActor [weak self] in
                 await self?.resolveRemoteLaunchPrompts(
-                    profile, detached: detached, freshBootFallback: freshBootFallback)
+                    profile, detached: detached, freshBootFallback: freshBootFallback, quiet: quiet)
             }
             return
         }
@@ -13049,7 +13355,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// actions, then re-enter `launch` with `preflightResolved` so the sync
     /// gates don't re-ask.
     @MainActor private func resolveRemoteLaunchPrompts(
-        _ profile: Profile, detached: Bool, freshBootFallback: Bool) async {
+        _ profile: Profile, detached: Bool, freshBootFallback: Bool, quiet: Bool = false) async {
         var profile = profile
         if SessionDisk.isCompromised(profile: profile, store: store) {
             guard await confirmWipeAndProceedAsync(profile: profile) else { return }
@@ -13066,7 +13372,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
         }
         launch(profile, detached: detached, freshBootFallback: freshBootFallback,
-               remoteInitiated: true, preflightResolved: true)
+               remoteInitiated: true, preflightResolved: true, quiet: quiet)
     }
 
     /// Title + body for the compromise-wipe prompt, shared by the local
@@ -13859,18 +14165,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // deadline and force-stop if it doesn't land, exactly like the
             // .shutdown watchdog below. 20s comfortably covers a legit multi-GB
             // RAM save on SSD while still guaranteeing quit terminates.
-            let saved = await withTaskGroup(of: Bool.self) { group -> Bool in
-                group.addTask { @MainActor in
-                    do { try await sandbox.suspend(); return true }
-                    catch { return false }
-                }
-                group.addTask { @MainActor in
-                    try? await Task.sleep(nanoseconds: 20_000_000_000)
-                    return false
-                }
-                let first = await group.next() ?? false
-                group.cancelAll()
-                return first
+            // QuitDeadline, not a task-group race: the group would await the
+            // hung suspend child anyway, so the "watchdog" never fired (QH-1).
+            let saved = await QuitDeadline.run(
+                seconds: 20, label: "suspend '\(name)'", timeoutValue: false
+            ) { @MainActor in
+                do { try await sandbox.suspend(); return true }
+                catch { return false }
             }
             if saved {
                 FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
@@ -14289,7 +14590,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         picker.target = self
         menu.addItem(picker)
         let quit = NSMenuItem(title: NSLocalizedString("Quit", comment: ""),
-                              action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+                              action: #selector(quitAction(_:)), keyEquivalent: "")
+        quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
     }

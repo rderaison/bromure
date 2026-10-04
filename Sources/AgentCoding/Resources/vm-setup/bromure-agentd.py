@@ -5327,32 +5327,6 @@ def task_folder_shares():
                 log("session", "FAILED ln -s for ~/%s" % name)
 
 
-def task_ensure_pip():
-    """Images baked before python3-pip/python3-venv joined setup.sh ship
-    without pip ("No module named pip"), and agents burn turns working around
-    it. Install both once, in the background, onto the workspace's persistent
-    system disk — a runtime fallback that needs no image rebuild. Silent and
-    retried next boot if the network/firewall says no."""
-    if subprocess.run(["python3", "-c", "import pip, venv, ensurepip"],
-                      stdout=_DEVNULL, stderr=_DEVNULL).returncode == 0:
-        return
-    time.sleep(20)   # let the session + proxies settle first
-    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
-    install = ["apt-get", "-o", "DPkg::Lock::Timeout=300", "install", "-y", "-q",
-               "--no-install-recommends", "python3-pip", "python3-venv"]
-    try:
-        ok = _sudo(["env", "DEBIAN_FRONTEND=noninteractive"] + install,
-                   env=env, timeout=900).returncode == 0
-        if not ok:
-            _sudo(["apt-get", "-o", "DPkg::Lock::Timeout=300", "update", "-q"],
-                  env=env, timeout=600)
-            ok = _sudo(["env", "DEBIAN_FRONTEND=noninteractive"] + install,
-                       env=env, timeout=900).returncode == 0
-    except Exception:
-        ok = False
-    log("session", "python3-pip/venv %s" % ("installed" if ok else "install failed (retry next boot)"))
-
-
 def task_reapply_binfmt():
     """Re-apply cross-arch emulation if enabled in a prior session. binfmt_misc
     registrations are wiped on reboot; the tonistiigi/binfmt image is cached, so
@@ -5476,7 +5450,6 @@ def main():
     # One-shot background jobs (fire-and-forget, not supervised).
     threading.Thread(target=task_reapply_binfmt, daemon=True).start()
     threading.Thread(target=task_fstrim, daemon=True).start()
-    threading.Thread(target=task_ensure_pip, daemon=True).start()
 
     # 3. Supervised services — each isolated so one crash never kills the process.
     services = [

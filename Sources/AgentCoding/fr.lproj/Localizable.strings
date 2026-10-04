@@ -3679,3 +3679,10 @@
 "Available when the workspace is running" = "Disponible quand l’espace de travail est en marche";
 "Video available when the workspace is running" = "Vidéo disponible quand l’espace de travail est en marche";
 "Image available when the workspace is running" = "Image disponible quand l’espace de travail est en marche";
+
+/* Fat client: link states (reconnecting / key rejected / host key changed) */
+"“%@” didn't accept this Mac's key" = "« %@ » n’a pas accepté la clé de ce Mac";
+"“%@” presented a different host key" = "« %@ » a présenté une autre clé d’hôte";
+"Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection." = "Son identité ne correspond plus à celle que ce Mac a approuvée. Si le Mac distant a été réinstallé, reconnectez-vous via Se connecter à un Bromure distant… pour vérifier la nouvelle clé ; sinon, quelqu’un intercepte peut-être la connexion.";
+"Reconnecting to %@…" = "Reconnexion à %@…";
+"The connection dropped. What you see is from just before; it picks up again on its own." = "La connexion a été coupée. Ce que vous voyez date d’il y a un instant ; elle reprend d’elle-même.";

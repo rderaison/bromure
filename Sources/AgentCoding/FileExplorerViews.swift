@@ -149,7 +149,7 @@ struct FileExplorerPane: View {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 if Task.isCancelled { return }
                 updateAgentTab()
-                await model.refresh()
+                await model.pollRefresh()
             }
         }
     }

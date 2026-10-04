@@ -259,6 +259,13 @@ final class FileExplorerModel {
     /// file must not clobber the current one.
     private var refreshGeneration = 0
     private var detailGeneration = 0
+    /// A refresh of the folder on show is out (not yet answered). The pane's
+    /// 4 s poll skips while one is: a poll that started a fresh refresh
+    /// orphaned the slow one in flight — over a fat client, or against a
+    /// guest still waking, every answer arrived after the next poll had
+    /// bumped the generation, so none was ever applied and the first
+    /// listing's spinner never went away.
+    @ObservationIgnored private(set) var refreshInFlight = false
     /// "path|mode" the detail currently shows — a poll-driven reload of the
     /// same selection keeps the content up (no spinner flash every 4s).
     private var shownDetailKey: String?
@@ -385,8 +392,16 @@ final class FileExplorerModel {
         loadError = nil
         truncated = false
         loading = newRoot != nil
+        refreshInFlight = false   // the orphaned one's answer no longer counts
         guard newRoot != nil else { return }
         Task { await refresh() }
+    }
+
+    /// The periodic re-list: skipped while a refresh is still out, so a slow
+    /// link answers instead of being superseded forever.
+    func pollRefresh() async {
+        guard !refreshInFlight else { return }
+        await refresh()
     }
 
     /// Re-list the folder (one level, plus every unfolded folder), find the
@@ -400,6 +415,8 @@ final class FileExplorerModel {
         guard let root else { return }
         refreshGeneration += 1
         let generation = refreshGeneration
+        refreshInFlight = true
+        defer { if generation == refreshGeneration { refreshInFlight = false } }
         let dirs = [root] + expandedDirs.sorted().map { (root as NSString).appendingPathComponent($0) }
         // Each folder: "\002<path>\001<type><name>\0…" — `find -L` so a
         // symlinked folder (a shared folder) reads as a folder; .git hidden.

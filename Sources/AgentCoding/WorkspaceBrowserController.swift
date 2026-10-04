@@ -300,6 +300,7 @@ final class WorkspaceBrowserController {
                 try await pool.warmUp()
             } catch {
                 print("[browser] warmUp failed: \(error)")
+                guard self?.pool === pool else { return }   // stopped meanwhile
                 self?.fail(String(
                     format: NSLocalizedString("The browser VM did not start: %@", comment: ""),
                     "\(error)"))
@@ -311,6 +312,14 @@ final class WorkspaceBrowserController {
                                         profileImageDir: profileImageDir,
                                         profileDiskKey: profileDiskKey)
             guard let self else {
+                if let warm { await Self.tearDown(warm) }
+                return
+            }
+            // stop() mid-boot (pane closed, mirror window closed, quit) drops
+            // `pool`. Attaching now would revive a VM on a stopped controller
+            // that nothing tears down any more — discard it instead.
+            guard self.pool === pool else {
+                print("[browser] stopped during boot — discarding the claimed VM")
                 if let warm { await Self.tearDown(warm) }
                 return
             }
@@ -938,13 +947,18 @@ final class WorkspaceBrowserController {
             self.warm = nil
             Task { await Self.tearDown(warm) }
         }
+        // The pool can still hold a VM: one mid-boot, or its unclaimed pool VM
+        // when claim() booted a dedicated one. Dropping the reference alone
+        // orphans it (a live VZ VM nobody stops) — shut the pool down.
+        if let pool { Task { await pool.shutdown() } }
         pool = nil
         state = .idle
     }
 
     /// True while this workspace still owns a booted browser VM. Quit consults
     /// it: a browser VM alone must still take the `.terminateLater` path.
-    var hasLiveVM: Bool { warm != nil }
+    /// Booting counts: the pool is mid-boot on a VZ VM that quit must shut down.
+    var hasLiveVM: Bool { warm != nil || (pool != nil && state == .booting) }
 
     /// `stop()`, but *awaiting* the VM teardown instead of detaching it.
     ///
@@ -955,9 +969,15 @@ final class WorkspaceBrowserController {
     /// `handle_unresponsive_connection`. Quit must await this instead.
     func stopAndWait() async {
         let live = warm
+        let ownPool = pool
         warm = nil          // so stop() doesn't also detach a teardown
+        pool = nil          // ditto for the pool shutdown, awaited below
         stop()
         if let live { await Self.tearDown(live) }
+        // A boot still in flight: shutdown() makes the pool retire the VM it's
+        // booting instead of handing it out (and the boot task above discards
+        // anything claimed after stop()).
+        if let ownPool { await ownPool.shutdown() }
     }
 
     /// No image anywhere: show the consent card in the pane placeholder

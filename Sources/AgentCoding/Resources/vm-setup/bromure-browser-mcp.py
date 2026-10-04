@@ -94,6 +94,16 @@ CDP_TOOLS = {
 }
 
 
+# `bromure/cdpEndpoint` error code: the browser serving this workspace can't be
+# reached over the LAN (a fat client's own browser, answering through the
+# host's relay) — send the CDP tools through the host channel instead.
+CDP_VIA_HOST_CODE = -32010
+
+
+class CDPViaHost(Exception):
+    pass
+
+
 def log(msg):
     sys.stderr.write("bromure-browser-mcp: %s\n" % msg)
     sys.stderr.flush()
@@ -665,6 +675,9 @@ class Server:
         resp = self.host.request({"jsonrpc": "2.0", "id": self.endpoint_id,
                                   "method": "bromure/cdpEndpoint"})
         res = resp.get("result") if isinstance(resp, dict) else None
+        err = (resp.get("error") or {}) if isinstance(resp, dict) else {}
+        if err.get("code") == CDP_VIA_HOST_CODE:
+            raise CDPViaHost()
         if not res or not res.get("ip") or not res.get("secret"):
             raise RuntimeError((resp.get("error") or {}).get("message", "no CDP endpoint")
                                if isinstance(resp, dict) else "no CDP endpoint")
@@ -687,6 +700,11 @@ class Server:
                     self.cdp = self._fetch_endpoint()
                 result = run_cdp_tool(self.cdp, name, args)
                 return {"jsonrpc": "2.0", "id": req.get("id"), "result": result}
+            except CDPViaHost:
+                # Asked again on every call (cdp stays None): the route
+                # follows the user between the server's console and a client.
+                self.cdp = None
+                return self.host.request(req)
             except Exception as e:  # noqa: BLE001
                 last = e
                 self.cdp = None     # drop; refetch endpoint + reconnect next loop
@@ -710,6 +728,9 @@ class Server:
                 if self.cdp is None:
                     self.cdp = self._fetch_endpoint()
                 self.cdp.probe()
+                return
+            except CDPViaHost:
+                self.cdp = None
                 return
             except Exception as e:  # noqa: BLE001
                 self.cdp = None

@@ -147,6 +147,31 @@ final class SSHDialer: @unchecked Sendable {
         }
     }
 
+    /// Why the last dial to a host failed, when SSH said so: an auth or
+    /// host-key verdict is an answer (it needs the user), anything else is
+    /// transport (a Wi-Fi drop, the remote restarting) that heals by
+    /// retrying. Cleared by the next successful dial. Lets a mirror that was
+    /// already connected tell "reconnecting…" from "this Mac's key is no
+    /// longer authorized".
+    enum DialVerdict: Equatable { case authFailed, hostKeyChanged, unreachable }
+    private var lastVerdicts: [UUID: DialVerdict] = [:]
+
+    func lastDialVerdict(hostID: UUID) -> DialVerdict? {
+        lock.lock(); defer { lock.unlock() }
+        return lastVerdicts[hostID]
+    }
+
+    private func noteDialFailure(_ hostID: UUID, _ error: SSHDialError?) {
+        let v: DialVerdict?
+        switch error {
+        case nil: v = nil
+        case .authFailed?: v = .authFailed
+        case .hostKeyChanged?: v = .hostKeyChanged
+        case .unreachable?: v = .unreachable
+        }
+        lock.lock(); lastVerdicts[hostID] = v; lock.unlock()
+    }
+
     /// Close and drop every pooled connection (all hosts + lanes).
     func closeAll() {
         lock.lock()
@@ -249,12 +274,18 @@ final class SSHDialer: @unchecked Sendable {
     /// request/stream errors out the same way it does when ssh dies).
     func dial(host: RemoteHost, verb: String, lane: String = "") -> Int32? {
         for attempt in 0..<2 {
-            guard let conn = try? ensureConnection(host: host, lane: lane) else { return nil }
-            if let fd = conn.openVerbChannel(verb) { return fd }
+            let conn: SSHConnection
+            do {
+                conn = try ensureConnection(host: host, lane: lane)
+            } catch {
+                noteDialFailure(host.id, (error as? SSHDialError) ?? .unreachable("\(error)"))
+                return nil
+            }
+            if let fd = conn.openVerbChannel(verb) { noteDialFailure(host.id, nil); return fd }
             // Channel open failed on a connection that claimed to be alive —
             // drop it and retry once on a fresh one.
             conn.close()
-            if attempt == 1 { return nil }
+            if attempt == 1 { noteDialFailure(host.id, .unreachable("channel open failed")); return nil }
         }
         return nil
     }
