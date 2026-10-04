@@ -855,6 +855,16 @@ struct RoomStageView: View {
                     // Delegations only where a cell has the room for them.
                     BeautifiedSessionView(model: m, parts: .transcript,
                                           delegations: zoomed || controller.layout.size == 1)
+                        // B53: a cell's transcript scrolls under its title
+                        // bar; the line cut at the edge read as broken text.
+                        // Fade the top few points instead of a hard cut.
+                        .overlay(alignment: .top) {
+                            LinearGradient(colors: [Color.platformWindowBackground,
+                                                    Color.platformWindowBackground.opacity(0)],
+                                           startPoint: .top, endPoint: .bottom)
+                                .frame(height: 16)
+                                .allowsHitTesting(false)
+                        }
                 } else {
                     restingCell(s)
                 }
@@ -988,7 +998,8 @@ struct RoomStageView: View {
 
     private func restingBar(_ s: AgentSession, _ bucket: SessionBucket) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: bucket == .ended ? "checkmark.circle.fill" : "pause.circle.fill")
+            // Ended or asleep, both "Paused": a message picks either up.
+            Image(systemName: "pause.circle.fill")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
             Text(bucket.title)
@@ -1216,7 +1227,7 @@ struct RoomStageView: View {
             Group {
                 if let m = controller.targetModel {
                     BeautifiedSessionView(model: m, parts: .composer, placeholder: String(
-                        format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
+                        format: NSLocalizedString("Message %@… (or drop files)", comment: "beautified composer"),
                         toSwitchboard ? NSLocalizedString("the Switchboard", comment: "room composer target") : name))
                         .id(ObjectIdentifier(m))   // a fresh composer per target
                 } else if let asleep = toSwitchboard ? controller.switchboard : focused {

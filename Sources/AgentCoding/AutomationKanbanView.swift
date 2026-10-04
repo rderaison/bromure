@@ -107,12 +107,20 @@ struct AutomationKanbanView: View {
     @ViewBuilder private var content: some View {
         if store.automations.isEmpty {
             ContentUnavailableView {
-                Label(NSLocalizedString("No automations yet", comment: ""),
+                // As the hub's Runs tab the empty state is about runs; the
+                // stand-alone board keeps the automations wording.
+                Label(showsHeader
+                      ? NSLocalizedString("No automations yet", comment: "")
+                      : NSLocalizedString("No runs yet", comment: "automation runs tab"),
                       systemImage: "bolt.badge.clock")
             } description: {
-                Text(NSLocalizedString(
-                    "Automations are recurring, unattended agent runs. Their runs will flow across this board.",
-                    comment: ""))
+                Text(showsHeader
+                     ? NSLocalizedString(
+                        "Automations are recurring, unattended agent runs. Their runs will flow across this board.",
+                        comment: "")
+                     : NSLocalizedString(
+                        "Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started.",
+                        comment: "automation runs tab"))
             } actions: {
                 Button(NSLocalizedString("New Automation…", comment: ""),
                        action: actions.newAutomation)
@@ -360,6 +368,10 @@ struct KanbanColumn<Content: View>: View {
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            // Shrink a little before truncating ("Waiting
+                            // for your revi…"); the whole line on hover.
+                            .minimumScaleFactor(0.8)
+                            .help(subtitle)
                     }
                 }
                 Spacer(minLength: 4)
@@ -369,6 +381,7 @@ struct KanbanColumn<Content: View>: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
                     .background(Capsule().fill(accent.opacity(count > 0 ? 0.14 : 0.06)))
+                    .fixedSize()
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
@@ -413,19 +426,13 @@ struct KanbanColumn<Content: View>: View {
     }
 }
 
-/// The primary action: Liquid Glass prominent on macOS 26, bordered
-/// prominent before.
+/// The primary action of a board header ("New Task", "New Automation").
+/// Bordered prominent everywhere: `.glassProminent` lost its tint on the
+/// pale board backdrop (and in an inactive window), leaving a white "+"
+/// on near-white — the button read as plain text with a missing glyph.
 struct ProminentGlassButton: ViewModifier {
     func body(content: Content) -> some View {
-        #if os(macOS)
-        if #available(macOS 26.0, *) {
-            content.buttonStyle(.glassProminent)
-        } else {
-            content.buttonStyle(.borderedProminent)
-        }
-        #else
         content.buttonStyle(.borderedProminent)
-        #endif
     }
 }
 
@@ -498,41 +505,6 @@ struct BoardBackdrop: View {
     }
 }
 
-/// A column with nothing in it, folded to a slim rail so the rest of the
-/// board fits. Clicking it does `onTap` (usually: explain how it fills).
-struct KanbanRail: View {
-    let title: String
-    let systemImage: String
-    var tint: Color = .secondary
-    var help: String = ""
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(tint == .secondary ? Color.gray : tint)
-                .frame(width: 24, height: 24)
-                .background((tint == .secondary ? Color.gray : tint).opacity(0.14),
-                            in: RoundedRectangle(cornerRadius: 7))
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .fixedSize()
-                .rotationEffect(.degrees(-90))
-                .frame(width: 20, height: 80)
-            Text("0")
-                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.tertiary)
-            Spacer()
-        }
-        .padding(.vertical, 12)
-        .frame(width: 46)
-        .modifier(GlassCapsule(cornerRadius: 16))
-        .frame(maxHeight: .infinity, alignment: .top)
-        .help(help)
-    }
-}
-
 // MARK: - Cards
 
 /// Shared card chrome: a raised surface that lifts on hover. A tint marks a
@@ -584,7 +556,10 @@ struct WorkspaceChip: View {
             Circle().fill(Color(hex: accentHex)).frame(width: 6, height: 6)
             Text(name.isEmpty ? "—" : name)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 150, alignment: .leading)
         }
+        .help(name)
         .font(.system(size: 10.5, weight: .medium))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 6)

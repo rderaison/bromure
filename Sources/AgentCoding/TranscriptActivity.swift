@@ -20,8 +20,31 @@ enum TranscriptRow: Identifiable {
         switch self {
         case .item(let i): return i.id
         case .activity(let a): return a.first?.id ?? 0
-        case .changes(_, let after): return -(after + 1)
+        case .changes(_, let after): return Self.changesID(after: after)
         }
+    }
+
+    // Row ids live in their own space. Item ids are hashes (or, from a
+    // parser that numbers by position, small integers; the optimistic echo
+    // counts down from Int.max): an id derived by arithmetic (`id * 131 + k`,
+    // `-(id + 1)`) could land on another row's — a lazy stack with two rows
+    // of one id never settles its placement (B23) — or overflow.
+
+    /// The id of piece `k` (k ≥ 1) of a reply cut into rows.
+    static func chunkID(_ itemID: Int, _ k: Int) -> Int {
+        var h = Hasher()
+        h.combine("reply-piece")
+        h.combine(itemID)
+        h.combine(k)
+        return h.finalize()
+    }
+
+    /// The id of the "what this turn changed" row after item `after`.
+    static func changesID(after: Int) -> Int {
+        var h = Hasher()
+        h.combine("turn-changes")
+        h.combine(after)
+        return h.finalize()
     }
 
     static func isActivity(_ item: TranscriptItem) -> Bool {
@@ -38,6 +61,21 @@ enum TranscriptRow: Identifiable {
     /// A long reply cut into rows of about this many characters, so no row
     /// is several screens tall (a lazy list can't draw one of those).
     static let chunkChars = 2000
+
+    /// The piece size for a chat column `width` points wide: the same
+    /// height of row whatever the width — a 2000-character piece is a
+    /// screen at 700 pt but five at 180 pt (the chat squeezed by the
+    /// browser and files panes), where the lazy stack's re-measure churned.
+    /// In steps, so a resize re-cuts the replies only a few times.
+    static func chunkLimit(forWidth width: CGFloat) -> Int {
+        guard width > 0 else { return chunkChars }
+        switch width {
+        case ..<260: return 500
+        case ..<400: return 900
+        case ..<560: return 1400
+        default: return chunkChars
+        }
+    }
 
     /// `text` split at paragraph breaks outside code fences into pieces of
     /// about `limit` characters (a fence is never cut).
@@ -62,17 +100,47 @@ enum TranscriptRow: Identifiable {
 
     /// The rows of a long reply: the first keeps the item's id (search and
     /// scroll anchors find it), the rest get ids derived from it.
-    static func split(_ item: TranscriptItem) -> [TranscriptItem] {
+    static func split(_ item: TranscriptItem, limit: Int = chunkChars) -> [TranscriptItem] {
         guard case .assistantText(let text) = item.kind else { return [item] }
-        let pieces = chunks(text)
+        let pieces = chunks(text, limit: limit)
         guard pieces.count > 1 else { return [item] }
         return pieces.enumerated().map { k, piece in
-            TranscriptItem(id: k == 0 ? item.id : item.id &* 131 &+ k, kind: .assistantText(piece),
+            TranscriptItem(id: k == 0 ? item.id : chunkID(item.id, k), kind: .assistantText(piece),
                            timestamp: item.timestamp)
         }
     }
 
-    static func rows(_ items: [TranscriptItem], chunked: Bool = true) -> [TranscriptRow] {
+    static func rows(_ items: [TranscriptItem], chunked: Bool = true,
+                     chunkLimit: Int = chunkChars) -> [TranscriptRow] {
+        uniqued(buildRows(items, chunked: chunked, chunkLimit: chunkLimit))
+    }
+
+    /// No two rows with one id, whatever the items brought: a repeat is
+    /// re-keyed (its content stays).
+    static func uniqued(_ rows: [TranscriptRow]) -> [TranscriptRow] {
+        var seen = Set<Int>()
+        seen.reserveCapacity(rows.count)
+        return rows.map { row in
+            var r = row
+            var salt = 0
+            rekey: while !seen.insert(r.id).inserted {
+                salt += 1
+                switch row {
+                case .item(let i):
+                    r = .item(TranscriptItem(id: chunkID(i.id, -salt), kind: i.kind, timestamp: i.timestamp))
+                case .activity(var run):
+                    guard let first = run.first else { break rekey }
+                    run[0] = TranscriptItem(id: chunkID(first.id, -salt), kind: first.kind, timestamp: first.timestamp)
+                    r = .activity(run)
+                case .changes(let c, let after):
+                    r = .changes(c, after: chunkID(after, -salt))
+                }
+            }
+            return r
+        }
+    }
+
+    private static func buildRows(_ items: [TranscriptItem], chunked: Bool, chunkLimit: Int) -> [TranscriptRow] {
         var out: [TranscriptRow] = []
         var run: [TranscriptItem] = []
         var turn: [TranscriptItem] = []
@@ -88,7 +156,7 @@ enum TranscriptRow: Identifiable {
                 // Your next message closes the agent's turn: its changes go
                 // at the end of it.
                 if case .userText = item.kind { closeTurn() }
-                if chunked { out += split(item).map { .item($0) } } else { out.append(.item(item)) }
+                if chunked { out += split(item, limit: chunkLimit).map { .item($0) } } else { out.append(.item(item)) }
             }
             turn.append(item)
         }
@@ -311,10 +379,64 @@ enum ActivitySummary {
         }
     }
 
-    /// A tool name for people: "mcp__delegation__request" → "delegation request".
+    /// A tool name for people: "mcp__delegation__request" → "delegation
+    /// request". A tool that already repeats its server's name says it once
+    /// (B71): "mcp__browser__browser_evaluate" → "browser evaluate", not
+    /// "browser browser evaluate".
     static func humanTool(_ name: String) -> String {
         guard name.hasPrefix("mcp__") else { return name }
-        return name.dropFirst(5).split(separator: "_", omittingEmptySubsequences: true).joined(separator: " ")
+        let rest = name.dropFirst(5)
+        var words: [Substring]
+        if let sep = rest.range(of: "__") {
+            let server = rest[..<sep.lowerBound]
+            var tool = rest[sep.upperBound...]
+            let s = server.lowercased(), t = tool.lowercased()
+            if !s.isEmpty, t.count > s.count, t.hasPrefix(s),
+               let next = t.dropFirst(s.count).first, next == "_" || next == "-" {
+                tool = tool.dropFirst(s.count + 1)
+            }
+            words = server.split(whereSeparator: { $0 == "_" || $0 == "-" })
+                + tool.split(separator: "_", omittingEmptySubsequences: true)
+        } else {
+            words = rest.split(separator: "_", omittingEmptySubsequences: true)
+        }
+        return words.joined(separator: " ")
+    }
+
+    /// What a lone tool result (its call shown elsewhere) answered.
+    enum ResultKind: Hashable {
+        case media, chart, file, other
+
+        init(tool: String) {
+            let t = tool.lowercased()
+            let display = t.contains("display") || !t.contains("__")
+            if display, t.hasSuffix("show_media") { self = .media }
+            else if display, t.hasSuffix("show_chart") { self = .chart }
+            else if display, t.hasSuffix("send_file") { self = .file }
+            else { self = .other }
+        }
+
+        var symbol: String {
+            switch self {
+            case .media: return "photo"
+            case .chart: return "chart.bar"
+            case .file:  return "arrow.down.doc"
+            case .other: return "wrench.and.screwdriver"
+            }
+        }
+
+        func count(_ n: Int) -> String {
+            switch self {
+            case .media: return n == 1 ? NSLocalizedString("1 media item shown", comment: "activity line")
+                : String(format: NSLocalizedString("%d media items shown", comment: "activity line"), n)
+            case .chart: return n == 1 ? NSLocalizedString("1 chart shown", comment: "activity line")
+                : String(format: NSLocalizedString("%d charts shown", comment: "activity line"), n)
+            case .file: return n == 1 ? NSLocalizedString("1 file sent", comment: "activity line")
+                : String(format: NSLocalizedString("%d files sent", comment: "activity line"), n)
+            case .other: return n == 1 ? NSLocalizedString("1 tool result", comment: "activity line")
+                : String(format: NSLocalizedString("%d tool results", comment: "activity line"), n)
+            }
+        }
     }
 
     struct Line {
@@ -329,6 +451,7 @@ enum ActivitySummary {
         var failures = 0
         var thought = false
         var calls: [(name: String, summary: String)] = []
+        var results: [String] = []   // the tool each result answers
         for item in items {
             switch item.kind {
             case .toolUse(let name, let summary, _):
@@ -336,20 +459,41 @@ enum ActivitySummary {
                 if counts[c] == nil { order.append(c) }
                 counts[c, default: 0] += 1
                 calls.append((name, summary))
-            case .toolResult(_, _, let isError):
+            case .toolResult(let tool, _, let isError):
                 if isError { failures += 1 }
+                results.append(tool)
             case .thinking:
                 thought = true
             default:
                 break
             }
         }
+        // Only results (B69): a display-MCP call is content — its card sits
+        // in the chat, outside the run — so a run of show_media results has
+        // no call to describe. Name what they answered instead of an
+        // unlabeled chip.
+        if calls.isEmpty, !results.isEmpty {
+            var resultParts: [ResultKind: Int] = [:]
+            var resultOrder: [ResultKind] = []
+            for tool in results {
+                let k = ResultKind(tool: tool)
+                if resultParts[k] == nil { resultOrder.append(k) }
+                resultParts[k, default: 0] += 1
+            }
+            var parts: [String] = []
+            if thought { parts.append(NSLocalizedString("Thought", comment: "activity line")) }
+            parts += resultOrder.map { $0.count(resultParts[$0] ?? 0) }
+            return Line(text: parts.joined(separator: " · "),
+                        symbols: Array(resultOrder.prefix(3).map(\.symbol)),
+                        failures: failures)
+        }
         var parts: [String] = []
         if thought { parts.append(NSLocalizedString("Thought", comment: "activity line")) }
         if calls.count == 1, let c = calls.first {
             // One step: say what it was.
-            let what = c.summary.isEmpty ? humanTool(c.name) : c.summary
-            parts.append(humanTool(c.name) + " " + what.replacingOccurrences(of: "\n", with: " "))
+            let tool = humanTool(c.name)
+            parts.append(c.summary.isEmpty ? tool
+                         : tool + " " + c.summary.replacingOccurrences(of: "\n", with: " "))
         } else {
             parts += order.map { $0.count(counts[$0] ?? 0) }
         }

@@ -191,6 +191,61 @@ struct AgentScreenTests {
         #expect(p.selectedOption == 1)
     }
 
+    @Test("B73: Kimi 2.1's command approval, as captured in a live session, becomes a card")
+    func kimiApprovalLiveCapture() throws {
+        // Exact text the tab showed (2.1.x), and the whole screen around it:
+        // the conversation above, the rule, the status line below.
+        let dialog = """
+         ▶ Run this command?
+           cwd: /home/ubuntu/qa
+           $ sleep 1 && echo 1
+           ▶ 1. Approve once
+             2. Approve for this session
+             3. Reject
+             4. Reject with feedback
+           ↑/↓ select · 1/2/3/4 choose · ↵ confirm
+        """
+        let full = """
+         ● The user wants me to count slowly from 1 to 15, running `sleep 1 && echo N`
+           for each number, one command per number. That's 15 separate bash commands,
+           … (49 more lines, ctrl+o to expand)
+
+         ● I'll run them one at a time so the counting stays slow — one number per
+           second.
+
+         ● Running a command · $ sleep 1 && echo 1
+           Press Ctrl+B to run in background
+         ──────────────────────────────────────────────────────────────────────────────
+           ▶ Run this command?
+
+           cwd: /home/ubuntu/qa
+           $ sleep 1 && echo 1
+
+           ▶ 1. Approve once
+             2. Approve for this session
+             3. Reject
+             4. Reject with feedback
+
+           ↑/↓ select · 1/2/3/4 choose · ↵ confirm
+         ──────────────────────────────────────────────────────────────────────────────
+         K2.8 Preview thinking: max  ~/qa  master [±]                     ctrl+o expand
+                                                                 context: 3% (30.5k/1M)
+        """
+        for screen in [dialog, full] {
+            let p = try #require(TerminalPrompt.detect(inScreen: screen, agent: "kimi"))
+            #expect(p.kind == .picker)
+            #expect(p.title == "Run this command?")
+            #expect(p.options.map(\.label) == ["Approve once", "Approve for this session", "Reject", "Reject with feedback"])
+            #expect(p.selectedOption == 1)
+            #expect(p.detail.contains("sleep 1 && echo 1"))
+            // Picking relays from the highlighted row.
+            #expect(p.keys(picking: 1) == ["Enter"])
+            #expect(p.keys(picking: 3) == ["Down", "Down", "Enter"])
+            // And it is what the scan surfaces (not a failure banner).
+            #expect(TerminalScan.classify(screen, agent: "kimi") == .prompt(p))
+        }
+    }
+
     @Test("Grok's radio approval: the preselected option is the cursor, never assumed to be 1's 'Yes'")
     func grokApproval() throws {
         let screen = """

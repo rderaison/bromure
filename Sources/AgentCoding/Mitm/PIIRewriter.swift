@@ -22,7 +22,10 @@ enum PIIRewriter {
 
     /// Is this an AI API call whose body carries a conversation?
     static func isEligible(host: String, method: String, body: Data) -> Bool {
-        guard method.uppercased() == "POST", body.count > 2, body.first == UInt8(ascii: "{") else { return false }
+        // First non-whitespace byte opens a JSON object (a pretty-printed
+        // body may start with a newline).
+        let first = body.first { !($0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D) }
+        guard method.uppercased() == "POST", body.count > 2, first == UInt8(ascii: "{") else { return false }
         let h = host.lowercased()
         guard TraceLevel.aiHosts.contains(where: { h.contains($0) }),
               !h.contains("huggingface.co"), h != InferenceService.localMitmHost else { return false }
@@ -96,7 +99,7 @@ enum PIIRewriter {
             let (swapped, n) = vault.forward(text, spans: p.spans)
             guard n > 0, swapped != text else { continue }
             if p.fresh {
-                for s in p.spans { outcome.newSwaps[PIIVault.Kind(s.label), default: 0] += 1 }
+                for (kind, n) in countedKinds(p.spans, in: text) { outcome.newSwaps[kind, default: 0] += n }
             }
             out.append(contentsOf: bytes[cursor..<ref.range.lowerBound])
             out.append(JSONStrings.encode(swapped))
@@ -106,6 +109,31 @@ enum PIIRewriter {
         out.append(contentsOf: bytes[cursor...])
         outcome.body = out
         return outcome
+    }
+
+    /// How many values of each kind `spans` stand for, as the Timeline counts
+    /// them: a given name and surname side by side ("Margaret Hollowell") are
+    /// ONE person, not "2 names" (B41). Swapping still works per span, so a
+    /// later lone "Margaret" keeps its stand-in.
+    static func countedKinds(_ spans: [PIISpan], in text: String) -> [PIIVault.Kind: Int] {
+        let ns = text as NSString
+        var out: [PIIVault.Kind: Int] = [:]
+        var prevName: PIISpan? = nil
+        for s in spans.sorted(by: { $0.start < $1.start }) {
+            if s.label.isName {
+                if let p = prevName, s.start >= p.end, s.start - p.end <= 3,
+                   ns.substring(with: NSRange(location: p.end, length: s.start - p.end))
+                    .allSatisfy({ $0 == " " || $0 == "." || $0 == "-" || $0 == "," }) {
+                    prevName = s          // same person: extend the run, no new count
+                    continue
+                }
+                prevName = s
+            } else {
+                prevName = nil
+            }
+            out[PIIVault.Kind(s.label), default: 0] += 1
+        }
+        return out
     }
 
     /// The spans worth swapping under `policy`: coarse geography, URLs and IP

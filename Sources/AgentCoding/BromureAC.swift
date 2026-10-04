@@ -241,7 +241,7 @@ struct BromureAC: ParsableCommand {
                 let items: [PaletteItem] = [
                     PaletteItem(section: .actions, title: "New Session", icon: "plus", shortcut: "⌘N") {},
                     PaletteItem(section: .actions, title: "New Room…", icon: "square.grid.2x2", tint: .indigo) {},
-                    PaletteItem(section: .actions, title: "Security Timeline", icon: "shield.lefthalf.filled", tint: .green) {},
+                    PaletteItem(section: .actions, title: "Security", icon: "shield.lefthalf.filled", tint: .green) {},
                     PaletteItem(section: .actions, title: "Preferences", icon: "gearshape", tint: .gray, shortcut: "⌘,") {},
                     PaletteItem(section: .sessions, title: "Fix the login redirect loop", subtitle: "Claude Dev · Working",
                                 icon: "text.bubble.fill", tint: SessionBucket.working.tint) {},
@@ -333,6 +333,20 @@ struct BromureAC: ParsableCommand {
                 m.demoServers = (try? JSONDecoder().decode([DeviceInfo].self, from: Data(json.utf8))) ?? []
                 view = AnyView(RemoteConnectView(model: m, onClose: {}))
                 size = NSSize(width: 560, height: 520)
+            case "prefs", "editor-new":
+                // Preferences (template) or a new-workspace editor at a window
+                // size (BROMURE_SHOT_SIZE=WxH, default the editor's ideal) —
+                // checks nothing is clipped at the window's minimum size.
+                var p = Profile(name: which == "prefs" ? "Defaults" : "Workspace 2", tool: .claude,
+                                authMode: .subscription)
+                if which == "prefs" { p.id = ProfileStore.templateID } else { p.agentReach = [] }
+                view = AnyView(ProfileEditorView(profile: p, isNew: which != "prefs", terminalDefaults: .fallback,
+                                                 storageContext: nil, onSave: { _, _ in }, onCancel: {}))
+                size = NSSize(width: 820, height: 680)
+                if let env = ProcessInfo.processInfo.environment["BROMURE_SHOT_SIZE"] {
+                    let wh = env.split(separator: "x").compactMap { Double($0) }
+                    if wh.count == 2 { size = NSSize(width: wh[0], height: wh[1]) }
+                }
             case "machinemenu":
                 view = AnyView(HStack(spacing: 8) {
                     Spacer()
@@ -860,6 +874,28 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                     action: #selector(NSApplication.terminate(_:)),
                     keyEquivalent: "q")
 
+    // File menu — the standard first menu: start things, close the window.
+    let fileMenuItem = NSMenuItem()
+    main.addItem(fileMenuItem)
+    let fileMenu = NSMenu(title: L("File"))
+    fileMenuItem.submenu = fileMenu
+    // Sessions first: the thing a user does most — start an agent — leads.
+    let newSessionItem = NSMenuItem(title: L("New Session…"),
+                                    action: #selector(ACAppDelegate.newSessionAction(_:)),
+                                    keyEquivalent: "n")
+    newSessionItem.target = delegate
+    fileMenu.addItem(newSessionItem)
+    // Rooms: sessions grouped, side by side, with their own Switchboard.
+    let newRoomItem = NSMenuItem(title: L("New Room…"),
+                                 action: #selector(ACAppDelegate.newRoomAction(_:)),
+                                 keyEquivalent: "")
+    newRoomItem.target = delegate
+    fileMenu.addItem(newRoomItem)
+    fileMenu.addItem(NSMenuItem.separator())
+    fileMenu.addItem(withTitle: L("Close Window"),
+                     action: #selector(NSWindow.performClose(_:)),
+                     keyEquivalent: "w")
+
     // Workspaces menu — before Edit. Acts on the unified window's selected
     // workspace + active tab.
     let wsMenuItem = NSMenuItem()
@@ -867,18 +903,6 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     let wsMenu = NSMenu(title: L("Workspaces"))
     wsMenuItem.submenu = wsMenu
 
-    // Sessions first: the thing a user does most — start an agent — leads.
-    let newSessionItem = NSMenuItem(title: L("New Session…"),
-                                    action: #selector(ACAppDelegate.newSessionAction(_:)),
-                                    keyEquivalent: "n")
-    newSessionItem.target = delegate
-    wsMenu.addItem(newSessionItem)
-    // Rooms: sessions grouped, side by side, with their own Switchboard.
-    let newRoomItem = NSMenuItem(title: L("New Room…"),
-                                 action: #selector(ACAppDelegate.newRoomAction(_:)),
-                                 keyEquivalent: "")
-    newRoomItem.target = delegate
-    wsMenu.addItem(newRoomItem)
     let paletteItem = NSMenuItem(title: L("Go to…"),
                                  action: #selector(ACAppDelegate.commandPaletteAction(_:)),
                                  keyEquivalent: "k")
@@ -1065,6 +1089,35 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                      action: #selector(NSText.selectAll(_:)),
                      keyEquivalent: "a")
 
+    // View menu — the panes of the session window. Its sendEvent already
+    // handles these chords; the menu makes them discoverable (and clickable).
+    // nil targets: the first responder chain reaches the key window.
+    let viewMenuItem = NSMenuItem()
+    main.addItem(viewMenuItem)
+    let viewMenu = NSMenu(title: L("View"))
+    viewMenuItem.submenu = viewMenu
+    let sidebarItem = NSMenuItem(title: L("Toggle Sidebar"),
+                                 action: #selector(UnifiedSessionWindow.toggleSidebar(_:)),
+                                 keyEquivalent: "s")
+    sidebarItem.keyEquivalentModifierMask = [.command, .control]
+    viewMenu.addItem(sidebarItem)
+    let filesItem = NSMenuItem(title: L("Toggle Files Pane"),
+                               action: #selector(UnifiedSessionWindow.toggleFilePane(_:)),
+                               keyEquivalent: "e")
+    filesItem.keyEquivalentModifierMask = [.command, .control]
+    viewMenu.addItem(filesItem)
+    let browserItem = NSMenuItem(title: L("Toggle Browser Pane"),
+                                 action: #selector(UnifiedSessionWindow.toggleBrowserPane(_:)),
+                                 keyEquivalent: "b")
+    browserItem.keyEquivalentModifierMask = [.command, .control]
+    viewMenu.addItem(browserItem)
+    viewMenu.addItem(NSMenuItem.separator())
+    let fullScreenItem = NSMenuItem(title: L("Enter Full Screen"),
+                                    action: #selector(NSWindow.toggleFullScreen(_:)),
+                                    keyEquivalent: "f")
+    fullScreenItem.keyEquivalentModifierMask = [.command, .control]
+    viewMenu.addItem(fullScreenItem)
+
     let windowMenuItem = NSMenuItem()
     main.addItem(windowMenuItem)
     let windowMenu = NSMenu(title: L("Window"))
@@ -1072,9 +1125,9 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     windowMenu.addItem(withTitle: L("Minimize"),
                        action: #selector(NSWindow.performMiniaturize(_:)),
                        keyEquivalent: "m")
-    windowMenu.addItem(withTitle: L("Close"),
-                       action: #selector(NSWindow.performClose(_:)),
-                       keyEquivalent: "w")
+    windowMenu.addItem(withTitle: L("Zoom"),
+                       action: #selector(NSWindow.performZoom(_:)),
+                       keyEquivalent: "")
     windowMenu.addItem(NSMenuItem.separator())
     let pickerItem = NSMenuItem(title: L("Workspace Manager"),
                                 action: #selector(ACAppDelegate.openProfileManagerAction(_:)),
@@ -1100,7 +1153,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     approvalsItem.target = delegate
     windowMenu.addItem(approvalsItem)
 
-    let securityTimelineItem = NSMenuItem(title: L("Security Timeline…"),
+    let securityTimelineItem = NSMenuItem(title: L("Security…"),
                                           action: #selector(ACAppDelegate.openSecurityTimelineAction(_:)),
                                           keyEquivalent: "")
     securityTimelineItem.target = delegate
@@ -1122,6 +1175,18 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     // appear here as the user opens them — Picker / Trace Inspector /
     // session windows all routable from one place.
     NSApp.windowsMenu = windowMenu
+
+    // Help menu — macOS adds the menu-search field to it automatically.
+    let helpMenuItem = NSMenuItem()
+    main.addItem(helpMenuItem)
+    let helpMenu = NSMenu(title: L("Help"))
+    helpMenuItem.submenu = helpMenu
+    let manualItem = NSMenuItem(title: String(format: L("%@ Manual"), appName),
+                                action: #selector(ACAppDelegate.openManualAction(_:)),
+                                keyEquivalent: "?")
+    manualItem.target = delegate
+    helpMenu.addItem(manualItem)
+    NSApp.helpMenu = helpMenu
     return main
 }
 
@@ -2127,8 +2192,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The injection scan every message between agents goes through:
         // its first inference pays a ~0.75 s warm-up (10 ms after) — take
         // it now, off the critical path, not on the first request.
-        Task.detached(priority: .utility) {
-            _ = await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: "warm up")])
+        // Only when some workspace actually has injection detection on —
+        // otherwise the model stays unloaded until the first delegation scan
+        // (B46: an idle app shouldn't hold the classifier resident).
+        if profiles.contains(where: { $0.promptInjection.detectSourceInjection }) {
+            Task.detached(priority: .utility) {
+                _ = await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: "warm up")])
+            }
         }
         return e
     }()
@@ -3222,6 +3292,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         migrateBedrockWorkspaces()
         migrateLegacyOmpWorkspaces()
         installLiveModelRefresh()
+        // B46: release the ONNX classifiers no running workspace needs.
+        ClassifierLifecycle.start(running: { [weak self] in
+            guard let self else { return [] }
+            return self.profiles.filter { self.runningSessions[$0.id] != nil }
+        })
         provisionKimiRecordsIfNeeded()
         NotificationCenter.default.addObserver(
             forName: .bromureSubscriptionStoresChanged, object: nil, queue: .main
@@ -5148,10 +5223,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onAgentSessionTranscript = { [weak self] sid in
             guard let self, let s = await MainActor.run(body: { self.agentSessionStore.session(sid) }) else { return nil }
-            // The live file when the machine can be read (fresher), else the
-            // local copy — the same order the local Ended page uses.
-            if let live = await self.fetchSessionTranscript(s), !live.isEmpty { return Data(live.utf8) }
-            return await MainActor.run { self.agentSessionEngine.transcripts.load(s.id) }
+            // The local copy with the live file's tail merged in (a 300 KB
+            // tail alone dropped everything before it).
+            return await self.agentSessionEngine.readableTranscript(s)
         }
         // The Signal / WhatsApp connector: POST /connector {action: create |
         // start | stop | restart | delete | status | send {text, channel?} |
@@ -7520,21 +7594,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false)
-        win.title = NSLocalizedString("Security Timeline", comment: "")
+        win.title = NSLocalizedString("Security", comment: "security window title")
         win.center()
         win.delegate = self
         win.isReleasedWhenClosed = false
         win.contentView = NSHostingView(rootView: SecurityTimelineView(
             onClose: { [weak self] in self?.securityTimelineWindow = nil },
             postures: { [weak self] in
-                (self?.profiles ?? []).map { p in
-                    SecurityPosture(id: p.id, name: p.name, colorHex: p.color.hexInUI,
-                                    firewall: p.resolvedEgressPolicy.isActive,
-                                    supplyChain: p.supplyChain.isActive,
-                                    guardrails: Self.guardrailsRestrict(p),
-                                    promptInjection: p.promptInjection.isActive,
-                                    pii: p.pii.isActive)
-                }
+                (self?.profiles ?? []).map { SecurityPosture(profile: $0) }
             },
             // Doc/video captures: open on the event log instead of the Overview.
             startOnTimeline: ProcessInfo.processInfo.environment["BROMURE_DEBUG_TIMELINE_TAB"] == "timeline"))
@@ -7789,6 +7856,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// ⌘K — the command palette, over whichever window has the focus.
+    /// The user manual. `defaults write <bundle-id> help.manualURL <url>`
+    /// points it elsewhere (a staging copy, a local build of manual/).
+    static let defaultManualURL = "https://bromure.io/docs"
+
+    /// Help → Manual.
+    @objc func openManualAction(_ sender: Any?) {
+        let raw = UserDefaults.standard.string(forKey: "help.manualURL") ?? Self.defaultManualURL
+        if let url = URL(string: raw) { NSWorkspace.shared.open(url) }
+    }
+
     @objc func commandPaletteAction(_ sender: Any?) {
         if let rw = keyRemoteWindow { rw.showCommandPalette(); return }
         let w = ensureUnifiedWindow()
@@ -8276,8 +8353,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// workspace (nil when it isn't running or nothing is there).
     func fetchSessionTranscript(_ s: AgentSession) async -> String? {
         let cwd = ScheduledAutomationEngine.guestPath(s.cwd)
+        // A Kimi session's own journal when the engine pinned it — the
+        // folder's newest may be another conversation (B72).
+        var pin = TranscriptPin()
+        if s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            pin.kimiSession = id
+        }
         guard let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0,
-                                                               agent: s.tool.rawValue) else { return nil }
+                                                               agent: s.tool.rawValue, pin: pin) else { return nil }
         let out: String?
         if let m = attachedMachines[s.profileID] {
             out = try? await m.hostExec(cmd, timeout: 20)   // an attached machine's session
@@ -8362,12 +8445,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let hosts = remoteHostWindows.values
             .map { PreferencesRemoteHost(id: $0.controller.host.id, name: $0.controller.host.name) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let pickerBar: CGFloat = hosts.isEmpty ? 0 : 44
+        let ideal = ProfileEditorView.idealWindowSize
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: hosts.isEmpty ? 620 : 664),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: ideal.width, height: ideal.height + pickerBar),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
+        win.contentMinSize = NSSize(width: ProfileEditorView.minWindowSize.width,
+                                    height: ProfileEditorView.minWindowSize.height + pickerBar)
         win.title = Self.preferencesTitle(for: initial, hosts: hosts)
-        win.center()
+        placeSettingsWindow(win, avoiding: editorWindow)
         win.isReleasedWhenClosed = false
         win.delegate = self
         win.contentView = NSHostingView(rootView: PreferencesWindowView(
@@ -8399,6 +8486,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         preferencesWindow = win
+    }
+
+    /// Center a Preferences / workspace-editor window — cascaded off the other
+    /// one when it's on screen, so the two never open exactly stacked.
+    private func placeSettingsWindow(_ win: NSWindow, avoiding other: NSWindow?) {
+        // The ideal size fits the whole sidebar; on a short screen, shrink to
+        // the visible area (never below the window's minimum).
+        if let vis = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame {
+            var f = win.frame
+            let minFrame = win.frameRect(forContentRect: NSRect(origin: .zero, size: win.contentMinSize))
+            f.size.height = max(minFrame.height, min(f.height, vis.height - 40))
+            f.size.width = max(minFrame.width, min(f.width, vis.width - 40))
+            win.setFrame(f, display: false)
+        }
+        win.center()
+        guard let other, other.isVisible else { return }
+        // Top-left 28 pt right/down of the other window's.
+        var f = win.frame
+        f.origin.x = other.frame.minX + 28
+        f.origin.y = other.frame.maxY - 28 - f.height
+        if let vis = (other.screen ?? NSScreen.main)?.visibleFrame {
+            f.origin.x = min(max(f.origin.x, vis.minX), max(vis.minX, vis.maxX - f.width))
+            f.origin.y = min(max(f.origin.y, vis.minY), max(vis.minY, vis.maxY - f.height))
+        }
+        win.setFrame(f, display: false)
     }
 
     private static func preferencesTitle(for target: PreferencesTarget,
@@ -8997,6 +9109,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         refreshSidebar()
     }
 
+    /// A workspace's editor opened on one pane: a freshly built editor reads
+    /// `pendingWorkspaceCategory` on init; one already open for this
+    /// workspace is switched by the targeted notification.
+    func openEditorWindow(editing profile: Profile, category: EditorCategory) {
+        ProfileEditorView.pendingWorkspaceCategory = (profile.id, category)
+        openEditorWindow(editing: profile)
+        DispatchQueue.main.async {
+            ProfileEditorView.pendingWorkspaceCategory = nil
+            NotificationCenter.default.post(
+                name: .bromureACSelectEditorCategory,
+                object: "workspace:\(profile.id.uuidString.lowercased()):\(category.rawValue.lowercased())")
+        }
+    }
+
     func openEditorWindow(editing: Profile?) {
         // Reuse the open editor ONLY when it's already editing this same
         // profile; for a different profile (or a new-profile draft) tear the
@@ -9014,13 +9140,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         editorEditingProfile = editing
 
+        let ideal = ProfileEditorView.idealWindowSize
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: ideal.width, height: ideal.height),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false
         )
+        win.contentMinSize = NSSize(width: ProfileEditorView.minWindowSize.width,
+                                    height: ProfileEditorView.minWindowSize.height)
         win.title = editing?.name ?? NSLocalizedString("New workspace", comment: "editor window title")
-        win.center()
+        placeSettingsWindow(win, avoiding: preferencesWindow)
         // For new profiles, hand the editor a draft pre-populated from
         // the user's preferences template (Bromure → Preferences…)
         // and a numbered placeholder name so the user can save
@@ -9626,9 +9755,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let existing = profileByNameOrID(idOrName) else {
                 return ["ok": false, "error": "Workspace not found: \(idOrName)"]
             }
-            guard let data = try? JSONSerialization.data(withJSONObject: doc),
-                  var incoming = try? JSONDecoder.iso8601().decode(Profile.self, from: data) else {
-                return ["ok": false, "error": "Invalid profile document"]
+            // A partial document (only the fields to change) is overlaid on
+            // the stored workspace; a full one replaces every field it names.
+            var incoming: Profile
+            switch ProfileDocument.merge(doc, over: existing) {
+            case .success(let p): incoming = p
+            case .failure(let e): return ["ok": false, "error": e.message]
             }
             // Server-owned identity — never trust the client's copies.
             incoming.id = existing.id
@@ -9682,14 +9814,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let name = (doc["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !name.isEmpty else { return ["ok": false, "error": "A workspace name is required."] }
             let minted = store.newProfileFromTemplate(name: name)
-            guard let mData = try? JSONEncoder.iso8601().encode(minted),
-                  var base = (try? JSONSerialization.jsonObject(with: mData)) as? [String: Any] else {
-                return ["ok": false, "error": "Internal error seeding the workspace."]
-            }
-            for (k, v) in doc { base[k] = v }
-            guard let data = try? JSONSerialization.data(withJSONObject: base),
-                  var created = try? JSONDecoder.iso8601().decode(Profile.self, from: data) else {
-                return ["ok": false, "error": "Invalid profile document"]
+            var created: Profile
+            switch ProfileDocument.merge(doc, over: minted) {
+            case .success(let p): created = p
+            case .failure(let e): return ["ok": false, "error": e.message]
             }
             // Force server-owned identity regardless of what the doc carried.
             created.id = minted.id
@@ -10797,6 +10925,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // And for the supply-chain prompts.
             let scBroker = engine.supplyChainBroker
             Task.detached { await scBroker.setProfileName(nameCopy, for: pidCopy) }
+            // And the prompt-injection prompt (B68: it read "in “this
+            // workspace”" — nothing ever told it the name).
+            Task.detached {
+                await HTTPMitmConnection.promptInjectionBroker.setProfileName(nameCopy, for: pidCopy)
+            }
             let agentKeys = loadAgentKeys(for: profile)
             engine.sshAgent.setKeys(agentKeys, for: profile.id)
             // AWS creds: pushed to the host-side server. The guest's

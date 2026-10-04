@@ -154,22 +154,47 @@ final class TranscriptSearchIndex {
     }
 
     /// The last model the agent logged: Claude's per-message `"model"`,
-    /// Codex's turn context. Claude's `<synthetic>` stand-in is skipped.
+    /// Codex's turn context, Kimi's `modelAlias`. Placeholders an agent
+    /// logs in the model slot (Claude's `<synthetic>`, Kimi's internal
+    /// "agent-loop") are skipped.
     nonisolated static func model(in data: Data) -> String? {
         let raw = String(decoding: data.suffix(2_000_000), as: UTF8.self)
         func last(_ pattern: String) -> String? {
             guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
             let all = re.matches(in: raw, range: NSRange(raw.startIndex..., in: raw))
-            return all.last.flatMap { Range($0.range(at: 1), in: raw).map { String(raw[$0]) } }
+            for m in all.reversed() {
+                guard let r = Range(m.range(at: 1), in: raw) else { continue }
+                let v = String(raw[r])
+                if !placeholderModels.contains(v.lowercased()) { return v }
+            }
+            return nil
         }
         // An assistant message's own model first: a bare "model" key can
         // just as well sit in a tool's input or a file the agent read.
         return last(#""message"\s*:\s*\{\s*"model"\s*:\s*"([^"<]{2,80})""#)
+            ?? last(#""modelAlias"\s*:\s*"([^"<]{2,80})""#)
             ?? last(#""model"\s*:\s*"([^"<]{2,80})""#)
     }
 
-    /// "claude-opus-4-5-20251101" → "Opus 4.5"; anything else as logged.
+    /// Values agents put in a model field that name no model.
+    nonisolated static let placeholderModels: Set<String> = ["agent-loop", "synthetic", "unknown", "default"]
+
+    /// "claude-opus-4-5-20251101" → "Opus 4.5"; "kimi-code/kimi-for-coding"
+    /// → "Kimi for Coding"; anything else as logged (minus a provider prefix).
     nonisolated static func prettyModel(_ m: String) -> String {
+        var m = m
+        // "provider/model" (Kimi's alias, OpenRouter ids): the model part.
+        if let slash = m.lastIndex(of: "/"), m.index(after: slash) < m.endIndex {
+            m = String(m[m.index(after: slash)...])
+        }
+        if m.lowercased().hasPrefix("kimi-") {
+            let small: Set<String> = ["for", "with", "and", "of"]
+            return m.split(separator: "-").enumerated().map { i, w in
+                let s = String(w)
+                if i > 0, small.contains(s.lowercased()) { return s.lowercased() }
+                return s.prefix(1).uppercased() + s.dropFirst()
+            }.joined(separator: " ")
+        }
         guard m.hasPrefix("claude-") else { return m }
         let parts = m.dropFirst("claude-".count).split(separator: "-").map(String.init)
             .filter { !($0.count == 8 && $0.allSatisfy(\.isNumber)) }
@@ -180,6 +205,18 @@ final class TranscriptSearchIndex {
     }
 
     func model(_ id: UUID) -> String? { entries[id]?.model.map(Self.prettyModel) }
+
+    /// The session's model; before its transcript names one (a session
+    /// still starting), the one its agent last used on the same machine —
+    /// so the header doesn't gain the model only once the agent is ready.
+    func model(for s: AgentSession, among sessions: [AgentSession]) -> String? {
+        if let m = model(s.id) { return m }
+        return sessions
+            .filter { $0.id != s.id && $0.profileID == s.profileID && $0.tool == s.tool }
+            .compactMap { o in entries[o.id].flatMap { e in e.model.map { (e.modified, $0) } } }
+            .max { $0.0 < $1.0 }
+            .map { Self.prettyModel($0.1) }
+    }
 
     func timeline(_ id: UUID) -> SessionTimeline? {
         entries[id].flatMap { $0.timeline.turns.isEmpty ? nil : $0.timeline }
@@ -196,28 +233,73 @@ final class TranscriptSearchIndex {
         return "\(s)s"
     }
 
-    /// Token use as the agent logged it: Claude's per-message `usage`
-    /// summed; Codex's running `total_token_usage`, its last value.
+    /// How full the conversation's context is, as the agent last logged it:
+    /// the LATEST model call's prompt (fresh input + cache writes + cache
+    /// reads) plus its reply — not a running sum. Summing per-message usage
+    /// counted the cached prefix again on every call, so a one-line turn
+    /// could add 180k "tokens".
+    ///   - Claude: the last `usage` with `input_tokens`
+    ///   - Codex: `last_token_usage` (its `input_tokens` include the cached)
+    ///   - Kimi: the last `usage` with `inputOther` / `inputCacheRead`
+    ///   - omp (pi): the last `usage` with `cacheRead`
     nonisolated static func tokens(in data: Data) -> TokenUsage {
-        let raw = String(decoding: data, as: UTF8.self)
-        func ints(_ pattern: String, in s: String) -> [Int] {
-            guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
-            return re.matches(in: s, range: NSRange(s.startIndex..., in: s)).compactMap {
-                Range($0.range(at: 1), in: s).flatMap { Int(s[$0]) }
+        let raw = String(decoding: data.suffix(4_000_000), as: UTF8.self)
+        func int(_ key: String, in s: Substring) -> Int {
+            guard let r = s.range(of: "\"\(key)\"") else { return 0 }
+            var rest = s[r.upperBound...].drop(while: { $0 == " " || $0 == ":" })
+            rest = rest.prefix(while: \.isNumber)
+            return Int(rest) ?? 0
+        }
+        /// The text after the last `anchor` in `line` up to the end of the
+        /// object holding it (braces balanced, so a nested object inside —
+        /// Claude's `cache_creation` — doesn't cut it short).
+        func object(after anchor: String, in line: Substring) -> Substring? {
+            guard let r = line.range(of: anchor, options: .backwards) else { return nil }
+            let tail = line[r.upperBound...]
+            // The anchor is either a key whose value is the object
+            // (`"usage":{…}`) or a key inside it (`"inputOther":1,…}`): stop
+            // where that object closes.
+            var depth = 0
+            for i in tail.indices {
+                switch tail[i] {
+                case "{": depth += 1
+                case "}":
+                    if depth == 0 { return tail[..<i] }
+                    depth -= 1
+                    if depth == 0 { return tail[...i] }
+                default: break
+                }
+            }
+            return tail
+        }
+        for line in raw.split(whereSeparator: \.isNewline).reversed() {
+            if line.contains("\"last_token_usage\""),
+               let u = object(after: "\"last_token_usage\"", in: line) {
+                let input = int("input_tokens", in: u), cached = int("cached_input_tokens", in: u)
+                return TokenUsage(input: max(0, input - cached), cached: cached, output: int("output_tokens", in: u))
+            }
+            if line.contains("\"inputOther\""), let u = object(after: "\"inputOther\"", in: line) {
+                let full = "\"inputOther\"" + u
+                return TokenUsage(input: int("inputOther", in: Substring(full)) + int("inputCacheCreation", in: Substring(full)),
+                                  cached: int("inputCacheRead", in: Substring(full)),
+                                  output: int("output", in: Substring(full)))
+            }
+            // An assistant message's own usage — a Task tool's result (a
+            // user line) carries its subagent's.
+            if line.contains("\"input_tokens\""), line.contains("\"usage\""),
+               !line.contains("\"type\":\"user\""),
+               let u = object(after: "\"usage\"", in: line), u.contains("\"input_tokens\"") {
+                return TokenUsage(input: int("input_tokens", in: u) + int("cache_creation_input_tokens", in: u),
+                                  cached: int("cache_read_input_tokens", in: u),
+                                  output: int("output_tokens", in: u))
+            }
+            if line.contains("\"cacheRead\""), line.contains("\"usage\""),
+               let u = object(after: "\"usage\"", in: line), u.contains("\"cacheRead\"") {
+                return TokenUsage(input: int("input", in: u) + int("cacheWrite", in: u),
+                                  cached: int("cacheRead", in: u), output: int("output", in: u))
             }
         }
-        if let r = raw.range(of: "\"total_token_usage\"", options: .backwards) {
-            let tail = String(raw[r.lowerBound...].prefix(400))
-            let input = ints(#""input_tokens":\s*(\d+)"#, in: tail).first ?? 0
-            let cached = ints(#""cached_input_tokens":\s*(\d+)"#, in: tail).first ?? 0
-            let output = ints(#""output_tokens":\s*(\d+)"#, in: tail).first ?? 0
-            return TokenUsage(input: max(0, input - cached), cached: cached, output: output)
-        }
-        return TokenUsage(
-            input: ints(#""input_tokens":\s*(\d+)"#, in: raw).reduce(0, +)
-                + ints(#""cache_creation_input_tokens":\s*(\d+)"#, in: raw).reduce(0, +),
-            cached: ints(#""cache_read_input_tokens":\s*(\d+)"#, in: raw).reduce(0, +),
-            output: ints(#""output_tokens":\s*(\d+)"#, in: raw).reduce(0, +))
+        return TokenUsage()
     }
 
     /// Sessions whose conversation mentions `query`, each with the words

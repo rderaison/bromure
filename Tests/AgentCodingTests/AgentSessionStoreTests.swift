@@ -291,6 +291,77 @@ struct AgentSessionStoreTests {
         #expect(store.session(s.id)?.bootID == nil)
     }
 
+    @Test("a resume that boots the machine fresh unbinds the session but never calls it finished")
+    func resumeFreshBootIsNotFinished() {
+        let store = tempStore()
+        let ws = UUID()
+        var s = AgentSession(profileID: ws, tool: .claude, title: "Wago", cwd: "~/wago", windowIndex: 2)
+        s.launchDisplay = "Wago"
+        s.bootID = "boot-a"
+        store.upsert(s)
+        // The resume marks it under way before it wakes the machine…
+        store.mutate(s.id) { $0.launchingSince = Date(); $0.launchBaselineIndex = nil }
+        // …and the machine came back from a fresh boot.
+        #expect(!store.checkBoot(s.id, bootID: "boot-b"))
+        let after = store.session(s.id)!
+        #expect(after.windowIndex == nil)
+        #expect(after.endedAt == nil)
+        #expect(!after.hasEnded)
+        let model = SessionListModel()
+        model.profileRows = [SessionListModel.ProfileRow(id: ws, name: "Daily", accentHex: "#000000",
+                                                         state: .suspended, compromised: false)]
+        #expect(SessionHome.bucket(for: after, in: model) == .working)
+        #expect(SessionHome.statusLine(for: after, in: model) == "Waking up…")
+        // The tab missing from the new boot's roster doesn't end it either.
+        let t0 = Date()
+        store.reconcile(entries: [roster(ws, [TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu")])], now: t0)
+        store.reconcile(entries: [roster(ws, [TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu")])],
+                        now: t0.addingTimeInterval(AgentSessionStore.missingGrace + 1))
+        #expect(store.session(s.id)?.endedAt == nil)
+    }
+
+    @Test("an ended session that can be resumed reads Paused; just relaunched reads Starting")
+    func pausedVocabulary() {
+        let store = tempStore()
+        let ws = UUID()
+        var s = AgentSession(profileID: ws, tool: .claude, title: "Lux", cwd: "~/lux")
+        s.endedAt = Date()
+        store.upsert(s)
+        let model = SessionListModel()
+        #expect(SessionHome.bucket(for: s, in: model) == .ended)
+        #expect(SessionHome.statusLine(for: s, in: model) == "Paused")
+        #expect(SessionBucket.ended.title == SessionBucket.asleep.title)
+        // Relaunched a moment ago, no probe verdict yet: starting, whatever
+        // the tab's label says; a verdict (or time) ends that.
+        var r = AgentSession(profileID: ws, tool: .claude, title: "Lux", cwd: "~/lux", windowIndex: 1)
+        r.resumedAt = Date()
+        #expect(SessionHome.isStartingUp(r))
+        r.agentAlive = true
+        #expect(!SessionHome.isStartingUp(r))
+        r.agentAlive = nil
+        #expect(!SessionHome.isStartingUp(r, now: Date().addingTimeInterval(SessionHome.startingGrace + 1)))
+    }
+
+    @Test("Kimi between turns reads Ready; while its journal says a turn runs, Working")
+    func kimiTurnFromTranscript() {
+        let store = tempStore()
+        let ws = UUID()
+        var s = AgentSession(profileID: ws, tool: .kimi, title: "Hello", cwd: "~/hello", windowIndex: 1)
+        s.agentAlive = true
+        store.upsert(s)
+        let tab = TabsModel.Tab(label: "kimi", index: 1, cwd: "/home/ubuntu/hello")
+        let model = SessionListModel()
+        model.headlessEntries = [roster(ws, [TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu"), tab])]
+        model.profileRows = [SessionListModel.ProfileRow(id: ws, name: "QA", accentHex: "#000000",
+                                                         state: .running, compromised: false)]
+        // Alive, hooks idle: Ready — not Finished.
+        #expect(SessionHome.bucket(for: store.session(s.id)!, in: model) == .idle)
+        store.setTranscriptWorking(s.id, true)
+        #expect(SessionHome.bucket(for: store.session(s.id)!, in: model) == .working)
+        store.setTranscriptWorking(s.id, false)
+        #expect(SessionHome.bucket(for: store.session(s.id)!, in: model) == .idle)
+    }
+
     @Test("the liveness probe's boot line parses and doesn't read as a window")
     func probeBootLine() {
         let out = "boot\t6f1c2d3e-aaaa-bbbb-cccc-0123456789ab\n2\tclaude\t\tWago\n"

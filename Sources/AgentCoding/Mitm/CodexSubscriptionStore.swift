@@ -260,12 +260,60 @@ public enum CodexSubscriptionError: Error, CustomStringConvertible {
     case noCredential
     case refreshHTTP(Int)
     case malformedRefreshResponse
+    /// The login is flagged "needs sign-in" (OpenAI rejected its refresh, or
+    /// invalidated a freshly refreshed token): nothing is injected until the
+    /// user signs in again.
+    case reauthRequired
     public var description: String {
         switch self {
         case .noCredential: return "no Codex subscription credential registered"
         case .refreshHTTP(let c): return "Codex OAuth refresh failed (HTTP \(c))"
         case .malformedRefreshResponse: return "Codex OAuth refresh returned an unexpected body"
+        case .reauthRequired: return "the ChatGPT sign-in was invalidated; sign in again from Bromure"
         }
+    }
+
+    /// The provider REJECTED the grant (as opposed to a transient failure):
+    /// only a new sign-in fixes it.
+    public var isRejection: Bool {
+        switch self {
+        case .noCredential, .reauthRequired: return true
+        case .refreshHTTP(let code): return (400...403).contains(code)
+        case .malformedRefreshResponse: return false
+        }
+    }
+}
+
+/// What the proxy tells Codex when the host has no usable ChatGPT login:
+/// a 401 whose message says where to fix it. Codex's own retry path then
+/// tries a refresh — answered with ``refreshRejectedJSON`` — and prints its
+/// "sign in again" banner, which the session view turns into a sign-in card.
+public enum CodexSignInExpired {
+    public static let message =
+        "Your ChatGPT sign-in expired or was invalidated. Sign in again from Bromure (the session's sign-in card or Preferences → Models) — not with codex login inside the VM."
+
+    /// Body for a chatgpt.com / api.openai.com request answered locally.
+    public static var apiErrorJSON: [String: Any] {
+        ["error": ["message": message, "type": "invalid_request_error",
+                   "code": "token_invalidated", "param": NSNull()] as [String: Any],
+         "status": 401]
+    }
+
+    /// Body for a stand-in refresh the host couldn't honour. Codex classes
+    /// `refresh_token_invalidated` as permanent and stops retrying.
+    public static func refreshRejectedJSON(_ error: Error) -> [String: Any] {
+        ["error": ["code": "refresh_token_invalidated",
+                   "message": "\(message) (\(error))"] as [String: Any],
+         "error_description": "Bromure could not refresh the Codex subscription on the host: \(error)"]
+    }
+
+    /// An upstream 401 whose body says the access token was invalidated
+    /// server-side (sign-out elsewhere, password change, revoked session) —
+    /// not merely expired.
+    public static func isInvalidation(_ response: Data) -> Bool {
+        let text = String(decoding: response.prefix(64 * 1024), as: UTF8.self).lowercased()
+        return text.contains("token_invalidated") || text.contains("token_revoked")
+            || text.contains("authentication token has been invalidated")
     }
 }
 
@@ -277,19 +325,66 @@ public actor CodexSubscriptionRefresher {
     private static let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
     private static let tokenURL = URL(string: "https://auth.openai.com/oauth/token")!
     private static let refreshMargin: TimeInterval = 300
+    /// A 401-driven refresh at most this often per slot, so an upstream that
+    /// 401s for some other reason can't turn every request into a refresh.
+    static let forcedRefreshFloor: TimeInterval = 60
 
-    public init(store: CodexSubscriptionStore) { self.store = store }
+    private var lastRefreshAt: [String: Date] = [:]
+    /// The HTTP stack the refresh goes out on (tests stub it).
+    private let sessionConfiguration: URLSessionConfiguration
 
-    public func accessToken(for profileID: UUID?) async throws -> String {
-        guard let record = store.record(for: profileID) else { throw CodexSubscriptionError.noCredential }
-        if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
-        return try await singleFlight(profileID)
+    public init(store: CodexSubscriptionStore,
+                sessionConfiguration: URLSessionConfiguration = .ephemeral) {
+        self.store = store
+        self.sessionConfiguration = sessionConfiguration
     }
 
-    public func noteUnauthorized(stale: String, for profileID: UUID?) async {
-        guard let record = store.record(for: profileID) else { return }
-        if record.accessToken != stale { return }
-        _ = try? await singleFlight(profileID)
+    /// A currently-valid access token, refreshing proactively near expiry.
+    /// Throws ``CodexSubscriptionError/reauthRequired`` while the login is
+    /// flagged — a dead token is never injected.
+    public func accessToken(for profileID: UUID?) async throws -> String {
+        guard let record = store.record(for: profileID) else { throw CodexSubscriptionError.noCredential }
+        if record.reauthRequiredAt != nil { throw CodexSubscriptionError.reauthRequired }
+        if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
+        return try await singleFlight(profileID, force: false)
+    }
+
+    /// Codex sent its stand-in refresh token (it only does that after OpenAI
+    /// turned a request down): refresh the REAL login now, unless the slot
+    /// was refreshed moments ago. Returns true when a real refresh happened
+    /// on this call, false when the recent one is reused. Throws when the
+    /// login is flagged or the refresh is rejected — the caller must then
+    /// tell Codex the truth instead of handing out fresh stand-ins.
+    @discardableResult
+    public func refreshForStandIn(for profileID: UUID?) async throws -> Bool {
+        guard let record = store.record(for: profileID) else { throw CodexSubscriptionError.noCredential }
+        if record.reauthRequiredAt != nil { throw CodexSubscriptionError.reauthRequired }
+        let slot = store.slotKey(for: profileID)
+        if let last = lastRefreshAt[slot], Date().timeIntervalSince(last) < Self.forcedRefreshFloor {
+            return false
+        }
+        _ = try await singleFlight(profileID, force: true)
+        return true
+    }
+
+    /// Reactive path for an upstream 401 on `stale`: force a real refresh
+    /// (the old code returned early while the token looked unexpired, so an
+    /// invalidated token was injected forever). `invalidated` = the 401 body
+    /// said the token was invalidated server-side: if the token it rejected
+    /// is one we refreshed moments ago, the login itself is dead — flag it.
+    public func noteUnauthorized(stale: String, for profileID: UUID?, invalidated: Bool = false) async {
+        guard let record = store.record(for: profileID),
+              record.accessToken == stale, record.reauthRequiredAt == nil else { return }
+        let slot = store.slotKey(for: profileID)
+        if let last = lastRefreshAt[slot], Date().timeIntervalSince(last) < Self.forcedRefreshFloor {
+            if invalidated {
+                FileHandle.standardError.write(Data(
+                    "[codex-sub] (\(slot)) freshly refreshed token invalidated upstream; sign-in required\n".utf8))
+                store.setReauthRequired(true, for: profileID)
+            }
+            return
+        }
+        _ = try? await singleFlight(profileID, force: true)
     }
 
     /// One refresh per storage slot at a time. The actor alone doesn't
@@ -298,39 +393,49 @@ public actor CodexSubscriptionRefresher {
     /// ``ClaudeSubscriptionRefresher``). Unstructured so a caller giving up
     /// can't cancel a refresh whose rotated token must still be stored.
     private var inflight: [String: Task<String, Error>] = [:]
-    private func singleFlight(_ profileID: UUID?) async throws -> String {
+    private func singleFlight(_ profileID: UUID?, force: Bool) async throws -> String {
         let slot = store.slotKey(for: profileID)
         if let running = inflight[slot] { return try await running.value }
-        let task = Task { try await self.performRefresh(for: profileID) }
+        let task = Task { try await self.performRefresh(for: profileID, slot: slot, force: force) }
         inflight[slot] = task
         defer { inflight[slot] = nil }
         return try await task.value
     }
 
-    private func performRefresh(for profileID: UUID?) async throws -> String {
+    private func performRefresh(for profileID: UUID?, slot: String, force: Bool) async throws -> String {
         guard let record = store.record(for: profileID) else { throw CodexSubscriptionError.noCredential }
-        if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
+        if !force, record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
+        let sent = record.refreshToken
 
         var req = URLRequest(url: Self.tokenURL)
         req.httpMethod = "POST"
+        req.timeoutInterval = 30
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: String] = [
             "grant_type": "refresh_token",
-            "refresh_token": record.refreshToken,
+            "refresh_token": sent,
             "client_id": Self.clientID,
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let session = URLSession(configuration: .ephemeral)
+        let session = URLSession(configuration: sessionConfiguration)
+        defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: req)
+        lastRefreshAt[slot] = Date()
         guard let http = response as? HTTPURLResponse else { throw CodexSubscriptionError.malformedRefreshResponse }
         guard http.statusCode == 200 else {
+            let detail = String(decoding: data.prefix(300), as: UTF8.self)
+            FileHandle.standardError.write(Data(
+                "[codex-sub] refresh (\(slot)) HTTP \(http.statusCode): \(detail)\n".utf8))
             // 400/401/403 = the provider rejected the REFRESH TOKEN itself
-            // (revoked, expired, signed out elsewhere). Nothing retries out of
-            // that — flag the credential so the UI can say "sign-in expired"
-            // instead of every session failing with an opaque auth error. A
-            // 5xx or a rate-limit is transient and must NOT flag.
-            if (400...403).contains(http.statusCode) {
+            // (revoked, expired, reused, signed out elsewhere). Nothing
+            // retries out of that — flag the credential so the UI can say
+            // "sign-in expired" and the proxy stops injecting. Only if the
+            // slot still holds the token we presented (a re-registration
+            // that landed meanwhile is a different, good grant). A 5xx or a
+            // rate-limit is transient and must NOT flag.
+            if (400...403).contains(http.statusCode),
+               store.record(for: profileID)?.refreshToken == sent {
                 store.setReauthRequired(true, for: profileID)
             }
             throw CodexSubscriptionError.refreshHTTP(http.statusCode)
@@ -339,15 +444,24 @@ public actor CodexSubscriptionRefresher {
               let newAccess = json["access_token"] as? String, newAccess.hasPrefix("eyJ")
         else { throw CodexSubscriptionError.malformedRefreshResponse }
 
-        let newRefresh = (json["refresh_token"] as? String) ?? record.refreshToken
+        let newRefresh = (json["refresh_token"] as? String) ?? sent
         let newID = (json["id_token"] as? String).flatMap { $0.hasPrefix("eyJ") ? $0 : nil } ?? record.idToken
         let expiresIn = (json["expires_in"] as? Double)
             ?? ((json["expires_in"] as? Int).map(Double.init)) ?? 3600
 
+        // The slot changed under us (re-registered / signed out): serve what
+        // it holds now rather than resurrect the old grant.
+        if let now = store.record(for: profileID), now.refreshToken != sent {
+            FileHandle.standardError.write(Data(
+                "[codex-sub] refresh (\(slot)) superseded by a newer sign-in; discarded\n".utf8))
+            return now.accessToken
+        }
         let updated = CodexSubscriptionRecord(
             accessToken: newAccess, refreshToken: newRefresh, idToken: newID,
             expiresAt: Date().addingTimeInterval(expiresIn), savedAt: Date())
         try store.update(updated, for: profileID)
+        FileHandle.standardError.write(Data(
+            "[codex-sub] refreshed (\(slot)); next expiry in \(Int(expiresIn))s\n".utf8))
         // Refresh worked — any earlier rejection is stale.
         store.setReauthRequired(false, for: profileID)
         return newAccess

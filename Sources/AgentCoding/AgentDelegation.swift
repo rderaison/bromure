@@ -717,8 +717,8 @@ enum DelegationNotice {
 /// apart from the user's own turns. Several notices typed as one line
 /// (joined with `joiner`) read as one row with a line each.
 /// A line the host typed at the agent — a delegation or Switchboard
-/// notice. Drawn as a system line (glyph, small caps label, grey text, no
-/// card), so it never reads as something the user said.
+/// notice. Drawn as a quoted request: the user turn's card with a neutral
+/// spine and a small-caps label, so it never reads as something the user said.
 struct DelegationNoticeRow: View {
     let text: String
     /// A Switchboard notice rather than a delegation one.
@@ -731,8 +731,16 @@ struct DelegationNoticeRow: View {
             .filter { !$0.isEmpty }
     }
 
+    #if os(iOS) || os(visionOS)
+    private static let textSize: CGFloat = 16
+    #else
+    private static let textSize: CGFloat = 13
+    #endif
+
+    /// Read as a quoted request — the user turn's card, its spine neutral
+    /// (the host typed it, not the user) and a small label over the words.
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 7) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 4) {
                 Image(systemName: switchboard ? "point.3.connected.trianglepath.dotted" : "arrow.triangle.branch")
                     .font(.system(size: 9.5, weight: .semibold))
@@ -742,21 +750,24 @@ struct DelegationNoticeRow: View {
                     .textCase(.uppercase)
                     .tracking(0.5)
             }
-            .foregroundStyle(.tertiary)
-            .fixedSize()
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    Text(line)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            .foregroundStyle(.secondary)
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: Self.textSize))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.vertical, 2)
-        .padding(.leading, 4)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.10))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.5))
+                .frame(width: 3)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 #endif

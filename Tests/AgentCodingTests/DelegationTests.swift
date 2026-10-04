@@ -702,7 +702,8 @@ struct DelegationTests {
         let child = f.sessions.session(f.store.delegation(id)!.childSessionID)!
         #expect(child.profileID == lab)
         #expect(child.parentSessionID == f.parentID)
-        #expect(child.cwd.hasPrefix("~/scan-the-build"))
+        // Named from the title, filler dropped (syntheticFolderName).
+        #expect(child.cwd.hasPrefix("~/scan-build-"))
         #expect(child.worktreeOf == nil)
     }
 

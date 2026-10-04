@@ -468,7 +468,6 @@
 "Allow this request" = "允许此请求";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure 在本机分析代理的 AI 流量以检测被注入的指令——任何数据都不会离开 Mac。每个检测器使用本地模型，首次启用时从 bromure.io 下载。";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "对代理读取的文件内容、网页和工具输出进行评分（Prompt Guard），捕捉藏在恶意仓库中的「忽略先前指令 / 窃取机密」。首次启用时下载约 272 MB。";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "对 Claude Code、Codex 和 Grok 作为权威加载的 CLAUDE.md、AGENTS.md、GROK.md 及其他指令 / 设置文件进行评分。首次启用时下载约 571 MB。";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“记录但继续”将检测记录到安全日志窗口。“询问我该怎么做”会暂停请求并显示被标记的文本。“阻止”会直接让请求失败。";
 "Possible %@ in “%@”" = "“%@”中可能存在%@";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure 标记了代理即将发送给模型的内容（来自 %@）。请在下方查看——放行还是阻止此请求？";
@@ -1811,7 +1810,7 @@
 "Up one folder" = "上一级文件夹";
 "No folders in here yet." = "这里还没有文件夹。";
 "The machine's folders can't be read right now." = "现在无法读取机器的文件夹。";
-"Message %@…  (or drop files)" = "给 %@ 发消息…  （或拖入文件）";
+"Message %@… (or drop files)" = "给 %@ 发消息…（或拖入文件）";
 "Ready · %@" = "就绪 · %@";
 "Ended · %@ ago" = "已结束 · %@前";
 "End “%@”?" = "结束“%@”？";
@@ -2017,7 +2016,7 @@
 "Streaming to bromure.io" = "正在流式发送到 bromure.io";
 "Signed in to bromure.io" = "已登录 bromure.io";
 "Log out" = "登出";
-"Message the agent…  (or drop files)" = "给代理发消息…  （或拖入文件）";
+"Message the agent… (or drop files)" = "给代理发消息…（或拖入文件）";
 "Drop to attach" = "松开以附加";
 "Loading transcript…" = "正在载入记录…";
 "Say what you need — the agent is listening." = "说说你需要什么 — 代理在听。";
@@ -3624,3 +3623,59 @@
 "Created %@" = "创建于 %@";
 "Modified %@" = "修改于 %@";
 "Updated %@" = "更新于 %@";
+"GitHub rejected this workspace's token" = "GitHub 拒绝了此工作区的令牌";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "github.com 令牌已过期、已撤销或输入有误（HTTP 401）。请在 %@ › 凭据 中更新，或选择其他工作区。";
+"Fix the workspace's GitHub token to watch a repository." = "请先修正工作区的 GitHub 令牌，才能监视仓库。";
+"Assigned to %@ — click to change" = "已分配给 %@ — 点击更改";
+"Click to fold the error" = "点击收起错误";
+"Click to read the whole error" = "点击查看完整错误";
+"Deleted workspace" = "已删除的工作区";
+"Open Coding Tasks (⇧⌘T)" = "打开编码任务 (⇧⌘T)";
+"No open tasks" = "没有未完成的任务";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "每次自动化触发时，它的运行都会显示在这里——已排程、进行中、然后完成。先创建一个自动化开始吧。";
+"Open Automations" = "打开自动化";
+"Open Automations (⇧⌘A)" = "打开自动化 (⇧⌘A)";
+"View" = "显示";
+"Help" = "帮助";
+"Close Window" = "关闭窗口";
+"Toggle Sidebar" = "显示/隐藏边栏";
+"Toggle Files Pane" = "显示/隐藏文件面板";
+"Toggle Browser Pane" = "显示/隐藏浏览器面板";
+"Enter Full Screen" = "进入全屏幕";
+"Zoom" = "缩放";
+"%@ Manual" = "%@ 手册";
+"Add a note about this workspace" = "为此工作区添加备注";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "评估每个代理作为权威加载的指令 / 设置文件：CLAUDE.md（Claude Code）、AGENTS.md（Codex、Kimi 和 omp）和 GROK.md（Grok），以及它们的嵌套和全局版本。首次启用时下载约 571 MB。";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "出站连接规则需在运行此工作区的 Mac 上编辑。";
+"Click a protection that's off to turn it on in that workspace's settings." = "点击已关闭的保护，即可在该工作区的设置中将其打开。";
+"Turn on…" = "打开…";
+"%1$@ is on for %2$@. Click to change it." = "%2$@ 的%1$@已打开。点击可更改。";
+"%1$@ is off for %2$@. Click to turn it on." = "%2$@ 的%1$@已关闭。点击可打开。";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "未扫描 — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@（%2$d 次，显示最近一次）";
+
+"Security…" = "安全…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "下载当前版本";
+"Update" = "更新";
+"an unknown version" = "未知版本";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "已过时：共享镜像为 %1$@；此版本的 Agentic Coding 使用 %2$@。请打开 Bromure 让它更新浏览器镜像，或仅为 Agentic Coding 下载当前版本（在 Bromure 跟上之前，将代替共享镜像使用）。";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "已过时：此镜像为 %1$@；当前版本为 %2$@。更新即可下载。";
+"The Linux machine behind this session — available while it runs" = "此会话背后的 Linux 机器 — 仅在运行时可用";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "显示了 1 个媒体";
+"%d media items shown" = "显示了 %d 个媒体";
+"1 chart shown" = "显示了 1 个图表";
+"%d charts shown" = "显示了 %d 个图表";
+"1 file sent" = "发送了 1 个文件";
+"%d files sent" = "发送了 %d 个文件";
+"1 tool result" = "1 个工具结果";
+"%d tool results" = "%d 个工具结果";
+"Available when the workspace is running" = "工作区运行时可用";
+"Video available when the workspace is running" = "工作区运行时可查看视频";
+"Image available when the workspace is running" = "工作区运行时可查看图片";

@@ -1086,8 +1086,13 @@ public final class VMNetSwitch: @unchecked Sendable {
             return true                                       // dropped
         }
 
-        fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                   proto: proto, port: dport, denied: false)
+        // Allow verdicts are only worth a log line / Timeline row when the
+        // firewall is actually on: with no rules (allow-all) every flow would
+        // otherwise be reported as "allowed" by a firewall that's off (B25).
+        if Self.reportsAllowedFlows(g.policy) {
+            fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                       proto: proto, port: dport, denied: false)
+        }
 
         // Allowed: divert intercepted TCP into the MiTM (the SNI layer re-checks
         // the host + `web` rules); otherwise let the native switch forward it.
@@ -1128,6 +1133,12 @@ public final class VMNetSwitch: @unchecked Sendable {
         let interceptor = portInterceptDisabled.contains(srcPortID) ? nil : self.interceptor
         let inspected = pid != nil && (interceptor != nil || (policy?.isActive ?? false))
         return (pid, policy, interceptor, interceptPorts, inspected)
+    }
+
+    /// Whether allowed flows are reported to the egress observer: only when a
+    /// real ruleset is in force (`EgressPolicy.isActive`). Denials always are.
+    static func reportsAllowedFlows(_ policy: EgressPolicy?) -> Bool {
+        policy?.isActive ?? false
     }
 
     /// Fire the observer for a new flow, deduped per (port, dstIP, port, proto),

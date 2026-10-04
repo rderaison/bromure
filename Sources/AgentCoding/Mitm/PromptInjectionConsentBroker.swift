@@ -24,7 +24,8 @@ public actor PromptInjectionConsentBroker {
             return await withCheckedContinuation { c in pending[key, default: []].append(c) }
         }
         pending[key] = []
-        let name = profileNames[profileID] ?? "this workspace"
+        let name = profileNames[profileID]
+            ?? NSLocalizedString("this workspace", comment: "Prompt-injection consent: unnamed workspace")
         let allow: Bool
         let route = RemoteConsent.route(for: profileID)
         if route == .localAlert {

@@ -1356,8 +1356,23 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("GET", path)
         }.value
         guard let resp, resp.status == 200,
-              let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
-        return Data(base64Encoded: b64)
+              let b64 = resp.json["transcript"] as? String, !b64.isEmpty,
+              let data = Data(base64Encoded: b64) else { return nil }
+        rememberTranscript(id, data)
+        return data
+    }
+
+    /// The last few conversations downloaded from the server, by session:
+    /// what a resuming session's launch page and a just-bound chat show
+    /// before their own read comes back over the tunnel.
+    @ObservationIgnored private var transcriptCopies: [UUID: Data] = [:]
+    @ObservationIgnored private var transcriptCopyOrder: [UUID] = []
+    func cachedTranscript(_ id: UUID) -> Data? { transcriptCopies[id] }
+    private func rememberTranscript(_ id: UUID, _ data: Data) {
+        transcriptCopies[id] = data
+        transcriptCopyOrder.removeAll { $0 == id }
+        transcriptCopyOrder.append(id)
+        while transcriptCopyOrder.count > 8 { transcriptCopies[transcriptCopyOrder.removeFirst()] = nil }
     }
 
     // MARK: Actions (client → remote), routed over the tunnel
@@ -2996,7 +3011,7 @@ final class RemoteHostWindow: NSWindow {
             // the handle's x, to get the proposed browser width.
             let fileW = self.filePaneOpen ? self.filePaneWidthConstraint.constant : 0
             let width = content.bounds.width - fileW - x
-            if width < Self.browserPaneMinWidth {
+            if width < Self.browserPaneCloseWidth {
                 if let id = self.shownBrowser { self.setBrowserOpen(id, false) }
             } else {
                 self.setBrowserWidth(self.clampBrowserWidth(width))
@@ -3107,7 +3122,10 @@ final class RemoteHostWindow: NSWindow {
     }
 
     // Browser-pane width bounds (mirror the local window).
-    private static let browserPaneMinWidth: CGFloat = 380
+    /// Chromium's minimum window width (B18); dragging under the close
+    /// width closes the pane, between the two it holds at the floor.
+    private static let browserPaneMinWidth: CGFloat = BrowserDisplaySizing.minPaneWidth
+    private static let browserPaneCloseWidth: CGFloat = 380
     private static let terminalSlotMinWidth: CGFloat = 400
 
     /// Clamp a proposed browser width so the terminal keeps its minimum and the
@@ -3231,9 +3249,10 @@ final class RemoteHostWindow: NSWindow {
             if let win = self.settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
             self.settingsOriginals[id] = profile   // baseline for the restart diff
             let win = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(origin: .zero, size: ProfileEditorView.idealWindowSize),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
+            win.contentMinSize = ProfileEditorView.minWindowSize
             let hostName = c.host.name
             win.title = "\(profile.name) — \(hostName)"
             win.center()
@@ -3462,9 +3481,10 @@ final class RemoteHostWindow: NSWindow {
     private func presentNewWorkspaceEditor(draft: Profile, remoteGlobalModels: ModelSettings) {
         if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(origin: .zero, size: ProfileEditorView.idealWindowSize),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
+        win.contentMinSize = ProfileEditorView.minWindowSize
         // Remote editors keep the "— host" suffix: with several mirrors open,
         // which machine the workspace lands on is the thing you can't guess.
         let hostName = controller.host.name
@@ -4630,7 +4650,8 @@ final class RemoteHostWindow: NSWindow {
         if s.isLaunching {
             showSessionOverlay(SessionLaunchView(
                 store: c.sessionStore, model: model, sessionID: s.id, accent: accent,
-                actions: sessionStageActions))
+                actions: sessionStageActions,
+                cachedTranscript: { [weak c] s in c?.cachedTranscript(s.id) }))
         } else {
             showSessionOverlay(SessionRestView(
                 store: c.sessionStore, model: model, sessionID: s.id, accent: accent,
@@ -4638,7 +4659,7 @@ final class RemoteHostWindow: NSWindow {
                 fetchTranscript: { s in
                     await c.fetchSessionTranscript(s.id).map { String(decoding: $0, as: UTF8.self) }
                 },
-                cachedTranscript: { _ in nil },
+                cachedTranscript: { [weak c] s in c?.cachedTranscript(s.id) },
                 fetchWhenAsleep: true))
         }
     }
@@ -6587,6 +6608,7 @@ final class RemoteHostWindow: NSWindow {
                                                 windowIndex: idx, accent: accent)
         let m = BeautifiedSessionModel(provider: provider)
         m.draftKey = "\(controller.host.id.uuidString):\(id.uuidString):\(idx)"
+        m.cachedTranscript = { [weak controller] sid in controller?.cachedTranscript(sid) }
         // Delegations this session is part of (read-only here: answering
         // for the agent is done on the server's own window), and the jump
         // to the other end's session.

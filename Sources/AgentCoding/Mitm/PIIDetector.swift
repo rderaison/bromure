@@ -68,6 +68,23 @@ actor PIIDetector {
     /// Forget a failed load so a freshly downloaded model is picked up.
     func reload() { loadTask = nil }
 
+    /// Last time the classifier was asked for (load or inference).
+    private var lastUsed = Date.distantPast
+
+    /// Release the ONNX session (+ span cache) when nothing has used it for
+    /// `idle` seconds — called by ClassifierLifecycle when no running
+    /// workspace has PII protection on. The next detect() reloads lazily.
+    /// In-flight scans keep their own reference, so this never races one.
+    @discardableResult
+    func unloadIfIdle(_ idle: TimeInterval) -> Bool {
+        guard loadTask != nil, Date().timeIntervalSince(lastUsed) >= idle else { return false }
+        loadTask = nil
+        cache.removeAll()
+        cacheOrder.removeAll()
+        FileHandle.standardError.write(Data("[pii] Rampart classifier released (idle)\n".utf8))
+        return true
+    }
+
     /// Every PII span in `text` (all labels; the caller applies policy),
     /// sorted and disjoint. `cached` reports whether this exact text was seen
     /// before (history the agent resent).
@@ -194,6 +211,7 @@ actor PIIDetector {
     // MARK: Loading
 
     private func loaded() async -> Loaded? {
+        lastUsed = Date()
         if let t = loadTask { return await t.value }
         let dir = modelDirectory
         let t = Task { () -> Loaded? in

@@ -78,7 +78,7 @@ final class NativeTabBarModel {
     /// field falls back to its placeholder.
     static func displayValue(for tab: TabInfo?) -> String {
         guard let tab, !tab.url.isEmpty, !isNewTabURL(tab.url) else { return "" }
-        guard let url = URL(string: tab.url), let host = url.host else {
+        guard let url = URL(string: tab.url), let host = hostWithPort(url) else {
             return tab.url
         }
         var s = host
@@ -87,6 +87,20 @@ final class NativeTabBarModel {
         if let q = url.query, !q.isEmpty { s += "?" + q }
         if let f = url.fragment, !f.isEmpty { s += "#" + f }
         return s
+    }
+
+    /// `host[:port]` for display: keeps an explicit non-default port (a dev
+    /// server on :8080 must not read as the bare host — the agent and the
+    /// user need the port to reach it again), drops :80/:443 for http/https,
+    /// and re-brackets IPv6 literals. nil when the URL has no host.
+    nonisolated static func hostWithPort(_ url: URL) -> String? {
+        guard var host = url.host, !host.isEmpty else { return nil }
+        if host.contains(":") && !host.hasPrefix("[") { host = "[\(host)]" }
+        guard let port = url.port else { return host }
+        let scheme = url.scheme?.lowercased() ?? ""
+        let isDefault = (scheme == "http" && port == 80) || (scheme == "https" && port == 443)
+            || (scheme == "ws" && port == 80) || (scheme == "wss" && port == 443)
+        return isDefault ? host : "\(host):\(port)"
     }
 
     /// Called when the user clicks a tab or picks one via keyboard.
@@ -606,7 +620,7 @@ private struct InactiveTabPill: View {
             return String(localized: "New Tab")
         }
         if !tab.title.isEmpty { return tab.title }
-        if let url = URL(string: tab.url), let host = url.host { return host }
+        if let url = URL(string: tab.url), let host = NativeTabBarModel.hostWithPort(url) { return host }
         return tab.url.isEmpty ? String(localized: "New Tab") : tab.url
     }
 }
@@ -628,7 +642,7 @@ private struct SiteInfoPopover: View {
 
     private var parsed: URL? { URL(string: url) }
     private var scheme: String { parsed?.scheme?.lowercased() ?? "" }
-    private var host: String { parsed?.host ?? url }
+    private var host: String { parsed.flatMap(NativeTabBarModel.hostWithPort) ?? url }
     private var isSecure: Bool { scheme == "https" }
     private var schemeKnown: Bool { !scheme.isEmpty }
 
@@ -752,7 +766,7 @@ private struct SiteInfoPopover: View {
 
     private func loadCertificate() async {
         guard isSecure, let parsed,
-              let scheme = parsed.scheme, let host = parsed.host
+              let scheme = parsed.scheme, let host = NativeTabBarModel.hostWithPort(parsed)
         else {
             certInfo = nil
             certChain = []
@@ -779,7 +793,7 @@ private struct SiteInfoPopover: View {
     private func openCertificatePanel() {
         guard !certChain.isEmpty,
               let panel = SFCertificatePanel.shared() else { return }
-        panel.setPolicies(SecPolicyCreateSSL(true, host as CFString))
+        panel.setPolicies(SecPolicyCreateSSL(true, (parsed?.host ?? host) as CFString))
         panel.beginSheet(
             for: nil,
             modalDelegate: nil,

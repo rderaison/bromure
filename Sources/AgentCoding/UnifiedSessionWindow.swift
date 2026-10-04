@@ -168,6 +168,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 guard let self else { return }
                 self.effectiveAppearance.performAsCurrentDrawingAppearance {
                     for w in self.canvasViews { w.view?.layer?.backgroundColor = NSColor.acCanvas.cgColor }
+                    // A session's page paints the stage the canvas colour too
+                    // (setSessionHeader) — only while one is shown, and opaque.
+                    if self.sessionHeaderHost?.isHidden == false, self.isOpaque {
+                        self.stage.layer?.backgroundColor = NSColor.acCanvas.cgColor
+                    }
                 }
             }
         }
@@ -351,12 +356,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         return browserPaneOpenWorkspaces.contains(id)
     }
     private var expandedBrowserPaneWidth: CGFloat = 640
-    private static let browserPaneMinWidth: CGFloat = 380
+    /// The pane's floor: Chromium's minimum window width (B18) — narrower,
+    /// the page used to be clipped on the right. Only a window too narrow to
+    /// hold chat + browser squeezes it further (the chat's floor wins); the
+    /// browser then overscans its display to keep the page whole.
+    static let browserPaneMinWidth: CGFloat = BrowserDisplaySizing.minPaneWidth
+    /// Dragging the pane under this closes it; between this and the floor
+    /// the drag just holds at the floor.
+    private static let browserPaneCloseWidth: CGFloat = 380
     private static let browserPaneMaxWidth: CGFloat = 1400
     private static let browserPaneDefaultWidth: CGFloat = 640
     /// Floor the terminal/pane slot keeps when the browser pane is open —
     /// the clamp that stops the pane from growing the window off-screen.
-    private static let terminalSlotMinWidth: CGFloat = 240
+    /// It is also the chat's floor: below ~360 pt a prompt wraps to a word
+    /// a line and the header can't fit (B15), so the side panes give way
+    /// (the Files pane doesn't pop open, the browser closes it) instead.
+    static let terminalSlotMinWidth: CGFloat = 360
     private static let browserPaneWidthKey = "ac.browserPaneWidth"
 
     init(acDelegate: ACAppDelegate) {
@@ -485,6 +500,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         stage.translatesAutoresizingMaskIntoConstraints = false
         stage.wantsLayer = true
         stage.layer?.backgroundColor = NSColor.black.cgColor
+        // B14: nothing on the stage ever draws over the sidebar (a header
+        // wider than its slot was centred and spilled left across it).
+        stage.clipsToBounds = true
+        paneSlot.clipsToBounds = true
         paneSlot.translatesAutoresizingMaskIntoConstraints = false
         emptyStateHost.translatesAutoresizingMaskIntoConstraints = false
         stage.addSubview(paneSlot)
@@ -499,6 +518,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // backing), and any slack between the header's content and its slot
         // must read as window, never as a black bar.
         headerHost.wantsLayer = true
+        headerHost.clipsToBounds = true
         paintCanvas(headerHost)
         headerHost.isHidden = true
         self.sessionHeaderHost = headerHost
@@ -598,6 +618,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // Tasks-first stage overlay (task detail / inline review / composer).
         sessionSlot.translatesAutoresizingMaskIntoConstraints = false
         sessionSlot.wantsLayer = true
+        sessionSlot.clipsToBounds = true
         paintCanvas(sessionSlot)
         sessionSlot.isHidden = true
         stage.addSubview(sessionSlot)
@@ -672,7 +693,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             // right edge before measuring.
             let fileW = self.filePaneOpen ? (self.filePaneWidthConstraint?.constant ?? 0) : 0
             let width = self.stage.bounds.width - fileW - x
-            if width < Self.browserPaneMinWidth {
+            if width < Self.browserPaneCloseWidth {
                 self.setBrowserPaneOpen(false, animated: true)
             } else {
                 self.browserPaneWidthConstraint?.constant = self.clampedBrowserPaneWidth(width)
@@ -934,14 +955,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Open/close the right file pane. Closed = width 0 and hidden (no rail);
     /// drag-to-close under the min width lands here too. Open state persists
     /// so the pane comes back after an app restart.
-    func setFilePaneOpen(_ open: Bool, animated: Bool) {
+    func setFilePaneOpen(_ open: Bool, animated: Bool, width: CGFloat? = nil) {
         guard open != filePaneOpen else { return }
         filePaneOpen = open
         listModel.filePaneOpen = open
         UserDefaults.standard.set(open, forKey: Self.filePaneOpenKey)
         filePaneResizeHandle?.isHidden = !open
         if open { filePaneHost.isHidden = false }
-        let target = open ? expandedFilePaneWidth : 0
+        let target = open ? (width ?? expandedFilePaneWidth) : 0
         // @Sendable for runAnimationGroup's completion handler; it always fires
         // on the main thread, so the isolation assumption holds.
         let hideWhenClosed: @Sendable () -> Void = { [weak self] in
@@ -1153,8 +1174,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// off-screen — the pane-width constraint outranks NSWindow's
     /// windowSizeStayPut, so an over-wide value pushes the window edge
     /// past the screen instead of squeezing the terminal.
-    private func clampedBrowserPaneWidth(_ desired: CGFloat) -> CGFloat {
-        let fileW = filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0
+    private func clampedBrowserPaneWidth(_ desired: CGFloat, fileWidth: CGFloat? = nil) -> CGFloat {
+        let fileW = fileWidth ?? (filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0)
         let available = stage.bounds.width - fileW - Self.terminalSlotMinWidth
         return max(Self.browserPaneMinWidth,
                    min(desired, min(Self.browserPaneMaxWidth, available)))
@@ -1183,21 +1204,40 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             shownBrowser = nil
         }
 
-        let target = open ? clampedBrowserPaneWidth(expandedBrowserPaneWidth) : 0
+        // B15/B19: the browser and the Files pane together can't leave the
+        // chat under its floor. Opening the browser where they wouldn't fit
+        // folds the Files pane away in the SAME move — one animation to the
+        // final widths, not a browser slide followed by a squeeze.
+        var foldFiles = false
+        let stageW = stage.bounds.width
+        if open, filePaneOpen, stageW > 0, browserPaneWidthConstraint?.constant == 0 {
+            let fileW = filePaneWidthConstraint?.constant ?? 0
+            foldFiles = stageW - fileW - Self.terminalSlotMinWidth < Self.browserPaneMinWidth
+        }
+        if foldFiles {
+            filePaneOpen = false
+            listModel.filePaneOpen = false
+            UserDefaults.standard.set(false, forKey: Self.filePaneOpenKey)
+            filePaneResizeHandle?.isHidden = true
+        }
+        let target = open ? clampedBrowserPaneWidth(expandedBrowserPaneWidth, fileWidth: foldFiles ? 0 : nil) : 0
         let hideWhenClosed: @Sendable () -> Void = { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, !self.browserPaneOpen else { return }
-                self.browserPaneHost.isHidden = true
+                guard let self else { return }
+                if !self.browserPaneOpen { self.browserPaneHost.isHidden = true }
+                if !self.filePaneOpen { self.filePaneHost.isHidden = true }
             }
         }
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.18
                 ctx.allowsImplicitAnimation = true
+                if foldFiles { self.filePaneWidthConstraint?.animator().constant = 0 }
                 self.browserPaneWidthConstraint?.animator().constant = target
                 self.contentView?.layoutSubtreeIfNeeded()
             }, completionHandler: hideWhenClosed)
         } else {
+            if foldFiles { filePaneWidthConstraint?.constant = 0 }
             browserPaneWidthConstraint?.constant = target
             hideWhenClosed()
         }
@@ -2011,6 +2051,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// app delegate on pane add/remove). No-op when nothing changed.
     /// Ticks the session on stage has been missing from the store.
     private var missingSessionTicks = 0
+    /// Workspaces a live session on stage is having a pane attached for.
+    private var attachingForSession: Set<Profile.ID> = []
 
     func sessionStageDidChange() {
         guard let id = selectedSessionID else { return }
@@ -2037,6 +2079,27 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // session's shell is reachable as a terminal from the Machines list.
         let liveChat = livePosition != nil && (pane(s.profileID) != nil || machine?.connected == true)
             && bucket != .ended
+        // B73: a live session in a workspace that runs with no pane here
+        // (booted detached — at startup, by an automation or a CLI start —
+        // or its window was closed with the VM kept up). Its roster still
+        // reads (the headless entry), so the sidebar said "Needs you" while
+        // the stage, finding no tab position, fell to the resting surface:
+        // "Paused. Your next message picks it up", the local copy instead
+        // of the live file, and no card for the agent's approval prompt.
+        // Attach a pane quietly; its arrival re-plans this stage.
+        if livePosition == nil, machine == nil, s.windowIndex != nil,
+           bucket == .needsYou || bucket == .working || bucket == .idle,
+           !delegate.isAttached(s.profileID), delegate.runningSessions[s.profileID] != nil,
+           !attachingForSession.contains(s.profileID) {
+            let pid = s.profileID
+            attachingForSession.insert(pid)
+            DispatchQueue.main.async { [weak self] in
+                self?.attachingForSession.remove(pid)
+                guard let delegate = self?.acDelegate, !delegate.isAttached(pid),
+                      let running = delegate.runningSessions[pid] else { return }
+                delegate.attachWindow(to: running, quiet: true)
+            }
+        }
         let key: String
         if DemoMode.isLive(s.id) {
             key = "demo:\(s.id.uuidString)"
@@ -2130,7 +2193,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard key != revealedChangesKey else { return }
         revealedChangesKey = key
         guard !filePaneOpen else { return }
-        setFilePaneOpen(true, animated: true)
+        // B15: never at the chat's expense. With the browser open the Files
+        // pane opens only as wide as the room left over (at least its
+        // minimum), else not at all — the toolbar still opens it by hand.
+        guard let width = autoFilePaneWidth() else { return }
+        setFilePaneOpen(true, animated: true, width: width)
+    }
+
+    /// How wide the Files pane can open on its own without squeezing the
+    /// chat below its floor; nil = not without squeezing it.
+    private func autoFilePaneWidth() -> CGFloat? {
+        let stageW = stage.bounds.width
+        guard stageW > 0 else { return expandedFilePaneWidth }
+        let browserW = browserPaneOpen ? (browserPaneWidthConstraint?.constant ?? 0) : 0
+        let room = stageW - browserW - Self.terminalSlotMinWidth
+        guard room >= Self.filePaneMinWidth else { return nil }
+        return min(expandedFilePaneWidth, room)
     }
 
     private static func changesKey(_ id: UUID, _ at: Date) -> String {
@@ -2191,6 +2269,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let m = BeautifiedSessionModel(provider: provider)
         let mid = machine.id
         m.draftKey = "machine:\(mid.uuidString):\(w)"
+        m.cachedTranscript = SessionTranscriptCache.loadDetached
         m.delegationStore = acDelegate?.delegationStore
         m.sessionStore = acDelegate?.homeSessionStore
         m.currentSession = { [weak machine] in machine?.sessionStore.session(profileID: mid, windowIndex: w) }
@@ -2357,6 +2436,19 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             ? SessionHome.headerHeight(selectedSessionID.flatMap { acDelegate?.sessionRecord($0) },
                                        base: Self.sessionHeaderHeightValue)
             : 0
+        // B60: a session surface is a window-colored page. The stage's black
+        // (a terminal's backing) showed as a band under the header for the
+        // first frame, before the surface below had drawn — and the header
+        // was drawn at its old height (title cut off). Canvas behind it, and
+        // the new geometry laid out before anything is displayed.
+        if visible {
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                stage.layer?.backgroundColor = NSColor.acCanvas.cgColor
+            }
+            stage.layoutSubtreeIfNeeded()
+        } else {
+            applyOpacityChrome(for: selectedID.flatMap { pane($0) })
+        }
     }
 
     /// Leave the session surfaces — a machine row, a board or a dashboard
@@ -2391,7 +2483,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         icon: "plus", keywords: "start agent", shortcut: "⌘N") { [weak self] in self?.showNewSession() },
             PaletteItem(section: .actions, title: NSLocalizedString("New Room…", comment: "session menu"),
                         icon: "square.grid.2x2", tint: .indigo, keywords: "group") { [weak self] in self?.promptNewRoom() },
-            PaletteItem(section: .actions, title: NSLocalizedString("Security Timeline", comment: ""),
+            PaletteItem(section: .actions, title: NSLocalizedString("Security", comment: "security window title"),
                         icon: "shield.lefthalf.filled", tint: .green, keywords: "security events firewall audit log overview") {
                 delegate.openSecurityTimelineAction(nil)
             },
@@ -3142,7 +3234,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         self?.acDelegate?.findingStore.markDuplicate(id, of: of)
                     },
                     deleteFinding: { [weak self] id in self?.acDelegate?.findingStore.removeFinding(id) },
-                    editWorkspace: { [weak self] id in self?.acDelegate?.sidebarEditProfile(id) },
+                    // The watch sheet's "Edit Workspace…": its credentials (the
+                    // GitHub token a watch needs).
+                    editWorkspace: { [weak self] id in
+                        guard let d = self?.acDelegate,
+                              let p = d.profiles.first(where: { $0.id == id }) else { return }
+                        d.openEditorWindow(editing: p, category: .credentials)
+                    },
                     fetchRepos: { [weak self] pid in
                         try await self?.acDelegate?.fetchGitHubRepos(profileID: pid) ?? []
                     }))
@@ -3334,7 +3432,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         } else {
             isOpaque = true
             backgroundColor = nil
-            stage.layer?.backgroundColor = NSColor.black.cgColor
+            // A session's page keeps the canvas behind it (see setSessionHeader).
+            let sessionPage = sessionHeaderHost?.isHidden == false
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                stage.layer?.backgroundColor = (sessionPage ? NSColor.acCanvas : NSColor.black).cgColor
+            }
             setBackgroundFrost(radius: 0)
         }
     }
@@ -5389,15 +5491,37 @@ struct UnifiedToolbarBar: View {
         return model.profileRows.first { $0.id == pid }
     }
 
+    /// No running machine behind what's on stage, yet a session page:
+    /// the machine controls stay, dimmed.
+    private var placeholderControls: Bool {
+        guard model.sessionsFirst, model.selectedRoomID == nil else { return false }
+        if restingMachine != nil { return true }
+        return model.newSessionSelected
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            if let row = restingMachine {
-                MachineMenu(name: row.name, accentHex: row.accentHex,
-                            onSettings: { onSettings(row.id) },
-                            onReboot: {}, onTrace: {}, onDetach: {},
-                            onDetails: onDetails.map { f in { f(row.id) } },
-                            running: false)
+            // B5/B13: a session whose machine is asleep, and the new-session
+            // screen, keep the same controls in the same places — dimmed
+            // where they need a running machine — so the bar doesn't jump
+            // when a machine wakes or a session is picked.
+            if placeholderControls {
+                LinuxPill(back: false, action: {})
+                    .disabled(true).opacity(0.45)
+                    .help(NSLocalizedString("The Linux machine behind this session — available while it runs", comment: "toolbar"))
+                if let row = restingMachine {
+                    MachineMenu(name: row.name, accentHex: row.accentHex,
+                                onSettings: { onSettings(row.id) },
+                                onReboot: {}, onTrace: {}, onDetach: {},
+                                onDetails: onDetails.map { f in { f(row.id) } },
+                                running: false)
+                }
+                HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
+                           active: false) {}
+                    .disabled(true).opacity(0.45)
+                HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
+                           active: model.filePaneOpen) { onToggleFilePane() }
             }
             // A room spans machines: nothing machine-specific in its bar —
             // the browser and Files follow the focused cell.

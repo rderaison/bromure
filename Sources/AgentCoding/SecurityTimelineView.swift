@@ -1,5 +1,6 @@
 #if os(macOS)
 import SwiftUI
+import SandboxEngine
 
 /// The Security Timeline window: one chronological table of every decision the
 /// security engines made — credential brokering, the egress firewall, supply
@@ -16,6 +17,45 @@ struct SecurityPosture: Identifiable {
     let guardrails: Bool
     let promptInjection: Bool
     var pii: Bool = false
+}
+
+extension SecurityPosture {
+    /// A workspace's posture, one column per engine. Guardrails is the
+    /// CREDENTIAL engine only (write policies, ask-before-use) — the egress
+    /// ruleset is its own Firewall column and no longer lights Guardrails up.
+    /// Firewall is on when the user wrote a ruleset that restricts something
+    /// (a rule, or `default deny`), not merely when the text is non-empty.
+    @MainActor init(profile p: Profile) {
+        var credentialsOnly = p
+        credentialsOnly.egressRules = ""
+        let ruleset = p.egressRules.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(id: p.id, name: p.name, colorHex: p.color.hexInUI,
+                  firewall: !ruleset.isEmpty && ((try? EgressPolicy.parse(ruleset))?.isActive ?? false),
+                  supplyChain: p.supplyChain.isActive,
+                  guardrails: ACAppDelegate.guardrailsRestrict(credentialsOnly),
+                  promptInjection: p.promptInjection.isActive,
+                  pii: p.pii.isActive)
+    }
+}
+
+extension SecurityTimeline.Event {
+    /// How many identical routine events this coalesced row stands for, when
+    /// more than one (nil otherwise). `count` on a non-coalesced row means
+    /// something else (PII values in one request) and is not a repeat.
+    var repeats: Int? {
+        guard coalesceKey != nil, let n = count, n > 1 else { return nil }
+        return n
+    }
+}
+
+/// Opens a workspace's editor on one pane — the Overview's protection cells.
+@MainActor
+enum SecurityEditorLauncher {
+    static func open(profileID: UUID, category: EditorCategory) {
+        guard let d = NSApp.delegate as? ACAppDelegate,
+              let p = d.profiles.first(where: { $0.id == profileID }) else { return }
+        d.openEditorWindow(editing: p, category: category)
+    }
 }
 
 struct SecurityTimelineView: View {
@@ -247,8 +287,18 @@ struct SecurityTimelineView: View {
                 HStack(spacing: 5) {
                     Circle().fill(color(e.kind)).frame(width: 7, height: 7)
                     Text(e.decision).foregroundStyle(color(e.kind)).lineLimit(1)
+                    if let n = e.repeats {
+                        Text(verbatim: "×\(n)")
+                            .font(.caption.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                            .fixedSize()
+                    }
                 }
-                .help(e.decision)
+                .help(e.repeats.map {
+                    String(format: NSLocalizedString("%1$@ (%2$d times, last one shown)", comment: "security timeline: coalesced row; 1 = decision, 2 = repeats"), e.decision, $0)
+                } ?? e.decision)
             }
             .width(min: 120, ideal: 160, max: 260)
         }
@@ -304,16 +354,19 @@ private struct SecurityOverview: View {
                          "hand.raised.fill", .red, engine: nil, outcome: .blocked)
                     tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.count,
                          "checkmark.seal.fill", .green, engine: nil, outcome: .allowed)
-                    tile(NSLocalizedString("Credentials brokered", comment: "security overview"),
-                         recent.filter { $0.engine == NSLocalizedString("Credential brokering", comment: "Security Timeline engine") }.count,
+                    // Tiles carry the engine names the Protections columns use.
+                    // Swaps, not rows: a coalesced row carries its repeat count.
+                    tile(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                         recent.filter { $0.engine == NSLocalizedString("Credential brokering", comment: "Security Timeline engine") }
+                             .reduce(0) { $0 + ($1.count ?? 1) },
                          "arrow.left.arrow.right", .blue,
                          engine: NSLocalizedString("Credential brokering", comment: "Security Timeline engine"))
-                    tile(NSLocalizedString("Packages checked", comment: "security overview"),
+                    tile(NSLocalizedString("Supply chain", comment: "Security Timeline engine"),
                          recent.filter { $0.engine == NSLocalizedString("Supply chain", comment: "Security Timeline engine") }.count,
                          "shippingbox.fill", .orange,
                          engine: NSLocalizedString("Supply chain", comment: "Security Timeline engine"))
                     // Values swapped, not requests: each row carries its count.
-                    tile(NSLocalizedString("PII swapped", comment: "security overview"),
+                    tile(NSLocalizedString("PII protection", comment: "Security Timeline engine"),
                          recent.filter { $0.engine == NSLocalizedString("PII protection", comment: "Security Timeline engine") }
                              .reduce(0) { $0 + ($1.count ?? 1) },
                          "person.crop.circle.badge.checkmark", .purple,
@@ -322,8 +375,12 @@ private struct SecurityOverview: View {
 
                 if !postures.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(NSLocalizedString("Protections", comment: "security overview"))
-                            .font(.system(size: 15, weight: .semibold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(NSLocalizedString("Protections", comment: "security overview"))
+                                .font(.system(size: 15, weight: .semibold))
+                            Text(NSLocalizedString("Click a protection that's off to turn it on in that workspace's settings.", comment: "security overview"))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         VStack(spacing: 0) {
                             postureHeader
                             ForEach(postures) { p in
@@ -406,6 +463,9 @@ private struct SecurityOverview: View {
                                   NSLocalizedString("Prompt injection", comment: "Security Timeline engine"),
                                   NSLocalizedString("PII protection", comment: "Security Timeline engine"),
                                   NSLocalizedString("Credential brokering", comment: "Security Timeline engine")]
+    /// The editor pane behind each column, in `columns` order.
+    private static let columnCategories: [EditorCategory] =
+        [.firewall, .supplyChain, .guardrails, .promptInjection, .pii, .credentials]
 
     private var postureHeader: some View {
         HStack(spacing: 0) {
@@ -428,15 +488,52 @@ private struct SecurityOverview: View {
                 Text(p.name).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true].enumerated()), id: \.offset) { _, on in
-                Image(systemName: on ? "checkmark.circle.fill" : "minus.circle")
-                    .foregroundStyle(on ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
-                    .frame(width: 96)
-                    .help(on ? NSLocalizedString("On", comment: "security overview") : NSLocalizedString("Off", comment: "security overview"))
+            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true].enumerated()), id: \.offset) { i, on in
+                PostureCell(on: on, workspace: p.name, column: Self.columns[i]) {
+                    SecurityEditorLauncher.open(profileID: p.id, category: Self.columnCategories[i])
+                }
+                .frame(width: 96)
             }
         }
         .font(.system(size: 12.5))
         .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+}
+
+/// One protection in the Overview's table. On: a green check. Off: a muted
+/// minus that turns into a "Turn on" pill on hover. Either way a click opens
+/// that workspace's editor on the protection's pane.
+private struct PostureCell: View {
+    let on: Bool
+    let workspace: String
+    let column: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if on {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                } else if hover {
+                    Text(NSLocalizedString("Turn on…", comment: "security overview: off protection, hovered"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.accentColor))
+                } else {
+                    Image(systemName: "minus.circle").foregroundStyle(.tertiary)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 20)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(on
+              ? String(format: NSLocalizedString("%1$@ is on for %2$@. Click to change it.", comment: "security overview: 1 = protection, 2 = workspace"), column, workspace)
+              : String(format: NSLocalizedString("%1$@ is off for %2$@. Click to turn it on.", comment: "security overview: 1 = protection, 2 = workspace"), column, workspace))
     }
 }
 #endif

@@ -22,6 +22,7 @@ enum ScrollBench {
               let data = FileManager.default.contents(atPath: path) else {
             print("usage: __bench-scroll <transcript.jsonl> [--lazy] [--flat]"); return
         }
+        if args.contains("--chat") { ChatLayoutCheck.run(path: path, data: data, args: args); return }
         let lazy = args.contains("--lazy"), flat = args.contains("--flat")
         MainActor.assumeIsolated {
             let app = NSApplication.shared
@@ -117,5 +118,161 @@ enum ScrollBench {
             exit(0)
         }
     }
+}
+
+/// `bromure-ac __bench-scroll <transcript.jsonl> --chat [--width 180]
+/// [--seconds 20] [--working]` — the REAL chat view (BeautifiedSessionView,
+/// fed the file by a fixture provider) in an offscreen window that opens
+/// wide and is then squeezed to `--width` (the chat column with the browser
+/// and files panes open), stepping through narrow widths and scrolling about
+/// meanwhile. A watchdog thread pings the main queue: a layout that never
+/// converges (B23: the app froze in one SwiftUI transaction placing the
+/// lazy stack) prints HANG and exits 3. Exit 0 = every phase laid out.
+enum ChatLayoutCheck {
+    static func run(path: String, data: Data, args: [String]) {
+        func value(_ flag: String) -> Double? {
+            guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+            return Double(args[i + 1])
+        }
+        let narrow = CGFloat(value("--width") ?? 180)
+        let seconds = value("--seconds") ?? 20
+        let working = args.contains("--working")
+        let grow = args.contains("--grow")
+        // The watchdog: the main queue must answer within 4 s, always.
+        let lastPong = OSAllocatedUnfairLockBox(Date())
+        Thread.detachNewThread {
+            while true {
+                Thread.sleep(forTimeInterval: 0.5)
+                DispatchQueue.main.async { lastPong.set(Date()) }
+                if Date().timeIntervalSince(lastPong.get()) > 4 {
+                    print("HANG: the main thread has not answered for 4 s (layout loop)")
+                    fflush(stdout)
+                    _exit(3)
+                }
+            }
+        }
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.accessory)
+            let provider: BeautifiedTranscriptProvider = grow
+                ? GrowingTranscriptProvider(transcript: data)
+                : FixtureTranscriptProvider(accent: .blue, transcript: data, working: working)
+            let model = BeautifiedSessionModel(provider: provider)
+            model.start()
+            let host = NSHostingView(rootView: BeautifiedSessionView(model: model,
+                                                                     parts: args.contains("--composer") ? .all : .transcript)
+                .frame(maxWidth: .infinity, maxHeight: .infinity))
+            let height = CGFloat(value("--height") ?? 760)
+            host.frame = NSRect(x: 0, y: 0, width: 720, height: height)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .resizable],
+                                  backing: .buffered, defer: false)
+            window.contentView = host
+            window.orderFront(nil)
+            func pump(_ s: Double) {
+                let until = Date().addingTimeInterval(s)
+                while Date() < until {
+                    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+                }
+            }
+            func find(_ v: NSView) -> NSScrollView? {
+                if let s = v as? NSScrollView, s.documentView != nil, s.frame.height > 100 { return s }
+                for sub in v.subviews { if let s = find(sub) { return s } }
+                return nil
+            }
+            func resize(_ w: CGFloat) {
+                window.setContentSize(NSSize(width: w, height: height))
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+            }
+            /// A drag over the chat, as the user's own: TailFollow lets go.
+            func userDrag() {
+                let p = NSPoint(x: host.bounds.midX, y: host.bounds.midY)
+                if let e = NSEvent.mouseEvent(with: .leftMouseDragged, location: p, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1) {
+                    app.sendEvent(e)
+                }
+            }
+            pump(2.5)   // the poll loads the file, the history settles
+            print("items \(model.items.count)")
+            // Panes opening: a few widths in a row, then the squeeze.
+            let steps: [CGFloat] = [560, 420, 300, narrow, narrow + 60, narrow]
+            for w in steps { resize(w); pump(0.4) }
+            let t0 = Date()
+            var phase = 0
+            while Date().timeIntervalSince(t0) < seconds {
+                if phase % 5 == 2 { userDrag() }
+                if let scroll = find(host), let doc = scroll.documentView {
+                    let maxY = max(0, doc.frame.height - scroll.contentView.bounds.height)
+                    // Up a little (reading), back to the end, a jump to the top.
+                    let ys: [CGFloat] = [maxY - 300, maxY, maxY * 0.5, maxY, 0, maxY]
+                    let y = max(0, ys[phase % ys.count])
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                if phase % 7 == 3 { resize(narrow + 24) } else if phase % 7 == 4 { resize(narrow) }
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                pump(0.5)
+                phase += 1
+            }
+            let g = model.debugGeometry
+            print(String(format: "OK: %.0f s at %.0f pt — viewport %.0f content %.0f tailY %.0f watchdog %.0f",
+                         seconds, narrow, g["viewport"] ?? -1, g["content"] ?? -1, g["tailY"] ?? -2,
+                         g["watchdog"] ?? 0))
+            if let i = args.firstIndex(of: "--shot"), i + 1 < args.count,
+               let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+            }
+            exit(0)
+        }
+    }
+}
+
+/// Serves a transcript as if the agent were writing it: a few more lines
+/// at every poll, "working" until the file is whole.
+@MainActor
+final class GrowingTranscriptProvider: BeautifiedTranscriptProvider {
+    let accent: Color = .blue
+    private let lines: [Data]
+    private var shown = 0
+    private static let path = "/home/ubuntu/.claude/projects/-home-ubuntu-demo/grow.jsonl"
+
+    init(transcript: Data) {
+        lines = transcript.split(separator: UInt8(ascii: "\n")).map { Data($0) + Data([0x0a]) }
+        shown = min(lines.count, 3)
+    }
+
+    func activeTabIndex() -> Int? { 1 }
+    func isWorking() -> Bool { shown < lines.count }
+    func guestFileOp(_ op: [String: Any]) async -> [String: Any]? { nil }
+
+    func execGuest(_ command: String, timeout: Int) async -> String? {
+        if command.contains("pane_current_path") { return "/home/ubuntu/demo\n0\n" }
+        guard command.hasPrefix("f=\"\";") else { return nil }
+        // The client's cursor: `python3 - "$f" <known> <offset> <bytes> tail`.
+        var known = "", off = -1
+        if let r = command.range(of: #"python3 - "\$f" (\S*) (-?\d+) (\d+) (tail|earlier)"#,
+                                 options: .regularExpression) {
+            let parts = command[r].split(separator: " ")
+            if parts.count >= 6 { known = String(parts[3]).trimmingCharacters(in: CharacterSet(charactersIn: "'")); off = Int(parts[4]) ?? -1 }
+        }
+        let body = lines.prefix(shown).reduce(Data(), +)
+        shown = min(lines.count, shown + 2)
+        let size = body.count
+        let start = (known == Self.path && off >= 0 && off <= size) ? off : 0
+        return "\(Self.path)\n\n\(size)\n\(start)\n\(size)\n" + String(decoding: body[start...], as: UTF8.self)
+    }
+}
+
+/// A tiny lock-guarded value for the watchdog thread.
+private final class OSAllocatedUnfairLockBox<T>: @unchecked Sendable {
+    private var value: T
+    private let lock = NSLock()
+    init(_ v: T) { value = v }
+    func get() -> T { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
 }
 #endif

@@ -62,6 +62,40 @@ public final class SecurityTimeline {
         /// How many things it covers when it's more than one (PII values
         /// swapped in one request); nil = one.
         public var count: Int? = nil
+        /// Repeats of a routine event (same credential swapped in for the same
+        /// host) share this key and fold into one row with a `count` (B40).
+        public var coalesceKey: String? = nil
+    }
+
+    /// A routine row folds into an earlier one with the same `coalesceKey`
+    /// seen within this long (sliding: each repeat restarts it).
+    nonisolated static let coalesceWindow: TimeInterval = 10 * 60
+
+    /// Fold `e` into `events` (oldest first): a repeat of a recent row with the
+    /// same `coalesceKey` (same profile) replaces it — moved to the end, time
+    /// bumped, count incremented — instead of adding a row.
+    nonisolated static func coalesce(_ e: Event, into events: inout [Event]) {
+        if let key = e.coalesceKey {
+            // Look back a bounded number of rows; routine repeats are recent.
+            let lowerBound = max(0, events.count - 500)
+            var i = events.count - 1
+            while i >= lowerBound {
+                let old = events[i]
+                if old.time < e.time.addingTimeInterval(-coalesceWindow) { break }
+                if old.coalesceKey == key, old.profileID == e.profileID, old.machine == e.machine {
+                    var merged = Event(time: e.time, engine: e.engine, condition: e.condition,
+                                       decision: e.decision, kind: e.kind, profileID: e.profileID,
+                                       workspace: e.workspace ?? old.workspace, machine: e.machine,
+                                       count: (old.count ?? 1) + (e.count ?? 1))
+                    merged.coalesceKey = key
+                    events.remove(at: i)
+                    events.append(merged)
+                    return
+                }
+                i -= 1
+            }
+        }
+        events.append(e)
     }
 
     /// This Mac's events, oldest first (the most recent `cap` in memory; the
@@ -124,7 +158,9 @@ public final class SecurityTimeline {
     public func append(_ e: Event) {
         var e = e
         if e.workspace == nil { e.workspace = workspaceName(e.profileID) }
-        events.append(e)
+        // Routine repeats fold into one row; the disk log keeps every raw
+        // event (with its key) and `load` folds them the same way.
+        Self.coalesce(e, into: &events)
         if events.count > Self.cap { events.removeFirst(events.count - Self.cap) }
         persist(e)
     }
@@ -154,6 +190,7 @@ public final class SecurityTimeline {
                                 "d": e.decision, "k": e.kind.wire, "p": e.profileID.uuidString]
         if let w = e.workspace { d["w"] = w }
         if let n = e.count { d["n"] = n }
+        if let ck = e.coalesceKey { d["ck"] = ck }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -163,10 +200,12 @@ public final class SecurityTimeline {
         guard let d = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               let t = d["t"] as? Double, let engine = d["e"] as? String,
               let condition = d["c"] as? String, let decision = d["d"] as? String else { return nil }
-        return Event(time: Date(timeIntervalSince1970: t), engine: engine, condition: condition,
-                     decision: decision, kind: Decision(wire: d["k"] as? String ?? ""),
-                     profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
-                     workspace: d["w"] as? String, count: d["n"] as? Int)
+        var e = Event(time: Date(timeIntervalSince1970: t), engine: engine, condition: condition,
+                      decision: decision, kind: Decision(wire: d["k"] as? String ?? ""),
+                      profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
+                      workspace: d["w"] as? String, count: d["n"] as? Int)
+        e.coalesceKey = d["ck"] as? String
+        return e
     }
 
     private func persist(_ e: Event) {
@@ -196,7 +235,10 @@ public final class SecurityTimeline {
             out = day + out
             if out.count >= limit { break }
         }
-        return Array(out.suffix(limit))
+        var folded: [Event] = []
+        folded.reserveCapacity(out.count)
+        for e in out { coalesce(e, into: &folded) }
+        return Array(folded.suffix(limit))
     }
 
     /// Drop daily logs past the retention window.
@@ -231,6 +273,7 @@ public final class SecurityTimeline {
             ]
             if let w = e.workspace { r["workspace"] = w }
             if let n = e.count { r["count"] = n }
+            if let ck = e.coalesceKey { r["ck"] = ck }
             return r
         }
     }
@@ -245,10 +288,12 @@ public final class SecurityTimeline {
                   let decision = r["decision"] as? String else { return nil }
             let t = (r["t"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
             let pid = (r["profileID"] as? String).flatMap(UUID.init) ?? UUID()
-            return Event(time: t, engine: engine, condition: condition,
-                         decision: decision, kind: Decision(wire: r["kind"] as? String ?? ""),
-                         profileID: pid, workspace: r["workspace"] as? String, machine: host,
-                         count: r["count"] as? Int)
+            var e = Event(time: t, engine: engine, condition: condition,
+                          decision: decision, kind: Decision(wire: r["kind"] as? String ?? ""),
+                          profileID: pid, workspace: r["workspace"] as? String, machine: host,
+                          count: r["count"] as? Int)
+            e.coalesceKey = r["ck"] as? String
+            return e
         }
     }
 
@@ -278,9 +323,12 @@ public final class SecurityTimeline {
             let fake = str(d, "fake_preview") ?? "fake"
             let real = str(d, "real_preview") ?? "real"
             let host = str(d, "host") ?? "?"
-            return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
-                       "\(fake) → \(host)",
-                       String(format: NSLocalizedString("swapped in %@", comment: "Security Timeline decision"), real), .info)
+            var e = row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                        "\(fake) → \(host)",
+                        String(format: NSLocalizedString("swapped in %@", comment: "Security Timeline decision"), real), .info)
+            // One row per credential + host, not one per API call (B40).
+            e.coalesceKey = "token_swap|\(fake)|\(real)|\(host)"
+            return e
 
         case "credential.exfiltration":
             let fake = str(d, "fake_preview") ?? "fake"
@@ -355,10 +403,17 @@ public final class SecurityTimeline {
 
         case "egress.firewall":
             let host = str(d, "host") ?? str(d, "ip") ?? "?"
-            let port = int(d, "port").map { ":\($0)" } ?? ""
-            let proto = str(d, "proto").map { " \($0)" } ?? ""
             let action = (str(d, "action") ?? "allowed").lowercased()
             let kind: Decision = action.contains("allow") ? .allowed : .blocked
+            // A `web` rule's verb decision carries the request: show it like a
+            // guardrails block ("POST httpbin.org/post").
+            if let method = str(d, "method"), !method.isEmpty {
+                let cond = "\(method) \(host)\(str(d, "path") ?? "")"
+                let decision = str(d, "reason").map { "\(action) — \($0)" } ?? action
+                return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), cond, decision, kind)
+            }
+            let port = int(d, "port").map { ":\($0)" } ?? ""
+            let proto = str(d, "proto").map { " \($0)" } ?? ""
             return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), "\(host)\(port)\(proto)", action, kind)
 
         case "credential.ssh_sign":
@@ -382,7 +437,14 @@ public final class SecurityTimeline {
             let path = str(d, "path") ?? ""
             let cond = "\(method) \(host)\(path)".trimmingCharacters(in: .whitespaces)
             let decision = str(d, "reason").map { "blocked — \($0)" } ?? "blocked"
-            return row(NSLocalizedString("Guardrails", comment: "Security Timeline engine"), cond, decision, .blocked)
+            // A firewall `web` rule's verb denial goes through the same 403
+            // path; the proxy tags it so it isn't credited to Guardrails.
+            let engine = (str(d, "engine") ?? str(d, "source") ?? "").lowercased()
+            let isFirewall = engine == "firewall" || engine == "egress"
+            return row(isFirewall
+                           ? NSLocalizedString("Firewall", comment: "Security Timeline engine")
+                           : NSLocalizedString("Guardrails", comment: "Security Timeline engine"),
+                       cond, decision, .blocked)
 
         case "tls.upstream_untrusted":
             let host = str(d, "host") ?? "?"
@@ -430,6 +492,34 @@ public final class SecurityTimeline {
                         .info)
             e.count = n
             return e
+
+        case "content_scan.skipped":
+            // An AI request that went out without the content scans (body too
+            // large, or compressed in a way the proxy can't decode). Credited to
+            // the engine(s) that would have scanned it; blue, not a block.
+            let host = str(d, "host") ?? "?"
+            let reason = str(d, "reason") ?? "unknown reason"
+            var ids: [String] = []
+            if case .array(let a)? = d["engines"] {
+                ids = a.compactMap { if case .string(let v) = $0 { return v.lowercased() } else { return nil } }
+            } else if let one = str(d, "engines") {
+                ids = one.lowercased().split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            }
+            let pi = NSLocalizedString("Prompt injection", comment: "Security Timeline engine")
+            let pii = NSLocalizedString("PII protection", comment: "Security Timeline engine")
+            let names = ids.compactMap { id -> String? in
+                switch id {
+                case "prompt_injection", "promptinjection", "prompt injection": return pi
+                case "pii", "pii_protection", "pii protection": return pii
+                default: return nil
+                }
+            }
+            let engine = names.first ?? pi
+            // Both engines missed it: one row, the other named in the condition.
+            let cond = names.count > 1 ? "\(host) (\(names.joined(separator: " + ")))" : host
+            return row(engine, cond,
+                       String(format: NSLocalizedString("not scanned — %@", comment: "Security Timeline decision: content scans skipped; %@ = reason"), reason),
+                       .info)
 
         case "prompt_injection.detection":
             let action = (str(d, "action") ?? "detected").lowercased()

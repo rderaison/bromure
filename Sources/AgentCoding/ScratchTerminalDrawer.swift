@@ -285,7 +285,7 @@ extension ScratchTerminalDrawer {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 ScratchTerminalDrawer(model: m, maxHeight: 400, onHide: {})
                 Divider().opacity(0.5)
-                ChatComposer(placeholder: "Message Claude Code…  (or drop files)",
+                ChatComposer(placeholder: "Message Claude Code… (or drop files)",
                              text: .constant(""), accent: m.accent, onSend: {})
                     .padding(.horizontal, 12).padding(.vertical, 10)
             }

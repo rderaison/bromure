@@ -101,6 +101,22 @@ actor PromptInjectionClassifier {
     /// `await` (actors are reentrant across suspension) prevents two
     /// concurrent scans from both loading the session.
     private var loadTask: Task<Loaded?, Never>?
+    /// Last time the classifier was asked for (load or inference).
+    private var lastUsed = Date.distantPast
+
+    /// Release the ONNX session (+ verdict cache) when nothing has used it
+    /// for `idle` seconds — called by ClassifierLifecycle when no running
+    /// workspace has this detector on. The next scan reloads lazily (the
+    /// delegation / automation scans keep working, paying one reload).
+    @discardableResult
+    func unloadIfIdle(_ idle: TimeInterval) -> Bool {
+        guard loadTask != nil, Date().timeIntervalSince(lastUsed) >= idle else { return false }
+        loadTask = nil
+        verdictCache.removeAll()
+        cacheOrder.removeAll()
+        FileHandle.standardError.write(Data("[mitm/injection] \(logLabel) classifier released (idle)\n".utf8))
+        return true
+    }
 
     /// Per-span cap: a single tool_result can be a multi-hundred-KB
     /// file. We classify a bounded set of character windows over the
@@ -217,6 +233,7 @@ actor PromptInjectionClassifier {
     // MARK: - Loading
 
     private func loaded() async -> Loaded? {
+        lastUsed = Date()
         if let task = loadTask { return await task.value }
         let task = Task { () -> Loaded? in
             do {

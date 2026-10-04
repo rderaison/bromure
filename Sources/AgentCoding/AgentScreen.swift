@@ -271,7 +271,7 @@ enum AgentScreen {
     static func title(_ lines: [String], before end: Int) -> String {
         let above = lines[0..<end].suffix(12).reversed()
         func prose(_ l: String) -> String? {
-            let t = unboxed(l).trimmingCharacters(in: .whitespaces)
+            let t = deglyphed(unboxed(l).trimmingCharacters(in: .whitespaces))
             guard !t.isEmpty, t.count <= 90, t.contains(where: \.isLetter),
                   !t.hasPrefix("·"), !t.hasPrefix("•"), !t.hasPrefix("-"), !t.hasPrefix("—")
             else { return nil }
@@ -293,9 +293,18 @@ enum AgentScreen {
         let edge = { (l: String) in isRule(l) && !l.contains("╌") && !l.contains("┄") }
         let start = lines[..<first].lastIndex(where: edge).map { $0 + 1 } ?? max(0, first - 12)
         return lines[max(start, first - 12)..<first]
-            .map { unboxed($0).trimmingCharacters(in: .whitespaces) }
+            .map { deglyphed(unboxed($0).trimmingCharacters(in: .whitespaces)) }
             .filter { !$0.isEmpty && $0 != title && $0.contains(where: \.isLetter) }
             .joined(separator: "\n")
+    }
+
+    /// A heading without the marker some agents draw before it — Kimi 2.1
+    /// heads its approval panel "▶ Run this command?" with the same glyph
+    /// as its cursor row.
+    static func deglyphed(_ t: String) -> String {
+        guard let g = t.first, cursorGlyphs.contains(g),
+              t.dropFirst().first.map({ $0 == " " || $0 == "\u{00a0}" }) == true else { return t }
+        return String(t.dropFirst().drop(while: { $0 == " " || $0 == "\u{00a0}" }))
     }
 
     /// A line without the dialog box drawn around it ("│ ❯ 1. Yes   │") —

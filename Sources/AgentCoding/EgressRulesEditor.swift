@@ -12,6 +12,16 @@ struct EgressRulesEditor: View {
     @State private var showPF = false
     @State private var loaded = false
 
+    /// Fixed column widths; Host is flexible (min `hostMin`).
+    private enum Col {
+        static let action: CGFloat = 70
+        static let proto: CGFloat = 62
+        static let hostMin: CGFloat = 140
+        static let ports: CGFloat = 56
+        static let methods: CGFloat = 92
+        static let buttons: CGFloat = 58
+    }
+
     private let actions = ["allow", "deny"]
     private let protos = ["tcp", "udp", "web", "any"]
 
@@ -34,14 +44,20 @@ struct EgressRulesEditor: View {
             .pickerStyle(.segmented)
             .frame(maxWidth: 320)
 
+            // The Host column takes every spare point: it holds the long
+            // values (domains, CIDRs). Ports and Methods are short ("any",
+            // "443", "GET,POST"), and Methods only exists when a `web` rule
+            // does — without one the column is dropped altogether.
+            let showMethods = rows.contains { $0.proto == "web" }
             if !rows.isEmpty {
                 HStack(spacing: 6) {
-                    Text("Action").frame(width: 66, alignment: .leading)
-                    Text("Proto").frame(width: 56, alignment: .leading)
-                    Text("Host / CIDR").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Ports").frame(width: 84, alignment: .leading)
-                    Text("Methods").frame(width: 128, alignment: .leading)
-                    Spacer().frame(width: 66)
+                    Text("Action").frame(width: Col.action, alignment: .leading)
+                    Text("Proto").frame(width: Col.proto, alignment: .leading)
+                    Text("Host / CIDR").frame(minWidth: Col.hostMin, maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(1)
+                    Text("Ports").frame(width: Col.ports, alignment: .leading)
+                    if showMethods { Text("Methods").frame(width: Col.methods, alignment: .leading) }
+                    Spacer().frame(width: Col.buttons)
                 }
                 .font(.caption2).foregroundStyle(.secondary)
             }
@@ -49,18 +65,24 @@ struct EgressRulesEditor: View {
             ForEach($rows) { $row in
                 HStack(spacing: 6) {
                     Picker("", selection: $row.action) { ForEach(actions, id: \.self) { Text($0).tag($0) } }
-                        .labelsHidden().frame(width: 66)
+                        .labelsHidden().frame(width: Col.action)
                     Picker("", selection: $row.proto) { ForEach(protos, id: \.self) { Text($0).tag($0) } }
-                        .labelsHidden().frame(width: 56)
-                    TextField("any / example.com / 10.0.0.0/8", text: $row.host).frame(maxWidth: .infinity)
-                    TextField("any", text: $row.ports).frame(width: 84)
-                    TextField(methodsPlaceholder(row), text: $row.methods)
-                        .frame(width: 128).disabled(row.proto != "web")
-                    HStack(spacing: 2) {
+                        .labelsHidden().frame(width: Col.proto)
+                    TextField("any / example.com / 10.0.0.0/8", text: $row.host)
+                        .frame(minWidth: Col.hostMin, maxWidth: .infinity)
+                        .layoutPriority(1)
+                        .help(row.host)
+                    TextField("any", text: $row.ports).frame(width: Col.ports)
+                    if showMethods {
+                        TextField(methodsPlaceholder(row), text: $row.methods)
+                            .frame(width: Col.methods).disabled(row.proto != "web")
+                            .help(row.methods)
+                    }
+                    HStack(spacing: 0) {
                         Button { move(row, by: -1) } label: { Image(systemName: "chevron.up") }.buttonStyle(.borderless)
                         Button { move(row, by: 1) } label: { Image(systemName: "chevron.down") }.buttonStyle(.borderless)
                         Button(role: .destructive) { rows.removeAll { $0.id == row.id } } label: { Image(systemName: "trash") }.buttonStyle(.borderless)
-                    }.frame(width: 66)
+                    }.frame(width: Col.buttons)
                 }
                 .textFieldStyle(.roundedBorder)
                 .font(.callout)
@@ -105,7 +127,7 @@ struct EgressRulesEditor: View {
     /// reads the opposite way for allow vs deny (allowlist vs blocklist).
     private func methodsPlaceholder(_ row: EgressPolicy.EditRow) -> String {
         guard row.proto == "web" else { return "—" }
-        return row.action == "deny" ? "PUT,DELETE (block)" : "GET,POST / read-only"
+        return row.action == "deny" ? "PUT,DELETE" : "GET,POST"
     }
 
     private func move(_ row: EgressPolicy.EditRow, by delta: Int) {

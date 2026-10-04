@@ -171,7 +171,7 @@ struct CodingTasksSection: View {
         if parts.isEmpty {
             parts.append(backlog > 0
                 ? String(format: NSLocalizedString("%d in backlog", comment: ""), backlog)
-                : NSLocalizedString("Open the board", comment: "tasks sidebar"))
+                : NSLocalizedString("No open tasks", comment: "tasks sidebar"))
         }
         return parts.joined(separator: " · ")
     }
@@ -195,11 +195,11 @@ struct CodingTasksSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            SidebarSectionHeader(title: NSLocalizedString("Tasks", comment: "sidebar section"),
+            SidebarSectionHeader(title: NSLocalizedString("Coding Tasks", comment: "sidebar section"),
                                  selected: model.taskBoardSelected,
                                  badges: [(attentionCount, .red), (reviewCount, .orange)],
                                  count: openCount,
-                                 help: NSLocalizedString("Open the coding board (⇧⌘T)", comment: ""),
+                                 help: NSLocalizedString("Open Coding Tasks (⇧⌘T)", comment: ""),
                                  onTitle: onShowBoard,
                                  onAdd: onNew,
                                  addHelp: NSLocalizedString("New task", comment: ""))
@@ -322,22 +322,18 @@ struct CodingKanbanView: View {
                 // strip scrolls. (On the Mac the board used to overflow its
                 // stage and spill over the sidebar.)
                 GeometryReader { geo in
-                    // An empty Plan column folds to a rail: most boards have
-                    // no phases, and four columns then fit where five didn't.
+                    // An empty Plan column is left out: most boards have no
+                    // phases, and four columns then fit where five didn't.
                     let planEmpty = store.tasks(in: .planning).isEmpty
                     let w = Self.columnWidth(count: planEmpty ? 4 : 5,
-                                             available: geo.size.width - (planEmpty ? 60 : 0))
+                                             available: geo.size.width)
                     ScrollView(.horizontal, showsIndicators: true) {
                         HStack(alignment: .top, spacing: 14) {
                             backlogColumn.frame(width: w)
-                            if planEmpty {
-                                KanbanRail(
-                                    title: NSLocalizedString("Plan", comment: "kanban column"),
-                                    systemImage: "list.number", tint: .blue,
-                                    help: NSLocalizedString(
-                                        "No phases yet — click Plan on a backlog card to have an agent split it into ordered phases.",
-                                        comment: "kanban"))
-                            } else {
+                            // No phases: no Plan column at all (a folded rail
+                            // with rotated text read as a broken column). It
+                            // appears as soon as a backlog card's Plan files one.
+                            if !planEmpty {
                                 planColumn.frame(width: w)
                             }
                             inProgressColumn.frame(width: w)
@@ -566,7 +562,10 @@ struct CodingKanbanView: View {
     }
 
     private func workspaceName(for profileID: UUID) -> String {
-        model.profileRows.first { $0.id == profileID }?.name ?? ""
+        // A task whose workspace was deleted (or isn't known on this host)
+        // still says so — an empty chip read as a rendering bug.
+        model.profileRows.first { $0.id == profileID }?.name
+            ?? NSLocalizedString("Deleted workspace", comment: "task card workspace chip")
     }
 
     /// Live tab status for a started task, via the sidebar's tab models
@@ -1024,20 +1023,48 @@ func plainExcerpt(_ markdown: String) -> String {
     return out.joined(separator: " ")
 }
 
-/// A card's error, one line, full text on hover.
+/// A card's error: two lines, full text on hover — and a click on it
+/// unfolds the rest (a tooltip alone was easy to miss, and the card's own
+/// click opens the editor, not the error).
 private struct CardErrorLine: View {
     let text: String
+    @State private var expanded = false
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 9.5))
-            Text(text)
-                .lineLimit(2)
+        Button { expanded.toggle() } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9.5))
+                Text(text)
+                    .lineLimit(expanded ? nil : 2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.system(size: 10.5))
+            .foregroundStyle(.red)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .font(.system(size: 10.5))
-        .foregroundStyle(.red)
+        .buttonStyle(.borderless)
         .help(text)
+        .accessibilityHint(expanded
+            ? NSLocalizedString("Click to fold the error", comment: "task card")
+            : NSLocalizedString("Click to read the whole error", comment: "task card"))
+    }
+}
+
+/// A card header's date: shown whole when it fits next to the workspace
+/// chip and the card's controls, dropped otherwise (the chip and the
+/// controls matter more; the editor shows both dates).
+struct CardDateSlot: View {
+    let task: CodingTask
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            TaskDateLabel(task: task)
+            Color.clear.frame(width: 0, height: 0)
+        }
+        .layoutPriority(-1)
     }
 }
 
@@ -1071,8 +1098,8 @@ private struct BacklogTaskCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     WorkspaceChip(name: workspaceName, accentHex: accentHex)
-                        .layoutPriority(-1)
-                    TaskDateLabel(task: task)
+                        .layoutPriority(1)
+                    CardDateSlot(task: task)
                     Spacer(minLength: 4)
                     if let onAssign, !planningLive {
                         Button(action: onAssign) {
@@ -1088,7 +1115,16 @@ private struct BacklogTaskCard: View {
                         .buttonStyle(.borderless)
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(task.assignment == nil ? Color.secondary : Color.indigo)
-                        .help(NSLocalizedString("Who picks this task up", comment: "task card"))
+                        // One line, always: squeezed, the label wrapped one
+                        // syllable per line ("As/sig/n"). An assignee name
+                        // may truncate, capped so the chip keeps its room.
+                        .lineLimit(1)
+                        .fixedSize(horizontal: task.assignment == nil, vertical: false)
+                        .frame(maxWidth: task.assignment == nil ? nil : 120, alignment: .trailing)
+                        .layoutPriority(2)
+                        .help(task.assignment.map { a in
+                            String(format: NSLocalizedString("Assigned to %@ — click to change", comment: "task card"), a.label)
+                        } ?? NSLocalizedString("Who picks this task up", comment: "task card"))
                     }
                     if planningLive {
                         CardStatusPill(text: NSLocalizedString("Planning", comment: "task card"),
@@ -1466,8 +1502,8 @@ private struct InProgressTaskCard: View {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     HStack(spacing: 6) {
                         WorkspaceChip(name: workspaceName, accentHex: accentHex)
-                            .layoutPriority(-1)
-                        TaskDateLabel(task: task)
+                            .layoutPriority(1)
+                        CardDateSlot(task: task)
                         Spacer(minLength: 4)
                         if status == .needsInput {
                             CardStatusPill(text: NSLocalizedString("Needs you", comment: "task card"),
@@ -1557,7 +1593,8 @@ private struct TestingTaskCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     WorkspaceChip(name: workspaceName, accentHex: accentHex)
-                    TaskDateLabel(task: task)
+                        .layoutPriority(1)
+                    CardDateSlot(task: task)
                     Spacer(minLength: 4)
                     if unsent > 0 {
                         CardStatusPill(text: String(format: NSLocalizedString("%d comment(s)", comment: "task card"),
@@ -1663,6 +1700,7 @@ private struct DoneTaskCard: View {
                         .font(.system(size: 12.5, weight: .medium))
                         .lineLimit(2)
                         .foregroundStyle(task.merged || task.prOpened == true ? .primary : .secondary)
+                        .help(task.title)
                     Text(outcomeText)
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)

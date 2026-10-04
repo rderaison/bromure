@@ -1054,6 +1054,32 @@ enum GrokTranscriptParser {
 /// `context.append_loop_event` content parts and tool calls. Everything
 /// else (llm.request, usage.record, permission.*, …) is plumbing.
 enum KimiTranscriptParser {
+    /// Whether the journal's tail shows a turn under way: a turn started
+    /// (`turn.prompt` / `agent.turn.started`) with no `turn.ended` after it,
+    /// and the journal written within `freshFor` of `now` (a crashed agent
+    /// leaves its turn open forever). Kimi's status hooks drive the
+    /// working cue; this is the transcript's own word for it, so the chat
+    /// shows the agent at work even when a hook doesn't fire.
+    static func turnInProgress(_ data: Data, now: Date = Date(), freshFor: TimeInterval = 180) -> Bool {
+        let tail = data.suffix(256_000)
+        let text = String(decoding: tail, as: UTF8.self)
+        var lastTime: Double?
+        for line in text.split(whereSeparator: \.isNewline).reversed() {
+            guard line.contains("\"type\""),
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            else { continue }
+            if lastTime == nil, let t = obj["time"] as? Double { lastTime = t }
+            switch obj["type"] as? String ?? "" {
+            case "turn.ended", "agent.turn.ended", "prompt.completed": return false
+            case "turn.prompt", "agent.turn.started":
+                guard let t = lastTime else { return false }
+                return now.timeIntervalSince(Date(timeIntervalSince1970: t / 1000)) < freshFor
+            default: continue
+            }
+        }
+        return false
+    }
+
     static func parse(_ data: Data) -> [TranscriptItem] {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         var items: [TranscriptItem] = []
@@ -3238,9 +3264,13 @@ private struct TranscriptCodeFence: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text(languageLabel)
-                    .font(.system(size: bodySize * 0.7, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                // An unlabeled fence (command output, a plain listing) says
+                // nothing rather than a generic "code".
+                if let languageLabel {
+                    Text(languageLabel)
+                        .font(.system(size: bodySize * 0.7, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 0)
                 #if os(macOS)
                 CopyButton(text: configuration.content, size: bodySize * 0.72)
@@ -3261,9 +3291,15 @@ private struct TranscriptCodeFence: View {
         .transcriptCard()
     }
 
-    private var languageLabel: String {
-        let lang = (configuration.language ?? "").trimmingCharacters(in: .whitespaces)
-        return lang.isEmpty ? "code" : lang.lowercased()
+    private var languageLabel: String? { CodeFenceLabel.text(configuration.language) }
+}
+
+enum CodeFenceLabel {
+    /// A code fence's header label: its language, lowercased; nil when the
+    /// fence has none (or a placeholder like "text"/"code").
+    static func text(_ language: String?) -> String? {
+        let lang = (language ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        return ["", "code", "text", "plain", "plaintext", "txt"].contains(lang) ? nil : lang
     }
 }
 

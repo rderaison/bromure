@@ -469,7 +469,6 @@
 "Allow this request" = "Allow this request";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it.";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable.";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.";
 "Possible %@ in “%@”" = "Possible %@ in “%@”";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?";
@@ -1614,7 +1613,7 @@
 "Block" = "Block";
 
 /* Sessions-first UI */
-"New Session…" = "New Session…";
+"New Session…" = "New session…";
 "New session" = "New session";
 "Start an agent (⌘N)" = "Start an agent (⌘N)";
 "Search sessions" = "Search sessions";
@@ -1826,7 +1825,7 @@
 "Up one folder" = "Up one folder";
 "No folders in here yet." = "No folders in here yet.";
 "The machine's folders can't be read right now." = "The machine's folders can't be read right now.";
-"Message %@…  (or drop files)" = "Message %@…  (or drop files)";
+"Message %@… (or drop files)" = "Message %@… (or drop files)";
 "Ready · %@" = "Ready · %@";
 "Ended · %@ ago" = "Ended · %@ ago";
 "End “%@”?" = "End “%@”?";
@@ -2052,7 +2051,7 @@
 "Streaming to bromure.io" = "Streaming to bromure.io";
 "Signed in to bromure.io" = "Signed in to bromure.io";
 "Log out" = "Log out";
-"Message the agent…  (or drop files)" = "Message the agent…  (or drop files)";
+"Message the agent… (or drop files)" = "Message the agent… (or drop files)";
 "Drop to attach" = "Drop to attach";
 "Loading transcript…" = "Loading transcript…";
 "Say what you need — the agent is listening." = "Say what you need — the agent is listening.";
@@ -2566,10 +2565,10 @@
 "Its sessions keep running and go back to the list. The room's Switchboard is archived." = "Its sessions keep running and go back to the list. The room's Switchboard is archived.";
 "Lime" = "Lime";
 "Move to Room" = "Move to Room";
-"New Room" = "New Room";
-"New Room…" = "New Room…";
-"New Session" = "New Session";
-"New Session in Room" = "New Session in Room";
+"New Room" = "New room";
+"New Room…" = "New room…";
+"New Session" = "New session";
+"New Session in Room" = "New session in room";
 "New session in “%@”" = "New session in “%@”";
 "Next Room" = "Next Room";
 "Open as Session" = "Open as Session";
@@ -2628,7 +2627,7 @@
 "Latest blocks" = "Latest blocks";
 "Machines" = "Machines";
 "Message %@ — it wakes up and carries on…" = "Message %@ — it wakes up and carries on…";
-"New Machine…" = "New Machine…";
+"New Machine…" = "New machine…";
 "Packages checked" = "Packages checked";
 "Pop Out to Its Own Window" = "Pop Out to Its Own Window";
 "Preferences" = "Preferences";
@@ -3659,3 +3658,59 @@
 "Created %@" = "Created %@";
 "Modified %@" = "Modified %@";
 "Updated %@" = "Updated %@";
+"GitHub rejected this workspace's token" = "GitHub rejected this workspace's token";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace.";
+"Fix the workspace's GitHub token to watch a repository." = "Fix the workspace's GitHub token to watch a repository.";
+"Assigned to %@ — click to change" = "Assigned to %@ — click to change";
+"Click to fold the error" = "Click to fold the error";
+"Click to read the whole error" = "Click to read the whole error";
+"Deleted workspace" = "Deleted workspace";
+"Open Coding Tasks (⇧⌘T)" = "Open Coding Tasks (⇧⌘T)";
+"No open tasks" = "No open tasks";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started.";
+"Open Automations" = "Open Automations";
+"Open Automations (⇧⌘A)" = "Open Automations (⇧⌘A)";
+"View" = "View";
+"Help" = "Help";
+"Close Window" = "Close Window";
+"Toggle Sidebar" = "Toggle Sidebar";
+"Toggle Files Pane" = "Toggle Files Pane";
+"Toggle Browser Pane" = "Toggle Browser Pane";
+"Enter Full Screen" = "Enter Full Screen";
+"Zoom" = "Zoom";
+"%@ Manual" = "%@ Manual";
+"Add a note about this workspace" = "Add a note about this workspace";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable.";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "Outbound connection rules are edited on the Mac that runs this workspace.";
+"Click a protection that's off to turn it on in that workspace's settings." = "Click a protection that's off to turn it on in that workspace's settings.";
+"Turn on…" = "Turn on…";
+"%1$@ is on for %2$@. Click to change it." = "%1$@ is on for %2$@. Click to change it.";
+"%1$@ is off for %2$@. Click to turn it on." = "%1$@ is off for %2$@. Click to turn it on.";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "not scanned — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@ (%2$d times, last one shown)";
+
+"Security…" = "Security…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "Download Current Version";
+"Update" = "Update";
+"an unknown version" = "an unknown version";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up).";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "Outdated: this image is %@; the current version is %@. Update to download it.";
+"The Linux machine behind this session — available while it runs" = "The Linux machine behind this session — available while it runs";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "1 media item shown";
+"%d media items shown" = "%d media items shown";
+"1 chart shown" = "1 chart shown";
+"%d charts shown" = "%d charts shown";
+"1 file sent" = "1 file sent";
+"%d files sent" = "%d files sent";
+"1 tool result" = "1 tool result";
+"%d tool results" = "%d tool results";
+"Available when the workspace is running" = "Available when the workspace is running";
+"Video available when the workspace is running" = "Video available when the workspace is running";
+"Image available when the workspace is running" = "Image available when the workspace is running";

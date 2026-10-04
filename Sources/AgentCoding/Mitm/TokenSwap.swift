@@ -202,7 +202,9 @@ public final class TokenSwapper: @unchecked Sendable {
         var headerBytes = rawRequest.subdata(in: 0..<headerEndIdx)
         let bodyBytes   = rawRequest.subdata(in: headerEndIdx..<rawRequest.count)
 
-        guard var headerStr = String(data: headerBytes, encoding: .ascii) else {
+        // Latin-1 maps every byte, so a non-ASCII header value can't make the
+        // whole swap silently no-op (it's re-encoded as Latin-1 below).
+        guard var headerStr = String(data: headerBytes, encoding: .isoLatin1) else {
             return SwapResult(modified: rawRequest, swaps: [])
         }
 
@@ -293,7 +295,7 @@ public final class TokenSwapper: @unchecked Sendable {
         if bodyDirty {
             headerStr = Self.replaceContentLength(headerStr, newLength: newBody.count)
         }
-        headerBytes = Data(headerStr.utf8)
+        headerBytes = headerStr.data(using: .isoLatin1) ?? Data(headerStr.utf8)
         var out = Data()
         out.reserveCapacity(headerBytes.count + newBody.count)
         out.append(headerBytes)
@@ -340,7 +342,7 @@ public final class TokenSwapper: @unchecked Sendable {
         lock.unlock()
 
         guard let headerEndIdx = rawRequest.range(of: Data("\r\n\r\n".utf8))?.lowerBound,
-              let headerStr = String(data: rawRequest.subdata(in: 0..<headerEndIdx), encoding: .ascii)
+              let headerStr = String(data: rawRequest.subdata(in: 0..<headerEndIdx), encoding: .isoLatin1)
         else { return [] }
 
         var leaks: [LeakEntry] = []
@@ -377,6 +379,10 @@ public final class TokenSwapper: @unchecked Sendable {
             // sent as Bearer to the local engine) is ours, not a leaked
             // credential — never flag it.
             if tok.hasPrefix("brk-") { continue }
+
+            // Public client-side SDK keys are designed to ship inside apps
+            // and carry no authority — not a secret escaping the vault.
+            if Self.isPublicClientKey(header: lname, token: tok) { continue }
 
             // Heuristic: known secret prefixes are almost certainly
             // real credentials.
@@ -474,6 +480,17 @@ public final class TokenSwapper: @unchecked Sendable {
                 timestamp: Date()))
         }
         return leaks
+    }
+
+    /// Public client SDK keys sent from inside apps (telemetry / feature
+    /// flags). They're meant to be embedded in shipped binaries and grant no
+    /// access, so flagging them as a LEAK is pure noise (B51: Codex sends its
+    /// Statsig `client-…` key to ab.chatgpt.com on every run).
+    static func isPublicClientKey(header lname: String, token: String) -> Bool {
+        // Statsig: client SDK keys are `client-…` (server secrets are
+        // `secret-…`, which stay flagged).
+        if lname == "statsig-api-key", token.hasPrefix("client-") { return true }
+        return false
     }
 
     static func preview(_ s: String) -> String {

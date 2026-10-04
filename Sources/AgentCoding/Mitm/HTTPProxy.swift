@@ -137,14 +137,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func drive() async throws {
         let t0 = Date()
 
-        // 1. CONNECT request from client (proxy command). Treat as
-        //    ASCII — proxy headers don't legally carry non-ASCII.
+        // 1. CONNECT request from client (proxy command). Decode only the
+        //    request line (Latin-1: byte-exact, never fails) — a forward-proxy
+        //    request carries headers and possibly a body after it, and one
+        //    non-ASCII byte there must not make the whole request "malformed".
         let connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
-        guard let asString = String(data: connectReq, encoding: .ascii),
-              let lineEnd = asString.range(of: "\r\n") else {
+        guard let lineEndBytes = connectReq.range(of: Data("\r\n".utf8)),
+              let firstLineStr = String(data: connectReq[connectReq.startIndex..<lineEndBytes.lowerBound],
+                                        encoding: .isoLatin1) else {
             throw MitmError.malformedHTTPRequest
         }
-        let firstLine = asString[..<lineEnd.lowerBound]
+        let firstLine = Substring(firstLineStr)
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2 else { throw MitmError.malformedHTTPRequest }
 
@@ -179,7 +182,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 throw MitmError.malformedHTTPRequest
             }
             let rewrittenLine = "\(parts[0]) \(path) \(parts.count >= 3 ? String(parts[2]) : "HTTP/1.1")"
-            var rewritten = Data(rewrittenLine.utf8)
+            var rewritten = rewrittenLine.data(using: .isoLatin1) ?? Data(rewrittenLine.utf8)
             rewritten.append(connectReq.subdata(in: reqLineEnd.lowerBound..<connectReq.count))
 
             if deniedByEgressPolicy(host: host, port: port) {
@@ -345,17 +348,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 dbQuery: dbQuery,
                 broker: guardrailsBroker,
                 profileID: profileID) {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
-                // Structured event → the Security Timeline window.
+                // Structured event → the Security Timeline window. A `web`
+                // method rule is the egress firewall's decision, recorded under
+                // the Firewall engine — not Guardrails (B39).
+                let (eventType, data) = Self.denialEvent(denial, host: host, port: port,
+                                                         method: reqMethod, path: reqPath)
+                if denial.isFirewall {
+                    SupplyChainLog.shared.record(
+                        "[firewall] ✗ deny web \(reqMethod) \(host)\(reqPath) (\(profileID.uuidString.prefix(8)))")
+                } else {
+                    FileHandle.standardError.write(Data(
+                        "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
+                }
                 BACEventEmitter.shared.emitDetached(
-                    profileID: profileID, eventType: "guardrails.block",
-                    eventData: [
-                        "host": .string(host),
-                        "method": .string(reqMethod),
-                        "path": .string(reqPath),
-                        "reason": .string(denial.reason),
-                    ])
+                    profileID: profileID, eventType: eventType, eventData: data)
                 var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: \(denial.contentType)\r\n"
                 if let t = denial.amzErrorType { resp += "x-amzn-ErrorType: \(t)\r\n" }
                 resp += "Content-Length: \(denial.body.utf8.count)\r\nConnection: close\r\n\r\n\(denial.body)"
@@ -662,6 +668,22 @@ final class HTTPMitmConnection: @unchecked Sendable {
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Codex subscription token unavailable for \(host): \(error)\n".utf8))
+                // Never forward the stand-in (or a dead token): answer here.
+                // A rejected / flagged login → a 401 that says where to sign
+                // in (Codex then prints its "sign in again" banner, which the
+                // session turns into a sign-in card); a transient failure → a
+                // retryable 503.
+                let rejected = (error as? CodexSubscriptionError)?.isRejection ?? false
+                let reply = rejected
+                    ? SignInCapture.response(status: 401, reason: "Unauthorized",
+                                             json: CodexSignInExpired.apiErrorJSON)
+                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
+                        "error": ["message": "Bromure couldn't renew the ChatGPT sign-in just now; retrying.",
+                                  "type": "server_error"] as [String: Any],
+                    ])
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                try tls.write(reply)
+                return
             }
         }
 
@@ -816,19 +838,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
             if grant == "refresh_token", let sent, SubscriptionFakeMint.isCodexRefreshFake(sent) {
                 let reply: Data
                 do {
-                    _ = try await refresher.accessToken(for: profileID)
+                    // Codex only refreshes after OpenAI turned it down: refresh
+                    // the REAL login for real (not just "it isn't expired yet"),
+                    // and fail honestly when the login is dead.
+                    let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
                     guard let fresh = store.record(for: profileID),
                           let standIn = CodexStandIn.mint(fresh, profileID: profileID)
                     else { throw CodexSubscriptionError.noCredential }
                     store.registerBogusKey(standIn.access, for: profileID)
                     reply = SignInCapture.response(status: 200, reason: "OK", json: CodexStandIn.refreshAnswer(standIn))
                     FileHandle.standardError.write(Data(
-                        "[mitm] answered Codex stand-in refresh for \(profileID.uuidString.prefix(8)) (host refreshed the real credential)\n".utf8))
+                        "[mitm] answered Codex stand-in refresh for \(profileID.uuidString.prefix(8)) (\(refreshedNow ? "host refreshed the real credential" : "real credential refreshed moments ago; reused"))\n".utf8))
                 } catch {
-                    reply = SignInCapture.response(status: 401, reason: "Unauthorized", json: [
-                        "error": "invalid_grant",
-                        "error_description": "Bromure could not refresh the Codex subscription on the host: \(error)",
-                    ])
+                    reply = SignInCapture.response(status: 401, reason: "Unauthorized",
+                                                   json: CodexSignInExpired.refreshRejectedJSON(error))
                     FileHandle.standardError.write(Data(
                         "[mitm] Codex stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
                 }
@@ -898,6 +921,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 onUpstreamMessage: realtimeTap.map { tap in
                     { @Sendable msg in tap.handle(msg) }
                 })
+            // Codex's Responses WebSocket turned the injected token down:
+            // same self-heal / dead-login detection as the HTTP path below.
+            if let stale = codexSubStaleAccess, result.statusCode == 401,
+               let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider() {
+                let pid = profileID
+                let invalidated = CodexSignInExpired.isInvalidation(result.handshakeResponse)
+                Task { await refresher.noteUnauthorized(stale: stale, for: pid, invalidated: invalidated) }
+            }
             let elapsed = Date().timeIntervalSince(t0) * 1000
             let streamedAny = realtimeTap?.streamedAnyEvents ?? false
             if streamedAny {
@@ -1497,6 +1528,35 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
 
+        // Content scans (prompt injection, PII) read the request body as JSON.
+        // A content-coded body (gzip / deflate / br) is decoded here and sent
+        // upstream as identity, so both scans see the real text; one that
+        // can't be decoded (zstd, corrupt) or a body too large to hold in
+        // memory (spooled to disk) is recorded on the Security Timeline as
+        // "not scanned" instead of being skipped silently (B36).
+        if Self.isAIHost(host) {
+            let piOn = Self.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
+            let piiOn = Self.piiPolicyProvider?(profileID)?.isActive ?? false
+            if piOn || piiOn {
+                let engines = [piOn ? "prompt_injection" : nil, piiOn ? "pii" : nil].compactMap { $0 }
+                if bodyFile != nil {
+                    Self.recordScanSkipped(host: host, path: reqPath, engines: engines,
+                                           reason: "request body too large to scan", profileID: profileID)
+                } else {
+                    switch Self.decodeRequestContentEncoding(toForward) {
+                    case .identity:
+                        break
+                    case .decoded(let plain):
+                        toForward = plain
+                    case .undecodable(let encoding):
+                        Self.recordScanSkipped(host: host, path: reqPath, engines: engines,
+                                               reason: "\(encoding)-compressed request body",
+                                               profileID: profileID)
+                    }
+                }
+            }
+        }
+
         // Prompt-injection enforcement (ask / block). Runs pre-forward so we
         // can stop a poisoned request before the model ever sees it. `log`
         // mode is handled post-response in emitTrace (zero added latency).
@@ -1723,7 +1783,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
            Self.parseStatusCode(relay.buffer) == 401,
            let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider() {
             let pid = profileID
-            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+            let invalidated = CodexSignInExpired.isInvalidation(relay.buffer)
+            Task { await refresher.noteUnauthorized(stale: stale, for: pid, invalidated: invalidated) }
         }
         if let stale = grokSubStaleAccess,
            Self.parseStatusCode(relay.buffer) == 401,
@@ -1765,7 +1826,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func isWebSocketUpgrade(rawRequest: Data) -> Bool {
         guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)),
               let headerStr = String(data: rawRequest.subdata(in: 0..<endRange.lowerBound),
-                                     encoding: .ascii) else {
+                                     encoding: .isoLatin1) else {
             return false
         }
         var sawUpgrade = false
@@ -2175,7 +2236,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Pull the numeric status code out of a raw response header
     /// blob ("HTTP/1.1 101 Switching Protocols\r\n…" → 101).
     private func parseStatusCode(rawHeaders: Data) -> Int {
-        guard let str = String(data: rawHeaders.prefix(64), encoding: .ascii),
+        guard let str = String(data: rawHeaders.prefix(64), encoding: .isoLatin1),
               let lineEnd = str.range(of: "\r\n") else { return 0 }
         let parts = str[..<lineEnd.lowerBound].split(separator: " ")
         guard parts.count >= 2, let n = Int(parts[1]) else { return 0 }
@@ -2362,9 +2423,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// newest external ingestion) rather than re-scanning — and
     /// re-logging — every prior result. Each element is the result's
     /// `(toolUseId, content)`.
-    private static func newToolResultSpans(
+    ///
+    /// Wire shapes: Anthropic puts every result of a turn in ONE user message
+    /// as `tool_result` blocks; OpenAI Chat Completions (Kimi, Grok, Mistral,
+    /// most OpenAI-compatible agents) sends one `role: "tool"` message PER
+    /// call, whose content the parser surfaces as plain text. Those used to be
+    /// invisible to the scan (B37) — the trailing run of tool messages is now
+    /// the newest ingestion too.
+    static func newToolResultSpans(
         in conv: Conversation
     ) -> [(id: String?, content: String)] {
+        var collected: [(id: String?, content: String)] = []
+        var inToolRun = false
         for message in conv.messages.reversed() {
             var spans: [(id: String?, content: String)] = []
             for block in message.content {
@@ -2373,9 +2443,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     spans.append((id: toolUseId, content: content))
                 }
             }
-            if !spans.isEmpty { return spans }
+            if !spans.isEmpty {
+                // Anthropic / Responses-style results: this message is the
+                // newest ingestion on its own (plus any tool run after it).
+                return spans + collected
+            }
+            if message.role == .tool {
+                // OpenAI-chat tool message: its text is the tool's output.
+                let text = message.content.compactMap { block -> String? in
+                    if case let .text(s) = block, !s.isEmpty { return s }
+                    return nil
+                }.joined(separator: "\n")
+                if !text.isEmpty { collected.insert((id: nil, content: text), at: 0) }
+                inToolRun = true
+                continue
+            }
+            if inToolRun { break }   // the run of tool messages ended
         }
-        return []
+        return collected
     }
 
     /// 451 response the guest sees when a prompt-injection detection blocks the
@@ -2389,6 +2474,90 @@ final class HTTPMitmConnection: @unchecked Sendable {
         for (kind, n) in o.newSwaps { data[kind.rawValue] = .int(n) }
         if o.partial { data["partial"] = .bool(true) }
         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "privacy.pii_swap", eventData: data)
+    }
+
+    /// An AI provider host (the hosts the conversation scans apply to).
+    static func isAIHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return TraceLevel.aiHosts.contains { h.contains($0) }
+    }
+
+    enum RequestBodyDecoding: Equatable {
+        /// No (or `identity`) Content-Encoding — the body is already plain.
+        case identity
+        /// The full request rewritten with a decoded body and no
+        /// Content-Encoding header (the relay recomputes the length).
+        case decoded(Data)
+        /// Encoded with something we can't decode (zstd, or corrupt data).
+        case undecodable(String)
+    }
+
+    /// Decode a content-coded request body (gzip / deflate / br) so the
+    /// content scans can read it. The result is forwarded as identity —
+    /// every provider accepts an uncompressed body.
+    static func decodeRequestContentEncoding(_ raw: Data) -> RequestBodyDecoding {
+        guard let sep = raw.range(of: Data("\r\n\r\n".utf8)),
+              let header = rawHeaderSection(of: raw),
+              let enc = headerValue("content-encoding", inHeaderSection: header)?
+                .trimmingCharacters(in: .whitespaces).lowercased(),
+              !enc.isEmpty, enc != "identity" else { return .identity }
+        let body = raw.subdata(in: sep.upperBound..<raw.endIndex)
+        // Stacked codings ("gzip, br") are applied in order; undo in reverse.
+        var plain = body
+        for coding in enc.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).reversed()
+        where !coding.isEmpty && coding != "identity" {
+            let next: Data?
+            switch coding {
+            case "gzip", "x-gzip", "deflate": next = decompressBody(plain, encoding: coding == "x-gzip" ? "gzip" : coding)
+            case "br": next = brotliDecode(plain)
+            default: next = nil
+            }
+            guard let next else { return .undecodable(coding) }
+            plain = next
+        }
+        let kept = header.components(separatedBy: "\r\n").filter { line in
+            guard let colon = line.firstIndex(of: ":") else { return true }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            return name != "content-encoding" && name != "content-length"
+        }
+        var newHeader = kept.joined(separator: "\r\n")
+        newHeader += "\r\nContent-Length: \(plain.count)"
+        var out = newHeader.data(using: .isoLatin1) ?? Data(newHeader.utf8)
+        out.append(Data("\r\n\r\n".utf8))
+        out.append(plain)
+        return .decoded(out)
+    }
+
+    /// Last "not scanned" record per (profile, host, reason): a client that
+    /// compresses every request (Codex → zstd) gets one Timeline row per
+    /// window, not one per call.
+    nonisolated(unsafe) private static var scanSkipSeen: [String: Date] = [:]
+    private static let scanSkipLock = NSLock()
+    static let scanSkipWindow: TimeInterval = 600
+
+    /// Record that a request to an AI host went out without the content
+    /// scans (prompt injection / PII) — never skip them silently.
+    static func recordScanSkipped(host: String, path: String, engines: [String],
+                                  reason: String, profileID: UUID, now: Date = Date()) {
+        FileHandle.standardError.write(Data(
+            "[mitm] \(host) \(path): \(reason) — not scanned (\(engines.joined(separator: ", ")))\n".utf8))
+        let key = "\(profileID.uuidString)|\(host.lowercased())|\(reason)"
+        scanSkipLock.lock()
+        if let last = scanSkipSeen[key], now.timeIntervalSince(last) < scanSkipWindow {
+            scanSkipLock.unlock(); return
+        }
+        if scanSkipSeen.count > 1024 { scanSkipSeen.removeAll() }
+        scanSkipSeen[key] = now
+        scanSkipLock.unlock()
+        SupplyChainLog.shared.record("[content-scan] not scanned: \(reason) → \(host)")
+        BACEventEmitter.shared.emitDetached(
+            profileID: profileID, eventType: "content_scan.skipped",
+            eventData: [
+                "host": .string(host),
+                "path": .string(path),
+                "reason": .string(reason),
+                "engines": .array(engines.map { .string($0) }),
+            ])
     }
 
     private static func injectionBlockResponse(detector: String, source: String) -> Data {
@@ -2410,7 +2579,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         guard let endRange = raw.range(of: Data("\r\n\r\n".utf8)) else { return raw }
         let headerData = raw.subdata(in: 0..<endRange.lowerBound)
         let bodyData   = raw.subdata(in: endRange.lowerBound..<raw.count)
-        guard let headerStr = String(data: headerData, encoding: .ascii) else { return raw }
+        // Latin-1: a non-ASCII header byte must not skip redaction (the old
+        // `.ascii` decode returned the frame unredacted on any such byte).
+        guard let headerStr = String(data: headerData, encoding: .isoLatin1) else { return raw }
 
         var lines = headerStr.components(separatedBy: "\r\n")
         for i in lines.indices {
@@ -2423,8 +2594,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         let rebuilt = lines.joined(separator: "\r\n")
         var out = Data()
-        out.reserveCapacity(rebuilt.utf8.count + bodyData.count)
-        out.append(Data(rebuilt.utf8))
+        let rebuiltBytes = rebuilt.data(using: .isoLatin1) ?? Data(rebuilt.utf8)
+        out.reserveCapacity(rebuiltBytes.count + bodyData.count)
+        out.append(rebuiltBytes)
         out.append(bodyData)
         return out
     }
@@ -2462,7 +2634,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return raw
         }
         let header = raw.subdata(in: 0..<endRange.lowerBound)
-        guard let headerStr = String(data: header, encoding: .ascii) else {
+        guard let headerStr = String(data: header, encoding: .isoLatin1) else {
             return raw
         }
         let lines = headerStr.split(separator: "\r\n")
@@ -2519,13 +2691,52 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     /// Pull "GET /foo HTTP/1.1" → ("GET", "/foo").
-    private static func parseRequestLine(_ raw: Data) -> (method: String, path: String) {
-        guard let str = String(data: raw.prefix(8 * 1024), encoding: .ascii),
-              let lineEnd = str.range(of: "\r\n") else {
+    ///
+    /// Only the request-line bytes (up to the first CRLF) are decoded. The
+    /// old code decoded the whole 8 KB prefix — headers AND the start of the
+    /// body — as ASCII, so one UTF-8 byte in a body ("héllo", "—", emoji)
+    /// turned the method into "?" and silently bypassed every method-gated
+    /// protection (firewall `web` verb rules, PII, guardrails) — B35.
+    /// Latin-1 maps every byte, so the decode itself can never fail.
+    static func parseRequestLine(_ raw: Data) -> (method: String, path: String) {
+        let window = raw.prefix(8 * 1024)
+        return parseRequestLineWindow(window)
+    }
+
+    /// The Security Timeline event for a pre-forward policy denial: a `web`
+    /// method rule is the egress firewall's (`egress.firewall`, engine
+    /// "Firewall"); everything else is a protocol guardrail (`guardrails.block`).
+    static func denialEvent(_ denial: GuardrailsConfig.Denial, host: String, port: Int,
+                            method: String, path: String) -> (String, [String: AnyJSON]) {
+        if denial.isFirewall {
+            return ("egress.firewall", [
+                "action": .string("deny"),
+                "layer": .string("web"),
+                "proto": .string("web"),
+                "host": .string(host),
+                "port": .int(port),
+                "method": .string(method),
+                "path": .string(path),
+                "reason": .string(denial.reason),
+            ])
+        }
+        return ("guardrails.block", [
+            "host": .string(host),
+            "method": .string(method),
+            "path": .string(path),
+            "reason": .string(denial.reason),
+        ])
+    }
+
+    private static func parseRequestLineWindow(_ window: Data) -> (method: String, path: String) {
+        guard let lineEnd = window.range(of: Data("\r\n".utf8)) else {
             return ("?", "/")
         }
-        let line = str[..<lineEnd.lowerBound]
-        let parts = line.split(separator: " ")
+        let lineBytes = window[window.startIndex..<lineEnd.lowerBound]
+        guard let line = String(data: lineBytes, encoding: .isoLatin1) else {
+            return ("?", "/")
+        }
+        let parts = line.split(separator: " ", omittingEmptySubsequences: true)
         guard parts.count >= 2 else { return ("?", "/") }
         return (String(parts[0]), String(parts[1]))
     }
@@ -2749,7 +2960,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
     /// Pull "HTTP/1.1 200 OK" → 200.
     private static func parseStatusCode(_ raw: Data) -> Int {
-        guard let str = String(data: raw.prefix(64), encoding: .ascii),
+        guard let str = String(data: raw.prefix(64), encoding: .isoLatin1),
               let lineEnd = str.range(of: "\r\n") else { return 0 }
         let line = str[..<lineEnd.lowerBound]
         let parts = line.split(separator: " ")
@@ -3041,7 +3252,7 @@ private func readUntilCompleteHTTP(maxBytes: Int,
            let r = buffer.range(of: Data("\r\n\r\n".utf8)) {
             headerEnd = r.upperBound
             // Parse Content-Length from headers.
-            if let str = String(data: buffer.prefix(r.lowerBound), encoding: .ascii) {
+            if let str = String(data: buffer.prefix(r.lowerBound), encoding: .isoLatin1) {
                 for line in str.split(separator: "\r\n") {
                     let lower = line.lowercased()
                     if lower.hasPrefix("content-length:") {
@@ -3334,6 +3545,46 @@ private func decompressBody(_ data: Data, encoding: String) -> Data? {
 }
 
 private enum DeflateFormat { case zlib, raw }
+
+/// Brotli decode (Compression.framework, macOS 12+) for content-coded request
+/// bodies. Output capped at 64 MiB like `inflateData`.
+private func brotliDecode(_ data: Data) -> Data? {
+    guard !data.isEmpty else { return nil }
+    let chunkSize = 64 * 1024
+    let outCap = 64 * 1024 * 1024
+    let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
+    defer { stream.deallocate() }
+    var status = compression_stream_init(stream, COMPRESSION_STREAM_DECODE, COMPRESSION_BROTLI)
+    guard status == COMPRESSION_STATUS_OK else { return nil }
+    defer { compression_stream_destroy(stream) }
+    let dstBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: chunkSize)
+    defer { dstBuf.deallocate() }
+    var out = Data()
+    return data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Data? in
+        guard let srcBase = src.baseAddress else { return nil }
+        stream.pointee.src_ptr = srcBase.assumingMemoryBound(to: UInt8.self)
+        stream.pointee.src_size = data.count
+        stream.pointee.dst_ptr = dstBuf
+        stream.pointee.dst_size = chunkSize
+        repeat {
+            status = compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+            switch status {
+            case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
+                let produced = chunkSize - stream.pointee.dst_size
+                out.append(dstBuf, count: produced)
+                if out.count > outCap { return nil }
+                stream.pointee.dst_ptr = dstBuf
+                stream.pointee.dst_size = chunkSize
+                // No progress with the input exhausted: a truncated stream.
+                if status == COMPRESSION_STATUS_OK, produced == 0,
+                   stream.pointee.src_size == 0 { return nil }
+            default:
+                return nil
+            }
+        } while status != COMPRESSION_STATUS_END
+        return out
+    }
+}
 
 private func gunzipData(_ data: Data) -> Data? {
     // gzip wrapper: 10-byte header (with optional FEXTRA/FNAME/FCOMMENT

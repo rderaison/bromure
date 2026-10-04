@@ -94,6 +94,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case mcp         = "MCP"
     case tracing     = "Tracing"
     case guardrails       = "Guardrails"
+    case firewall         = "Firewall"
     case supplyChain      = "Supply Chain"
     case promptInjection  = "Prompt Injection"
     case pii              = "PII Protection"
@@ -117,7 +118,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general, .appearance: return .workspace
         case .localModels, .fusion: return .models
         case .folders, .environment, .resources, .browser, .mcp: return .machine
-        case .credentials, .guardrails, .supplyChain, .promptInjection, .pii, .tracing: return .security
+        case .credentials, .guardrails, .firewall, .supplyChain, .promptInjection, .pii, .tracing: return .security
         case .automation: return .app
         }
     }
@@ -133,7 +134,8 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .environment:     return "env variables dotenv shell description auto mode safety servers staging production trusted"
         case .mcp:             return "tools servers mcp"
         case .tracing:         return "trace http log requests"
-        case .guardrails:      return "firewall egress network block allow kubernetes aws docker github destructive"
+        case .guardrails:      return "credentials approval write policy kubernetes aws docker github destructive exfiltration"
+        case .firewall:        return "firewall egress outbound network connections block allow deny host port web methods interception proxy"
         case .supplyChain:     return "npm pypi packages age socket osv install scripts depi"
         case .promptInjection: return "injection detector scan classifier"
         case .pii:             return "privacy personal data names email phone gdpr redact anonymize pseudonymize"
@@ -155,6 +157,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .mcp:         "network"
         case .tracing:     "doc.text.magnifyingglass"
         case .guardrails:       "exclamationmark.shield.fill"
+        case .firewall:         "flame.fill"
         case .supplyChain:      "shippingbox.fill"
         case .promptInjection:  "exclamationmark.triangle.fill"
         case .pii:              "person.crop.circle.badge.checkmark"
@@ -176,6 +179,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .mcp:         .blue
         case .tracing:     .red
         case .guardrails:       .orange
+        case .firewall:         .red
         case .supplyChain:      .yellow
         case .promptInjection:  .red
         case .pii:              .purple
@@ -451,6 +455,13 @@ enum ModelsPaneMode {
 }
 
 struct ProfileEditorView: View {
+    #if os(macOS)
+    /// Content sizes of the windows hosting the editor (Preferences, the
+    /// workspace editor): opened at `idealWindowSize`, resizable down to
+    /// `minWindowSize`.
+    static let minWindowSize = CGSize(width: 780, height: 600)
+    static let idealWindowSize = CGSize(width: 880, height: 840)
+    #endif
     @State private var draft: Profile
     /// The saved home size, so picking the current size back leaves the
     /// profile unchanged (no restart prompt for a no-op).
@@ -468,6 +479,10 @@ struct ProfileEditorView: View {
     /// The pane a freshly opened Preferences editor starts on (set just before
     /// a workspace editor opens Preferences), consumed on init.
     static var pendingPreferencesCategory: EditorCategory?
+    /// The pane a workspace editor opens on when it is opened FOR that pane
+    /// (the Security Overview's "turn on" cells): consumed on init when the
+    /// edited workspace matches.
+    static var pendingWorkspaceCategory: (id: UUID, category: EditorCategory)?
     /// The sidebar's search.
     @State private var categorySearch = ""
     #if os(iOS) || os(visionOS)
@@ -675,6 +690,10 @@ struct ProfileEditorView: View {
             _remoteGlobalDraft = State(initialValue: initial)
         }
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
+        if let pending = Self.pendingWorkspaceCategory, profile?.id == pending.id {
+            Self.pendingWorkspaceCategory = nil
+            _selectedCategory = State(initialValue: pending.category)
+        }
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
         // values. We always render the editable fields (no inherit toggle).
@@ -788,7 +807,12 @@ struct ProfileEditorView: View {
             #endif
         }
         #if os(macOS)
-        .frame(width: 720, height: 520)
+        // Flexible, with a minimum that fits the whole sidebar (Security group
+        // included) and the widest pane; the hosting window sizes to the ideal.
+        .frame(minWidth: Self.minWindowSize.width, idealWidth: Self.idealWindowSize.width,
+               maxWidth: .infinity,
+               minHeight: Self.minWindowSize.height, idealHeight: Self.idealWindowSize.height,
+               maxHeight: .infinity)
         #endif
         // Title bar follows the name live, and is seeded on appear so a
         // pre-filled draft doesn't sit under a stale title until first keypress.
@@ -832,6 +856,12 @@ struct ProfileEditorView: View {
                 .replacingOccurrences(of: " ", with: "")
             if let r = raw, r.hasPrefix("preferences:") {
                 raw = isLocalPreferences ? String(r.dropFirst("preferences:".count)) : nil
+            }
+            // "workspace:<uuid>:<category>" targets only that workspace's editor.
+            if let r = raw, r.hasPrefix("workspace:") {
+                let parts = r.split(separator: ":", maxSplits: 2).map(String.init)
+                raw = parts.count == 3 && parts[1] == draft.id.uuidString.lowercased() && !isNew
+                    ? parts[2] : nil
             }
             if let raw,
                let cat = EditorCategory.allCases.first(where: {
@@ -964,6 +994,10 @@ struct ProfileEditorView: View {
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // A pane wider than the space left must clip inside this column,
+            // never widen the whole editor (which then centred in the window
+            // and cut the sidebar and the value column off — B44).
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         }
     }
 
@@ -1055,6 +1089,7 @@ struct ProfileEditorView: View {
         case .mcp:         mcpSection
         case .tracing:     tracingSection
         case .guardrails:       guardrailsSection
+        case .firewall:         firewallSection
         case .supplyChain:      supplyChainSection
         case .promptInjection:  promptInjectionSection
         case .pii:              piiSection
@@ -1296,8 +1331,14 @@ struct ProfileEditorView: View {
                 Toggle(NSLocalizedString("Start this VM at login", comment: ""),
                        isOn: $draft.bootAtStartup)
 
+                // A grouped Form draws an empty TextField borderless and
+                // right-aligned — invisible until typed into. The prompt
+                // makes the field visible.
                 TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
-                          text: $draft.comments, axis: .vertical)
+                          text: $draft.comments,
+                          prompt: Text(NSLocalizedString("Add a note about this workspace",
+                                                         comment: "Profile notes field placeholder")),
+                          axis: .vertical)
                     .lineLimit(2...6)
             }
 
@@ -3375,7 +3416,18 @@ struct ProfileEditorView: View {
                 case .idle, .failed:
                     switch installer.installedSource {
                     case .sharedWithBromureWeb:
-                        EmptyView()   // Bromure Web owns it — nothing to manage here
+                        // Bromure Web owns it. Only when it's stale do we
+                        // offer AC's own copy — which then wins over the
+                        // shared one (BrowserImageInstaller.resolve).
+                        if installer.installedIsOutdated {
+                            Button("Download Current Version") {
+                                Task { await BrowserImageInstaller.shared.install() }
+                            }
+                        }
+                    case .downloadedByAC where installer.installedIsOutdated:
+                        Button("Update") {
+                            Task { await BrowserImageInstaller.shared.install() }
+                        }
                     case .downloadedByAC:
                         Button("Re-download") { confirmBrowserRedownload = true }
                             .confirmationDialog(
@@ -3416,6 +3468,12 @@ struct ProfileEditorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if installer.installedIsOutdated, let note = browserImageOutdatedNote(installer) {
+                    Label(note, systemImage: "exclamationmark.arrow.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if case .failed(let message) = installer.phase {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -3423,6 +3481,20 @@ struct ProfileEditorView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    /// Why the image is flagged outdated, and what to do about it.
+    private func browserImageOutdatedNote(_ installer: BrowserImageInstaller) -> String? {
+        let have = installer.installedVersion.map { "v\($0)" } ?? String(localized: "an unknown version")
+        let want = "v\(BrowserImageInstaller.currentVersion)"
+        switch installer.installedSource {
+        case .sharedWithBromureWeb:
+            return String(localized: "Outdated: the shared image is \(have); this version of Agentic Coding uses \(want). Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up).")
+        case .downloadedByAC:
+            return String(localized: "Outdated: this image is \(have); the current version is \(want). Update to download it.")
+        case nil:
+            return nil
         }
     }
 
@@ -3955,14 +4027,39 @@ struct ProfileEditorView: View {
                 }
 
                 Divider().padding(.vertical, 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Don't alert on credential exfiltration",
+                           isOn: $draft.disableExfiltrationAlerts)
+                    Text("By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 2)
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
+    /// The Firewall pane: the workspace's outbound-connection rules (pf-style
+    /// egress policy) and the interception switches that decide what the proxy
+    /// gets to see. Split out of Guardrails, which is about credentials.
+    @ViewBuilder
+    private var firewallSection: some View {
+        guardrailsScrollWrapper {
+            VStack(alignment: .leading, spacing: 12) {
                 // The pf-rules table editor needs the real EgressPolicy
                 // model (SandboxEngine, macOS-only). The fat client
                 // mirrors profiles but neither edits nor enforces egress
                 // rules, so the pane simply omits the table there.
                 #if os(macOS)
                 EgressRulesEditor(pfText: $draft.egressRules)
+                #else
+                Text(NSLocalizedString("Outbound connection rules are edited on the Mac that runs this workspace.", comment: "Firewall pane, remote client"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 #endif
 
+                Divider().padding(.vertical, 4)
                 VStack(alignment: .leading, spacing: 2) {
                     Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
                     Text("Transparent interception (on by default) diverts the VM's HTTP/HTTPS into Bromure at the network layer, so the proxy sees the traffic even when a client doesn't use the proxy env vars. Turn it off and that forced divert stops: raw sockets and cert-pinned clients (Signal and similar) reach the real network — and the real upstream cert — directly. This does NOT disable the proxy itself: HTTP(S)_PROXY stays set, so proxy-aware tools (apt/git/pip/curl/node…) and the agent's own API calls still go through Bromure and keep credential/token swap, tracing, and guardrails. Applies live, no restart. Use for a workspace with a client that breaks under transparent interception.")
@@ -3975,15 +4072,7 @@ struct ProfileEditorView: View {
                     Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-
-                    Toggle("Don't alert on credential exfiltration",
-                           isOn: $draft.disableExfiltrationAlerts)
-                        .padding(.top, 8)
-                    Text("By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.top, 6)
             }
             .padding(.bottom, 8)
         }
@@ -4181,7 +4270,7 @@ struct ProfileEditorView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             GroupBox(label: Label(NSLocalizedString("Detectors", comment: ""),
-                                  systemImage: "magnifyingglass")) {
+                                  systemImage: "brain")) {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle(NSLocalizedString("Detect prompt injection in source code", comment: ""),
                            isOn: $draft.promptInjection.detectSourceInjection)
@@ -4215,7 +4304,7 @@ struct ProfileEditorView: View {
                             }
                             #endif
                         }
-                    Text(NSLocalizedString("Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.", comment: ""))
+                    Text(NSLocalizedString("Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable.", comment: "Prompt injection: rules-file detector"))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

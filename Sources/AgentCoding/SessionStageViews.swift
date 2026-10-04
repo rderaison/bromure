@@ -496,6 +496,168 @@ struct SessionHeaderView: View {
         }
     }
 
+    /// The quiet line under the title: @nick · status · agent · machine ·
+    /// folder · …, at a level of detail (3 = all; 2 drops the model, the
+    /// folder, the clone and the tokens; 1 also the machine, branch and
+    /// time; 0 keeps @nick · status · agent). The header picks the richest
+    /// that fits (B14: an overflowing row was centred and spilled over the
+    /// sidebar; B4: nothing in it truncates, so a status change never
+    /// re-truncates the folder frame by frame).
+    @ViewBuilder
+    private func metaLine(_ s: AgentSession, bucket: SessionBucket, gone: Bool, detail: Int) -> some View {
+        HStack(spacing: 7) {
+            if let nick = s.nickname, !nick.isEmpty {
+                Text("@" + nick)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                    .fixedSize()
+                    .help(NSLocalizedString("How agents and the composer reach this session", comment: "session header"))
+                metaDot
+            }
+            HStack(spacing: 5) {
+                if let st = SessionHome.dot(for: s, in: model) {
+                    AgentStatusDot(status: st).scaleEffect(1.15)   // breathes while working
+                } else {
+                    Circle().fill(bucket.tint).frame(width: 7, height: 7)
+                }
+                Text(SessionHome.goneReason(s, in: model) ?? statusText(s, bucket: bucket))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(bucket.tint)
+            }
+            .fixedSize()
+            metaDot
+            HStack(spacing: 5) {
+                AgentAvatar(tool: s.tool, size: 13)
+                Text(s.tool.displayName)
+                #if os(macOS)
+                if detail >= 3, let m = TranscriptSearchIndex.shared.model(for: s, among: store.sessions) {
+                    Text(m)
+                        .foregroundStyle(.tertiary)
+                        .help(NSLocalizedString("The model the agent last answered with", comment: "session header"))
+                }
+                #endif
+            }
+            .fixedSize()
+            if detail >= 2, !workspaceName(s.profileID).isEmpty {
+                metaDot
+                HStack(spacing: 5) {
+                    WorkspaceSquare(accentHex: accentHex(s.profileID), size: 7)
+                    Text(workspaceName(s.profileID))
+                }
+                .fixedSize()
+                .contentShape(Rectangle())
+                .onTapGesture { actions.showMachine(s.profileID) }
+                .contextMenu { machineItems(s, gone: gone) }
+                .help(NSLocalizedString("The machine this session runs on — click for its details, right-click for its settings", comment: "session header"))
+                // A native machine: said plainly, every time.
+                if model.machineIDs.contains(s.profileID) {
+                    HStack(spacing: 4) {
+                        NativeMachineBadge(size: 10)
+                        Text(NativeMachine.notSandboxed)
+                            .foregroundStyle(NativeMachine.tint)
+                    }
+                    .fixedSize()
+                    .help(NativeMachine.help(workspaceName(s.profileID)))
+                }
+            }
+            if detail >= 3 {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "folder").font(.system(size: 10.5))
+                    Text(prettyGuestPath(s.cwd))
+                        .font(.system(size: 11.5, design: .monospaced))
+                }
+                .fixedSize()
+            }
+            if detail >= 2, let branch = s.worktreeBranch, !branch.isEmpty {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.branch").font(.system(size: 10.5))
+                    Text(branch)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .truncationMode(.middle)
+                    if let sum = SessionHome.branchSummary(s), s.branchMerge == nil {
+                        Text(sum).foregroundStyle(.tertiary)
+                    }
+                }
+                .help(s.branchParent.map {
+                    String(format: NSLocalizedString("Its own git branch, off %@ — merge it back when it's ready", comment: "session header"), $0)
+                } ?? NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
+            }
+            if detail >= 3, let url = s.cloneURL, !url.isEmpty {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.down.circle").font(.system(size: 10.5))
+                    Text(CodingTask.shortRepoURL(url))
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .truncationMode(.middle)
+                }
+                .help(url)
+            }
+            #if os(macOS)
+            // Time spent working: the chat's live timeline
+            // (any surface), else this Mac's transcript index.
+            let timeline = SessionTimelineStore.shared.timeline(s.id)
+            let turns = TranscriptSearchIndex.shared.turns(s.id)
+            let count = timeline?.turns.count ?? turns.count
+            if detail >= 2, count > 0 {
+                let busy = timeline?.busy ?? turns.reduce(0) { $0 + $1.duration }
+                let longest = timeline?.turns.map(\.duration).max() ?? turns.map(\.duration).max() ?? 0
+                metaDot
+                Button { if timeline != nil { flameFor = s.id } } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stopwatch").font(.system(size: 10.5))
+                        Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(String(format: NSLocalizedString("Time the agent spent working: %d turns, the longest %@ — click for where it went", comment: "session header"),
+                             count, TranscriptSearchIndex.duration(longest)))
+                .popover(isPresented: Binding(get: { flameFor == s.id },
+                                              set: { if !$0 { flameFor = nil } })) {
+                    if let tl = SessionTimelineStore.shared.timeline(s.id) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                                Spacer()
+                                Button {
+                                    flameFor = nil
+                                    let sid = s.id
+                                    TimelineWindows.open(title: s.title, SessionFlameWindow(sessionID: sid))
+                                } label: {
+                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                }
+                                .buttonStyle(.plain)
+                                .help(NSLocalizedString("Open in its own window", comment: "display card"))
+                            }
+                            FlameGraphView(timeline: tl)
+                        }
+                        .padding(14)
+                        .frame(width: 940, height: 520)
+                    }
+                }
+            }
+            if detail >= 3, let t = TranscriptSearchIndex.shared.tokens(s.id) {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 10.5))
+                    Text(String(format: NSLocalizedString("%@ tokens", comment: "session header"),
+                                TranscriptSearchIndex.compact(t.total)))
+                        .monospacedDigit()
+                }
+                .help(String(format: NSLocalizedString("Input %@ · cached %@ · output %@", comment: "session header"),
+                             TranscriptSearchIndex.compact(t.input),
+                             TranscriptSearchIndex.compact(t.cached),
+                             TranscriptSearchIndex.compact(t.output)))
+            }
+            #endif
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+
     var body: some View {
         if let s = session {
             let bucket = SessionHome.bucket(for: s, in: model)
@@ -528,155 +690,14 @@ struct SessionHeaderView: View {
                                 .contextMenu { machineItems(s, gone: gone) }
                         }
                         // One quiet line: @nick · status · agent · machine · folder.
-                        HStack(spacing: 7) {
-                            if let nick = s.nickname, !nick.isEmpty {
-                                Text("@" + nick)
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(Color.accentColor)
-                                    .fixedSize()
-                                    .help(NSLocalizedString("How agents and the composer reach this session", comment: "session header"))
-                                metaDot
-                            }
-                            HStack(spacing: 5) {
-                                if let st = SessionHome.dot(for: s, in: model) {
-                                    AgentStatusDot(status: st).scaleEffect(1.15)   // breathes while working
-                                } else {
-                                    Circle().fill(bucket.tint).frame(width: 7, height: 7)
-                                }
-                                Text(SessionHome.goneReason(s, in: model) ?? statusText(s, bucket: bucket))
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(bucket.tint)
-                            }
-                            .fixedSize()
-                            metaDot
-                            HStack(spacing: 5) {
-                                AgentAvatar(tool: s.tool, size: 13)
-                                Text(s.tool.displayName)
-                                #if os(macOS)
-                                if let m = TranscriptSearchIndex.shared.model(s.id) {
-                                    Text(m)
-                                        .foregroundStyle(.tertiary)
-                                        .help(NSLocalizedString("The model the agent last answered with", comment: "session header"))
-                                }
-                                #endif
-                            }
-                            .fixedSize()
-                            if !workspaceName(s.profileID).isEmpty {
-                                metaDot
-                                HStack(spacing: 5) {
-                                    WorkspaceSquare(accentHex: accentHex(s.profileID), size: 7)
-                                    Text(workspaceName(s.profileID))
-                                }
-                                .fixedSize()
-                                .contentShape(Rectangle())
-                                .onTapGesture { actions.showMachine(s.profileID) }
-                                .contextMenu { machineItems(s, gone: gone) }
-                                .help(NSLocalizedString("The machine this session runs on — click for its details, right-click for its settings", comment: "session header"))
-                                // A native machine: said plainly, every time.
-                                if model.machineIDs.contains(s.profileID) {
-                                    HStack(spacing: 4) {
-                                        NativeMachineBadge(size: 10)
-                                        Text(NativeMachine.notSandboxed)
-                                            .foregroundStyle(NativeMachine.tint)
-                                    }
-                                    .fixedSize()
-                                    .help(NativeMachine.help(workspaceName(s.profileID)))
-                                }
-                            }
-                            metaDot
-                            HStack(spacing: 4) {
-                                Image(systemName: "folder").font(.system(size: 10.5))
-                                Text(prettyGuestPath(s.cwd))
-                                    .font(.system(size: 11.5, design: .monospaced))
-                                    .truncationMode(.middle)
-                            }
-                            if let branch = s.worktreeBranch, !branch.isEmpty {
-                                metaDot
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.triangle.branch").font(.system(size: 10.5))
-                                    Text(branch)
-                                        .font(.system(size: 11.5, design: .monospaced))
-                                        .truncationMode(.middle)
-                                    if let sum = SessionHome.branchSummary(s), s.branchMerge == nil {
-                                        Text(sum).foregroundStyle(.tertiary)
-                                    }
-                                }
-                                .help(s.branchParent.map {
-                                    String(format: NSLocalizedString("Its own git branch, off %@ — merge it back when it's ready", comment: "session header"), $0)
-                                } ?? NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
-                            }
-                            if let url = s.cloneURL, !url.isEmpty {
-                                metaDot
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.down.circle").font(.system(size: 10.5))
-                                    Text(CodingTask.shortRepoURL(url))
-                                        .font(.system(size: 11.5, design: .monospaced))
-                                        .truncationMode(.middle)
-                                }
-                                .help(url)
-                            }
-                            #if os(macOS)
-                            // Time spent working: the chat's live timeline
-                            // (any surface), else this Mac's transcript index.
-                            let timeline = SessionTimelineStore.shared.timeline(s.id)
-                            let turns = TranscriptSearchIndex.shared.turns(s.id)
-                            let count = timeline?.turns.count ?? turns.count
-                            if count > 0 {
-                                let busy = timeline?.busy ?? turns.reduce(0) { $0 + $1.duration }
-                                let longest = timeline?.turns.map(\.duration).max() ?? turns.map(\.duration).max() ?? 0
-                                metaDot
-                                Button { if timeline != nil { flameFor = s.id } } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "stopwatch").font(.system(size: 10.5))
-                                        Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
-                                    }
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .help(String(format: NSLocalizedString("Time the agent spent working: %d turns, the longest %@ — click for where it went", comment: "session header"),
-                                             count, TranscriptSearchIndex.duration(longest)))
-                                .popover(isPresented: Binding(get: { flameFor == s.id },
-                                                              set: { if !$0 { flameFor = nil } })) {
-                                    if let tl = SessionTimelineStore.shared.timeline(s.id) {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            HStack {
-                                                Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                                                Spacer()
-                                                Button {
-                                                    flameFor = nil
-                                                    let sid = s.id
-                                                    TimelineWindows.open(title: s.title, SessionFlameWindow(sessionID: sid))
-                                                } label: {
-                                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                                }
-                                                .buttonStyle(.plain)
-                                                .help(NSLocalizedString("Open in its own window", comment: "display card"))
-                                            }
-                                            FlameGraphView(timeline: tl)
-                                        }
-                                        .padding(14)
-                                        .frame(width: 940, height: 520)
-                                    }
-                                }
-                            }
-                            if let t = TranscriptSearchIndex.shared.tokens(s.id) {
-                                metaDot
-                                HStack(spacing: 4) {
-                                    Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 10.5))
-                                    Text(String(format: NSLocalizedString("%@ tokens", comment: "session header"),
-                                                TranscriptSearchIndex.compact(t.total)))
-                                        .monospacedDigit()
-                                }
-                                .help(String(format: NSLocalizedString("Input %@ · cached %@ · output %@", comment: "session header"),
-                                             TranscriptSearchIndex.compact(t.input),
-                                             TranscriptSearchIndex.compact(t.cached),
-                                             TranscriptSearchIndex.compact(t.output)))
-                            }
-                            #endif
+                        ViewThatFits(in: .horizontal) {
+                            metaLine(s, bucket: bucket, gone: gone, detail: 3)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 2)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 1)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 0)
                         }
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        .clipped()
                     }
                     Spacer(minLength: 8)
                     if !gone, SessionHome.isBranch(s) {
@@ -788,9 +809,15 @@ struct SessionHeaderView: View {
     }
 
     private func statusText(_ s: AgentSession, bucket: SessionBucket) -> String {
+        // Launching or resuming: what's happening ("Waking up…" while the
+        // machine boots, "Starting…" once the agent is on its way) — the
+        // same words as the sidebar row.
+        if s.isLaunching || (bucket == .working && SessionHome.isStartingUp(s)) {
+            return SessionHome.statusLine(for: s, in: model)
+        }
         let detail: String?
         switch bucket {
-        case .working: detail = s.isLaunching ? NSLocalizedString("starting", comment: "pill") : nil
+        case .working: detail = nil
         case .idle:    detail = SessionHome.elapsed(since: s.lastSeenAt)
         case .ended:   detail = SessionHome.elapsed(since: s.endedAt).map {
             // "3 min ago" — but never "just now ago".
@@ -969,15 +996,84 @@ struct BranchMergeControl: View {
 
 // MARK: - Launch surface
 
+/// Conversations already parsed for a stage, by session: the resting page,
+/// the launch page a resume swaps in, and the page after it all show the
+/// same history at once instead of re-reading it ("the history vanished
+/// for a second" on every resume).
+@MainActor
+enum StageTranscriptMemo {
+    private static var items: [UUID: [TranscriptItem]] = [:]
+    private static var order: [UUID] = []
+    static func get(_ id: UUID) -> [TranscriptItem]? { items[id] }
+    static func put(_ id: UUID, _ list: [TranscriptItem]) {
+        guard !list.isEmpty else { return }
+        items[id] = list
+        order.removeAll { $0 == id }
+        order.append(id)
+        while order.count > 8 { items[order.removeFirst()] = nil }
+    }
+}
+
+/// A read-back conversation: the newest `limit` rows laid out eagerly (a
+/// lazy stack anchored at the bottom left the page blank over a tall row),
+/// older ones a click away.
+private struct RestingTranscriptRows: View {
+    let items: [TranscriptItem]
+    let sessionID: UUID
+    @Binding var limit: Int
+    static let step = 200
+
+    var body: some View {
+        let hidden = max(0, items.count - limit)
+        VStack(alignment: .leading, spacing: 14) {
+            if hidden > 0 {
+                Button {
+                    limit += Self.step
+                } label: {
+                    let n = min(hidden, Self.step)
+                    Label(n == 1
+                          ? NSLocalizedString("Show 1 earlier message", comment: "beautified history")
+                          : String(format: NSLocalizedString("Show %d earlier messages", comment: "beautified history"), n),
+                          systemImage: "arrow.up.circle")
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+            }
+            TranscriptRowsView(items: hidden > 0 ? Array(items.suffix(limit)) : items)
+        }
+        .environment(\.changesSessionID, sessionID)
+    }
+}
+
 /// The chat before the agent's tab exists: the opening message as the first
-/// turn, a live cue for what is happening, the composer parked.
+/// turn — or, for a session being resumed, the conversation so far — a live
+/// cue for what is happening, the composer parked.
 struct SessionLaunchView: View {
     var store: AgentSessionStore
     @Bindable var model: SessionListModel
     let sessionID: UUID
     let accent: Color
     let actions: SessionStageActions
+    /// The conversation as last copied (nil: this app's own copy).
+    var cachedTranscript: ((AgentSession) -> Data?)?
     @State private var draft = ""
+    /// The conversation so far, when there is one (a resume).
+    @State private var history: [TranscriptItem]
+    @State private var limit = RestingTranscriptRows.step
+    @State private var viewportHeight: CGFloat = 0
+
+    init(store: AgentSessionStore, model: SessionListModel, sessionID: UUID, accent: Color,
+         actions: SessionStageActions, cachedTranscript: ((AgentSession) -> Data?)? = nil) {
+        self.store = store
+        self.model = model
+        self.sessionID = sessionID
+        self.accent = accent
+        self.actions = actions
+        self.cachedTranscript = cachedTranscript
+        _history = State(initialValue: StageTranscriptMemo.get(sessionID) ?? [])
+    }
 
     private var session: AgentSession? { store.session(sessionID) }
 
@@ -998,8 +1094,10 @@ struct SessionLaunchView: View {
             let live = SessionHome.liveTabPosition(for: s, in: model)
             VStack(spacing: 0) {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if let msg = s.openingMessage, !msg.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if !history.isEmpty {
+                            RestingTranscriptRows(items: history, sessionID: sessionID, limit: $limit)
+                        } else if let msg = s.openingMessage, !msg.isEmpty {
                             TranscriptItemView(item: TranscriptItem(id: 0, kind: .userText(msg), timestamp: nil))
                         }
                         HStack(spacing: 10) {
@@ -1015,7 +1113,13 @@ struct SessionLaunchView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
+                    // Bottom-anchored like the live chat it turns into, by
+                    // filling the viewport (a short page anchored by the
+                    // scroll view alone hit-tests top-aligned).
+                    .frame(maxWidth: .infinity, minHeight: max(0, viewportHeight), alignment: .bottom)
                 }
+                .defaultScrollAnchor(.bottom)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
                 Divider().opacity(0.5)
                 ChatComposer(
                     placeholder: String(format: NSLocalizedString("%@ is starting — you can talk to it in a moment…", comment: "session launch"), s.tool.displayName),
@@ -1024,10 +1128,26 @@ struct SessionLaunchView: View {
                 .padding(.vertical, 10)
             }
             .background(Color.platformTextBackground)
+            .task(id: s.id) { await loadHistory(s) }
             .onChange(of: live) { _, new in if new != nil { actions.represent(s.id) } }
             .onChange(of: s.launchingSince) { _, _ in actions.represent(s.id) }
             .onChange(of: s.lastError) { _, _ in actions.represent(s.id) }
         }
+    }
+
+    /// A resumed session's conversation, from the local copy.
+    private func loadHistory(_ s: AgentSession) async {
+        let id = s.id
+        let source = cachedTranscript
+        let agent = s.tool.rawValue
+        let data: Data? = source.map { $0(s) } ?? SessionTranscriptCache.shared.load(id)
+        guard let data, !data.isEmpty else { return }
+        let items = await Task.detached(priority: .userInitiated) {
+            AgentTranscript.parse(data, agent: agent)
+        }.value
+        guard !items.isEmpty, items.count >= history.count else { return }
+        history = items
+        StageTranscriptMemo.put(id, items)
     }
 }
 
@@ -1052,21 +1172,42 @@ struct SessionRestView: View {
     var fetchWhenAsleep = false
 
     private enum Load { case idle, loading, loaded([TranscriptItem]), unavailable }
-    @State private var load: Load = .idle
+    @State private var load: Load
+
+    init(store: AgentSessionStore, model: SessionListModel, sessionID: UUID, accent: Color,
+         actions: SessionStageActions, fetchTranscript: @escaping (AgentSession) async -> String?,
+         cachedTranscript: @escaping (AgentSession) -> Data?, fetchWhenAsleep: Bool = false) {
+        self.store = store
+        self.model = model
+        self.sessionID = sessionID
+        self.accent = accent
+        self.actions = actions
+        self.fetchTranscript = fetchTranscript
+        self.cachedTranscript = cachedTranscript
+        self.fetchWhenAsleep = fetchWhenAsleep
+        // Shown a moment ago (the launch page, the live chat's last read):
+        // on screen from the first frame.
+        _load = State(initialValue: StageTranscriptMemo.get(sessionID).map { .loaded($0) } ?? .idle)
+    }
     /// Words to scroll to once the conversation is in.
     @State private var pendingFind: String?
+    @State private var limit = RestingTranscriptRows.step
+    @State private var viewportHeight: CGFloat = 0
     private var loadedCount: Int { if case .loaded(let items) = load { return items.count } else { return 0 } }
 
     private func applyFind(_ proxy: ScrollViewProxy) {
         guard let q = pendingFind, !q.isEmpty, case .loaded(let items) = load else { return }
         pendingFind = nil
-        guard let hit = items.first(where: { item in
+        guard let at = items.firstIndex(where: { item in
             switch item.kind {
             case .userText(let t), .assistantText(let t):
                 return t.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
             default: return false
             }
         }) else { return }
+        let hit = items[at]
+        // Laid out first, when it's among the older rows.
+        if items.count - at > limit { limit = items.count - at + 10 }
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(hit.id, anchor: .center) }
         }
@@ -1091,7 +1232,14 @@ struct SessionRestView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 20)
+                    // The conversation sits at its end, as the live chat
+                    // does — a resume used to slide it from top-aligned to
+                    // bottom-anchored. Filling the viewport (not the scroll
+                    // anchor alone) keeps a short page hit-testable.
+                    .frame(maxWidth: .infinity, minHeight: max(0, viewportHeight), alignment: .bottom)
                 }
+                .defaultScrollAnchor(.bottom)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
                 // Opened from a search: to the first message with the words
                 // (once the conversation has loaded).
                 .onReceive(NotificationCenter.default.publisher(for: .bromureFindInChat)) { note in
@@ -1118,23 +1266,32 @@ struct SessionRestView: View {
                     // The way back in is the same as ever: say something.
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
-                            Image(systemName: s.isArchived ? "archivebox"
-                                  : bucket == .asleep ? "pause.circle" : "checkmark.circle")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                            Text(s.isArchived
-                                 ? NSLocalizedString("Archived. Your next message brings it back and carries on from here.", comment: "session rest")
-                                 : bucket == .asleep
-                                 ? NSLocalizedString("Paused. Your next message picks it up from here.", comment: "session rest")
-                                 : NSLocalizedString("Finished. Your next message picks it up from here.", comment: "session rest"))
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+                            if s.isLaunching || bucket == .needsYou || bucket == .working || bucket == .idle {
+                                // Picked up again, on its way — or live with
+                                // no tab to show yet (its workspace's pane is
+                                // being attached): say what the sidebar says,
+                                // never "Paused" (B73).
+                                ProgressView().controlSize(.mini)
+                                Text(SessionHome.statusLine(for: s, in: model))
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Image(systemName: s.isArchived ? "archivebox" : "pause.circle")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                // One word for it, wherever it shows: paused.
+                                Text(s.isArchived
+                                     ? NSLocalizedString("Archived. Your next message brings it back and carries on from here.", comment: "session rest")
+                                     : NSLocalizedString("Paused. Your next message picks it up from here.", comment: "session rest"))
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
                             Spacer(minLength: 0)
                         }
                         .padding(.horizontal, 6)
                         ChatComposer(
                             placeholder: String(format: NSLocalizedString("Message %@…", comment: "session rest composer"), s.tool.displayName),
-                            text: $draft, busy: sending, accent: accent,
+                            text: $draft, busy: sending || s.isLaunching, accent: accent,
                             onSend: { send(s) })
                     }
                     .padding(.horizontal, 12)
@@ -1158,24 +1315,48 @@ struct SessionRestView: View {
     }
 
     /// The local copy first — instantly, machine on or off — then the live
-    /// file when the workspace can still be read.
+    /// file when the workspace can still be read, MERGED into the copy: the
+    /// live read is a 300 KB tail of the newest transcript in the folder,
+    /// which used to replace the whole conversation with its last answer
+    /// (or with another session's, sharing the folder).
     private func loadTranscript(_ s: AgentSession, bucket: SessionBucket) async {
-        load = .loading
+        let id = s.id
+        if let memo = StageTranscriptMemo.get(id) { load = .loaded(memo) } else { load = .loading }
         let agent = s.tool.rawValue
-        if let cached = cachedTranscript(s), !cached.isEmpty {
+        let cached = cachedTranscript(s)
+        if let cached, !cached.isEmpty {
             let items = await Task.detached(priority: .userInitiated) {
                 AgentTranscript.parse(cached, agent: agent)
             }.value
-            load = items.isEmpty ? .unavailable : .loaded(items)
+            if !items.isEmpty {
+                load = .loaded(items)
+                StageTranscriptMemo.put(id, items)
+            } else if case .loading = load {
+                load = .unavailable
+            }
         }
         guard bucket == .ended || fetchWhenAsleep, let raw = await fetchTranscript(s), !raw.isEmpty else {
             if case .loading = load { load = .unavailable }
             return
         }
+        let liveData = Data(raw.utf8)
+        let data: Data
+        if let cached, !cached.isEmpty {
+            guard let merged = SessionTranscriptCache.merge(history: cached, incoming: liveData, mode: .overlapOnly),
+                  merged.count != cached.count else { return }
+            data = merged
+        } else {
+            data = liveData
+        }
         let items = await Task.detached(priority: .userInitiated) {
-            AgentTranscript.parse(Data(raw.utf8), agent: agent)
+            AgentTranscript.parse(data, agent: agent)
         }.value
-        if !items.isEmpty { load = .loaded(items) } else if case .loading = load { load = .unavailable }
+        if !items.isEmpty, items.count >= loadedCount {
+            load = .loaded(items)
+            StageTranscriptMemo.put(id, items)
+        } else if case .loading = load {
+            load = .unavailable
+        }
     }
 
     private func errorCard(_ text: String) -> some View {
@@ -1202,10 +1383,7 @@ struct SessionRestView: View {
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         case .loaded(let items):
-            LazyVStack(alignment: .leading, spacing: 14) {
-                TranscriptRowsView(items: items)
-            }
-            .environment(\.changesSessionID, sessionID)
+            RestingTranscriptRows(items: items, sessionID: sessionID, limit: $limit)
         }
     }
 }
@@ -1256,12 +1434,26 @@ struct NewSessionView: View {
             var out: [RecentStart] = []
             for s in sessions.sorted(by: { $0.createdAt > $1.createdAt })
             where !s.isDeleted && !s.isSwitchboard && profiles.contains(where: { $0.id == s.profileID }) {
+                // A folder the app minted for a fresh-folder session is that
+                // session's own: picking up "the same" again means a fresh
+                // one, not N look-alike chips ("Daily / run-this-exact-…").
                 let home = s.cwd.isEmpty || s.cwd == "~" || s.cwd == "/home/ubuntu"
+                    || isSynthesizedFolder(s.cwd)
                 let r = RecentStart(profileID: s.profileID, tool: s.tool, folder: home ? "" : s.cwd)
                 if !out.contains(r) { out.append(r) }
                 if out.count == limit { break }
             }
             return out
+        }
+
+        /// "~/hello-260915-1830", "~/shell-command-1003-1204-2": a folder
+        /// `AgentSessionEngine.syntheticFolderName` made in the home.
+        static func isSynthesizedFolder(_ path: String) -> Bool {
+            let parent = (path as NSString).deletingLastPathComponent
+            guard parent == "~" || parent == "/home/ubuntu" else { return false }
+            let name = (path as NSString).lastPathComponent
+            return name.range(of: #"^[\p{L}\p{N}-]+-(\d{6}|\d{4})-\d{4}(-\d+)?$"#,
+                              options: .regularExpression) != nil
         }
     }
 
@@ -1665,7 +1857,11 @@ struct NewSessionView: View {
                 ComposerChip(help: NSLocalizedString("The agent that runs this session", comment: "new session chip"),
                              action: { agentPopover.toggle() }) {
                     AgentAvatar(tool: tool, size: 16)
+                    // Never truncated: the agent's name is short and the
+                    // one thing the chip must say ("Clau…" read as a bug).
                     Text(tool.displayName)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 .popover(isPresented: $agentPopover, arrowEdge: .bottom) { agentList.platformCompactPopover() }
 
@@ -1675,6 +1871,9 @@ struct NewSessionView: View {
                              action: { machinePopover.toggle() }) {
                     WorkspaceSquare(accentHex: selectedProfile?.color.hexInUI ?? "#888888", size: 9)
                     Text(selectedProfile?.name ?? NSLocalizedString("Machine", comment: "new session"))
+                        .lineLimit(1)
+                        .frame(maxWidth: 160)
+                        .fixedSize(horizontal: true, vertical: false)
                     if runningIDs.contains(profileID) {
                         Circle().fill(Color.green).frame(width: 5, height: 5)
                     }
@@ -1686,12 +1885,12 @@ struct NewSessionView: View {
                     Image(systemName: place == .repository ? "arrow.down.circle" : "folder")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-                    // Hugs its text, truncating only past 220pt.
+                    // Hugs its text up to 220pt; the one chip that gives way
+                    // (middle-truncated) when the row runs out of room.
                     Text(whereLabel)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: 220)
-                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .popover(isPresented: $wherePopover, arrowEdge: .bottom) { whereEditor.platformCompactPopover() }
 
@@ -1702,10 +1901,15 @@ struct NewSessionView: View {
 
                 Spacer(minLength: 8)
                 #if os(macOS)
-                Text(NSLocalizedString("⏎ start   ⇧⏎ newline", comment: "new session hint"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.quaternary)
-                    .lineLimit(1)
+                // Whole or not at all — a truncated "⇧⏎ new…" says nothing.
+                ViewThatFits(in: .horizontal) {
+                    Text(NSLocalizedString("⏎ start   ⇧⏎ newline", comment: "new session hint"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.quaternary)
+                        .lineLimit(1)
+                        .fixedSize()
+                    Color.clear.frame(width: 0, height: 0)
+                }
                 #endif
                 Button(action: start) {
                     HStack(spacing: 6) {
@@ -1803,10 +2007,12 @@ struct NewSessionView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "folder").font(.system(size: 10))
+                            // Head-truncated: folders differ at their end
+                            // (a minted folder's date), which must stay.
                             Text(p)
                                 .font(.system(size: 11.5, design: .monospaced))
                                 .lineLimit(1)
-                                .truncationMode(.middle)
+                                .truncationMode(.head)
                         }
                         .foregroundStyle(picked ? Color.accentColor : Color.secondary)
                         .padding(.horizontal, 8)
@@ -1816,9 +2022,9 @@ struct NewSessionView: View {
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
-                    .help(picked
+                    .help((picked
                           ? NSLocalizedString("Working in this folder — click to start in a new folder instead", comment: "new session recent")
-                          : NSLocalizedString("Work in this folder again", comment: "new session recent"))
+                          : NSLocalizedString("Work in this folder again", comment: "new session recent")) + "\n" + p)
                 }
                 Spacer(minLength: 0)
             }

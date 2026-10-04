@@ -267,6 +267,14 @@ final class BrowserMCPServer {
     192.168.x.x) — e.g. http://<that-ip>:3000. NEVER use http://localhost:PORT or \
     http://127.0.0.1:PORT with browser_navigate; it will not reach your server.
 
+    That LAN IP is a private address of Bromure's VM network: only the browser \
+    VM and the user's Mac can reach it, NOT other machines on the user's \
+    network. Don't tell the user to open it "from another machine on the same \
+    network"; point them at the browser pane instead.
+
+    The browser may still be booting on your first call; the tools wait for \
+    it, so you don't need to retry right after browser_navigate.
+
     Interacting: browser_click / browser_fill (fast) or browser_type (real \
     keystrokes) / browser_press_key drive the page by CSS selector; \
     browser_wait_for blocks until an element appears. Inspecting: \

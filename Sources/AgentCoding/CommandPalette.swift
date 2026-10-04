@@ -59,6 +59,9 @@ struct CommandPaletteView: View {
     let onClose: () -> Void
     /// Sessions found by what was said in them, for a query.
     var search: (String) -> [PaletteItem] = { _ in [] }
+    /// The card's frame in the hosting view (top-left origin), so the host
+    /// can tell a click outside it — see `CommandPaletteHost`.
+    var onCardFrame: (CGRect) -> Void = { _ in }
     @State private var query = ""
     @State private var selected = 0
     /// The row under the pointer: hovering selects it, but must not scroll to
@@ -149,9 +152,19 @@ struct CommandPaletteView: View {
             .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5))
             .shadow(color: .black.opacity(0.25), radius: 30, y: 14)
+            .background(GeometryReader { g in
+                Color.clear
+                    .onAppear { onCardFrame(g.frame(in: .global)) }
+                    .onChange(of: g.frame(in: .global)) { _, f in onCardFrame(f) }
+            })
             .padding(.top, 90)
         }
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            // Again once the host made the window key (focus set on a
+            // non-key window doesn't stick).
+            DispatchQueue.main.async { focused = true }
+        }
         .onChange(of: query) { _, _ in selected = 0 }
         .onKeyPress(.downArrow) { selected = min(selected + 1, max(0, results.count - 1)); return .handled }
         .onKeyPress(.upArrow) { selected = max(selected - 1, 0); return .handled }
@@ -195,17 +208,30 @@ struct CommandPaletteView: View {
 }
 
 /// Hosts the palette over a window's content (one at a time).
+///
+/// Dismissal doesn't rely on SwiftUI focus: opened while its window wasn't key
+/// (⌘K from the menu, the palette hook, another window focused) the text field
+/// never became first responder, so neither `.onExitCommand` nor the dimmed
+/// backdrop's tap ever fired and only ⌘K closed it. The host makes the window
+/// key, then watches the window's own events: Esc, or a click outside the
+/// card, closes.
 @MainActor
 final class CommandPaletteHost {
     private var host: NSView?
+    private weak var window: NSWindow?
+    private var monitor: Any?
+    /// The card's frame in `host` coordinates (flipped, like SwiftUI's).
+    private var cardFrame: CGRect = .zero
 
     var isShown: Bool { host != nil }
 
     func toggle(in window: NSWindow, items: [PaletteItem], search: @escaping (String) -> [PaletteItem] = { _ in [] }) {
         if isShown { close(); return }
         guard let content = window.contentView else { return }
-        let view = NSHostingView(rootView: CommandPaletteView(items: items, onClose: { [weak self] in self?.close() },
-                                                              search: search))
+        let view = PaletteHostingView(rootView: CommandPaletteView(
+            items: items, onClose: { [weak self] in self?.close() },
+            search: search,
+            onCardFrame: { [weak self] f in self?.cardFrame = f }))
         view.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(view)
         NSLayoutConstraint.activate([
@@ -215,12 +241,53 @@ final class CommandPaletteHost {
             view.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         host = view
+        self.window = window
+        cardFrame = .zero
+        // Key first, so the search field can take focus at all.
+        if !window.isKeyWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
         window.makeFirstResponder(view)
+        installMonitor()
     }
 
     func close() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
         host?.removeFromSuperview()
         host = nil
+        window = nil
     }
+
+    private func installMonitor() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, let host = self.host, let window = self.window,
+                  event.window === window else { return event }
+            switch event.type {
+            case .keyDown where event.keyCode == 53:   // Esc
+                self.close()
+                return nil
+            case .leftMouseDown, .rightMouseDown:
+                let p = host.convert(event.locationInWindow, from: nil)
+                guard host.bounds.contains(p) else { return event }
+                // Before the card has reported its frame, don't guess.
+                if self.cardFrame != .zero, !self.cardFrame.contains(p) {
+                    self.close()
+                    return nil
+                }
+                return event
+            default:
+                return event
+            }
+        }
+    }
+}
+
+/// Takes the first click even when its window isn't key, so the backdrop and
+/// rows respond on the first click rather than the click only focusing.
+private final class PaletteHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 #endif

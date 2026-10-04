@@ -310,14 +310,8 @@ struct AutomationHubView: View {
                 Text(NSLocalizedString("Automations", comment: "hub title"))
                     .font(.system(size: 16, weight: .bold))
             }
-            Picker("", selection: $hub.tab) {
-                ForEach(AutomationHubModel.Tab.allCases) { tab in
-                    Text(tab.title).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
+            HubTabBar(selection: $hub.tab, tabs: AutomationHubModel.Tab.allCases,
+                      title: \.title)
             Spacer(minLength: 8)
             Button {
                 hub.showingNewChooser = true
@@ -383,6 +377,54 @@ struct AutomationHubView: View {
 }
 
 // MARK: - Shared bits
+
+/// The hub's tab switch: a capsule track with the selected tab raised and
+/// evenly drawn separators between the others. (The system segmented
+/// control drew a divider between some unselected segments but not others
+/// on the board's translucent backdrop.)
+struct HubTabBar<Tab: Hashable & Identifiable>: View {
+    @Binding var selection: Tab
+    let tabs: [Tab]
+    let title: KeyPath<Tab, String>
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(tabs.enumerated()), id: \.element.id) { i, tab in
+                if i > 0 {
+                    // A separator only between two unselected tabs.
+                    Rectangle()
+                        .fill(Color.primary.opacity(
+                            selection == tab || selection == tabs[i - 1] ? 0 : 0.15))
+                        .frame(width: 1, height: 14)
+                }
+                Button { selection = tab } label: {
+                    Text(tab[keyPath: title])
+                        .font(.system(size: 12.5, weight: selection == tab ? .semibold : .regular))
+                        .foregroundStyle(selection == tab ? Color.primary : Color.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background {
+                            if selection == tab {
+                                Capsule()
+                                    .fill(Color.platformControlBackground.opacity(scheme == .dark ? 0.9 : 1))
+                                    .shadow(color: .black.opacity(0.12), radius: 1.5, y: 0.5)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selection == tab ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(Capsule().fill(Color.primary.opacity(0.07)))
+        .fixedSize()
+        .animation(.easeInOut(duration: 0.15), value: selection)
+    }
+}
 
 extension RepoFinding.Severity {
     var tint: Color {
@@ -2241,6 +2283,12 @@ struct WatchEditorSheet: View {
 
     private var repoValid: Bool { GitHubPRPoller.isValidRepoSlug(draft.repo) }
 
+    /// GitHub answered 401 for this workspace's token (set by `loadRepos`).
+    @State private var tokenRejected = false
+
+    /// A watch with a token GitHub refuses would only fail every scan.
+    private var canSave: Bool { repoValid && !tokenRejected }
+
     private func scanBinding(_ s: WatchedRepo.Scan) -> Binding<Bool> {
         Binding(get: { draft.scans.contains(s) },
                 set: { on in
@@ -2293,8 +2341,33 @@ struct WatchEditorSheet: View {
                             }
                         }
                     }
-                    if let repoError {
-                        Text(repoError).font(.system(size: 11)).foregroundStyle(.secondary)
+                    if tokenRejected {
+                        // A dead token isn't a footnote: every scan of this
+                        // watch would fail. Say what's wrong and where to fix it.
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "xmark.octagon.fill")
+                                .foregroundStyle(.red)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(NSLocalizedString("GitHub rejected this workspace's token", comment: "watch editor"))
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.red)
+                                Text(String(format: NSLocalizedString(
+                                    "The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace.",
+                                    comment: "watch editor"), workspace?.name ?? ""))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 4)
+                            Button(NSLocalizedString("Edit Workspace…", comment: "")) {
+                                onEditWorkspace(draft.profileID)
+                            }
+                            .controlSize(.small)
+                        }
+                    } else if let repoError {
+                        Label(repoError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
                     }
                     TextField(NSLocalizedString("Checkout in the workspace", comment: ""),
                               text: Binding(get: { draft.repoPath },
@@ -2384,7 +2457,10 @@ struct WatchEditorSheet: View {
             .formStyle(.grouped)
             Divider()
             HStack {
-                if !repoValid {
+                if tokenRejected {
+                    Text(NSLocalizedString("Fix the workspace's GitHub token to watch a repository.", comment: "watch editor"))
+                        .font(.system(size: 11)).foregroundStyle(.red)
+                } else if !repoValid {
                     Text(NSLocalizedString("Pick a repository (owner/name).", comment: ""))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
@@ -2393,13 +2469,13 @@ struct WatchEditorSheet: View {
                     .keyboardShortcut(.cancelAction)
                 if isNew {
                     Button(NSLocalizedString("Watch and Scan Now", comment: "")) { save(scan: true) }
-                        .disabled(!repoValid)
+                        .disabled(!canSave)
                 }
                 Button(isNew ? NSLocalizedString("Watch", comment: "") : NSLocalizedString("Save", comment: "")) {
                     save(scan: false)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!repoValid)
+                .disabled(!canSave)
             }
             .padding(14)
         }
@@ -2429,11 +2505,17 @@ struct WatchEditorSheet: View {
     private func loadRepos() async {
         repoChoices = nil
         repoError = nil
+        tokenRejected = false
         guard workspace?.hasGitHubToken == true else { return }
         do {
             repoChoices = try await fetchRepos(draft.profileID)
         } catch {
-            repoError = error.localizedDescription
+            let ns = error as NSError
+            if ns.domain == "GitHubPoller", ns.code == 401 {
+                tokenRejected = true
+            } else {
+                repoError = error.localizedDescription
+            }
         }
     }
 

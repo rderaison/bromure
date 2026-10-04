@@ -472,6 +472,17 @@ final class CodingTaskStore {
 
 // MARK: - Session-store locator (all platforms)
 
+/// What ties a read to ONE conversation when the agent's store is keyed by
+/// folder (Kimi): the session id once known, else the earliest moment its
+/// journal may have been begun.
+struct TranscriptPin: Equatable, Sendable {
+    /// Kimi's "session_<uuid>": read that session's journal, nothing else.
+    var kimiSession: String? = nil
+    /// Epoch seconds: a Kimi journal begun before this is another
+    /// conversation's (a fresh launch's floor).
+    var kimiCreatedSince: Int? = nil
+}
+
 /// Builds the guest-shell block that finds the newest session transcript a
 /// coding agent wrote for a working directory — one fragment per tool's
 /// on-disk store. Shared by the macOS engine and the fat client's iOS shim
@@ -499,13 +510,13 @@ enum AgentSessionLocator {
     /// folder share is a symlink into /mnt/bromure-share-N), while the
     /// caller's tab knows the logical path.
     nonisolated static func locateBlock(path: String, since: Int,
-                                        agent: String?) -> String {
+                                        agent: String?, kimiCreatedSince: Int? = nil) -> String {
         var cmd = "d='\(path)'; r=$(readlink -f \"$d\" 2>/dev/null || printf %s \"$d\"); "
         switch agent {
         case "claude": cmd += claudeFragment(path: path, since: since, into: "f")
         case "codex": cmd += codexFragment(since: since, into: "f")
         case "grok": cmd += grokFragment(path: path, since: since, into: "f")
-        case "kimi": cmd += kimiFragment(since: since, into: "f")
+        case "kimi": cmd += kimiFragment(since: since, createdSince: kimiCreatedSince, into: "f")
         case "omp": cmd += ompFragment(since: since, into: "f")
         default:
             cmd += claudeFragment(path: path, since: since, into: "tc")
@@ -582,20 +593,67 @@ enum AgentSessionLocator {
     /// otherwise win the mtime race while subagents work. The bare
     /// `wire.jsonl` alternative covers v1-engine sessions (journal at the
     /// session root).
-    nonisolated static func kimiFragment(since: Int, into varName: String) -> String {
+    /// `createdSince` (epoch seconds): only a journal Kimi BEGAN at or after
+    /// it counts — its first record (`metadata`) carries `created_at` in ms.
+    /// The mtime floor alone let the previous conversation in the folder
+    /// stand in for a just-launched one: interactive Kimi creates its
+    /// session only at the first prompt, seconds after the process starts,
+    /// and an older session still being written (another tab) passes any
+    /// mtime test (B72). A journal without the field (an older engine) is
+    /// judged by mtime alone.
+    nonisolated static func kimiFragment(since: Int, createdSince: Int? = nil,
+                                         into varName: String) -> String {
+        let pick: String
+        if let createdSince {
+            pick = "kc=$(" + kimiCandidates(since: since) + "); \(varName)=\"\"; "
+                + "for c in $kc; do ca=$(head -c 1024 \"$c\" 2>/dev/null "
+                + "| grep -o '\"created_at\":[0-9]*' | head -1 | cut -d: -f2); "
+                + "if [ -z \"$ca\" ] || [ \"$ca\" -ge \(max(0, createdSince) * 1000) ]; then "
+                + "\(varName)=\"$c\"; break; fi; done; "
+        } else {
+            pick = "\(varName)=$(" + kimiCandidates(since: since) + " | head -1); "
+        }
+        return kimiBucketVars + pick
+    }
+
+    /// `$kb`/`$kh`/`$kr`: the workspace bucket's slug and hashes for `$d`/`$r`.
+    private nonisolated static let kimiBucketVars =
         "kb=$(basename \"$d\" | tr 'A-Z' 'a-z' "
             + "| sed -E 's/[^a-z0-9._-]+/-/g;s/^-+//;s/-+$//' "
             + "| cut -c1-40 | sed -E 's/-+$//'); "
             + "case \"$kb\" in ''|.|..) kb=workspace;; esac; "
             + "kh=$(printf %s \"$d\" | sha256sum | cut -c1-12); "
             + "kr=$(printf %s \"$r\" | sha256sum | cut -c1-12); "
-            + "\(varName)=$(find \"$HOME/.kimi-code/sessions/wd_${kb}_$kh\" "
+
+    /// The bucket's main-agent journals touched since `since`, newest first.
+    private nonisolated static func kimiCandidates(since: Int) -> String {
+        "find \"$HOME/.kimi-code/sessions/wd_${kb}_$kh\" "
             + "\"$HOME/.kimi-code/sessions/wd_${kb}_$kr\" "
             + "\"$HOME/.kimi-code/sessions/wd_${kb}_\"* "
             + "\\( -path '*/agents/main/wire.jsonl' "
             + "-o \\( -name wire.jsonl ! -path '*/agents/*' \\) \\) "
             + "-newermt @\(since) 2>/dev/null | sort -u "
-            + "| xargs -r ls -t 2>/dev/null | head -1); "
+            + "| xargs -r ls -t 2>/dev/null"
+    }
+
+    /// A Kimi session id as its store names the session's folder
+    /// ("session_<uuid>") — what `kimi -S` resumes and what pins a
+    /// session's transcript.
+    nonisolated static func isKimiSessionID(_ s: String) -> Bool {
+        s.hasPrefix("session_") && s.count == 44 && UUID(uuidString: String(s.dropFirst(8))) != nil
+    }
+
+    /// The Kimi session id in a journal's path, nil when it isn't one.
+    nonisolated static func kimiSessionID(inPath path: String) -> String? {
+        path.split(separator: "/").map(String.init).first(where: isKimiSessionID)
+    }
+
+    /// `$varName` = the main journal of Kimi session `id`, wherever its
+    /// workspace bucket is — the session's own file, no floor needed.
+    nonisolated static func kimiPinnedFragment(id: String, into varName: String) -> String {
+        guard isKimiSessionID(id) else { return "" }
+        return "\(varName)=$(ls -t \"$HOME\"/.kimi-code/sessions/wd_*/\(id)/agents/main/wire.jsonl "
+            + "\"$HOME\"/.kimi-code/sessions/wd_*/\(id)/wire.jsonl 2>/dev/null | head -1); "
     }
 
     /// omp (Oh My Pi): ${PI_CODING_AGENT_DIR:-~/.omp/agent}/sessions/<dir>/…jsonl
@@ -1742,11 +1800,12 @@ final class CodingTaskEngine {
     /// Nil return when the path has characters we won't quote.
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
                                                   agent: String? = nil,
-                                                  pinnedWindow: Int? = nil) -> String? {
+                                                  pinnedWindow: Int? = nil,
+                                                  pin: TranscriptPin = TranscriptPin()) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
         var cmd = transcriptLocatePrefix(path: path, since: since, agent: agent,
-                                         pinnedWindow: pinnedWindow)
+                                         pinnedWindow: pinnedWindow, pin: pin)
         // iconv -c drops the orphan bytes a byte-cap cut can leave mid
         // UTF-8 sequence — a strict decode downstream used to collapse the
         // whole response.
@@ -1774,18 +1833,24 @@ final class CodingTaskEngine {
     /// folder, floored by `since`). Shared by the one-shot tail and the
     /// beautified view's incremental reader.
     private nonisolated static func transcriptLocatePrefix(
-        path: String, since: Int, agent: String?, pinnedWindow: Int?) -> String {
+        path: String, since: Int, agent: String?, pinnedWindow: Int?,
+        pin: TranscriptPin = TranscriptPin()) -> String {
         var cmd = "f=\"\"; pe=\"\"; "
-        // The transcript the tab's agent itself named (its hook records the
-        // path per window — see agent-status.sh) wins over "the newest file
-        // in the folder": two agents in one folder (a delegate beside its
-        // delegator) would otherwise take turns owning each other's view.
-        // Still floored: a file older than this process is another's.
-        if let w = pinnedWindow {
+        // Kimi records no per-window path, so the session's own id (pinned
+        // by the engine once this launch's journal appeared) names its file.
+        if agent == "kimi", let id = pin.kimiSession, AgentSessionLocator.isKimiSessionID(id) {
+            cmd += AgentSessionLocator.kimiPinnedFragment(id: id, into: "f")
+        } else if let w = pinnedWindow {
+            // The transcript the tab's agent itself named (its hook records the
+            // path per window — see agent-status.sh) wins over "the newest file
+            // in the folder": two agents in one folder (a delegate beside its
+            // delegator) would otherwise take turns owning each other's view.
+            // Still floored: a file older than this process is another's.
             cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
         }
         cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
-            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
+            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent,
+                                              kimiCreatedSince: pin.kimiCreatedSince)
             + "fi; "
         return cmd
     }
@@ -1807,11 +1872,12 @@ final class CodingTaskEngine {
     /// simply concatenate chunks.
     nonisolated static func transcriptChunkCommand(
         guestCwd: String, since: Int, agent: String? = nil, pinnedWindow: Int? = nil,
+        pin: TranscriptPin = TranscriptPin(),
         knownPath: String?, knownOffset: Int, bytes: Int, earlier: Bool) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
         var cmd = transcriptLocatePrefix(path: path, since: since, agent: agent,
-                                         pinnedWindow: pinnedWindow)
+                                         pinnedWindow: pinnedWindow, pin: pin)
         cmd += "if [ -n \"$f\" ]; then printf '%s\\n' \"$f\"; "
         if agent == nil || agent == "claude" {
             // Same pending-AskUserQuestion dump as `planTranscriptCommand`,

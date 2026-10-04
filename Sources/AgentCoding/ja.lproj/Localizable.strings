@@ -468,7 +468,6 @@
 "Allow this request" = "このリクエストを許可";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure はエージェントの AI トラフィックを端末上で解析し、注入された指示を検出します。データは Mac の外に出ません。各検出器はローカルモデルを使用し、初回有効化時に bromure.io からダウンロードされます。";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "エージェントが読み込むファイル内容・Web ページ・ツール出力を評価します（Prompt Guard）。悪意あるリポジトリに隠された「以前の指示を無視 / 機密を持ち出す」を検出します。初回有効化時に約 272 MB をダウンロードします。";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Claude Code・Codex・Grok が権威として読み込む CLAUDE.md・AGENTS.md・GROK.md などの指示／設定ファイルを評価します。初回有効化時に約 571 MB をダウンロードします。";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "「記録して続行」は検出をセキュリティログ ウインドウに記録します。「どうするか確認する」はリクエストを一時停止し、該当テキストを表示します。「ブロック」はリクエストを失敗させます。";
 "Possible %@ in “%@”" = "「%@」に %@ の可能性";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "エージェントがモデルに送信しようとしている内容（%@ から）を Bromure が検出しました。下記を確認し、許可するかこのリクエストをブロックしてください。";
@@ -1811,7 +1810,7 @@
 "Up one folder" = "1 つ上のフォルダへ";
 "No folders in here yet." = "ここにはまだフォルダがありません。";
 "The machine's folders can't be read right now." = "マシンのフォルダを今は読み取れません。";
-"Message %@…  (or drop files)" = "%@ にメッセージ…  （ファイルのドロップも可）";
+"Message %@… (or drop files)" = "%@ にメッセージ…（ファイルのドロップも可）";
 "Ready · %@" = "準備完了 · %@";
 "Ended · %@ ago" = "終了 · %@前";
 "End “%@”?" = "「%@」を終了しますか？";
@@ -2017,7 +2016,7 @@
 "Streaming to bromure.io" = "bromure.io にストリーミング中";
 "Signed in to bromure.io" = "bromure.io にサインイン済み";
 "Log out" = "ログアウト";
-"Message the agent…  (or drop files)" = "エージェントにメッセージ…  （ファイルのドロップも可）";
+"Message the agent… (or drop files)" = "エージェントにメッセージ…（ファイルのドロップも可）";
 "Drop to attach" = "ドロップして添付";
 "Loading transcript…" = "トランスクリプトを読み込んでいます…";
 "Say what you need — the agent is listening." = "必要なことを伝えてください — エージェントが聞いています。";
@@ -3624,3 +3623,59 @@
 "Created %@" = "作成 %@";
 "Modified %@" = "変更 %@";
 "Updated %@" = "更新 %@";
+"GitHub rejected this workspace's token" = "GitHub がこのワークスペースのトークンを拒否しました";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "github.com のトークンが期限切れ、取り消し済み、または入力ミスです (HTTP 401)。%@ › 資格情報 で更新するか、別のワークスペースを選んでください。";
+"Fix the workspace's GitHub token to watch a repository." = "リポジトリを監視するには、ワークスペースの GitHub トークンを修正してください。";
+"Assigned to %@ — click to change" = "%@ に割り当て済み — クリックで変更";
+"Click to fold the error" = "クリックでエラーを折りたたむ";
+"Click to read the whole error" = "クリックでエラー全文を表示";
+"Deleted workspace" = "削除されたワークスペース";
+"Open Coding Tasks (⇧⌘T)" = "コーディングタスクを開く (⇧⌘T)";
+"No open tasks" = "未完了のタスクはありません";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "オートメーションが実行されるたびに、その実行がここに表示されます — 予定、実行中、完了の順に。まずはオートメーションを作成してください。";
+"Open Automations" = "オートメーションを開く";
+"Open Automations (⇧⌘A)" = "オートメーションを開く (⇧⌘A)";
+"View" = "表示";
+"Help" = "ヘルプ";
+"Close Window" = "ウインドウを閉じる";
+"Toggle Sidebar" = "サイドバーの表示/非表示";
+"Toggle Files Pane" = "ファイルパネルの表示/非表示";
+"Toggle Browser Pane" = "ブラウザパネルの表示/非表示";
+"Enter Full Screen" = "フルスクリーンにする";
+"Zoom" = "拡大/縮小";
+"%@ Manual" = "%@ マニュアル";
+"Add a note about this workspace" = "このワークスペースについてのメモを追加";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "各エージェントが権威として読み込む指示 / 設定ファイルを評価します: CLAUDE.md（Claude Code）、AGENTS.md（Codex、Kimi、omp）、GROK.md（Grok）と、そのネストされた版およびグローバル版。初回有効化時に約 571 MB をダウンロードします。";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "送信接続のルールは、このワークスペースを実行している Mac で編集します。";
+"Click a protection that's off to turn it on in that workspace's settings." = "オフになっている保護をクリックすると、そのワークスペースの設定でオンにできます。";
+"Turn on…" = "オンにする…";
+"%1$@ is on for %2$@. Click to change it." = "%2$@ では %1$@ がオンです。クリックして変更します。";
+"%1$@ is off for %2$@. Click to turn it on." = "%2$@ では %1$@ がオフです。クリックしてオンにします。";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "スキャンされていません — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@（%2$d 回、最新のものを表示）";
+
+"Security…" = "セキュリティ…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "最新バージョンをダウンロード";
+"Update" = "アップデート";
+"an unknown version" = "不明なバージョン";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "古くなっています：共有イメージは %1$@ ですが、このバージョンの Agentic Coding は %2$@ を使用します。Bromure を開いてブラウザイメージをアップデートさせるか、Agentic Coding 専用に最新バージョンをダウンロードしてください（Bromure が追いつくまで共有イメージの代わりに使用されます）。";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "古くなっています：このイメージは %1$@ で、最新バージョンは %2$@ です。アップデートしてダウンロードしてください。";
+"The Linux machine behind this session — available while it runs" = "このセッションの裏にある Linux マシン — 実行中のみ利用できます";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "メディア表示 1 件";
+"%d media items shown" = "メディア表示 %d 件";
+"1 chart shown" = "グラフ表示 1 件";
+"%d charts shown" = "グラフ表示 %d 件";
+"1 file sent" = "ファイル送信 1 件";
+"%d files sent" = "ファイル送信 %d 件";
+"1 tool result" = "ツール結果 1 件";
+"%d tool results" = "ツール結果 %d 件";
+"Available when the workspace is running" = "ワークスペースの実行中に利用できます";
+"Video available when the workspace is running" = "動画はワークスペースの実行中に表示できます";
+"Image available when the workspace is running" = "画像はワークスペースの実行中に表示できます";

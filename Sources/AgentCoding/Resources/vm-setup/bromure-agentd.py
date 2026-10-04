@@ -4921,6 +4921,47 @@ def task_apply_hostname():
     log("agentd", "hostname -> %s" % want)
 
 
+# Optional virtiofs slots in the base image's fstab (setup.sh). The host only
+# attaches the tags a workspace uses, and systemd logs a red "FAILED to mount"
+# for every `nofail` slot whose tag is absent — on every boot. The host lists
+# the tags it attached as empty files under META/virtiofs-tags/; a drop-in per
+# slot skips the mount when its tag isn't there. Triggering conditions (`|`):
+# the mount also runs when the marker dir is missing altogether (an older host
+# that doesn't write markers), so a stale drop-in can never hide a share.
+_MOUNT_SLOTS = [("bromure-home", "home-ubuntu.mount")] + [
+    ("share-%d" % i, "mnt-bromure\\x2dshare\\x2d%d.mount" % i) for i in range(1, 9)]
+_MOUNT_DROPIN_NAME = "bromure-attached.conf"
+
+
+def _mount_condition_dropin(tag):
+    markers = os.path.join(META, "virtiofs-tags")
+    return ("# Bromure AC: managed by bromure-agentd (skip the mount when the\n"
+            "# host didn't attach this virtiofs tag).\n"
+            "[Unit]\n"
+            "RequiresMountsFor=%s\n"
+            "ConditionPathExists=|%s\n"
+            "ConditionPathExists=|!%s\n" % (META, os.path.join(markers, tag), markers))
+
+
+def task_mount_conditions():
+    """Install the per-slot ConditionPathExists drop-ins (see _MOUNT_SLOTS).
+    Takes effect from the next boot; idempotent (writes only on change)."""
+    if not os.path.isdir(os.path.join(META, "virtiofs-tags")):
+        return   # host predates the markers — leave the units alone
+    changed = False
+    for tag, unit in _MOUNT_SLOTS:
+        path = "/etc/systemd/system/%s.d/%s" % (unit, _MOUNT_DROPIN_NAME)
+        want = _mount_condition_dropin(tag)
+        if _read_text(path) == want.strip():
+            continue
+        _sudo(["mkdir", "-p", os.path.dirname(path)])
+        if _sudo_write(path, want):
+            changed = True
+    if changed:
+        _sudo(["systemctl", "daemon-reload"])
+        log("agentd", "virtiofs mount conditions installed")
+
+
 def task_fix_systemd_unit():
     """Converge an already-installed unit to _UNIT_CONTENT (existing images
     booted with the old control-group-kill unit; the .bashrc bootstrap only
@@ -5286,6 +5327,32 @@ def task_folder_shares():
                 log("session", "FAILED ln -s for ~/%s" % name)
 
 
+def task_ensure_pip():
+    """Images baked before python3-pip/python3-venv joined setup.sh ship
+    without pip ("No module named pip"), and agents burn turns working around
+    it. Install both once, in the background, onto the workspace's persistent
+    system disk — a runtime fallback that needs no image rebuild. Silent and
+    retried next boot if the network/firewall says no."""
+    if subprocess.run(["python3", "-c", "import pip, venv, ensurepip"],
+                      stdout=_DEVNULL, stderr=_DEVNULL).returncode == 0:
+        return
+    time.sleep(20)   # let the session + proxies settle first
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    install = ["apt-get", "-o", "DPkg::Lock::Timeout=300", "install", "-y", "-q",
+               "--no-install-recommends", "python3-pip", "python3-venv"]
+    try:
+        ok = _sudo(["env", "DEBIAN_FRONTEND=noninteractive"] + install,
+                   env=env, timeout=900).returncode == 0
+        if not ok:
+            _sudo(["apt-get", "-o", "DPkg::Lock::Timeout=300", "update", "-q"],
+                  env=env, timeout=600)
+            ok = _sudo(["env", "DEBIAN_FRONTEND=noninteractive"] + install,
+                       env=env, timeout=900).returncode == 0
+    except Exception:
+        ok = False
+    log("session", "python3-pip/venv %s" % ("installed" if ok else "install failed (retry next boot)"))
+
+
 def task_reapply_binfmt():
     """Re-apply cross-arch emulation if enabled in a prior session. binfmt_misc
     registrations are wiped on reboot; the tonistiigi/binfmt image is cached, so
@@ -5393,6 +5460,7 @@ def main():
     # 2. One-shot session tasks (each isolated; a failure never aborts boot).
     _run_once("hostname", task_apply_hostname)
     _run_once("unit", task_fix_systemd_unit)
+    _run_once("mount-conditions", task_mount_conditions)
     _run_once("mtu", task_set_mtu)
     _run_once("ca", task_install_ca)
     _run_once("docker-proxy", task_apt_and_docker_proxy)
@@ -5408,6 +5476,7 @@ def main():
     # One-shot background jobs (fire-and-forget, not supervised).
     threading.Thread(target=task_reapply_binfmt, daemon=True).start()
     threading.Thread(target=task_fstrim, daemon=True).start()
+    threading.Thread(target=task_ensure_pip, daemon=True).start()
 
     # 3. Supervised services — each isolated so one crash never kills the process.
     services = [

@@ -176,23 +176,38 @@ final class AgentSessionEngine {
     /// the kanban's worktrees use.
     static func worktreeSlug(_ name: String) -> String { AgentSession.worktreeSlug(name) }
 
-    /// "hello-260915-1830": a few words of the message (or the agent's name)
-    /// plus a timestamp, so folders never collide and still read at a glance.
+    /// "shell-command-1003-1204": the gist of the message — at most two
+    /// words, filler and verbs like "run"/"please"/"this" dropped — plus the
+    /// date, so folders stay short, never collide (the caller numbers a
+    /// repeat) and still read at a glance. The agent's name when the message
+    /// says nothing.
     static func syntheticFolderName(message: String?, tool: Profile.Tool, now: Date = Date()) -> String {
         let words = (message ?? "").lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init).filter { !$0.isEmpty }
+            .map(String.init)
+            .filter { $0.count > 1 && !folderNameFiller.contains($0) && !$0.allSatisfy(\.isNumber) }
         var slug = ""
-        for w in words {
+        for w in words.prefix(2) {
             let next = slug.isEmpty ? w : slug + "-" + w
-            if next.count > 28 { break }
+            if next.count > 20 { break }
             slug = next
         }
         if slug.isEmpty { slug = tool.rawValue }
         let f = DateFormatter()
-        f.dateFormat = "yyMMdd-HHmm"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMdd-HHmm"
         return slug + "-" + f.string(from: now)
     }
+
+    /// Words that never name what a session is about.
+    static let folderNameFiller: Set<String> = [
+        "a", "an", "the", "this", "that", "these", "those", "to", "of", "for", "in", "on", "at", "by",
+        "with", "and", "or", "but", "from", "into", "about", "as", "is", "are", "be", "it", "its",
+        "please", "pls", "can", "could", "would", "will", "you", "your", "me", "my", "i", "we", "our",
+        "us", "let", "lets", "just", "now", "then", "some", "any", "all", "so", "do", "does", "did",
+        "run", "make", "create", "write", "help", "want", "need", "use", "using", "try", "go", "get",
+        "hi", "hello", "hey", "exact", "exactly", "following", "here", "there", "what", "how", "why",
+    ]
 
     /// Reopen the agent's last conversation: in its tab when the tab is
     /// still there (a nudge if the agent is alive, the resume command if it
@@ -210,13 +225,29 @@ final class AgentSessionEngine {
         }
         let message = message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         // Picking it back up is what brings an archived conversation back.
-        store.mutate(id) { $0.lastError = nil; $0.archivedAt = nil }
+        // And it is under way from this moment: while the machine wakes (a
+        // fresh boot, often) the session reads "Waking up…" over its
+        // conversation — not "Finished" because the boot dropped its tab
+        // (see `AgentSessionStore.checkBoot`), not a bare launch screen.
+        let wasLaunching = s.isLaunching
+        store.mutate(id) {
+            $0.lastError = nil; $0.archivedAt = nil
+            if $0.launchingSince == nil { $0.launchingSince = Date(); $0.launchBaselineIndex = nil }
+        }
         BACDebug.log("sessions", "resume “\(s.title)”\(message == nil ? "" : " with a message")")
+        /// The resume didn't open a tab of its own (the agent was there, or
+        /// it was relaunched in its tab): no launch to wait for.
+        func settled() {
+            guard !wasLaunching else { return }
+            store.mutate(id) { if $0.launchBaselineIndex == nil { $0.launchingSince = nil } }
+        }
         Task { [weak self] in
             guard let self else { return }
             guard await self.ensureUp(s.profileID, quietly: quietly, remotely: remotely) else {
-                self.store.mutate(id) { $0.lastError = NSLocalizedString(
-                    "The workspace did not start in time", comment: "session resume") }
+                self.store.mutate(id) {
+                    $0.lastError = NSLocalizedString("The workspace did not start in time", comment: "session resume")
+                    if !wasLaunching { $0.launchingSince = nil; $0.launchBaselineIndex = nil }
+                }
                 return
             }
             if let w = s.windowIndex, let tab = delegate.pane(for: s.profileID)?.model.tabs
@@ -239,6 +270,7 @@ final class AgentSessionEngine {
                     self.relaunchInFreshTab(id, s, message: message)
                     return
                 }
+                settled()
                 let inlineMessage = s.tool == .claude || s.tool == .omp
                 if alive {
                     // Alive: the conversation is simply back on stage. Only
@@ -251,7 +283,9 @@ final class AgentSessionEngine {
                 } else {
                     // The agent exited, its shell is still there: relaunch
                     // in place so the conversation history is right at hand.
-                    let words: [String] = [s.tool.rawValue, Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)), Self.roleFlags(for: s)]
+                    let resume = Self.resumeFlags(for: s, sharedFolder: sharesFolder(s))
+                    self.noteKimiRun(id, flags: resume)
+                    let words: [String] = [s.tool.rawValue, resume, Self.roleFlags(for: s)]
                     var cmd = words.filter { !$0.isEmpty }.joined(separator: " ")
                     // Claude and Oh My Pi take the message on the command
                     // line: typing it once the agent "looks alive" raced the
@@ -438,6 +472,7 @@ final class AgentSessionEngine {
     private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false,
                         worktreeSlug: String? = nil, attachments: [DroppedFile] = [],
                         remotely: Bool = false) {
+        noteKimiRun(id, flags: flags)
         Task { [weak self] in
             guard let self, let delegate = self.delegate, let s = self.store.session(id) else { return }
             @MainActor func fail(_ reason: String) {
@@ -463,6 +498,13 @@ final class AgentSessionEngine {
                 let echoed = prompt
                 self.store.mutate(id) { $0.openingMessage = echoed }
             }
+            // Kimi takes no opening message on its command line but in its
+            // one-shot `--prompt` mode, which exits when the turn ends — the
+            // session went "Finished" after one answer. Start it
+            // interactively and type the message once it's up (as a resume
+            // already does).
+            let typeOnceUp = Self.typesOpeningMessage(s.tool) && !prompt.isEmpty ? prompt : nil
+            if typeOnceUp != nil { prompt = "" }
             let guestPath = ScheduledAutomationEngine.guestPath(s.cwd)
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
             if let worktreeSlug {
@@ -523,6 +565,7 @@ final class AgentSessionEngine {
                 }
                 BACDebug.log("sessions", "“\(s.title)”: worktree-create sent (baseline \(baseline))")
                 self.watchEarlyExit(id, display: display)
+                if let typeOnceUp { self.deliverWhenAlive(id, typeOnceUp) }
                 return
             }
             if let url = s.cloneURL, !url.isEmpty {
@@ -589,8 +632,14 @@ final class AgentSessionEngine {
             }
             BACDebug.log("sessions", "“\(s.title)”: agent-tab sent (baseline \(baseline))")
             self.watchEarlyExit(id, display: display)
+            if let typeOnceUp { self.deliverWhenAlive(id, typeOnceUp) }
         }
     }
+
+    /// Agents whose opening message is typed into the running TUI instead
+    /// of riding on the launch command: Kimi's only command-line prompt is
+    /// its one-shot mode (`kimi --prompt`, exits after the turn).
+    nonisolated static func typesOpeningMessage(_ tool: Profile.Tool) -> Bool { tool == .kimi }
 
     /// The agent dying as it starts (a bad flag, a resume with nothing to
     /// resume, a config error): the launcher says so in the tab and drops
@@ -683,23 +732,135 @@ final class AgentSessionEngine {
 
     /// Each session's conversation as last read from the machine, so an
     /// asleep session still reads back in full.
-    let transcripts = SessionTranscriptCache()
+    let transcripts = SessionTranscriptCache.shared
     private var lastSnapshotAt: [UUID: Date] = [:]
     private var snapshotting: Set<UUID> = []
+    /// Where each session's last snapshot read stopped: the file and the
+    /// offset the next read continues from.
+    private var snapshotCursor: [UUID: (path: String, end: Int)] = [:]
+    /// A session's first snapshot (no cursor yet): this much of the file's
+    /// end, aligned to a record — the copy may already hold what's before.
+    static let snapshotFirstBytes = 8_000_000
 
     /// Copy the session's transcript from the machine (while it's alive, on
-    /// a timer; and once more when the agent goes away).
+    /// a timer; and once more when the agent goes away). Incremental: whole
+    /// records from where the last read stopped, in the file the tab's own
+    /// agent named — a byte window of the tail used to REPLACE the history
+    /// whenever it no longer overlapped what was held (one browser
+    /// screenshot fills 300 KB).
     private func snapshot(_ s: AgentSession) {
         guard let delegate, !snapshotting.contains(s.id) else { return }
         snapshotting.insert(s.id)
         lastSnapshotAt[s.id] = Date()
         Task { [weak self] in
             defer { self?.snapshotting.remove(s.id) }
-            guard let raw = await delegate.fetchSessionTranscript(s), !raw.isEmpty else { return }
-            self?.transcripts.save(s.id, Data(raw.utf8))
+            guard let self else { return }
+            // An attached Mac's agent: the one-shot tail (the chunk reader
+            // needs python3, which a plain Mac may not have). The cache
+            // keeps whole records and merges, so this can't shrink it.
+            if delegate.attachedMachines[s.profileID] != nil {
+                guard let raw = await delegate.fetchSessionTranscript(s), !raw.isEmpty else { return }
+                self.transcripts.save(s.id, Data(raw.utf8))
+                return
+            }
+            var known = self.snapshotCursor[s.id]
+            // Kimi's store is keyed by folder, not by tab: "the newest journal
+            // in the folder" (floor 0) was the PREVIOUS conversation there
+            // until this launch's own appeared — Kimi only creates it at the
+            // first prompt — and the copy took that conversation in, then
+            // the real one after it (B72). Read the session's pinned journal;
+            // until there is one, only a journal begun by this run.
+            var since = 0
+            var pin = TranscriptPin()
+            if s.tool == .kimi {
+                if let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+                    pin.kimiSession = id
+                    if let k = known, AgentSessionLocator.kimiSessionID(inPath: k.path) != id { known = nil }
+                } else {
+                    guard let w = s.windowIndex,
+                          let fp = AgentSessionLocator.parseFloorProbe(try? await delegate.guestExec(
+                            profileID: s.profileID, command: AgentSessionLocator.floorProbeCommand(window: w),
+                            timeout: 8)),
+                          fp.since > 0 else { return }   // never unfloored
+                    since = fp.since
+                    // A fresh start: a journal begun before the agent was is
+                    // another conversation's, however recently it was written.
+                    // A resume reattaches an older one, so mtime alone there.
+                    if self.kimiFreshRun[s.id] == true { pin.kimiCreatedSince = fp.since - 2 }
+                }
+            }
+            guard let cmd = CodingTaskEngine.transcriptChunkCommand(
+                    guestCwd: ScheduledAutomationEngine.guestPath(s.cwd), since: since,
+                    agent: s.tool.rawValue, pinnedWindow: s.windowIndex, pin: pin,
+                    knownPath: known?.path, knownOffset: known?.end ?? -1,
+                    bytes: Self.snapshotFirstBytes, earlier: false),
+                  let out = try? await delegate.guestExec(profileID: s.profileID, command: cmd, timeout: 30),
+                  let f = TranscriptFetch.parse(Data(out.utf8)) else { return }
+            // This run's journal: from now on the session reads it by id (and
+            // a resume reopens it by id, never "the last one here").
+            var newConversation = false
+            if s.tool == .kimi, pin.kimiSession == nil, self.kimiFreshRun[s.id] != nil,
+               let id = AgentSessionLocator.kimiSessionID(inPath: f.path) {
+                self.store.setTranscriptID(s.id, id)
+                // Begun by this run (the creation floor held): the session's
+                // next conversation, carried on after what the copy holds.
+                newConversation = pin.kimiCreatedSince != nil && f.start == 0
+            }
+            let continues = newConversation
+                || (known.map { $0.path == f.path && $0.end == f.start } ?? false)
+            self.snapshotCursor[s.id] = (f.path, f.end)
+            if s.tool == .kimi { self.noteJournal(s.id, f.chunk, continues: continues && !newConversation) }
+            guard !f.chunk.isEmpty else { return }
+            if continues {
+                self.transcripts.append(s.id, f.chunk)
+            } else {
+                self.transcripts.save(s.id, f.chunk)
+            }
         }
     }
     private static let snapshotEvery: TimeInterval = 30
+    /// Kimi sessions by how their agent last started: true = a new
+    /// conversation (no resume flags), false = resumed. Unknown (the app
+    /// restarted under a running agent) reads as resumed.
+    private var kimiFreshRun: [UUID: Bool] = [:]
+
+    /// Note how a Kimi session's agent is (re)started. A fresh start is a
+    /// new conversation: whatever the session was pinned to is not it.
+    private func noteKimiRun(_ id: UUID, flags: String) {
+        guard store.session(id)?.tool == .kimi else { return }
+        let fresh = !flags.split(separator: " ").contains { $0 == "-c" || $0 == "--continue" || $0 == "-S" || $0 == "--session" }
+        kimiFreshRun[id] = fresh
+        if fresh, store.session(id)?.agentTranscriptID != nil {
+            store.mutate(id) { $0.agentTranscriptID = nil }
+        }
+    }
+    private static let kimiSnapshotEvery: TimeInterval = 3
+
+    /// The end of each Kimi session's journal (what `KimiTranscriptParser.
+    /// turnInProgress` reads), kept from the snapshots' increments.
+    private var journalTail: [UUID: Data] = [:]
+    private static let journalTailBytes = 256_000
+
+    /// Kimi: whether its journal says a turn is under way — the sidebar and
+    /// header follow it (`AgentSession.transcriptWorking`).
+    private func noteJournal(_ id: UUID, _ chunk: Data, continues: Bool) {
+        var tail = continues ? (journalTail[id] ?? Data()) : Data()
+        tail.append(chunk)
+        if tail.count > Self.journalTailBytes { tail = Data(tail.suffix(Self.journalTailBytes)) }
+        journalTail[id] = tail
+        store.setTranscriptWorking(id, KimiTranscriptParser.turnInProgress(tail))
+    }
+
+    /// The conversation to read back: the local copy, with what the
+    /// machine's file says now merged in when it can be read. The live
+    /// read is "the newest transcript in the folder" (it may be another
+    /// session's), so it only counts when it shares records with the copy.
+    func readableTranscript(_ s: AgentSession) async -> Data? {
+        let cached = transcripts.load(s.id)
+        guard let delegate, let live = await delegate.fetchSessionTranscript(s), !live.isEmpty else { return cached }
+        guard let cached, !cached.isEmpty else { return Data(live.utf8) }
+        return SessionTranscriptCache.merge(history: cached, incoming: Data(live.utf8), mode: .overlapOnly) ?? cached
+    }
 
     /// The tty process probe, one window: is an agent in its foreground?
     /// nil when the guest can't be asked.
@@ -844,6 +1005,11 @@ final class AgentSessionEngine {
         if s.tool == .claude, let id = s.agentTranscriptID, isTranscriptID(id) {
             return "--resume \(id)"
         }
+        // Kimi: its own session, by id — `-c` takes the folder's latest,
+        // which may be another session's.
+        if s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            return "-S \(id)"
+        }
         return sharedFolder ? "" : s.tool.resumeFlags
     }
 
@@ -859,7 +1025,7 @@ final class AgentSessionEngine {
     private func apply(_ p: ProbeLine, to s: AgentSession) {
         let wasAlive = s.agentAlive
         store.setLiveness(s.id, alive: p.alive)
-        if p.alive, let title = SessionHome.cleanAgentTitle(p.title, agent: s.tool.rawValue, cwd: s.cwd) {
+        if p.alive, let title = AgentSession.title(fromAgent: p.title, of: s) {
             store.setAgentTitle(s.id, title)
         }
         if p.alive, let tid = p.transcriptID { store.setTranscriptID(s.id, tid) }
@@ -867,9 +1033,14 @@ final class AgentSessionEngine {
         // it stops.
         let now = Date()
         if p.alive {
-            if now.timeIntervalSince(lastSnapshotAt[s.id] ?? .distantPast) > Self.snapshotEvery { snapshot(s) }
-        } else if wasAlive == true {
-            snapshot(s)
+            // Kimi's turn state is read off its journal (its hooks leave
+            // "Ready" up while it works): at the probe's cadence, not 30 s.
+            let every = s.tool == .kimi ? Self.kimiSnapshotEvery : Self.snapshotEvery
+            if now.timeIntervalSince(lastSnapshotAt[s.id] ?? .distantPast) > every { snapshot(s) }
+        } else {
+            if wasAlive == true { snapshot(s) }
+            journalTail[s.id] = nil
+            store.setTranscriptWorking(s.id, nil)
         }
     }
 

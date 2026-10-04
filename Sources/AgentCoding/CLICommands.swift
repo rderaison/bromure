@@ -851,8 +851,8 @@ struct WorkspacesCreate: ParsableCommand {
         }
         let resp = try client.request("POST", "/profiles", body: body)
         guard resp.status == 201, (resp.json["ok"] as? Bool) == true else {
-            throw ValidationError(resp.json["error"] as? String
-                ?? "Couldn't create the workspace (HTTP \(resp.status)).")
+            FileHandle.standardError.write(Data("Error: \(resp.json["error"] as? String ?? "Couldn't create the workspace (HTTP \(resp.status)).")\n".utf8))
+            throw ExitCode(1)
         }
         let sid = resp.json["shortId"] as? String ?? ""
         let nm = resp.json["name"] as? String ?? (body["name"] as? String ?? "?")
@@ -901,12 +901,14 @@ struct WorkspacesEdit: ParsableCommand {
         With no --from-json this fetches the workspace's entire configuration,
         opens it in $EDITOR (or vi), and saves your changes back. Secrets are shown
         blank: leave one blank to keep the stored value, or type a new value to
-        change it. Pass --from-json to apply a document non-interactively.
+        change it. Pass --from-json to apply a document non-interactively; it may
+        be partial (only the fields to change — the rest keep their values, and
+        an explicit null clears an optional field).
         """)
 
     @Argument(help: "Workspace id or name.")
     var workspace: String
-    @Option(name: .long, help: "Apply a full profile JSON document non-interactively: a file path, or - for stdin.")
+    @Option(name: .long, help: "Apply a (full or partial) profile JSON document non-interactively: a file path, or - for stdin.")
     var fromJson: String?
 
     func run() throws {
@@ -928,7 +930,10 @@ struct WorkspacesEdit: ParsableCommand {
         }
         let resp = try client.request("PUT", "/profiles/\(seg)", body: body)
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
-            throw ValidationError(resp.json["error"] as? String ?? "Couldn't save (HTTP \(resp.status)).")
+            // The server's message names the field; the usage text a
+            // ValidationError adds would bury it.
+            FileHandle.standardError.write(Data("Error: \(resp.json["error"] as? String ?? "Couldn't save (HTTP \(resp.status)).")\n".utf8))
+            throw ExitCode(1)
         }
         print("Saved workspace \(resp.json["name"] as? String ?? workspace).")
     }
@@ -1036,6 +1041,79 @@ func absoluteHostPath(_ raw: String) -> String {
         ? expanded
         : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(expanded)
     return (absolute as NSString).standardizingPath
+}
+
+/// Profile documents as `workspaces create/edit --from-json` (and the control
+/// API's POST/PUT /profiles) send them: possibly partial — only the fields to
+/// change. They are overlaid key by key on a base profile's own document
+/// (the template for a create, the stored workspace for an edit), so an
+/// omitted key keeps its value and an explicit `null` clears an optional one.
+enum ProfileDocument {
+    /// `doc` overlaid on `base`, decoded. On failure, a message naming the
+    /// offending field ("authMode: unknown value \"tokn\"").
+    static func merge(_ doc: [String: Any], over base: Profile) -> Result<Profile, ProfileDocumentError> {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let baseData = try? encoder.encode(base),
+              var merged = (try? JSONSerialization.jsonObject(with: baseData)) as? [String: Any] else {
+            return .failure(ProfileDocumentError(message: "Internal error encoding the workspace."))
+        }
+        for (k, v) in doc { merged[k] = v }
+        guard JSONSerialization.isValidJSONObject(merged),
+              let data = try? JSONSerialization.data(withJSONObject: merged) else {
+            return .failure(ProfileDocumentError(message: "Invalid profile document: not valid JSON."))
+        }
+        do {
+            return .success(try decoder.decode(Profile.self, from: data))
+        } catch {
+            return .failure(ProfileDocumentError(message: "Invalid profile document: " + describe(error)))
+        }
+    }
+
+    /// "folderPaths[2]: expected a string" — the path and the problem, from a
+    /// DecodingError (the generic localizedDescription says neither).
+    static func describe(_ error: Error) -> String {
+        func path(_ ctx: DecodingError.Context, _ last: CodingKey? = nil) -> String {
+            var keys = ctx.codingPath
+            if let last { keys.append(last) }
+            var out = ""
+            for k in keys {
+                if let i = k.intValue { out += "[\(i)]" } else { out += (out.isEmpty ? "" : ".") + k.stringValue }
+            }
+            return out.isEmpty ? "(document)" : out
+        }
+        guard let e = error as? DecodingError else { return error.localizedDescription }
+        switch e {
+        case .keyNotFound(let key, let ctx):
+            return "\(path(ctx, key)): required field is missing"
+        case .typeMismatch(let type, let ctx):
+            return "\(path(ctx)): expected \(typeName(type))"
+        case .valueNotFound(let type, let ctx):
+            return "\(path(ctx)): expected \(typeName(type)), found null"
+        case .dataCorrupted(let ctx):
+            let detail = ctx.debugDescription.isEmpty ? "invalid value" : ctx.debugDescription
+            return "\(path(ctx)): \(detail)"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
+
+    private static func typeName(_ t: Any.Type) -> String {
+        switch t {
+        case is String.Type: return "a string"
+        case is Bool.Type: return "true or false"
+        case is Int.Type, is Double.Type, is UInt64.Type, is Int64.Type: return "a number"
+        case is [Any].Type: return "an array"
+        case is [String: Any].Type: return "an object"
+        default: return "\(t)"
+        }
+    }
+}
+
+struct ProfileDocumentError: Error, Equatable {
+    let message: String
 }
 
 /// Load a JSON object from a file path, or from stdin when `spec == "-"`.

@@ -3248,6 +3248,10 @@ public final class ProfileStore {
         p.createdAt = Date()
         p.lastUsedAt = nil
         p.baseImageVersionAtClone = nil
+        // Reach is explicit for new workspaces: agents here reach no other
+        // workspace until the user ticks some (nil = "every workspace" stays
+        // only for workspaces that already stored it).
+        p.agentReach = []
         return p
     }
 

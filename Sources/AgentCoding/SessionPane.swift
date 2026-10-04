@@ -589,6 +589,7 @@ final class SessionPane {
         m.draftKey = "local:\(profile.id.uuidString):\(windowIndex)"
         if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
         m.transcriptSink = transcriptSinks[windowIndex]
+        m.cachedTranscript = SessionTranscriptCache.loadDetached
         // The tab's own terminal surface, for an interactive slash command
         // shown inline in the chat (same tmux client the Linux view uses).
         m.inlineTerminal = { [weak self] in

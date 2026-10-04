@@ -29,6 +29,13 @@ final class BrowserPaneModel {
     /// True once the VM controller has mounted a framebuffer into
     /// `framebufferContainer`; drives placeholder vs. live view.
     var hasFramebuffer = false
+    /// True once the guest is actually painting (Chromium up). The framebuffer
+    /// is mounted before that — VZ needs the view in a window to size the
+    /// scanout — but kept invisible under the themed placeholder, so a boot
+    /// never flashes the guest's black console (B16).
+    var framebufferRevealed = false
+    /// Placeholder covers the framebuffer until the guest paints.
+    var showsPlaceholder: Bool { !(hasFramebuffer && framebufferRevealed) }
     /// Subtitle under the placeholder globe (e.g. "Booting browser…").
     var placeholderStatus = ""
     /// Non-nil while the browser image is being downloaded (first open) —
@@ -151,6 +158,16 @@ final class NativeChromeCropper: NSView {
     /// window moves between displays, so it's recomputed live.
     private var deviceInset: CGFloat = 0
     private var insetConstraint: NSLayoutConstraint?
+    /// Framebuffer pixels per view device pixel (B18): above 1 when the pane
+    /// is narrower than Chromium's minimum window and the scanout is larger
+    /// than the view, scaled down into it — the chrome rows shrink on screen
+    /// by the same factor, so the clip does too.
+    var overscan: CGFloat = 1 {
+        didSet {
+            guard overscan != oldValue else { return }
+            insetConstraint?.constant = insetPoints()
+        }
+    }
 
     func clip(_ vzView: NSView, deviceInset: Int) {
         self.deviceInset = CGFloat(deviceInset)
@@ -175,7 +192,7 @@ final class NativeChromeCropper: NSView {
     private func insetPoints() -> CGFloat {
         let dpr = max(window?.backingScaleFactor
             ?? NSScreen.main?.backingScaleFactor ?? 2, 1)
-        return deviceInset / dpr
+        return deviceInset / (dpr * max(overscan, 1))
     }
 
     override func viewDidChangeBackingProperties() {
@@ -241,15 +258,24 @@ struct BrowserPaneView: View {
 
     @ViewBuilder private var content: some View {
         ZStack {
-            Color.black
-            placeholder.opacity(model.hasFramebuffer ? 0 : 1)
+            // Themed (not black): the placeholder reads as part of the window
+            // while the browser boots, in light and dark mode alike.
+            Color.platformWindowBackground
             if model.hasFramebuffer {
+                // Mounted early but invisible until the guest paints.
                 FramebufferHost(container: model.framebufferContainer)
+                    .opacity(model.framebufferRevealed ? 1 : 0)
+                    .allowsHitTesting(model.framebufferRevealed)
+            }
+            if model.showsPlaceholder {
+                ZStack {
+                    Color.platformWindowBackground
+                    placeholder
+                }
+                .transition(.opacity)
             }
         }
-        // The pane background is always Color.black; pin the scheme so
-        // .secondary/.tertiary text stays legible when the OS is in light mode.
-        .environment(\.colorScheme, .dark)
+        .animation(.easeOut(duration: 0.18), value: model.framebufferRevealed)
     }
 
     private var placeholder: some View {

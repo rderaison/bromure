@@ -180,6 +180,29 @@ mkdir -p /mnt/mnt/bromure-meta /mnt/mnt/bromure-outbox \
          /mnt/mnt/bromure-share-5 /mnt/mnt/bromure-share-6 \
          /mnt/mnt/bromure-share-7 /mnt/mnt/bromure-share-8
 
+# Skip the optional virtiofs slots the host didn't attach (it lists the tags
+# it attached under /mnt/bromure-meta/virtiofs-tags/) instead of logging a red
+# "FAILED to mount" for each absent one on every boot. Same text as agentd's
+# task_mount_conditions, which also installs these on older images at runtime.
+# The `|!…/virtiofs-tags` alternative keeps mounting when the marker dir is
+# absent (a host that doesn't write markers).
+for slot in "bromure-home:home-ubuntu.mount" \
+            share-1:'mnt-bromure\x2dshare\x2d1.mount' share-2:'mnt-bromure\x2dshare\x2d2.mount' \
+            share-3:'mnt-bromure\x2dshare\x2d3.mount' share-4:'mnt-bromure\x2dshare\x2d4.mount' \
+            share-5:'mnt-bromure\x2dshare\x2d5.mount' share-6:'mnt-bromure\x2dshare\x2d6.mount' \
+            share-7:'mnt-bromure\x2dshare\x2d7.mount' share-8:'mnt-bromure\x2dshare\x2d8.mount'; do
+    tag="${slot%%:*}"; unit="${slot#*:}"
+    mkdir -p "/mnt/etc/systemd/system/${unit}.d"
+    cat > "/mnt/etc/systemd/system/${unit}.d/bromure-attached.conf" <<DROPIN
+# Bromure AC: managed by bromure-agentd (skip the mount when the
+# host didn't attach this virtiofs tag).
+[Unit]
+RequiresMountsFor=/mnt/bromure-meta
+ConditionPathExists=|/mnt/bromure-meta/virtiofs-tags/${tag}
+ConditionPathExists=|!/mnt/bromure-meta/virtiofs-tags
+DROPIN
+done
+
 # Hostname + hosts. Write the full /etc/hosts so loopback resolution works
 # even when debootstrap leaves the file empty/missing.
 echo "bromure-ac" > /mnt/etc/hostname
@@ -475,6 +498,14 @@ step "apt-get install terminal multiplexers (screen + tmux)" \
 # even though the VM itself is already an isolation boundary.
 step "apt-get install bubblewrap" \
     retry apt-get install -y -q --no-install-recommends bubblewrap
+
+# pip + venv — agents routinely `pip install` a package (or `python3 -m venv`)
+# mid-task; without them they burn turns working around "No module named pip".
+# Noble's python3 is externally-managed (PEP 668): plain `pip install` still
+# refuses system-wide installs, which is fine — venvs and `pip install --user
+# --break-system-packages` work, and the agent knows both.
+step "apt-get install python3-pip + python3-venv" \
+    retry apt-get install -y -q --no-install-recommends python3-pip python3-venv
 
 # rdate is the user's preferred clock-resync nudge after VM restore —
 # VZ freezes CLOCK_REALTIME during saveMachineState, so on resume the

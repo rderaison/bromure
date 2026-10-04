@@ -47,11 +47,16 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     /// How much history a first read takes, when less than the default suits
     /// (a slow link); "load earlier" fetches the rest. nil: the default.
     var historyBytesHint: Int? { get }
+    /// What ties the tab's transcript to its session's own conversation
+    /// when the agent's store can't tell by tab (Kimi: the session id the
+    /// engine pinned). Empty: the floor and the folder decide.
+    func transcriptPin(window: Int) -> TranscriptPin
 }
 
 extension BeautifiedTranscriptProvider {
     var historyCacheKey: String? { nil }
     var historyBytesHint: Int? { nil }
+    func transcriptPin(window: Int) -> TranscriptPin { TranscriptPin() }
 }
 
 /// Where the host's copy of a transcript file ends: the file path and the
@@ -133,6 +138,7 @@ extension BeautifiedTranscriptProvider {
               // probe-every-store path inside the locator.
               let cmd = CodingTaskEngine.transcriptChunkCommand(
                   guestCwd: cwd, since: since, agent: agent, pinnedWindow: idx,
+                  pin: transcriptPin(window: idx),
                   knownPath: known?.path, knownOffset: known?.offset ?? -1,
                   bytes: mode == .earlier ? (historyBytesHint ?? BeautifiedSessionModel.earlierHistoryBytes)
                                           : (historyBytesHint ?? BeautifiedSessionModel.initialHistoryBytes),
@@ -497,6 +503,10 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The session this chat is, as of now (a tab binds to its record a
     /// beat after launch).
     var currentSession: (() -> AgentSession?)?
+    /// The session's conversation as last copied to this Mac (the engine's
+    /// `SessionTranscriptCache`, a mirror's last download): shown the moment
+    /// the chat mounts, until its first read of the live file lands.
+    var cachedTranscript: ((UUID) async -> Data?)?
     /// Put another session on stage (the other end of a delegation).
     var openSession: ((UUID) -> Void)?
     /// The user answers a delegate's question on the agent's behalf:
@@ -800,6 +810,14 @@ final class BeautifiedSessionModel: ObservableObject {
 
     /// The seeded "working" holds until the agent has answered (an assistant
     /// turn in the real transcript) or the seed times out.
+    /// The transcript's own "a turn is under way", for agents whose journal
+    /// records turn boundaries (Kimi) — their hooks alone left the header
+    /// on "Ready" while the agent worked.
+    private func transcriptSaysWorking() -> Bool {
+        guard agentKind == "kimi", let path = currentPath, let buf = buffers[path] else { return false }
+        return KimiTranscriptParser.turnInProgress(buf.data)
+    }
+
     private func seedHolds() -> Bool {
         guard let until = seededUntil else { return false }
         let answered = parsedItems.contains {
@@ -984,9 +1002,23 @@ final class BeautifiedSessionModel: ObservableObject {
         // The history on hand shows at once — over a tunnel the first poll
         // (terminal scan, then the fetch) is seconds away — with a quiet
         // "catching up" until that poll brings it current.
-        if restored || !parsedItems.isEmpty { catchingUp = true }
+        // Nothing downloaded yet this run: the conversation shown a moment
+        // ago (launch page, read-back) or this Mac's copy of it, so a chat
+        // that just bound doesn't flash blank until its first read.
+        var seedID: UUID?
+        if !restored, parsedItems.isEmpty, let sid = currentSession?()?.id {
+            if let memo = StageTranscriptMemo.get(sid) {
+                applyParsed(memo)
+                rebuild()
+                loading = false
+            } else if cachedTranscript != nil {
+                seedID = sid
+            }
+        }
+        if restored || !parsedItems.isEmpty || seedID != nil { catchingUp = true }
         pollTask = Task { [weak self] in
             if restored { await self?.showCached() }
+            if let seedID { await self?.showCopy(seedID) }
             while !Task.isCancelled {
                 await self?.poll()
                 if self?.catchingUp == true { self?.catchingUp = false }
@@ -1001,6 +1033,20 @@ final class BeautifiedSessionModel: ObservableObject {
     private func showCached() async {
         let parsed = await parseCurrent()
         guard !parsed.isEmpty else { return }
+        applyParsed(parsed)
+        rebuild()
+        if loading { loading = false }
+    }
+
+    /// This Mac's copy of the conversation, before the first read — unless
+    /// something real is already on show.
+    private func showCopy(_ id: UUID) async {
+        guard let data = await cachedTranscript?(id), !data.isEmpty, parsedItems.isEmpty else { return }
+        let agent = agentKind ?? currentSession?()?.tool.rawValue
+        let parsed = await Task.detached(priority: .userInitiated) {
+            AgentTranscript.parse(data, agent: agent)
+        }.value
+        guard !parsed.isEmpty, parsedItems.isEmpty else { return }
         applyParsed(parsed)
         rebuild()
         if loading { loading = false }
@@ -1107,7 +1153,7 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         reconcilePending()
         rebuild()
-        setWorking(provider.isWorking() || seedHolds())
+        setWorking(provider.isWorking() || seedHolds() || transcriptSaysWorking())
         reconcileQueued()
         if !background { await backfillContinuity() }
     }
@@ -1867,6 +1913,16 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
     }
 
     func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
+
+    /// The Kimi session the engine pinned for the session in this tab (B72):
+    /// its own journal, never the folder's newest.
+    func transcriptPin(window: Int) -> TranscriptPin {
+        guard let pane, let delegate = pane.acDelegate,
+              let s = delegate.sessionRecord(profileID: pane.profile.id, windowIndex: window),
+              s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id)
+        else { return TranscriptPin() }
+        return TranscriptPin(kimiSession: id)
+    }
 }
 
 /// The last messages of a chat, bottom-anchored: what shows (and re-flows)
@@ -1955,6 +2011,65 @@ private final class TailFollow {
         return v.bounds.contains(v.convert(e.location, from: nil))
     }
     let probe = TailFollowProbe.Box()
+    /// The transcript's laid-out height. Kept here, not in view state: it
+    /// changes on every re-measure of the lazy rows, and as state each
+    /// change re-rendered the view that re-measures them.
+    var contentHeight: CGFloat = 0
+
+    // MARK: Corrective scrolls
+    //
+    // Every scroll the view makes on its own (follow the tail, snap back
+    // from past the end, the watchdog) goes through `snap`: never inside
+    // the layout pass that noticed the drift (a scroll there re-runs the
+    // lazy placement in the same transaction — at a narrow column, where
+    // rows re-measure by whole screens, it never converged and the app
+    // froze), at most one pending, and only so many in a row before it
+    // waits for something new (B23).
+
+    private var snapPending = false
+    private var snapAnimated = false
+    private var snapsInBurst = 0
+    private var burstStart = Date.distantPast
+    /// Snaps allowed per burst before backing off; a burst is `burstWindow`.
+    static let snapBudget = 6
+    static let burstWindow: TimeInterval = 1.0
+    /// Snaps given up on: the next is allowed after `backoffUntil`.
+    private(set) var backoffUntil = Date.distantPast
+    /// How many snaps were refused for the budget (debug geometry).
+    private(set) var refused = 0
+
+    /// Scroll to the tail on the next turn of the main queue. Coalesced
+    /// (one pending at a time) and budgeted: a layout that keeps moving
+    /// the tail gets `snapBudget` tries a second, then a pause.
+    func snap(_ perform: @escaping (_ animated: Bool) -> Void, animated: Bool = false) {
+        if animated { snapAnimated = true }
+        guard !snapPending else { return }
+        let now = Date()
+        guard now >= backoffUntil else { refused += 1; return }
+        if now.timeIntervalSince(burstStart) > Self.burstWindow {
+            burstStart = now
+            snapsInBurst = 0
+        }
+        snapsInBurst += 1
+        if snapsInBurst > Self.snapBudget {
+            backoffUntil = now.addingTimeInterval(Self.burstWindow)
+            refused += 1
+            return
+        }
+        snapPending = true
+        DispatchQueue.main.async { [self] in
+            snapPending = false
+            let a = snapAnimated
+            snapAnimated = false
+            perform(a)
+        }
+    }
+
+    /// Something new happened (content, the user, a size): a fresh budget.
+    func resetBudget() {
+        snapsInBurst = 0
+        backoffUntil = .distantPast
+    }
 
     private struct UserEvent { let at: Date; weak var window: NSWindow?; let location: NSPoint }
     private static var lastEvent: UserEvent?
@@ -2050,7 +2165,6 @@ struct BeautifiedSessionView: View {
         return Array(items.suffix(n))
     }
     @State private var viewportHeight: CGFloat = 0
-    @State private var contentHeight: CGFloat = 0
     /// Keeps the tail on show through layout drift until the user scrolls
     /// (a reference: flipping it must not re-render the view).
     @State private var tailFollow = TailFollow()
@@ -2216,14 +2330,19 @@ struct BeautifiedSessionView: View {
                 }
                 // Shown from what was on hand; the latest round is on its way.
                 .overlay(alignment: .top) {
-                    if model.catchingUp, !model.items.isEmpty {
-                        CatchingUpPill()
-                            .padding(.top, 8)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                            .allowsHitTesting(false)
+                    ZStack {
+                        if model.catchingUp, !model.items.isEmpty {
+                            CatchingUpPill()
+                                .padding(.top, 8)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                                .allowsHitTesting(false)
+                        }
                     }
+                    // The pill only: the history lands in the same update,
+                    // and animating the transcript's layout with it fought
+                    // the tail follow.
+                    .animation(.easeOut(duration: 0.2), value: model.catchingUp)
                 }
-                .animation(.easeOut(duration: 0.2), value: model.catchingUp)
                 .clipped()
                 .background {
                     GeometryReader { g in
@@ -2308,8 +2427,8 @@ struct BeautifiedSessionView: View {
             }
             ChatComposer(
                 placeholder: placeholder ?? (model.agentDisplayName.isEmpty
-                    ? NSLocalizedString("Message the agent…  (or drop files)", comment: "beautified composer")
-                    : String(format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
+                    ? NSLocalizedString("Message the agent… (or drop files)", comment: "beautified composer")
+                    : String(format: NSLocalizedString("Message %@… (or drop files)", comment: "beautified composer"),
                              model.agentDisplayName)),
                 text: $model.composerText,
                 autofocus: true,
@@ -2422,7 +2541,10 @@ struct BeautifiedSessionView: View {
                         // The consolidated todo is shown pinned above the
                         // composer, not inline (where it scrolls away). Tool
                         // calls and thinking fold into one line per run.
-                        let rows = TranscriptRow.rows(visible.filter { !Self.isTodo($0) && !liveIDs.contains($0.id) })
+                        // Long replies cut to about a screen at THIS width
+                        // (a narrow column wraps a piece into many screens).
+                        let rows = TranscriptRow.rows(visible.filter { !Self.isTodo($0) && !liveIDs.contains($0.id) },
+                                                      chunkLimit: TranscriptRow.chunkLimit(forWidth: transcriptSize.width - 40))
                         let liveRun = model.working ? rows.last.flatMap { r -> Int? in
                             if case .activity = r { return r.id } else { return nil }
                         } : nil
@@ -2521,7 +2643,7 @@ struct BeautifiedSessionView: View {
                     // until the conversation outgrew the window.
                     .frame(maxWidth: .infinity, minHeight: max(0, viewportHeight), alignment: .bottom)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                        contentHeight = h
+                        tailFollow.contentHeight = h
                         model.debugGeometry["content"] = h
                     }
                 }
@@ -2533,19 +2655,26 @@ struct BeautifiedSessionView: View {
                 .background(TailFollowProbe(box: tailFollow.probe))
                 .coordinateSpace(name: Self.scrollSpace)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                    viewportHeight = h
-                    model.debugGeometry["viewport"] = h
+                    // Whole points: a sub-point wobble isn't a new size (it
+                    // re-laid the whole transcript through the min height).
+                    let r = h.rounded()
+                    if r != viewportHeight { viewportHeight = r; tailFollow.resetBudget() }
+                    model.debugGeometry["viewport"] = r
                 }
                 .onPreferenceChange(TailOffsetKey.self) { marker in
+                    // Runs inside the layout pass that moved the marker:
+                    // record, decide, and leave every scroll to `snap`
+                    // (async, coalesced, budgeted — see `TailFollow`).
                     tailFollow.lastMarker = marker
+                    model.debugGeometry["refused"] = Double(tailFollow.refused)
                     // Following the tail and the user didn't scroll: the
                     // tail moved because rows were measured — go again.
-                    // (See `TailFollow`.)
                     let byUser = tailFollow.userScrolling
+                    if byUser { tailFollow.resetBudget() }
                     if !byUser, tailFollow.sticky, viewportHeight > 0,
                        marker.map({ $0 > viewportHeight + 2 || $0 < viewportHeight - 40 }) ?? true {
                         if !pinnedToBottom { pinnedToBottom = true }
-                        DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                        snapToTail(proxy)
                         return
                     }
                     // The marker unloaded by the lazy stack: scrolled far up.
@@ -2572,8 +2701,8 @@ struct BeautifiedSessionView: View {
                     // past the content (rows re-measured shorter than their
                     // estimate, or trimmed away) and what shows is blank.
                     // Snap back to the tail.
-                    if viewportHeight > 0, contentHeight > viewportHeight, tailY < viewportHeight - 40 {
-                        proxy.scrollTo(Self.tailID, anchor: .bottom)
+                    if viewportHeight > 0, tailFollow.contentHeight > viewportHeight, tailY < viewportHeight - 40 {
+                        snapToTail(proxy)
                     }
                 }
                 .task {
@@ -2589,7 +2718,7 @@ struct BeautifiedSessionView: View {
                         let m = tailFollow.lastMarker
                         if m == nil || m! > v + 2 || m! < v - 40 {
                             model.debugGeometry["watchdog"] = (model.debugGeometry["watchdog"] ?? 0) + 1
-                            proxy.scrollTo(Self.tailID, anchor: .bottom)
+                            snapToTail(proxy)
                         }
                     }
                 }
@@ -2599,14 +2728,17 @@ struct BeautifiedSessionView: View {
                 // content BEFORE the append — a big answer landing would
                 // otherwise push the marker out of the slack first and read
                 // as "scrolled up".
-                .onReceive(model.$revision.dropFirst()) { _ in if pinnedToBottom { scrollToTail(proxy) } }
+                .onReceive(model.$revision.dropFirst()) { _ in
+                    tailFollow.resetBudget()
+                    if pinnedToBottom { scrollToTail(proxy) }
+                }
                 .onChange(of: model.localRevision) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.working) { _, _ in if pinnedToBottom { scrollToTail(proxy) } }
                 .onChange(of: model.failure) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.prompt) { _, _ in scrollToTail(proxy) }
                 .onAppear {
                     tailFollow.sticky = true
-                    proxy.scrollTo(Self.tailID, anchor: .bottom)
+                    snapToTail(proxy)
                 }
                 // Shown (a click, a switch back): the latest, once the whole
                 // history is laid out — the first jump lands on the tail only.
@@ -2619,6 +2751,7 @@ struct BeautifiedSessionView: View {
                 .onChange(of: model.items.count) { _, _ in applyFind(proxy) }
                 // Scrolled up while it keeps going: one click back down.
                 .overlay(alignment: .bottom) {
+                  ZStack {
                     if !pinnedToBottom {
                         Button {
                             scrollToTail(proxy)
@@ -2635,8 +2768,12 @@ struct BeautifiedSessionView: View {
                         .padding(.bottom, 12)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
+                  }
+                  // Only the button animates: on the scroll view, the flip
+                  // (decided from the tail marker mid-layout) animated the
+                  // lazy rows' own re-measure, which moved the marker again.
+                  .animation(.easeOut(duration: 0.18), value: pinnedToBottom)
                 }
-                .animation(.easeOut(duration: 0.18), value: pinnedToBottom)
             }
         }
     }
@@ -2708,17 +2845,26 @@ struct BeautifiedSessionView: View {
     }
 
     private func scrollToTail(_ proxy: ScrollViewProxy) {
-        // Twice: once now, once after the lazy rows have been measured — a
-        // single animated scroll against estimated row heights could stop
-        // short of, or past, the real tail. Rows measured later still are
-        // caught by `tailFollow`.
+        // Twice: once now-ish, once after the lazy rows have been measured
+        // — a single animated scroll against estimated row heights could
+        // stop short of, or past, the real tail. Rows measured later still
+        // are caught by `tailFollow`. Both through `snap` (never inside the
+        // update that asked; coalesced with any correction already queued).
         tailFollow.sticky = true
-        proxy.scrollTo(Self.tailID, anchor: .bottom)
-        DispatchQueue.main.async {
-            withAnimation(.easeOut(duration: 0.15)) {
+        tailFollow.resetBudget()
+        snapToTail(proxy)
+        DispatchQueue.main.async { snapToTail(proxy, animated: true) }
+    }
+
+    /// The one way this view scrolls itself to the tail (see `TailFollow.snap`).
+    private func snapToTail(_ proxy: ScrollViewProxy, animated: Bool = false) {
+        tailFollow.snap({ animate in
+            if animate {
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+            } else {
                 proxy.scrollTo(Self.tailID, anchor: .bottom)
             }
-        }
+        }, animated: animated)
     }
 
     /// One transcript item. A user turn that references pictures this Mac

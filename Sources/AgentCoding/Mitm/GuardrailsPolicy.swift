@@ -261,7 +261,7 @@ public struct GuardrailsConfig: Sendable {
     func egressMethodBlockReason(host: String, port: UInt16, method: String) -> String? {
         guard let policy = egressPolicy,
               !policy.permitsMethod(hostnames: [host], port: port, method: method) else { return nil }
-        return "\(method.uppercased()) to \(host) blocked by Bromure Guardrails"
+        return "\(method.uppercased()) to \(host) blocked by a Bromure firewall rule"
     }
 
     /// Whether any configured database endpoint needs the request body / query
@@ -644,6 +644,10 @@ public struct GuardrailsConfig: Sendable {
         public let body: String
         public let contentType: String
         public let amzErrorType: String?
+        /// True when the block came from the egress firewall's `web` method
+        /// rule rather than a protocol guardrail — the proxy records it under
+        /// the Firewall engine, not Guardrails (B39).
+        public var isFirewall: Bool = false
     }
 
     private func jsonMessageBody(_ reason: String) -> String {
@@ -750,7 +754,8 @@ public struct GuardrailsConfig: Sendable {
         if protocolMode(host: h, method: method, path: path) == nil,
            let reason = egressMethodBlockReason(host: h, port: 443, method: method) {
             return Denial(reason: reason, body: jsonMessageBody(reason),
-                          contentType: "application/json", amzErrorType: nil)
+                          contentType: "application/json", amzErrorType: nil,
+                          isFirewall: true)
         }
         return nil
     }

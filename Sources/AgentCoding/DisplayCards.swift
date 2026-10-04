@@ -188,6 +188,22 @@ enum DisplayMediaCache {
     private static let imageBudget = 200 * 1024 * 1024
 
     static func image(_ key: String) -> Data? { images[key] }
+    /// A copy of `path` fetched by some chat in this run, whatever machine
+    /// scope it was cached under — for a card with no live reader (a paused
+    /// session, B70). Only an unambiguous match: two machines' /tmp/shot.png
+    /// are two pictures.
+    static func image(anyScopeFor path: String) -> Data? {
+        if let d = images[path] { return d }
+        let suffix = "\u{1}" + path
+        let hits = images.filter { $0.key.hasSuffix(suffix) }
+        return hits.count == 1 ? hits.first?.value : nil
+    }
+    static func video(anyScopeFor path: String) -> URL? {
+        if let u = video(path) { return u }
+        let suffix = "\u{1}" + path
+        let hits = videos.keys.filter { $0.hasSuffix(suffix) }
+        return hits.count == 1 ? video(hits[0]) : nil
+    }
     static func store(image: Data, for key: String) {
         if imageBytes + image.count > imageBudget { images.removeAll(); imageBytes = 0 }
         images[key] = image
@@ -476,7 +492,8 @@ struct FileDownloadCard: View {
         switch state {
         case .idle:
             if reader?.op == nil {
-                return NSLocalizedString("This window can't read files from that machine.", comment: "download")
+                // No live machine behind this chat (a paused session, B70).
+                return NSLocalizedString("Available when the workspace is running", comment: "download")
             }
             return size.map { String(format: NSLocalizedString("%@ · sent by the agent", comment: "download"), $0) }
                 ?? NSLocalizedString("Sent by the agent", comment: "download")
@@ -578,12 +595,29 @@ struct MediaView: View {
     @State private var videoURL: URL?
     @State private var loading = false
     @State private var failure: String?
+    /// No machine to read from (a paused session) and nothing cached.
+    @State private var offline = false
 
     private var kind: DisplayMediaKind? { DisplayMediaKind(path: path) }
 
     var body: some View {
         Group {
-            if let failure {
+            if offline {
+                // B70: no machine to read from (a paused session) — a calm
+                // placeholder, not a warning.
+                VStack(spacing: 6) {
+                    Image(systemName: kind == .video ? "film" : "photo")
+                        .font(.system(size: 22, weight: .light))
+                    Text(kind == .video
+                         ? NSLocalizedString("Video available when the workspace is running", comment: "display card")
+                         : NSLocalizedString("Image available when the workspace is running", comment: "display card"))
+                        .font(.system(size: 12))
+                        .multilineTextAlignment(.center)
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 90)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+            } else if let failure {
                 Label(failure, systemImage: "exclamationmark.triangle")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -608,8 +642,23 @@ struct MediaView: View {
                     .frame(maxWidth: .infinity, minHeight: 120)
             }
         }
-        .onAppear {
-            let key = reader?.cacheKey(path) ?? path
+        // Re-run when the machine comes or goes (a paused session resumed).
+        .task(id: reader == nil) {
+            guard let reader else {
+                // A paused session: the copy this run already fetched, if any.
+                if let d = DisplayMediaCache.image(anyScopeFor: path), let img = PlatformImage(data: d) {
+                    image = img
+                } else if let u = DisplayMediaCache.video(anyScopeFor: path) {
+                    videoURL = u
+                } else if kind != nil {
+                    offline = true
+                } else {
+                    load()   // says it isn't an image or a video
+                }
+                return
+            }
+            offline = false
+            let key = reader.cacheKey(path)
             if let d = DisplayMediaCache.image(key), let img = PlatformImage(data: d) { image = img; return }
             if let u = DisplayMediaCache.video(key) { videoURL = u; return }
             if kind == .image || expanded { load() }   // a video waits for a tap inline
@@ -632,7 +681,7 @@ struct MediaView: View {
     private func load() {
         guard !loading else { return }
         guard let kind else { failure = NSLocalizedString("Not an image or a video this app can show.", comment: "display card"); return }
-        guard let reader else { failure = NSLocalizedString("This window can't read files from that machine.", comment: "display card"); return }
+        guard let reader else { offline = true; return }   // B70: paused — a calm placeholder
         loading = true
         let path = self.path
         Task { @MainActor in

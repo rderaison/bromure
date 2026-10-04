@@ -113,6 +113,10 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
         func methodAllowed(_ method: String) -> Bool {
             guard proto == .web else { return true }
             guard let methods else { return action == .allow }
+            // Fail closed: a method the proxy couldn't parse ("?", empty) must
+            // not slip past a deny-list rule — `deny web host POST` used to let
+            // an unparsed POST through because "?" isn't in the list (B35).
+            if action == .deny, method.isEmpty || method == "?" { return false }
             let inList = methods.contains(method)
             return action == .allow ? inList : !inList
         }

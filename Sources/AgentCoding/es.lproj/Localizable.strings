@@ -468,7 +468,6 @@
 "Allow this request" = "Permitir esta solicitud";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure analiza el tráfico de IA del agente en el dispositivo en busca de instrucciones inyectadas: nada sale del Mac. Cada detector usa un modelo local, descargado de bromure.io la primera vez que lo activas.";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "Evalúa el contenido de archivos, páginas web y la salida de herramientas que lee el agente (Prompt Guard). Detecta «ignora las instrucciones anteriores / exfiltra secretos» oculto en un repositorio malicioso. Descarga ~272 MB al activarlo por primera vez.";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Evalúa CLAUDE.md, AGENTS.md, GROK.md y los demás archivos de instrucciones / ajustes que Claude Code, Codex y Grok cargan como autoridad. Descarga ~571 MB al activarlo por primera vez.";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "«Registrar y continuar» anota las detecciones en la ventana Registro de seguridad. «Preguntarme qué hacer» pausa la solicitud y muestra el texto marcado. «Bloquear» hace fallar la solicitud.";
 "Possible %@ in “%@”" = "Posible %@ en «%@»";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure marcó contenido que el agente está a punto de enviar al modelo (desde %@). Revísalo abajo: ¿permitirlo o bloquear esta solicitud?";
@@ -1813,7 +1812,7 @@
 "Up one folder" = "Subir una carpeta";
 "No folders in here yet." = "Aún no hay carpetas aquí.";
 "The machine's folders can't be read right now." = "Las carpetas de la máquina no se pueden leer ahora mismo.";
-"Message %@…  (or drop files)" = "Mensaje para %@…  (o suelta archivos)";
+"Message %@… (or drop files)" = "Mensaje para %@… (o suelta archivos)";
 "Ready · %@" = "Listo · %@";
 "Ended · %@ ago" = "Terminada · hace %@";
 "End “%@”?" = "¿Terminar “%@”?";
@@ -2019,7 +2018,7 @@
 "Streaming to bromure.io" = "Transmitiendo a bromure.io";
 "Signed in to bromure.io" = "Sesión iniciada en bromure.io";
 "Log out" = "Cerrar sesión";
-"Message the agent…  (or drop files)" = "Mensaje para el agente…  (o suelta archivos)";
+"Message the agent… (or drop files)" = "Mensaje para el agente… (o suelta archivos)";
 "Drop to attach" = "Suelta para adjuntar";
 "Loading transcript…" = "Cargando la transcripción…";
 "Say what you need — the agent is listening." = "Di qué necesitas — el agente escucha.";
@@ -3626,3 +3625,59 @@
 "Created %@" = "Creada %@";
 "Modified %@" = "Modificada %@";
 "Updated %@" = "Actualizada %@";
+"GitHub rejected this workspace's token" = "GitHub rechazó el token de este espacio de trabajo";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "El token de github.com caducó, se revocó o está mal escrito (HTTP 401). Actualízalo en %@ › Credenciales o elige otro espacio de trabajo.";
+"Fix the workspace's GitHub token to watch a repository." = "Corrige el token de GitHub del espacio de trabajo para vigilar un repositorio.";
+"Assigned to %@ — click to change" = "Asignada a %@ — haz clic para cambiar";
+"Click to fold the error" = "Haz clic para plegar el error";
+"Click to read the whole error" = "Haz clic para leer el error completo";
+"Deleted workspace" = "Espacio de trabajo eliminado";
+"Open Coding Tasks (⇧⌘T)" = "Abrir Tareas de código (⇧⌘T)";
+"No open tasks" = "No hay tareas abiertas";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "Cada vez que se dispara una automatización, su ejecución aparece aquí: programada, en curso y terminada. Crea una automatización para empezar.";
+"Open Automations" = "Abrir Automatizaciones";
+"Open Automations (⇧⌘A)" = "Abrir Automatizaciones (⇧⌘A)";
+"View" = "Visualización";
+"Help" = "Ayuda";
+"Close Window" = "Cerrar ventana";
+"Toggle Sidebar" = "Mostrar/ocultar barra lateral";
+"Toggle Files Pane" = "Mostrar/ocultar panel de archivos";
+"Toggle Browser Pane" = "Mostrar/ocultar panel del navegador";
+"Enter Full Screen" = "Usar pantalla completa";
+"Zoom" = "Zoom";
+"%@ Manual" = "Manual de %@";
+"Add a note about this workspace" = "Añade una nota sobre este espacio de trabajo";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "Evalúa los archivos de instrucciones / ajustes que cada agente carga como autoridad: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi y omp) y GROK.md (Grok), además de sus variantes anidadas y globales. Descarga ~571 MB al activarlo por primera vez.";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "Las reglas de conexiones salientes se editan en el Mac que ejecuta este espacio de trabajo.";
+"Click a protection that's off to turn it on in that workspace's settings." = "Haz clic en una protección desactivada para activarla en los ajustes de ese espacio de trabajo.";
+"Turn on…" = "Activar…";
+"%1$@ is on for %2$@. Click to change it." = "%1$@ está activado para %2$@. Haz clic para cambiarlo.";
+"%1$@ is off for %2$@. Click to turn it on." = "%1$@ está desactivado para %2$@. Haz clic para activarlo.";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "no analizado — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@ (%2$d veces, se muestra la última)";
+
+"Security…" = "Seguridad…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "Descargar la versión actual";
+"Update" = "Actualizar";
+"an unknown version" = "una versión desconocida";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "Desactualizada: la imagen compartida es la %@; esta versión de Agentic Coding usa la %@. Abre Bromure y deja que actualice su imagen del navegador, o descarga la versión actual solo para Agentic Coding (se usará en lugar de la compartida hasta que Bromure se ponga al día).";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "Desactualizada: esta imagen es la %@; la versión actual es la %@. Actualiza para descargarla.";
+"The Linux machine behind this session — available while it runs" = "La máquina Linux detrás de esta sesión: disponible mientras se ejecuta";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "1 elemento multimedia mostrado";
+"%d media items shown" = "%d elementos multimedia mostrados";
+"1 chart shown" = "1 gráfico mostrado";
+"%d charts shown" = "%d gráficos mostrados";
+"1 file sent" = "1 archivo enviado";
+"%d files sent" = "%d archivos enviados";
+"1 tool result" = "1 resultado de herramienta";
+"%d tool results" = "%d resultados de herramientas";
+"Available when the workspace is running" = "Disponible cuando el espacio de trabajo esté en marcha";
+"Video available when the workspace is running" = "Vídeo disponible cuando el espacio de trabajo esté en marcha";
+"Image available when the workspace is running" = "Imagen disponible cuando el espacio de trabajo esté en marcha";

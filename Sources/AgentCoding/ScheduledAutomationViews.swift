@@ -187,9 +187,11 @@ struct AutomationsSection: View {
             parts.append(String(format: NSLocalizedString("next %@", comment: ""),
                                 Self.fireFormatter.string(from: next)))
         }
-        return parts.isEmpty
-            ? NSLocalizedString("Open the board", comment: "automations sidebar")
-            : parts.joined(separator: " · ")
+        if !parts.isEmpty { return parts.joined(separator: " · ") }
+        // Name the destination, not a "board" the hub never calls itself.
+        return store.automations.isEmpty
+            ? NSLocalizedString("No automations yet", comment: "")
+            : NSLocalizedString("Open Automations", comment: "automations sidebar")
     }
 
     var body: some View {
@@ -200,7 +202,7 @@ struct AutomationsSection: View {
                                  selected: model.automationBoardSelected,
                                  badges: [(attentionCount, .red), (openFindings, .orange)],
                                  count: store.automations.count,
-                                 help: NSLocalizedString("Open the automation board (⇧⌘A)", comment: ""),
+                                 help: NSLocalizedString("Open Automations (⇧⌘A)", comment: ""),
                                  onTitle: onShowBoard,
                                  onAdd: onNew,
                                  addHelp: NSLocalizedString("New automation", comment: ""))
@@ -1005,14 +1007,20 @@ struct AutomationEditorView: View {
                 Image(systemName: icon)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(selected ? Color.accentColor : .secondary)
+                // Six tiles share the editor's width: the title shrinks a
+                // little rather than truncate ("After automa…"), and the
+                // subtitle gets two lines — reserved on every tile so the
+                // row stays even.
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 Text(available ? subtitle
                                : NSLocalizedString("Needs a token", comment: "trigger tile"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(available ? .secondary : Color.orange)
-                    .lineLimit(1)
+                    .lineLimit(2, reservesSpace: !compact)
+                    .multilineTextAlignment(.leading)
             }
             .padding(10)
             .frame(width: compact ? 128 : nil, alignment: .leading)
@@ -1027,6 +1035,8 @@ struct AutomationEditorView: View {
         .buttonStyle(.plain)
         .disabled(!available)
         .opacity(available ? 1 : 0.6)
+        .help(title + " — " + (available ? subtitle
+                                        : NSLocalizedString("Needs a token", comment: "trigger tile")))
     }
 
     private func intervalLabel(_ minutes: Int) -> String {
@@ -1583,6 +1593,8 @@ struct AutomationEditorView: View {
             .padding(.horizontal, 30)
             .padding(.vertical, 12)
         }
-        .background(.bar)
+        // Opaque: over a translucent bar the scrolled-under section text
+        // showed through and collided with "To save: …".
+        .background(Color.platformWindowBackground)
     }
 }
