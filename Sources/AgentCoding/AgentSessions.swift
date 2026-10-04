@@ -624,6 +624,16 @@ final class AgentSessionStore {
         sessions.firstIndex { $0.id != id && !$0.isDeleted && $0.nickname?.lowercased() == nick.lowercased() }
     }
 
+    /// The Kimi sessions (`session_<uuid>`) the sessions on `profileID`
+    /// other than `besides` own — never another tab's to read or take.
+    func kimiSessionsClaimed(profileID: UUID, besides: UUID?) -> [String] {
+        sessions.compactMap { o in
+            guard o.id != besides, o.profileID == profileID, o.tool == .kimi, !o.isDeleted,
+                  let id = o.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) else { return nil }
+            return id
+        }
+    }
+
     /// The conversation id the agent's hook reported for this session.
     func setTranscriptID(_ id: UUID, _ tid: String) {
         guard let i = sessions.firstIndex(where: { $0.id == id }), sessions[i].agentTranscriptID != tid else { return }

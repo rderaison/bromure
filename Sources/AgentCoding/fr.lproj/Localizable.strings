@@ -3852,3 +3852,11 @@
 "%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ ne tourne plus dans la session de la tâche (il ne reste qu’un shell) : rien n’a été saisi — Redémarrer la session pour le relancer.";
 "The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "L’onglet de la session de la tâche a disparu ou appartient maintenant à autre chose : rien n’y a été saisi — Redémarrer la session pour relancer %@.";
 "The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "Le message n’a pas été saisi : l’onglet de la session n’affiche plus son agent. Reprenez la session pour réessayer.";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "Non envoyé — l’onglet de la session a disparu ou appartient maintenant à autre chose.";
+"Not sent — the agent isn't running in the session's tab any more." = "Non envoyé — l’agent ne tourne plus dans l’onglet de la session.";
+"No such task." = "Cette tâche n’existe pas.";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "La tâche est dans « Examiner » : son agent a terminé. Renvoyez-la plutôt vers « En cours », ou abandonnez sa branche.";
+"The task is done: there's no agent to stop." = "La tâche est terminée : il n’y a aucun agent à arrêter.";
+"The task isn't running: there's no agent to stop." = "La tâche n’est pas en cours : il n’y a aucun agent à arrêter.";

@@ -140,6 +140,74 @@ struct KimiTranscriptBindingTests {
         #expect(pinned.contains("\"NEW\"") && !pinned.contains("\"OLD\""))
     }
 
+    @Test("Two Kimi tabs in one folder: another session's journal is never this tab's")
+    func otherSessionsJournalExcluded() throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kimi-excl-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        // K2's conversation (pinned to K2), written just now; the second
+        // Kimi's own, a moment older.
+        try write(home: home, id: Self.oldID, body: Self.journal(createdAt: 1_000, prompt: "K2"),
+                  modified: Date())
+        try write(home: home, id: Self.newID, body: Self.journal(createdAt: 2_000, prompt: "MINE"),
+                  modified: Date().addingTimeInterval(-30))
+        let cwd = home.appendingPathComponent("qa").path
+        func located(_ pin: TranscriptPin) throws -> String {
+            let cmd = try #require(CodingTaskEngine.planTranscriptCommand(
+                guestCwd: cwd, since: 7, agent: "kimi", pin: pin))
+            return try run(cmd.replacingOccurrences(of: "-newermt @7 ", with: "")
+                .replacingOccurrences(of: "xargs -r", with: "xargs"), home: home)
+        }
+        #expect(try located(TranscriptPin()).contains("\"K2\""))          // by folder: K2's (the bug)
+        var pin = TranscriptPin()
+        pin.kimiExclude = [Self.oldID]
+        let mine = try located(pin)
+        #expect(mine.contains("\"MINE\"") && !mine.contains("\"K2\""))
+        // Only well-formed ids are spliced into the filter.
+        #expect(AgentSessionLocator.kimiExcludeFilter(["session_x'; rm -rf ~"]).isEmpty)
+    }
+
+    @Test("An unpinned Kimi tab: the session its process names, else a fresh run's own journal, never another's")
+    func unpinnedPin() {
+        let named = TranscriptPin.kimiUnpinned(argsSession: Self.newID, resumed: true, since: 100,
+                                               exclude: [Self.oldID])
+        #expect(named.kimiSession == Self.newID && named.kimiExclude.isEmpty)
+        let fresh = TranscriptPin.kimiUnpinned(argsSession: nil, resumed: false, since: 100,
+                                               exclude: [Self.oldID, "junk"])
+        #expect(fresh.kimiSession == nil && fresh.kimiCreatedSince == 98 && fresh.kimiExclude == [Self.oldID])
+        let resumed = TranscriptPin.kimiUnpinned(argsSession: nil, resumed: true, since: 100, exclude: [])
+        #expect(resumed.kimiCreatedSince == nil)
+    }
+
+    @Test("The floor probe reports the Kimi session a process names and whether it resumed")
+    func floorProbeFields() {
+        let p = AgentSessionLocator.parseFloorProbe("/home/ubuntu/qa\n1791069633\n\(Self.newID)\n1\n")
+        #expect(p?.cwd == "/home/ubuntu/qa" && p?.since == 1_791_069_633)
+        #expect(p?.kimiSession == Self.newID && p?.resumed == true)
+        // An older probe (two lines) still parses.
+        let old = AgentSessionLocator.parseFloorProbe("/home/ubuntu/qa\n5\n")
+        #expect(old?.since == 5 && old?.kimiSession == nil && old?.resumed == false)
+        #expect(AgentSessionLocator.parseFloorProbe("/x\n0\nsession_bogus\n0")?.kimiSession == nil)
+        let cmd = AgentSessionLocator.floorProbeCommand(window: 2)
+        #expect(cmd.contains("ks=") && cmd.contains("rs=") && cmd.contains("' -S '"))
+    }
+
+    @Test("The Kimi sessions other sessions on the machine own")
+    @MainActor func claimedSessions() {
+        let store = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("sessions-\(UUID().uuidString).json"))
+        let ws = UUID()
+        var k2 = AgentSession(profileID: ws, tool: .kimi, title: "K2", cwd: "~/qa", windowIndex: 1)
+        k2.agentTranscriptID = Self.oldID
+        var mine = AgentSession(profileID: ws, tool: .kimi, title: "Kimi in qa", cwd: "~/qa", windowIndex: 2)
+        mine.agentTranscriptID = nil
+        var elsewhere = AgentSession(profileID: UUID(), tool: .kimi, title: "x", cwd: "~/qa")
+        elsewhere.agentTranscriptID = Self.newID
+        for s in [k2, mine, elsewhere] { store.upsert(s) }
+        #expect(store.kimiSessionsClaimed(profileID: ws, besides: mine.id) == [Self.oldID])
+        #expect(store.kimiSessionsClaimed(profileID: ws, besides: k2.id).isEmpty)
+    }
+
     // MARK: The local copy
 
     @Test("The copy never splices another Kimi journal in, even through shared lines")

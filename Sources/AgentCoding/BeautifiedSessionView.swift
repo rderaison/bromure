@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CryptoKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -51,12 +52,54 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     /// when the agent's store can't tell by tab (Kimi: the session id the
     /// engine pinned). Empty: the floor and the folder decide.
     func transcriptPin(window: Int) -> TranscriptPin
+    /// Where text and keys for the chat in `window` may go: the window's
+    /// stable id when known, and the markers it carries (`@display`,
+    /// `@worktree`) — re-checked in the guest before every keystroke batch,
+    /// so a reused index never takes another session's input.
+    func paneTarget(window: Int) -> PaneTarget
+    /// Whether the agent in `window` is working; nil when that window isn't
+    /// known here (gone, roster not live). Drives delivery of the messages
+    /// a chat holds while it's off screen.
+    func isWorking(window: Int) -> Bool?
 }
 
 extension BeautifiedTranscriptProvider {
     var historyCacheKey: String? { nil }
     var historyBytesHint: Int? { nil }
     func transcriptPin(window: Int) -> TranscriptPin { TranscriptPin() }
+    func paneTarget(window: Int) -> PaneTarget { .index(window) }
+    func isWorking(window: Int) -> Bool? { activeTabIndex() == window ? isWorking() : nil }
+
+    /// `paneTarget(window:)` pinned to the window's stable id — resolved in
+    /// the guest when the target doesn't carry one yet. For text typed
+    /// later (a held message): by then the index may be another tab's.
+    func pinnedTarget(window: Int) async -> PaneTarget {
+        var t = paneTarget(window: window)
+        guard t.expectWindowID == nil, case .index(let i) = t.ref,
+              let out = await execGuest(
+                "tmux display-message -p -t bromure:\(i) '#{window_id}' 2>/dev/null", timeout: 8)
+        else { return t }
+        let id = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard PaneTypeGuard.isWindowID(id) else { return t }
+        t.ref = .windowID(id)
+        t.expectWindowID = id
+        return t
+    }
+
+    /// Type a held message into the agent, guarded — the window's identity
+    /// and an agent in front (`PaneTypeGuard`), and no menu open
+    /// (`guardedTypeCommand`) — before the text and again before Enter.
+    func deliverQueued(_ text: String, target: PaneTarget) async -> ChatQueueStore.Outcome {
+        guard let out = await execGuest(CodingTaskEngine.guardedTypeCommand(target: target, text: text),
+                                        timeout: 20)
+        else { return .unreachable }
+        if let r = PaneTypeGuard.refusal(in: out) {
+            BACDebug.log("beautified", "queued message refused (\(r.rawValue)) — nothing typed")
+            return .refused(r)
+        }
+        if out.contains(CodingTaskEngine.typeHeldMarker) { return .held }
+        return .typed
+    }
 }
 
 /// Where the host's copy of a transcript file ends: the file path and the
@@ -123,10 +166,17 @@ extension BeautifiedTranscriptProvider {
                          agent: String?) async -> TranscriptFetch? {
         guard let idx = activeTabIndex() else { return nil }
         let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
-        let lines = (meta ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard lines.count >= 2 else { return nil }
-        let cwd = lines[0].trimmingCharacters(in: .whitespaces)
-        let since = Int(lines[1].trimmingCharacters(in: .whitespaces)) ?? 0
+        guard let probe = AgentSessionLocator.parseFloorProbe(meta) else { return nil }
+        let cwd = probe.cwd
+        let since = probe.since
+        // Kimi keys its store by folder: until the session's own id is
+        // pinned, the tab's process names it (`-S`), or the read keeps to a
+        // journal no other session owns, begun by this run when it's fresh.
+        var pin = transcriptPin(window: idx)
+        if agent == "kimi", pin.kimiSession == nil {
+            pin = .kimiUnpinned(argsSession: probe.kimiSession, resumed: probe.resumed,
+                                since: since, exclude: pin.kimiExclude)
+        }
         guard !cwd.isEmpty,
               // Scope to the tab's OWN agent store. Passing nil here probed
               // every store and took the newest write across all of them —
@@ -138,7 +188,7 @@ extension BeautifiedTranscriptProvider {
               // probe-every-store path inside the locator.
               let cmd = CodingTaskEngine.transcriptChunkCommand(
                   guestCwd: cwd, since: since, agent: agent, pinnedWindow: idx,
-                  pin: transcriptPin(window: idx),
+                  pin: pin,
                   knownPath: known?.path, knownOffset: known?.offset ?? -1,
                   bytes: mode == .earlier ? (historyBytesHint ?? BeautifiedSessionModel.earlierHistoryBytes)
                                           : (historyBytesHint ?? BeautifiedSessionModel.initialHistoryBytes),
@@ -154,7 +204,8 @@ extension BeautifiedTranscriptProvider {
     @discardableResult
     func send(_ text: String) async -> Bool {
         guard let idx = activeTabIndex() else { return false }
-        let out = await execGuest(CodingTaskEngine.typeCommand(tabIndex: idx, text: text), timeout: 15) ?? ""
+        let out = await execGuest(CodingTaskEngine.typeCommand(target: paneTarget(window: idx), text: text),
+                                  timeout: 15) ?? ""
         if let r = PaneTypeGuard.refusal(in: out) {
             BACDebug.log("beautified", "send refused (\(r.rawValue)) — nothing typed into tab \(idx)")
             return false
@@ -179,9 +230,8 @@ extension BeautifiedTranscriptProvider {
     /// Named keys only, with a beat so the TUI's debounce doesn't swallow them.
     func pressKeys(_ keys: [String]) async {
         guard let idx = activeTabIndex(), !keys.isEmpty else { return }
-        let cmd = PaneTypeGuard.prelude(.index(idx)) + "if _bg; then "
-            + keys.map { "tmux send-keys -t \"$_bt\" \($0)" }.joined(separator: "; sleep 0.4; ")
-            + "; fi"
+        let cmd = PaneTypeGuard.keysCommand(target: paneTarget(window: idx), keys: keys)
+        guard !cmd.isEmpty else { return }
         _ = await execGuest(cmd, timeout: 15)
     }
 
@@ -190,8 +240,8 @@ extension BeautifiedTranscriptProvider {
     func typeText(_ text: String) async {
         guard let idx = activeTabIndex() else { return }
         _ = await execGuest(
-            PaneTypeGuard.prelude(.index(idx))
-            + "if _bg; then \(PaneTypeGuard.literalSend(text)) && sleep 0.3 && tmux send-keys -t \"$_bt\" Enter; fi",
+            PaneTypeGuard.prelude(paneTarget(window: idx))
+            + "if _bg; then \(PaneTypeGuard.literalSend(text)) && sleep 0.3 && _bg && tmux send-keys -t \"$_bt\" Enter; fi",
             timeout: 15)
     }
 
@@ -384,10 +434,10 @@ struct WorkingGate {
 }
 
 /// A message sent while the agent was busy (see `queued`).
-struct QueuedMessage: Identifiable, Equatable {
-    let id = UUID()
+struct QueuedMessage: Identifiable, Equatable, Codable {
+    var id = UUID()
     var text: String
-    let queuedAt = Date()
+    var queuedAt = Date()
     /// Bromure holds it: the agent's queue can't be edited, so it's typed in
     /// when the turn ends. Otherwise it sits in the agent's own queue.
     var held: Bool
@@ -399,6 +449,14 @@ struct QueuedMessage: Identifiable, Equatable {
     /// looked for in what was written after.
     var path: String?
     var offset: Int = 0
+    /// Where a held one is typed: the chat's window as it was when queued
+    /// (its stable id and markers) — never whatever tab has its index by
+    /// the time the agent is free.
+    var target: PaneTarget?
+    /// Why it couldn't be typed (shown on its row); nil while it waits.
+    var failure: String?
+    /// Being typed right now.
+    var sending = false
 }
 
 /// What each agent does with a message submitted while it's busy, measured
@@ -459,7 +517,15 @@ final class BeautifiedSessionModel: ObservableObject {
     /// and tab it's for. Setting it brings the draft back.
     var draftKey: String? {
         didSet {
-            guard let draftKey, draftKey != oldValue else { return }
+            guard draftKey != oldValue else { return }
+            // The queue follows the same key (`ChatQueueStore`).
+            if queueAttached {
+                queueStore.detach(oldValue ?? anonymousQueueKey, owner: self)
+                queueAttached = false
+                attachQueue()
+            }
+            bindQueue()
+            guard let draftKey else { return }
             let d = ComposerDrafts[draftKey]
             composerText = d.text
             pendingAttachments = d.attachments
@@ -493,7 +559,27 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Messages sent while the agent was busy, not yet in the transcript.
     /// The TUI queues them itself (they only land in the transcript when the
     /// turn gets to them), so the plain echo aged out and they vanished.
-    @Published var queued: [QueuedMessage] = []
+    /// A mirror of this chat's list in `queueStore`, which outlives the
+    /// model (a session switch rebuilds it) and keeps delivering the held
+    /// ones while the chat is off screen. Changed only through the store.
+    @Published private(set) var queued: [QueuedMessage] = []
+    /// Where the queue lives (tests pass their own).
+    var queueStore: ChatQueueStore = .shared {
+        didSet {
+            guard queueStore !== oldValue else { return }
+            if queueAttached { oldValue.detach(queueKey, owner: self); queueAttached = false; attachQueue() }
+            bindQueue()
+        }
+    }
+    /// A chat with no draft key (demo, bench) still queues, in memory only.
+    private let anonymousQueueKey = ChatQueueStore.ephemeralPrefix + UUID().uuidString
+    var queueKey: String { draftKey ?? anonymousQueueKey }
+    private var queueSub: AnyCancellable?
+    /// Registered with the store as a chat showing `queueKey` (between
+    /// `start` and `stop`).
+    private var queueAttached = false
+    /// The window the store's driver was made for (nil until known).
+    private var queueDriverWindow: Int?
     /// Since when the agent has been idle (nil while working).
     private var idleSince: Date?
 
@@ -840,6 +926,42 @@ final class BeautifiedSessionModel: ObservableObject {
 
     init(provider: BeautifiedTranscriptProvider) {
         self.provider = provider
+        bindQueue()
+    }
+
+    // MARK: Queue store wiring
+
+    private func bindQueue() {
+        let key = queueKey
+        queueSub = queueStore.$queues
+            .map { $0[key] ?? [] }
+            .removeDuplicates()
+            .sink { [weak self] list in
+                guard let self, self.queued != list else { return }
+                self.queued = list
+                self.localRevision &+= 1
+            }
+    }
+
+    /// The store's way to this chat's agent once it's off screen: status and
+    /// guarded typing for its own window, through the same provider.
+    private func queueDriver(window: Int) -> ChatQueueStore.Driver {
+        let p = provider
+        return ChatQueueStore.Driver(
+            isWorking: { p.isWorking(window: window) },
+            deliver: { text, target in await p.deliverQueued(text, target: target) })
+    }
+
+    private func attachQueue() {
+        queueDriverWindow = provider.activeTabIndex()
+        queueStore.attach(queueKey, owner: self, driver: queueDriverWindow.map { queueDriver(window: $0) })
+        queueAttached = true
+    }
+
+    private func detachQueue() {
+        guard queueAttached else { return }
+        queueAttached = false
+        queueStore.detach(queueKey, owner: self)
     }
 
     private func rebuild() {
@@ -881,8 +1003,14 @@ final class BeautifiedSessionModel: ObservableObject {
             if case .userText(let t) = $0.kind { return t }
             return nil
         }
-        let before = queued
-        queued.removeAll { q in
+        // The window became known after the chat started: give the store
+        // its way to the agent for when the chat goes off screen.
+        if queueAttached, queueDriverWindow == nil, let w = provider.activeTabIndex() {
+            queueDriverWindow = w
+            queueStore.setDriver(queueKey, queueDriver(window: w))
+        }
+        queueStore.update(queueKey) { queued in
+          queued.removeAll { q in
             guard !q.held else { return false }
             // A TUI may merge several queued messages into one turn.
             if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
@@ -895,14 +1023,14 @@ final class BeautifiedSessionModel: ObservableObject {
             if let idle = idleSince, now.timeIntervalSince(idle) > 20,
                now.timeIntervalSince(q.queuedAt) > 20 { return true }
             return false
+          }
         }
-        if queued != before { localRevision &+= 1 }
         // Held here: the turn ended — type them in now, as one message.
+        // Only the chat the store says delivers (two can show one session).
         if let idle = idleSince, now.timeIntervalSince(idle) > 1.5, !sending,
-           queued.contains(where: \.held) {
-            let held = queued.filter(\.held)
-            queued.removeAll(where: \.held)
-            deliver(held.map(\.text).joined(separator: "\n\n"))
+           queued.contains(where: ChatQueueStore.deliverable),
+           queueStore.isOwner(queueKey, self) {
+            deliverHeld()
         }
     }
 
@@ -928,15 +1056,23 @@ final class BeautifiedSessionModel: ObservableObject {
         return d.subdata(in: 1 ..< d.count - 1)
     }
 
-    private func deliver(_ text: String) {
-        gate.userSent()
-        setWorking(true)
+    /// Type the held messages in, as one, into the window they were
+    /// queued for (guarded: its identity, an agent in front, no menu up).
+    /// A refusal leaves them on the strip, saying why.
+    private func deliverHeld() {
+        guard let w = queueDriverWindow ?? provider.activeTabIndex() else { return }
+        let text = queued.filter(ChatQueueStore.deliverable).map(\.text).joined(separator: "\n\n")
         sending = true
-        appendOptimistic(.userText(text))
         Task { [weak self] in
             guard let self else { return }
-            await self.provider.send(text)
+            let outcome = await self.queueStore.deliverHeld(
+                self.queueKey, driver: self.queueDriver(window: w),
+                fallback: self.provider.paneTarget(window: w))
             self.sending = false
+            guard outcome == .typed else { return }
+            self.gate.userSent()
+            self.setWorking(true)
+            self.appendOptimistic(.userText(text))
             await self.poll()
         }
     }
@@ -945,8 +1081,8 @@ final class BeautifiedSessionModel: ObservableObject {
     /// agent itself holds is pulled out of its queue through its TUI (which
     /// recalls ALL of its queued messages at once), so they all come back.
     func editQueued(_ id: UUID) {
-        guard let q = queued.first(where: { $0.id == id }) else { return }
-        guard q.editable else { return }
+        guard let q = queued.first(where: { $0.id == id }), !q.sending else { return }
+        guard q.editable || q.failure != nil else { return }
         var back: [QueuedMessage] = [q]
         if !q.held, case .native(let recall?) = AgentQueueSupport.mode(for: agentKind) {
             // The TUI hands back its whole queue: take all of ours with it,
@@ -958,26 +1094,31 @@ final class BeautifiedSessionModel: ObservableObject {
             Task { [weak self] in await self?.runKeys(keys) }
         }
         let ids = Set(back.map(\.id))
-        queued.removeAll { ids.contains($0.id) }
+        queueStore.update(queueKey) { $0.removeAll { ids.contains($0.id) } }
         let text = back.map(\.text).joined(separator: "\n\n")
         composerText = composerText.isEmpty ? text : text + "\n\n" + composerText
         localRevision &+= 1
     }
 
-    /// Drop a queued message. Only one Bromure holds can be dropped alone.
+    /// Drop a queued message. Only one Bromure holds (or one that couldn't
+    /// be typed) can be dropped alone.
     func deleteQueued(_ id: UUID) {
-        guard let q = queued.first(where: { $0.id == id }), q.held else { return }
-        queued.removeAll { $0.id == id }
+        guard let q = queued.first(where: { $0.id == id }), q.held || q.failure != nil, !q.sending
+        else { return }
+        queueStore.update(queueKey) { $0.removeAll { $0.id == id } }
         localRevision &+= 1
     }
 
     /// Keystrokes into the agent's tab, one `tmux send-keys` per step.
     private func runKeys(_ steps: [[String]]) async {
         guard let idx = provider.activeTabIndex() else { return }
+        let target = provider.paneTarget(window: idx)
         for keys in steps {
+            let safe = keys.filter { k in !k.isEmpty && k.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" } }
+            guard !safe.isEmpty else { continue }
             let out = await provider.execGuest(
-                PaneTypeGuard.prelude(.index(idx))
-                    + "if _bg; then tmux send-keys -t \"$_bt\" \(keys.joined(separator: " ")); fi",
+                PaneTypeGuard.prelude(target)
+                    + "if _bg; then tmux send-keys -t \"$_bt\" \(safe.joined(separator: " ")); fi",
                 timeout: 10) ?? ""
             if PaneTypeGuard.refusal(in: out) != nil { return }
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -1002,6 +1143,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// what the user notices), relaxed once it's idle.
     func start() {
         guard pollTask == nil else { return }
+        attachQueue()
         // Shown again (a room, a click back): start from what was downloaded
         // last time; the first read then only asks for what's new.
         var restored = false
@@ -1086,6 +1228,8 @@ final class BeautifiedSessionModel: ObservableObject {
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        // Off screen: the store keeps delivering what this chat held.
+        detachQueue()
         flushSink(force: true)
         if let key = provider.historyCacheKey, let path = currentPath, let buf = buffers[path] {
             Self.remember(key, path: path, buffer: buf)
@@ -1526,7 +1670,10 @@ final class BeautifiedSessionModel: ObservableObject {
         guard await provider.execGuest(CodingTaskEngine.pickerVisibleCommand(tabIndex: idx), timeout: 8) != nil
         else { return false }
         setWorking(true)
-        let ok = await provider.execGuest(CodingTaskEngine.answerKeysCommand(tabIndex: idx, keys: keys), timeout: 60) != nil
+        // The session's own window, re-checked before every key.
+        let ok = await provider.execGuest(
+            PaneTypeGuard.answerKeysCommand(target: provider.paneTarget(window: idx), keys: keys),
+            timeout: 60) != nil
         await rescanSoon()
         return ok
     }
@@ -1607,6 +1754,7 @@ final class BeautifiedSessionModel: ObservableObject {
         let editable = !native || mode != .native(recall: nil)
         let queuedPath = currentPath
         let queuedOffset = currentPath.flatMap { buffers[$0]?.end } ?? 0
+        let queuedWindow = provider.activeTabIndex()
         if !isCommand { setWorking(true) }
         sending = true
 
@@ -1636,9 +1784,16 @@ final class BeautifiedSessionModel: ObservableObject {
             // until it aged out.
             if queuing {
                 if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
-                self.queued.append(QueuedMessage(text: text, held: !native, editable: editable,
-                                                 baseline: self.userTurnCount,
-                                                 path: queuedPath, offset: queuedOffset))
+                // A held one is typed later — maybe with this chat off
+                // screen and the index someone else's: it carries the
+                // window it is for, pinned to its stable id.
+                var target: PaneTarget?
+                if !native, let w = queuedWindow { target = await self.provider.pinnedTarget(window: w) }
+                self.queueStore.update(self.queueKey) {
+                    $0.append(QueuedMessage(text: text, held: !native, editable: editable,
+                                            baseline: self.userTurnCount,
+                                            path: queuedPath, offset: queuedOffset, target: target))
+                }
                 if native { await self.provider.send(text) }
                 self.sending = false
                 return
@@ -1927,14 +2082,16 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
 
     func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
 
+    func isWorking(window: Int) -> Bool? { pane?.chatIsWorking(window: window) }
+
     /// The Kimi session the engine pinned for the session in this tab (B72):
     /// its own journal, never the folder's newest.
     func transcriptPin(window: Int) -> TranscriptPin {
-        guard let pane, let delegate = pane.acDelegate,
-              let s = delegate.sessionRecord(profileID: pane.profile.id, windowIndex: window),
-              s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id)
-        else { return TranscriptPin() }
-        return TranscriptPin(kimiSession: id)
+        pane?.chatTranscriptPin(window: window) ?? TranscriptPin()
+    }
+
+    func paneTarget(window: Int) -> PaneTarget {
+        pane?.chatPaneTarget(window: window) ?? .index(window)
     }
 }
 
@@ -4362,14 +4519,20 @@ struct QueuedMessagesStrip: View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(queued) { q in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: q.held ? "clock" : "text.line.last.and.arrowtriangle.forward")
+                    Image(systemName: q.failure != nil ? "exclamationmark.triangle"
+                          : q.held ? "clock" : "text.line.last.and.arrowtriangle.forward")
                         .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(accent)
+                        .foregroundStyle(q.failure != nil ? Color.red : accent)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(q.text)
                             .font(.system(size: 12))
                             .lineLimit(2)
                             .truncationMode(.tail)
+                        if let failure = q.failure {
+                            Text(failure)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.red)
+                        } else {
                         Text(q.held
                              ? (agent.isEmpty
                                 ? NSLocalizedString("Queued — sent when the agent is done", comment: "queued message")
@@ -4379,14 +4542,15 @@ struct QueuedMessagesStrip: View {
                                 : String(format: NSLocalizedString("Queued — %@ reads it next", comment: "queued message"), agent)))
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
+                        }
                     }
                     Spacer(minLength: 4)
-                    if q.editable {
+                    if q.editable || q.failure != nil, !q.sending {
                         Button(NSLocalizedString("Edit", comment: "queued message")) { onEdit(q.id) }
                             .buttonStyle(.link)
                             .font(.system(size: 11))
                     }
-                    if q.held {
+                    if q.held || q.failure != nil, !q.sending {
                         Button { onDelete(q.id) } label: {
                             Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
                         }

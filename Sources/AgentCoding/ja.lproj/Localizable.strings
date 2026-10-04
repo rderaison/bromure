@@ -3852,3 +3852,11 @@
 "%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ はタスクのセッションで動作していません（シェルだけが残っています）。何も入力されませんでした — セッションを再起動して戻してください。";
 "The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "タスクのセッションのタブが閉じられたか、別のものになっています。何も入力されませんでした — セッションを再起動して %@ を戻してください。";
 "The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "メッセージは入力されませんでした：セッションのタブにエージェントが表示されていません。セッションを再開してもう一度お試しください。";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "未送信 — セッションのタブがなくなったか、別のものになりました。";
+"Not sent — the agent isn't running in the session's tab any more." = "未送信 — セッションのタブでエージェントが実行されていません。";
+"No such task." = "そのタスクはありません。";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "タスクは「確認」にあります：エージェントの作業は完了しています。代わりに「進行中」に戻すか、ブランチを破棄してください。";
+"The task is done: there's no agent to stop." = "タスクは完了しています：停止するエージェントはありません。";
+"The task isn't running: there's no agent to stop." = "タスクは実行されていません：停止するエージェントはありません。";

@@ -715,6 +715,25 @@ struct TranscriptPin: Equatable, Sendable {
     /// Epoch seconds: a Kimi journal begun before this is another
     /// conversation's (a fresh launch's floor).
     var kimiCreatedSince: Int? = nil
+    /// Kimi sessions other sessions on the machine own: never this tab's,
+    /// however recently written (two Kimi tabs in one folder).
+    var kimiExclude: [String] = []
+
+    /// A Kimi tab whose session isn't pinned yet: the session its process
+    /// names on its command line (`-S session_…`) when it does; else only
+    /// a journal no other session owns, and — for a fresh start (no resume
+    /// flag) — one begun by this run (`since`: when the process started).
+    static func kimiUnpinned(argsSession: String?, resumed: Bool, since: Int,
+                             exclude: [String]) -> TranscriptPin {
+        var p = TranscriptPin()
+        if let id = argsSession, AgentSessionLocator.isKimiSessionID(id) {
+            p.kimiSession = id
+            return p
+        }
+        p.kimiExclude = exclude.filter(AgentSessionLocator.isKimiSessionID)
+        if !resumed, since > 0 { p.kimiCreatedSince = since - 2 }
+        return p
+    }
 }
 
 /// Builds the guest-shell block that finds the newest session transcript a
@@ -744,13 +763,15 @@ enum AgentSessionLocator {
     /// folder share is a symlink into /mnt/bromure-share-N), while the
     /// caller's tab knows the logical path.
     nonisolated static func locateBlock(path: String, since: Int,
-                                        agent: String?, kimiCreatedSince: Int? = nil) -> String {
+                                        agent: String?, kimiCreatedSince: Int? = nil,
+                                        kimiExclude: [String] = []) -> String {
         var cmd = "d='\(path)'; r=$(readlink -f \"$d\" 2>/dev/null || printf %s \"$d\"); "
         switch agent {
         case "claude": cmd += claudeFragment(path: path, since: since, into: "f")
         case "codex": cmd += codexFragment(since: since, into: "f")
         case "grok": cmd += grokFragment(path: path, since: since, into: "f")
-        case "kimi": cmd += kimiFragment(since: since, createdSince: kimiCreatedSince, into: "f")
+        case "kimi": cmd += kimiFragment(since: since, createdSince: kimiCreatedSince,
+                                         exclude: kimiExclude, into: "f")
         case "omp": cmd += ompFragment(since: since, into: "f")
         default:
             cmd += claudeFragment(path: path, since: since, into: "tc")
@@ -835,19 +856,30 @@ enum AgentSessionLocator {
     /// and an older session still being written (another tab) passes any
     /// mtime test (B72). A journal without the field (an older engine) is
     /// judged by mtime alone.
+    /// `exclude`: Kimi session ids other sessions own — their journals are
+    /// never a candidate, however recently written.
     nonisolated static func kimiFragment(since: Int, createdSince: Int? = nil,
-                                         into varName: String) -> String {
+                                         exclude: [String] = [], into varName: String) -> String {
         let pick: String
+        let candidates = kimiCandidates(since: since) + kimiExcludeFilter(exclude)
         if let createdSince {
-            pick = "kc=$(" + kimiCandidates(since: since) + "); \(varName)=\"\"; "
+            pick = "kc=$(" + candidates + "); \(varName)=\"\"; "
                 + "for c in $kc; do ca=$(head -c 1024 \"$c\" 2>/dev/null "
                 + "| grep -o '\"created_at\":[0-9]*' | head -1 | cut -d: -f2); "
                 + "if [ -z \"$ca\" ] || [ \"$ca\" -ge \(max(0, createdSince) * 1000) ]; then "
                 + "\(varName)=\"$c\"; break; fi; done; "
         } else {
-            pick = "\(varName)=$(" + kimiCandidates(since: since) + " | head -1); "
+            pick = "\(varName)=$(" + candidates + " | head -1); "
         }
         return kimiBucketVars + pick
+    }
+
+    /// A pipeline stage dropping the journals of the given sessions (their
+    /// ids are a fixed shape, so they're safe to splice); empty for none.
+    nonisolated static func kimiExcludeFilter(_ ids: [String]) -> String {
+        let safe = ids.filter(isKimiSessionID)
+        guard !safe.isEmpty else { return "" }
+        return " | grep -v -F " + safe.map { "-e '/\($0)/'" }.joined(separator: " ")
     }
 
     /// `$kb`/`$kh`/`$kr`: the workspace bucket's slug and hashes for `$d`/`$r`.
@@ -963,16 +995,27 @@ enum AgentSessionLocator {
         + "case \"$a\" in "
         + "*--resume*|*--continue*|*--restore*) s=0;; "
         + "esac; "
-        + "printf '%s\\n%s\\n' \"$cwd\" \"$s\""
+        // A Kimi session the process names (`-S session_…`): the tab's own
+        // conversation, whatever else is being written in its folder.
+        + "ks=$(printf %s \"$a\" | grep -o -E 'session_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1); "
+        // Resumed (a short flag too — Kimi's -c / -S): an older journal is
+        // its own, so no "begun by this run" test.
+        + "rs=0; case \" $a \" in *' -c '*|*' -S '*|*' --session '*|*' --session='*|*' --continue'*|*' --resume'*) rs=1;; esac; "
+        + "printf '%s\\n%s\\n%s\\n%s\\n' \"$cwd\" \"$s\" \"$ks\" \"$rs\""
     }
 
-    /// `floorProbeCommand`'s answer: (cwd, since), nil when unreadable.
-    nonisolated static func parseFloorProbe(_ out: String?) -> (cwd: String, since: Int)? {
+    /// `floorProbeCommand`'s answer: the tab's cwd, its floor (epoch
+    /// seconds), the Kimi session its process names (if any) and whether
+    /// the process resumed a conversation. nil when unreadable.
+    nonisolated static func parseFloorProbe(_ out: String?)
+        -> (cwd: String, since: Int, kimiSession: String?, resumed: Bool)? {
         let lines = (out ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard lines.count >= 2 else { return nil }
         let cwd = lines[0].trimmingCharacters(in: .whitespaces)
         guard !cwd.isEmpty else { return nil }
-        return (cwd, Int(lines[1].trimmingCharacters(in: .whitespaces)) ?? 0)
+        let field = { (i: Int) in lines.count > i ? lines[i].trimmingCharacters(in: .whitespaces) : "" }
+        let ks = field(2)
+        return (cwd, Int(field(1)) ?? 0, isKimiSessionID(ks) ? ks : nil, field(3) == "1")
     }
 
     /// Sets `$varName` to the transcript the agent in tmux window `window`
@@ -1157,8 +1200,8 @@ enum AgentPaneProbe {
 /// intended task or session. On top of that the pane's FOREGROUND program
 /// must be what the text is for: an agent for a message (never a shell —
 /// bash would run it, backticks and all), a shell for a relaunch command.
-struct PaneTarget: Equatable, Sendable {
-    enum Ref: Equatable, Sendable {
+struct PaneTarget: Equatable, Sendable, Codable {
+    enum Ref: Equatable, Sendable, Codable {
         /// `bromure:<index>` — what a pane roster knows.
         case index(Int)
         /// A tmux window id ("@12"): stable for the window's whole life.
@@ -1166,7 +1209,7 @@ struct PaneTarget: Equatable, Sendable {
         /// The window tagged `@worktree <branch>` (a task's tab).
         case worktree(String)
     }
-    enum Foreground: Equatable, Sendable {
+    enum Foreground: Equatable, Sendable, Codable {
         /// An agent must be in the pane's foreground process group.
         case agent
         /// Only a shell (no agent) — for typing a command line.
@@ -1185,6 +1228,20 @@ struct PaneTarget: Equatable, Sendable {
     /// A board task's tab: found by its branch, and still carrying it.
     static func task(branch: String, foreground: Foreground = .agent) -> PaneTarget {
         PaneTarget(ref: .worktree(branch), expectWorktree: branch, foreground: foreground)
+    }
+
+    /// A chat's tab (the composer, its approval and picker keys, a review
+    /// draft): by the window's stable id when known — and then only that
+    /// window — else its index, and in either case still carrying the
+    /// markers it showed (`@display`, `@worktree`), with an agent in front.
+    static func chat(window: Int, windowID: String?, display: String?, worktree: String?,
+                     foreground: Foreground = .agent) -> PaneTarget {
+        let id = windowID.flatMap { PaneTypeGuard.isWindowID($0) ? $0 : nil }
+        var t = PaneTarget(ref: id.map { .windowID($0) } ?? .index(window), foreground: foreground)
+        t.expectWindowID = id
+        if let d = display, !d.isEmpty { t.expectDisplay = d }
+        if let w = worktree, !w.isEmpty { t.expectWorktree = w }
+        return t
     }
 }
 
@@ -1303,6 +1360,40 @@ enum PaneTypeGuard {
         prelude(target)
             + "if _bg; then \(literalSend(text)) && sleep 1 && "
             + "if _bg; then tmux send-keys -t \"$_bt\" Enter; fi; fi"
+    }
+
+    /// Named tmux keys into the target, one at a time with `beat` seconds
+    /// between, each re-checked (`_bg`). A refusal stops the rest and the
+    /// command fails (exit 1). Only key-name tokens pass (letters, digits,
+    /// `-`); anything else is dropped, never interpolated.
+    nonisolated static func keysCommand(target: PaneTarget, keys: [String], beat: Double = 0.4) -> String {
+        let safe = keys.filter { k in !k.isEmpty && k.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" } }
+        guard !safe.isEmpty else { return "" }
+        let steps = safe.map { "_bg && tmux send-keys -t \"$_bt\" \($0)" }
+        return prelude(target) + "{ " + steps.joined(separator: " && sleep \(beat) && ") + "; }"
+    }
+
+    /// True (exit 0) while an agent's option picker is on screen in "$_bt".
+    nonisolated static let pickerVisibleInTarget =
+        "tmux capture-pane -p -t \"$_bt\" 2>/dev/null | grep -qE 'Enter to (select|confirm)'"
+
+    /// An AskUserQuestion picker's key sequence into the target: digits
+    /// literally and only while the picker is still on screen (it can
+    /// instant-commit a key early), named keys as tmux key names, a beat
+    /// between. Every key re-checks the window's identity and the agent in
+    /// front (`_bg`); a refusal types nothing more and fails the command.
+    /// Empty when no key is valid.
+    nonisolated static func answerKeysCommand(target: PaneTarget, keys: [String]) -> String {
+        let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
+        let steps = keys.compactMap { k -> String? in
+            let isDigit = k.count == 1 && k.first!.isNumber
+            guard isDigit || named.contains(k) else { return nil }
+            let send = "tmux send-keys -t \"$_bt\" \(isDigit ? "-l " : "")\(k)"
+            return isDigit ? "{ _bg || exit 1; \(pickerVisibleInTarget) && \(send); true; }"
+                           : "{ _bg || exit 1; \(send); }"
+        }
+        guard !steps.isEmpty else { return "" }
+        return prelude(target) + steps.joined(separator: "; sleep 1; ")
     }
 }
 
@@ -1798,6 +1889,10 @@ final class CodingTaskEngine {
         store.mutate(taskID) { $0.startingAt = Date(); $0.queuedAt = nil; $0.lastError = nil }
         Task { [weak self] in
             guard let self else { return }
+            // Stopped a moment ago: its old tab is still closing. Typed into
+            // now, the resume brief would land there and die with it — wait
+            // for the close, then the resume opens (or finds) its own tab.
+            await self.awaitPendingTabClose(profileID: task.profileID, branch: branch)
             if let why = await self.ensureWorkspaceUp(task.profileID, delegate: delegate) {
                 self.store.mutate(taskID) { $0.startingAt = nil; $0.lastError = why }
                 return
@@ -2948,7 +3043,8 @@ final class CodingTaskEngine {
         }
         cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
             + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent,
-                                              kimiCreatedSince: pin.kimiCreatedSince)
+                                              kimiCreatedSince: pin.kimiCreatedSince,
+                                              kimiExclude: pin.kimiExclude)
             + "fi; "
         return cmd
     }
@@ -3302,15 +3398,11 @@ final class CodingTaskEngine {
             + "| grep -qE 'Enter to (select|confirm)'"
     }
 
+    /// By index (the window is resolved to its id once, and re-checked —
+    /// an agent in front — before every key); `PaneTypeGuard.answerKeysCommand`
+    /// takes a stable identity when the caller has one.
     nonisolated static func answerKeysCommand(tabIndex: Int, keys: [String]) -> String {
-        let probe = pickerVisibleCommand(tabIndex: tabIndex)
-        return keys.compactMap { k -> String? in
-            let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
-            let isDigit = k.count == 1 && k.first!.isNumber
-            guard isDigit || named.contains(k) else { return nil }
-            let send = "tmux send-keys -t bromure:\(tabIndex) \(isDigit ? "-l " : "")\(k)"
-            return isDigit ? "{ \(probe) && \(send); true; }" : send
-        }.joined(separator: "; sleep 1; ")
+        PaneTypeGuard.answerKeysCommand(target: .index(tabIndex), keys: keys)
     }
 
     /// Send picker keystrokes into a live session (see answerKeysCommand).
@@ -3337,9 +3429,11 @@ final class CodingTaskEngine {
             BACDebug.log("tasks", "picker not on screen for \(branch) — not sending")
             return false
         }
+        // By the task's branch, re-checked before every key: the index
+        // probed above may name another tab by now.
         return (try? await delegate.guestExec(
             profileID: profileID,
-            command: Self.answerKeysCommand(tabIndex: index, keys: keys),
+            command: PaneTypeGuard.answerKeysCommand(target: .task(branch: branch), keys: keys),
             timeout: 60)) != nil
     }
 
@@ -3415,7 +3509,12 @@ final class CodingTaskEngine {
             $0.isLowercase || $0.isNumber || $0 == "-" || $0 == "/"
         }), !branch.isEmpty else { return }
         let scheduledAt = Date()
-        Task { [weak self] in
+        let key = Self.pendingCloseKey(profileID: profileID, branch: branch)
+        let token = UUID()
+        let task = Task { [weak self] in
+            defer {
+                if self?.pendingTabCloses[key]?.token == token { self?.pendingTabCloses[key] = nil }
+            }
             // The tabs to close are the ones there NOW, by window id: a tab
             // the task opens on the same branch during the grace (Start right
             // after Stop & Return to Backlog) is a new window and is spared.
@@ -3443,6 +3542,33 @@ final class CodingTaskEngine {
             _ = try? await delegate.guestExec(profileID: profileID,
                                               command: cmd, timeout: 15)
             BACDebug.log("tasks", "closed session tab for \(branch)")
+        }
+        pendingTabCloses[key] = (token, task)
+    }
+
+    /// Tab closes scheduled by `closeSessionTab` and not done yet, by
+    /// workspace + branch. A Start right after Stop & Return to Backlog
+    /// waits for its branch's: until then the old tab is still there,
+    /// carrying the branch, and the resume brief went into it — moments
+    /// before it was killed.
+    private var pendingTabCloses: [String: (token: UUID, task: Task<Void, Never>)] = [:]
+
+    private static func pendingCloseKey(profileID: UUID, branch: String) -> String {
+        "\(profileID.uuidString)|\(branch)"
+    }
+
+    /// Whether a close of `branch`'s tab is still pending.
+    func hasPendingTabClose(profileID: UUID, branch: String) -> Bool {
+        pendingTabCloses[Self.pendingCloseKey(profileID: profileID, branch: branch)] != nil
+    }
+
+    /// Wait until no close of `branch`'s tab is pending (one scheduled
+    /// meanwhile is waited for too).
+    func awaitPendingTabClose(profileID: UUID, branch: String) async {
+        let key = Self.pendingCloseKey(profileID: profileID, branch: branch)
+        while let pending = pendingTabCloses[key] {
+            await pending.task.value
+            if pendingTabCloses[key]?.token == pending.token { pendingTabCloses[key] = nil }
         }
     }
 
@@ -3717,11 +3843,17 @@ final class CodingTaskEngine {
     /// Stop the agent and put the task back in the Backlog — nothing is
     /// deleted: the worktree and its branch stay in the workspace (the
     /// Branches window finds them), the card is a plain brief again.
-    func stopToBacklog(_ taskID: UUID) {
-        guard let task = store.task(taskID), task.stage == .inProgress else { return }
+    /// Only a task In Progress has an agent at work to stop: anything else
+    /// is refused with the reason (nil = stopped), never a silent no-op.
+    @discardableResult
+    func stopToBacklog(_ taskID: UUID) -> String? {
+        guard let task = store.task(taskID) else {
+            return NSLocalizedString("No such task.", comment: "task stop refused")
+        }
+        guard task.stage == .inProgress else { return Self.stopRefusal(task.stage) }
         if task.delegationID != nil {
             delegate?.taskDispatcher.recall(taskID)
-            return
+            return nil
         }
         // The branch is remembered (not just left in the workspace): the
         // next start resumes on it rather than orphaning it for a new one.
@@ -3751,6 +3883,23 @@ final class CodingTaskEngine {
         }
         BACDebug.log("tasks", "“\(task.title)”: stopped, back to the backlog")
         pumpQueue()
+        return nil
+    }
+
+    /// Why Stop & Return to Backlog doesn't apply to a task in `stage`.
+    nonisolated static func stopRefusal(_ stage: CodingTask.Stage) -> String {
+        switch stage {
+        case .testing:
+            return NSLocalizedString(
+                "The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead.",
+                comment: "task stop refused")
+        case .done:
+            return NSLocalizedString("The task is done: there's no agent to stop.", comment: "task stop refused")
+        case .backlog, .planning:
+            return NSLocalizedString("The task isn't running: there's no agent to stop.", comment: "task stop refused")
+        case .inProgress:
+            return ""
+        }
     }
 
     /// End a task's agent session: archive it and close its tab — resolved
@@ -4066,15 +4215,11 @@ enum CodingTaskEngine {
             + "| grep -qE 'Enter to (select|confirm)'"
     }
 
+    /// By index (the window is resolved to its id once, and re-checked —
+    /// an agent in front — before every key); `PaneTypeGuard.answerKeysCommand`
+    /// takes a stable identity when the caller has one.
     nonisolated static func answerKeysCommand(tabIndex: Int, keys: [String]) -> String {
-        let probe = pickerVisibleCommand(tabIndex: tabIndex)
-        return keys.compactMap { k -> String? in
-            let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
-            let isDigit = k.count == 1 && k.first!.isNumber
-            guard isDigit || named.contains(k) else { return nil }
-            let send = "tmux send-keys -t bromure:\(tabIndex) \(isDigit ? "-l " : "")\(k)"
-            return isDigit ? "{ \(probe) && \(send); true; }" : send
-        }.joined(separator: "; sleep 1; ")
+        PaneTypeGuard.answerKeysCommand(target: .index(tabIndex), keys: keys)
     }
 }
 #endif

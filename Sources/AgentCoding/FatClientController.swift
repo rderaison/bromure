@@ -2363,6 +2363,33 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     }
 
     func isWorking() -> Bool { boundTab?.agentStatus == .working }
+
+    func isWorking(window w: Int) -> Bool? {
+        guard let tab = controller.tabsModel(for: workspaceID)?.tabs.first(where: { $0.index == w })
+        else { return nil }
+        return tab.agentStatus == .working
+    }
+
+    /// The session's window on the server, by the id its probe stamped and
+    /// the markers the tab carries — never just the index.
+    func paneTarget(window w: Int) -> PaneTarget {
+        let tab = controller.tabsModel(for: workspaceID)?.tabs.first { $0.index == w }
+        let s = controller.sessionStore.session(profileID: workspaceID, windowIndex: w)
+        return .chat(window: w, windowID: s?.windowID, display: s?.launchDisplay ?? tab?.display,
+                     worktree: tab?.worktreeBranch)
+    }
+
+    /// The Kimi session the server pinned for the session in this tab: its
+    /// own journal, never the folder's newest (two Kimi tabs in one folder).
+    func transcriptPin(window w: Int) -> TranscriptPin {
+        let s = controller.sessionStore.session(profileID: workspaceID, windowIndex: w)
+        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            return TranscriptPin(kimiSession: id)
+        }
+        var pin = TranscriptPin()
+        pin.kimiExclude = controller.sessionStore.kimiSessionsClaimed(profileID: workspaceID, besides: s?.id)
+        return pin
+    }
 }
 
 struct RemoteToolbarBar: View {
@@ -4089,8 +4116,8 @@ final class RemoteHostWindow: NSWindow {
                 guard visible else { return false }
                 return (try? await self.controller.guestExec(
                     profileID,
-                    command: CodingTaskEngine.answerKeysCommand(
-                        tabIndex: index, keys: keys),
+                    command: PaneTypeGuard.answerKeysCommand(
+                        target: .task(branch: branch), keys: keys),
                     timeout: 60)) != nil
             },
             openTerminal: { [weak self] task in self?.jumpToTask(task) },

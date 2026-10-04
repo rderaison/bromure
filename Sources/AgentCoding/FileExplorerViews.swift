@@ -179,6 +179,11 @@ struct FileExplorerPane: View {
                 || Self.agentNames.contains { l.hasSuffix("(\($0))") }
             return (isAgent || tab.isWorktree) ? tab.index : nil
         }
+        let target = model.agentTabIndex.flatMap { i in
+            activeTab.map { PaneTarget.chat(window: i, windowID: nil, display: $0.display,
+                                            worktree: $0.worktreeBranch) }
+        }
+        if model.agentTabTarget != target { model.agentTabTarget = target }
     }
 
     /// IDE-style auto-show/auto-hide, both edge-triggered so the 0.7s roster

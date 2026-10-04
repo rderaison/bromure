@@ -41,6 +41,16 @@ final class PinnedTranscriptProvider: BeautifiedTranscriptProvider {
     func isWorking() -> Bool {
         pane?.model.tabs.first { $0.index == window }?.agentStatus == .working
     }
+
+    func isWorking(window: Int) -> Bool? { pane?.chatIsWorking(window: window) }
+
+    func transcriptPin(window: Int) -> TranscriptPin {
+        pane?.chatTranscriptPin(window: window) ?? TranscriptPin()
+    }
+
+    func paneTarget(window: Int) -> PaneTarget {
+        pane?.chatPaneTarget(window: window) ?? .index(window)
+    }
 }
 
 /// Where a room stage's data lives: this Mac (the app delegate) or a

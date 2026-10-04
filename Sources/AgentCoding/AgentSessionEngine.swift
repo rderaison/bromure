@@ -816,6 +816,9 @@ final class AgentSessionEngine {
             // until there is one, only a journal begun by this run.
             var since = 0
             var pin = TranscriptPin()
+            // The tab's own Kimi session, learned from this read: by the id
+            // its process names, or as the journal this run began.
+            var learnsID = false
             if s.tool == .kimi {
                 if let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
                     pin.kimiSession = id
@@ -825,12 +828,27 @@ final class AgentSessionEngine {
                           let fp = AgentSessionLocator.parseFloorProbe(try? await delegate.guestExec(
                             profileID: s.profileID, command: AgentSessionLocator.floorProbeCommand(window: w),
                             timeout: 8)),
-                          fp.since > 0 else { return }   // never unfloored
+                          fp.since > 0 || fp.kimiSession != nil else { return }   // never unfloored
                     since = fp.since
+                    // How the agent started: as the engine launched it, else
+                    // (a tab started by hand, adopted; the app restarted
+                    // under it) as its command line says.
+                    let fresh = self.kimiFreshRun[s.id] ?? (fp.kimiSession == nil && !fp.resumed)
                     // A fresh start: a journal begun before the agent was is
                     // another conversation's, however recently it was written.
-                    // A resume reattaches an older one, so mtime alone there.
-                    if self.kimiFreshRun[s.id] == true { pin.kimiCreatedSince = fp.since - 2 }
+                    // A resume reattaches an older one, so mtime alone there —
+                    // never one another session owns (two Kimi tabs in one
+                    // folder: the second was adopted with the first's
+                    // conversation and title).
+                    pin = .kimiUnpinned(argsSession: fp.kimiSession, resumed: !fresh, since: fp.since,
+                                        exclude: self.store.kimiSessionsClaimed(profileID: s.profileID,
+                                                                                besides: s.id))
+                    if let id = pin.kimiSession {
+                        since = 0
+                        if let k = known, AgentSessionLocator.kimiSessionID(inPath: k.path) != id { known = nil }
+                    }
+                    learnsID = pin.kimiSession != nil || pin.kimiCreatedSince != nil
+                        || self.kimiFreshRun[s.id] != nil
                 }
             }
             guard let cmd = CodingTaskEngine.transcriptChunkCommand(
@@ -843,8 +861,9 @@ final class AgentSessionEngine {
             // This run's journal: from now on the session reads it by id (and
             // a resume reopens it by id, never "the last one here").
             var newConversation = false
-            if s.tool == .kimi, pin.kimiSession == nil, self.kimiFreshRun[s.id] != nil,
-               let id = AgentSessionLocator.kimiSessionID(inPath: f.path) {
+            if s.tool == .kimi, learnsID, s.agentTranscriptID.map(AgentSessionLocator.isKimiSessionID) != true,
+               let id = AgentSessionLocator.kimiSessionID(inPath: f.path),
+               !self.store.kimiSessionsClaimed(profileID: s.profileID, besides: s.id).contains(id) {
                 self.store.setTranscriptID(s.id, id)
                 // Begun by this run (the creation floor held): the session's
                 // next conversation, carried on after what the copy holds.

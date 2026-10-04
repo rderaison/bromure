@@ -692,6 +692,41 @@ final class SessionPane {
         return m
     }
 
+    // MARK: Chat → its window
+
+    /// Where a chat's text and keys for `window` may go: the session's
+    /// window id when the probe stamped one, and the markers the tab
+    /// carries (`@display` — the session's own launch name first —
+    /// `@worktree`), re-checked in the guest before every keystroke batch.
+    func chatPaneTarget(window: Int) -> PaneTarget {
+        let tab = model.tabs.first { $0.index == window }
+        let s = acDelegate?.sessionRecord(profileID: profile.id, windowIndex: window)
+        return .chat(window: window, windowID: s?.windowID,
+                     display: s?.launchDisplay ?? tab?.display, worktree: tab?.worktreeBranch)
+    }
+
+    /// The agent in `window` is working; nil while the roster doesn't list
+    /// that window.
+    func chatIsWorking(window: Int) -> Bool? {
+        guard model.rosterLive, let tab = model.tabs.first(where: { $0.index == window }) else { return nil }
+        return tab.agentStatus == .working
+    }
+
+    /// The Kimi session the engine pinned for the session in `window` (its
+    /// own journal, never the folder's newest).
+    /// Not pinned yet: the Kimi sessions other sessions here own, which are
+    /// never this tab's (two Kimi tabs in one folder).
+    func chatTranscriptPin(window: Int) -> TranscriptPin {
+        let s = acDelegate?.sessionRecord(profileID: profile.id, windowIndex: window)
+        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            return TranscriptPin(kimiSession: id)
+        }
+        var pin = TranscriptPin()
+        pin.kimiExclude = acDelegate?.agentSessionStore
+            .kimiSessionsClaimed(profileID: profile.id, besides: s?.id) ?? []
+        return pin
+    }
+
     /// Mount (or keep) the beautified transcript view, unmounting the terminal
     /// surface (tmux keeps running behind it). Idempotent while the active tab is
     /// unchanged (the live poll keeps that view current); a switch to a different

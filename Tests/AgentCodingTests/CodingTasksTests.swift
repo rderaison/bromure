@@ -218,20 +218,22 @@ struct CodingTasksTests {
         if case .question = fallback[0].kind { Issue.record("should be generic tool row") }
     }
 
-    @Test("answerKeysCommand: gated digits, named keys, beats between")
+    @Test("answerKeysCommand: guarded, gated digits, named keys, beats between")
     func answerKeys() {
-        let probe = "tmux capture-pane -p -t bromure:3 2>/dev/null "
+        let probe = "tmux capture-pane -p -t \"$_bt\" 2>/dev/null "
             // Both Claude footers: single-select "Enter to select",
             // multi-select "… Enter to confirm".
             + "| grep -qE 'Enter to (select|confirm)'"
         let cmd = CodingTaskEngine.answerKeysCommand(
             tabIndex: 3, keys: ["1", "Right", "Enter"])
-        // Digits fire only while the picker is on screen (instant-commit can
-        // close it a key early — a late digit is stray text in the chat);
-        // named keys are unconditional so the final Enter can't be refused.
-        #expect(cmd == "{ \(probe) && tmux send-keys -t bromure:3 -l 1; true; }; sleep 1; "
-            + "tmux send-keys -t bromure:3 Right; sleep 1; "
-            + "tmux send-keys -t bromure:3 Enter")
+        // The window is resolved to its id once and every key re-checks it
+        // (an agent in front). Digits fire only while the picker is on
+        // screen (instant-commit can close it a key early — a late digit is
+        // stray text in the chat); named keys aren't gated on the picker.
+        #expect(cmd == PaneTypeGuard.prelude(.index(3))
+            + "{ _bg || exit 1; \(probe) && tmux send-keys -t \"$_bt\" -l 1; true; }; sleep 1; "
+            + "{ _bg || exit 1; tmux send-keys -t \"$_bt\" Right; }; sleep 1; "
+            + "{ _bg || exit 1; tmux send-keys -t \"$_bt\" Enter; }")
         // Anything not a digit or known key name is dropped, not injected.
         #expect(CodingTaskEngine.answerKeysCommand(tabIndex: 0, keys: ["; rm -rf /"]).isEmpty)
     }

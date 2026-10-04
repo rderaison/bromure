@@ -289,32 +289,69 @@ final class FileExplorerModel {
     /// tmux window index of the active tab WHEN its front process is a
     /// coding agent — nil hides the commenting UI. Kept fresh by the pane.
     var agentTabIndex: Int?
+    /// That tab's identity (its `@display` / `@worktree` markers), kept
+    /// fresh with `agentTabIndex`.
+    var agentTabTarget: PaneTarget?
+    /// Where the drafts on hand go: the agent tab as it was when the first
+    /// one was written (pinned to its window id once resolved) — never
+    /// whatever tab took its index since.
+    private(set) var reviewTarget: PaneTarget?
     var sendingReview = false
 
     func addReviewDraft(file: String, line: Int, text: String) {
+        if reviewDrafts.isEmpty { pinReviewTarget() }
         reviewDrafts.append(ReviewDraft(file: file, line: line, text: text))
     }
 
     func removeReviewDraft(_ id: UUID) {
         reviewDrafts.removeAll { $0.id == id }
+        if reviewDrafts.isEmpty { reviewTarget = nil }
+    }
+
+    /// Fix the drafts' destination to the current agent tab, and resolve
+    /// its stable window id in the background.
+    private func pinReviewTarget() {
+        guard var t = agentTabTarget ?? agentTabIndex.map({ PaneTarget.index($0) }) else {
+            reviewTarget = nil
+            return
+        }
+        reviewTarget = t
+        guard case .index(let i) = t.ref else { return }
+        Task { [weak self] in
+            guard let self,
+                  let out = try? await self.exec(
+                    "tmux display-message -p -t bromure:\(i) '#{window_id}' 2>/dev/null", timeout: 8)
+            else { return }
+            let id = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Still the same batch, still unpinned.
+            guard PaneTypeGuard.isWindowID(id), !self.reviewDrafts.isEmpty,
+                  self.reviewTarget == t else { return }
+            t.ref = .windowID(id)
+            t.expectWindowID = id
+            self.reviewTarget = t
+        }
     }
 
     /// Batch every draft into one feedback message and type it into the
-    /// active tab's agent session. Clears the drafts on success.
+    /// agent tab the drafts were written for. Clears the drafts on success.
     func submitReviewDrafts() async -> Bool {
-        guard let index = agentTabIndex, !reviewDrafts.isEmpty else { return false }
+        guard !reviewDrafts.isEmpty,
+              let target = reviewTarget ?? agentTabTarget ?? agentTabIndex.map({ PaneTarget.index($0) })
+        else { return false }
         var msg = "Review feedback on your current changes — address each point:"
         for d in reviewDrafts {
             msg += "\n- In \(d.file), line \(d.line): \(d.text)"
         }
         sendingReview = true
         defer { sendingReview = false }
-        // Guarded: typed only while an agent holds that tab (a shell would
-        // run the feedback as commands); the drafts stay otherwise.
-        let cmd = CodingTaskEngine.typeCommand(tabIndex: index, text: msg)
+        // Guarded: typed only into that window, still carrying its markers,
+        // while an agent holds it (a shell would run the feedback as
+        // commands); the drafts stay otherwise.
+        let cmd = CodingTaskEngine.typeCommand(target: target, text: msg)
         guard let out = try? await exec(cmd, timeout: 25),
               PaneTypeGuard.refusal(in: out) == nil else { return false }
         reviewDrafts.removeAll()
+        reviewTarget = nil
         return true
     }
 

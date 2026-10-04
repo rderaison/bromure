@@ -62,4 +62,42 @@ struct GuardedTypeTests {
         let pane = Self.sh("tmux capture-pane -p -t bromure:1", env: env)
         #expect(pane.components(separatedBy: "Delegation notice").count - 1 == 2)
     }
+
+    @Test("picker keys and chat keys go only to the window they're for")
+    func keysFollowIdentity() throws {
+        guard let tmux = Self.tmuxPath() else { return }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("gk-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bin = (tmux as NSString).deletingLastPathComponent
+        let env = ["TMUX_TMPDIR": dir.path, "PATH": "\(bin):/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"]
+        defer { Self.sh("tmux kill-server", env: env) }
+        // Two "agents" with a picker footer on screen, tagged like two sessions.
+        let picker = "printf 'Pick one\\n❯ 1. Yes\\n  2. No\\nEnter to select\\n'; exec -a claude cat"
+        Self.sh("tmux new-session -d -s bromure -x 100 -y 20 \"bash -c \\\"\(picker)\\\"\" "
+                + "&& tmux new-window -t bromure:1 \"bash -c \\\"\(picker)\\\"\" "
+                + "&& tmux set-option -w -t bromure:0 @display K1 "
+                + "&& tmux set-option -w -t bromure:1 @display K2", env: env)
+        Thread.sleep(forTimeInterval: 0.5)
+        let id1 = Self.sh("tmux display-message -p -t bromure:1 '#{window_id}'", env: env)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Meant for K1 (window 0) by name, but aimed at index 1 (K2 took it): refused.
+        let wrong = PaneTarget.chat(window: 1, windowID: nil, display: "K1", worktree: nil)
+        let out = Self.sh(PaneTypeGuard.answerKeysCommand(target: wrong, keys: ["2"]), env: env)
+        #expect(out.contains(PaneTypeGuard.refusedMarker + " identity"))
+        let keysOut = Self.sh(PaneTypeGuard.keysCommand(target: wrong, keys: ["x"]), env: env)
+        #expect(keysOut.contains(PaneTypeGuard.refusedMarker))
+        Thread.sleep(forTimeInterval: 0.3)
+        #expect(Self.sh("tmux capture-pane -p -t bromure:1", env: env).components(separatedBy: "\n")
+            .filter { ["2", "x"].contains($0.trimmingCharacters(in: .whitespaces)) }.isEmpty)
+
+        // K2's own id and name: the digit goes in.
+        let right = PaneTarget.chat(window: 1, windowID: id1, display: "K2", worktree: nil)
+        let ok = Self.sh(PaneTypeGuard.answerKeysCommand(target: right, keys: ["2"]), env: env)
+        #expect(!ok.contains(PaneTypeGuard.refusedMarker))
+        Thread.sleep(forTimeInterval: 0.3)
+        #expect(Self.sh("tmux capture-pane -p -t bromure:1", env: env).components(separatedBy: "\n")
+            .contains { $0.trimmingCharacters(in: .whitespaces) == "2" })
+    }
 }

@@ -195,12 +195,26 @@ enum TaskLiveState {
         // The session the launch was bound to (see CodingTaskEngine.bindSession)
         // first: it holds even when nothing carries the worktree branch.
         // Only while it holds a tab: a relaunch opens a new session.
+        let (session, tab) = find(task, in: model, sessions: sessions)
+        if let session { return SessionHome.bucket(for: session, in: model) }
+        // No session record (an older mirror): the tab's own status.
+        guard let tab else { return nil }
+        switch tab.agentStatus {
+        case .needsInput: return .needsYou
+        case .working:    return .working
+        case .done:       return .idle
+        }
+    }
+
+    /// The task's session (and its tab), as `bucket` reads them.
+    private static func find(_ task: CodingTask, in model: SessionListModel,
+                             sessions: AgentSessionStore?) -> (AgentSession?, TabsModel.Tab?) {
         if let sessions, let id = task.sessionID, let s = sessions.session(id), !s.isDeleted,
            !s.isArchived, s.windowIndex != nil, s.profileID == task.profileID {
-            return SessionHome.bucket(for: s, in: model)
+            return (s, nil)
         }
         let slugs = [task.branchSlug, task.branch.map { String($0.dropFirst(3)) }].compactMap { $0 }
-        guard !slugs.isEmpty else { return nil }
+        guard !slugs.isEmpty else { return (nil, nil) }
         func matches(_ branch: String?) -> Bool {
             slugs.contains { AutomationBoard.branchMatches(branch, slug: $0) }
         }
@@ -218,15 +232,33 @@ enum TaskLiveState {
                 ?? sessions.sessions.first {
                     $0.profileID == task.profileID && !$0.isDeleted && matches($0.worktreeBranch)
                 }
-            if let session { return SessionHome.bucket(for: session, in: model) }
+            if let session { return (session, tab) }
         }
-        // No session record (an older mirror): the tab's own status.
-        guard let tab else { return nil }
-        switch tab.agentStatus {
-        case .needsInput: return .needsYou
-        case .working:    return .working
-        case .done:       return .idle
+        return (nil, tab)
+    }
+
+    /// The task's agent couldn't start — said "Couldn't start" on the card
+    /// as on its session's sidebar row and stage: its session carries the
+    /// launch failure, or (no session to carry it) the card does.
+    static func couldntStart(_ task: CodingTask, in model: SessionListModel,
+                             sessions: AgentSessionStore?) -> Bool {
+        guard task.stage == .inProgress else { return false }
+        #if os(macOS)
+        if DemoMode.isOn { return false }
+        #endif
+        let (session, tab) = find(task, in: model, sessions: sessions)
+        if let session {
+            return !session.isLaunching && !(session.lastError ?? "").isEmpty
         }
+        return tab == nil && task.lastError != nil
+    }
+
+    /// What the board's "need you" counts: a running task waiting on the
+    /// user, or one whose agent couldn't start — every card with a red chip.
+    static func needsAttention(_ task: CodingTask, in model: SessionListModel,
+                               sessions: AgentSessionStore?) -> Bool {
+        bucket(of: task, in: model, sessions: sessions) == .needsYou
+            || couldntStart(task, in: model, sessions: sessions)
     }
 }
 
@@ -280,7 +312,7 @@ struct CodingTasksSection: View {
     /// user right now.
     private var attentionCount: Int {
         store.tasks(in: .inProgress).filter {
-            TaskLiveState.bucket(of: $0, in: model, sessions: sessionStore) == .needsYou
+            TaskLiveState.needsAttention($0, in: model, sessions: sessionStore)
         }.count
     }
 
@@ -611,7 +643,8 @@ struct CodingKanbanView: View {
     private func headerRow(compact: Bool) -> some View {
         let running = store.tasks(in: .inProgress).count
         let review = store.tasks(in: .testing).count
-        let needsYou = store.tasks(in: .inProgress).filter { liveStatus(of: $0) == .needsYou }.count
+        let needsYou = store.tasks(in: .inProgress)
+            .filter { TaskLiveState.needsAttention($0, in: model, sessions: sessionStore) }.count
             + store.tasks(in: .testing).filter { $0.landing?.phase == .needsYou }.count
         return HStack(spacing: 12) {
             Image(systemName: "checklist")
@@ -922,6 +955,7 @@ struct CodingKanbanView: View {
                     accentHex: accentHex(for: task.profileID),
                     workspaceName: workspaceName(for: task.profileID),
                     status: liveStatus(of: task),
+                    couldntStart: TaskLiveState.couldntStart(task, in: model, sessions: sessionStore),
                     onOpen: { actions.jumpToRun(task) },
                     onResume: { actions.resume(task.id) },
                     onStartOver: { actions.startOver(task.id) },
@@ -1845,6 +1879,9 @@ private struct InProgressTaskCard: View {
     var workspaceName: String = ""
     /// The task's session, as the sidebar shows it (`TaskLiveState`).
     let status: SessionBucket?
+    /// Its agent couldn't start (`TaskLiveState.couldntStart`): the chip
+    /// says so, in the words the sidebar row and the stage use.
+    var couldntStart = false
     let onOpen: () -> Void
     var onResume: () -> Void = {}
     var onStartOver: () -> Void = {}
@@ -1852,6 +1889,9 @@ private struct InProgressTaskCard: View {
     /// The card's menu (built by the column: it knows every action).
     var menu: [CardMenuItem] = []
     @State private var hovering = false
+
+    /// The sidebar row's and the stage's word for an agent that died at launch.
+    static var couldntStartTitle: String { NSLocalizedString("Couldn't start", comment: "session status") }
 
     /// No live agent to open: its session is paused, or no tab turned up
     /// within the boot window.
@@ -1877,7 +1917,11 @@ private struct InProgressTaskCard: View {
                     CardHeader(workspaceName: workspaceName, accentHex: accentHex, task: task) {
                         // The same words, tints and spinner as the session's
                         // sidebar row (SessionBucket).
-                        if let status, status != .asleep, status != .ended {
+                        if couldntStart {
+                            CardStatusPill(text: Self.couldntStartTitle, tint: .red,
+                                           systemImage: "exclamationmark.triangle.fill")
+                                .layoutPriority(2)
+                        } else if let status, status != .asleep, status != .ended {
                             CardStatusPill(text: status.title, tint: status.tint,
                                            spinning: status == .working,
                                            systemImage: status == .needsYou ? "hand.raised.fill" : nil)
@@ -1980,7 +2024,7 @@ private struct InProgressTaskCard: View {
         .help(NSLocalizedString("Open the task's live session", comment: ""))
         .modifier(CardAccessibility(
             label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
-                    status?.title
+                    couldntStart ? Self.couldntStartTitle : status?.title
                         ?? (task.lastError == nil ? NSLocalizedString("Starting…", comment: "task card") : nil),
                     task.lastError].compactMap { $0 }.joined(separator: ", "),
             hint: NSLocalizedString("Open the task's live session", comment: ""),
@@ -2085,7 +2129,7 @@ extension View {
 /// (VoiceOver reads the label — a `.contain` container dropped it), pressed
 /// (AXPress) to open it, its menu on AXShowMenu and as named actions —
 /// which is also how its inner buttons stay reachable.
-private struct CardAccessibility: ViewModifier {
+struct CardAccessibility: ViewModifier {
     let label: String
     let hint: String
     let onPress: () -> Void
@@ -2105,13 +2149,14 @@ private struct CardAccessibility: ViewModifier {
     func body(content: Content) -> some View {
         content
             .contextMenu { CardMenuContent(items: menu) }
+            // One element for the whole card — a button named by `label`,
+            // verbatim (never looked up as a localization key). No stand-in
+            // representation: the substituted button carried its own
+            // attributed text and the card's label reached assistive tools
+            // only as AXAttributedDescription, with no plain description.
             .accessibilityElement(children: .ignore)
-            // A real button stands in for the card: it carries the label as
-            // a plain AXTitle/AXDescription too (a bare label exposed only
-            // AXAttributedDescription, which some tools never read).
-            .accessibilityRepresentation { Button(label) { onPress() } }
-            .accessibilityLabel(label)
-            .accessibilityHint(hint)
+            .accessibilityLabel(Text(verbatim: label))
+            .accessibilityHint(Text(verbatim: hint))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction(.default) { onPress() }
             .accessibilityActions {

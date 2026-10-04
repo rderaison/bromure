@@ -5486,7 +5486,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.markMerged(id)
                 case "stop":
                     // Stop the agent, back to the Backlog (worktree kept).
-                    self.codingTaskEngine.stopToBacklog(id)
+                    // Only a task In Progress: anything else says why.
+                    if let why = self.codingTaskEngine.stopToBacklog(id) {
+                        return ["ok": false, "error": why]
+                    }
                 case "report-landing":
                     // Test hook: what board_report_landing does.
                     let status = body["status"] as? String ?? ""
@@ -8687,6 +8690,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var pin = TranscriptPin()
         if s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
             pin.kimiSession = id
+        } else if s.tool == .kimi {
+            // Not pinned: at least never another session's own journal.
+            let store = attachedMachines[s.profileID]?.sessionStore ?? agentSessionStore
+            pin.kimiExclude = store.kimiSessionsClaimed(profileID: s.profileID, besides: s.id)
         }
         guard let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0,
                                                                agent: s.tool.rawValue, pin: pin) else { return nil }

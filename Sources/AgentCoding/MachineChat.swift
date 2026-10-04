@@ -33,6 +33,18 @@ final class MachineTranscriptProvider: BeautifiedTranscriptProvider {
 
     func isWorking() -> Bool { machine?.hostTabStatus(window: window) == .working }
 
+    func isWorking(window w: Int) -> Bool? {
+        guard let machine, machine.tabsModel.tabs.contains(where: { $0.index == w }) else { return nil }
+        return machine.hostTabStatus(window: w) == .working
+    }
+
+    func paneTarget(window w: Int) -> PaneTarget {
+        let tab = machine?.tabsModel.tabs.first { $0.index == w }
+        let s = machine?.sessionStore.session(profileID: machineID, windowIndex: w)
+        return .chat(window: w, windowID: s?.windowID, display: s?.launchDisplay ?? tab?.display,
+                     worktree: tab?.worktreeBranch)
+    }
+
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {
         let timeout = (op["op"] as? String) == "untar" ? 600 : 30
         return try? await machine?.hostFileOp(op, timeout: timeout)

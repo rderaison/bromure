@@ -3855,3 +3855,11 @@
 "%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ 已不在任務的工作階段中執行（只剩下一個 shell），因此沒有輸入任何內容 — 重新啟動工作階段以恢復它。";
 "The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "任務的工作階段分頁已不存在或已屬於其他內容，因此沒有向其輸入任何內容 — 重新啟動工作階段以恢復 %@。";
 "The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "訊息未輸入：工作階段的分頁已不再顯示其代理。請恢復工作階段後再試一次。";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "未傳送 — 工作階段的分頁已不存在，或已屬於其他內容。";
+"Not sent — the agent isn't running in the session's tab any more." = "未傳送 — 代理程式已不在工作階段的分頁中執行。";
+"No such task." = "沒有這個任務。";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "此任務處於「檢視」階段：其代理程式已完成。請改為將其退回「進行中」，或捨棄其分支。";
+"The task is done: there's no agent to stop." = "此任務已完成：沒有可停止的代理程式。";
+"The task isn't running: there's no agent to stop." = "此任務未在執行：沒有可停止的代理程式。";
