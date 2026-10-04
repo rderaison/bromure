@@ -30,7 +30,7 @@ From top to bottom, the sidebar holds:
 2. The **New session** button (**⌘N**, tooltip "Start an agent (⌘N)"), which opens the [new-session screen](06-new-session.mdx).
 3. The **Sessions** section: the Switchboard row, your rooms, and your sessions grouped by state.
 4. The **Archived** fold, when anything has been archived.
-5. **Tasks** — the [coding-task board](06i-coding-tasks.mdx), with a **+** to add one.
+5. **Coding Tasks** — the [coding-task board](06i-coding-tasks.mdx), with a **+** to add one.
 6. **Automations** — your [scheduled runs](06h-automations.mdx), with a **+** to add one.
 7. **Virtual Machines** (shown as **VMs** when the sidebar is narrow) — the machines, folded away by default. Its header shows a green count of running machines and a **+** that creates a new one. Unfolded, it lists the terminal Grid, each machine with its terminal tabs, and any Kubernetes clusters, registries and messaging connector. See [Machines](06f-machines.mdx).
 
@@ -209,7 +209,7 @@ A few cases ask first:
 The list puts some sessions away by itself, so it stays about what's alive:
 
 - A session that **finished more than three days ago** is archived automatically. Sessions in a room and the Switchboards are never archived this way.
-- A **delegate's session** is archived when the delegation it served is closed, cancelled or fails; a **coding task's** session when the task goes to review or is cancelled; an **automation run's** session when the run finishes with its tab set to close when done.
+- A **delegate's session** is archived when the delegation it served is closed, cancelled or fails; a **coding task's** session when the task lands, is marked done or discarded (it stays live through review, so send-backs and landing reach the same conversation — or after about two hours idle in Review); an **automation run's** session when the run finishes with its tab set to close when done.
 
 Archived sessions stay readable and come back with one message.
 

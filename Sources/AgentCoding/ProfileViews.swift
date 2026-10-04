@@ -126,7 +126,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     /// What else the sidebar search finds it by.
     var keywords: String {
         switch self {
-        case .general:         return "name color close login notes defaults"
+        case .general:         return "name color close login notes defaults task approved merge pull request"
         case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
         case .fusion:          return "mount mac folders fusion"
         case .folders:         return "shared folder mount directory"
@@ -1326,6 +1326,8 @@ struct ProfileEditorView: View {
 
             closeActionPicker
 
+            taskFinishPicker
+
             // One machine's own: not a default for new ones.
             if draft.id != ProfileStore.templateID {
                 Toggle(NSLocalizedString("Start this VM at login", comment: ""),
@@ -1363,6 +1365,9 @@ struct ProfileEditorView: View {
             LabeledContent(NSLocalizedString("When closing the window", comment: "")) {
                 closeActionPicker.labelsHidden()
             }
+            LabeledContent(NSLocalizedString("When a task is approved", comment: "task finish preference")) {
+                taskFinishPicker.labelsHidden()
+            }
             if draft.id != ProfileStore.templateID {
                 Toggle(NSLocalizedString("Start this VM at login", comment: ""),
                        isOn: $draft.bootAtStartup)
@@ -1378,6 +1383,32 @@ struct ProfileEditorView: View {
             }
         }
         #endif
+    }
+
+    /// How an approved coding task leaves the board. In Preferences (the
+    /// template) it's the app-wide default; in a workspace, an override
+    /// ("App default" follows Preferences).
+    @ViewBuilder
+    private var taskFinishPicker: some View {
+        if draft.id == ProfileStore.templateID {
+            Picker(NSLocalizedString("When a task is approved", comment: "task finish preference"),
+                   selection: Binding(get: { draft.taskFinish ?? .merge },
+                                      set: { draft.taskFinish = $0 })) {
+                ForEach(TaskFinish.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .help(NSLocalizedString("What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise.", comment: "task finish preference"))
+        } else {
+            Picker(NSLocalizedString("When a task is approved", comment: "task finish preference"),
+                   selection: $draft.taskFinish) {
+                Text(String(format: NSLocalizedString("App default (%@)", comment: "task finish preference"),
+                            TaskFinish.appDefault.label))
+                    .tag(TaskFinish?.none)
+                ForEach(TaskFinish.allCases, id: \.self) { Text($0.label).tag(TaskFinish?.some($0)) }
+            }
+            .pickerStyle(.menu)
+            .help(NSLocalizedString("What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise.", comment: "task finish preference"))
+        }
     }
 
     @ViewBuilder

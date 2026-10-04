@@ -3461,6 +3461,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // not spin forever — re-arm their watchdogs (which abort with a
         // clear reason if the session is gone).
         codingTaskEngine.resumePlanningWatchdogs()
+        // Landings under way follow on; Review sessions idle for hours are
+        // put away.
+        codingTaskEngine.startHousekeeping()
 
         // Default SSH key: every new profile inherits this keypair via
         // the user's preferences template. Generate it on first launch
@@ -5465,13 +5468,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.plan(id)
                 case "send-back":
                     Task { @MainActor in await self.codingTaskEngine.sendBack(id) }
-                case "merge":
-                    self.codingTaskEngine.merge(
-                        id, into: body["target"] as? String,
-                        squash: body["squash"] as? Bool ?? false,
-                        cleanup: body["cleanup"] as? Bool ?? true)
+                case "merge", "land":
+                    // {mode: merge|squash|pr, target?, keepBranch?}; the
+                    // legacy merge body ({squash, cleanup}) still works.
+                    let mode = (body["mode"] as? String).flatMap(TaskLanding.Mode.init(rawValue:))
+                        ?? ((body["squash"] as? Bool ?? false) ? .squash : .merge)
+                    let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
+                    self.codingTaskEngine.land(id, mode: mode, target: body["target"] as? String,
+                                               keepBranch: keep)
                 case "open-pr":
-                    self.codingTaskEngine.openPR(id)
+                    self.codingTaskEngine.land(id, mode: .pr, target: body["target"] as? String)
+                case "retry-landing":
+                    self.codingTaskEngine.retryLanding(id)
+                case "cancel-landing":
+                    self.codingTaskEngine.cancelLanding(id)
+                case "mark-merged":
+                    self.codingTaskEngine.markMerged(id)
+                case "stop":
+                    // Stop the agent, back to the Backlog (worktree kept).
+                    self.codingTaskEngine.stopToBacklog(id)
+                case "report-landing":
+                    // Test hook: what board_report_landing does.
+                    let status = body["status"] as? String ?? ""
+                    let summary = body["summary"] as? String ?? ""
+                    let pr = body["prURL"] as? String
+                    Task { @MainActor in
+                        _ = await self.codingTaskEngine.reportLanding(id, status: status, summary: summary, prURL: pr)
+                    }
                 case "validate":
                     self.codingTaskEngine.validate(id)
                 case "to-testing":
@@ -11728,7 +11751,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// instead of lingering under Ended. Resolved off the live roster (or
     /// the mirrored one, for a detached session), so it must run before
     /// the tab is killed.
-    func archiveFinishedSession(profileID: Profile.ID, worktreeBranch: String) {
+    /// `windowIDs`: the tmux windows being closed. A session stamped with
+    /// another id is on a newer tab of the same branch (the task was
+    /// restarted, a landing resumed it) and stays; one not stamped yet goes
+    /// unless `strict` (the task restarted since the close was decided).
+    func archiveFinishedSession(profileID: Profile.ID, worktreeBranch: String,
+                                windowIDs: Set<String>? = nil, strict: Bool = false) {
         let tabs: [(index: Int, branch: String?)] =
             pane(for: profileID)?.model.tabs.map { ($0.index, $0.worktreeBranch) }
             ?? runningSessions[profileID]?.tabs.map { ($0.index, $0.worktreeBranch) }
@@ -11736,6 +11764,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for tab in tabs where tab.branch == worktreeBranch {
             guard let s = agentSessionStore.session(profileID: profileID, windowIndex: tab.index),
                   !s.isArchived, !s.isDeleted else { continue }
+            if let ids = windowIDs {
+                if let w = s.windowID { if !ids.contains(w) { continue } } else if strict { continue }
+            }
             BACDebug.log("sessions", "archiving finished “\(s.title)” (\(worktreeBranch))")
             agentSessionStore.setArchived(s.id, true)
         }
@@ -11746,7 +11777,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // All args are base64 (space-joined; base64 has no spaces) so paths and
     // pretty names with spaces/parens survive the guest's `set -- $arg` split.
 
-    private func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+    /// One positional guest field (empty → "-"; see `GuestCommand`).
+    private func b64(_ s: String) -> String { GuestCommand.arg(s) }
 
     /// Create a git worktree off `cwd`'s HEAD and open a tab in it running
     /// `tool`. `cwd` may itself be a worktree — the new branch descends from
@@ -11754,8 +11786,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// agent's initial message; nil/empty → the sentinel "-".
     func requestCreateWorktree(cwd: String, slug: String, display: String,
                                tool: String, prompt: String?, in pane: SessionPane) {
-        let p = (prompt?.isEmpty == false) ? b64(prompt!) : "-"
-        sendCommand("worktree-create \(b64(cwd)) \(b64(slug)) \(b64(display)) \(b64(tool)) \(p)", in: pane)
+        sendCommand("worktree-create \(b64(cwd)) \(b64(slug)) \(b64(display)) \(b64(tool)) \(b64(prompt ?? ""))", in: pane)
     }
 
     /// Merge `sourceBranch` into `targetBranch` (an ancestor) in a visible tab
@@ -11804,76 +11835,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let p = profileByNameOrID(profileNameOrID),
               let session = runningSessions[p.id],
               let outbox = session.sandbox.sessionDisk?.outboxDirectory else { return false }
-        let name: String
-        let encoded: [String]
-        switch action {
-        case "create":
-            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
-            name = "worktree-create"
-            let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
-            // Optional 6th, raw: "background" — the tab opens behind the
-            // current one (a delegate's; the user is looking at its delegator).
-            // Optional 7th: the branch to start from.
-            encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
-                + (args.count >= 6 && args[5] == "background" ? ["background"] : ["-"])
-                + (args.count >= 7 && !args[6].isEmpty ? [b64(args[6])] : [])
-        case "run":
-            // Automation fire: same layout as "create", but the guest falls
-            // back to a plain agent tab when cwd isn't a git repo. Optional
-            // 6th arg: run mode ("task" wires the board MCP tools in).
-            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt[, mode]]
-            name = "automation-run"
-            let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
-            encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
-                + (args.count >= 6 && !args[5].isEmpty ? [b64(args[5])] : [])
-        case "finish":
-            guard args.count >= 1 else { return false }   // worktree branch
-            name = "automation-finish"; encoded = [b64(args[0])]
-        case "task-resume":
-            // Coding board review round: reopen the agent on an existing
-            // worktree with a follow-up prompt.
-            guard args.count >= 6 else { return false }   // root, branch, parent, display, tool, prompt
-            name = "task-resume"
-            let prompt = args[5].isEmpty ? "-" : b64(args[5])
-            encoded = args.prefix(5).map(b64) + [prompt]
-        case "agent-tab":
-            // Home-screen session: an interactive agent tab in a folder (no
-            // worktree, no yolo). cwd, display, tool, prompt[, flags].
-            guard args.count >= 4 else { return false }
-            name = "agent-tab"
-            let prompt = args[3].isEmpty ? "-" : b64(args[3])
-            // Optional 6th, raw: "background" (see "create"). The guest
-            // splits on whitespace, so empty flags become "-" to hold the
-            // slot (it decodes to nothing).
-            let background = args.count >= 6 && args[5] == "background"
-            let flags: [String] = (args.count >= 5 && !args[4].isEmpty) ? [b64(args[4])] : (background ? ["-"] : [])
-            encoded = args.prefix(3).map(b64) + [prompt] + flags + (background ? ["background"] : [])
-        case "merge":
-            // src, target, mainRoot, display, tool[, mode ("merge"/"squash")
-            // [, autonomy ("ask"/"auto" — board merges commit without asking)]]
-            guard args.count >= 5 else { return false }
-            name = "worktree-merge"; encoded = args.prefix(7).map(b64)
-        case "pr":
-            guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
-            name = "worktree-pr"; encoded = args.prefix(5).map(b64)
-        case "remove":
-            guard args.count >= 2 else { return false }   // mainRoot, branch
-            name = "worktree-remove"; encoded = args.prefix(2).map(b64)
-        case "resolve":
-            guard args.count >= 2 else { return false }   // dir, tool
-            name = "worktree-resolve"; encoded = args.prefix(2).map(b64)
-        case "terminal":
-            guard args.count >= 2 else { return false }   // mainRoot, branch
-            name = "worktree-terminal"; encoded = args.prefix(2).map(b64)
-        case "unregister":
-            // Keep the checkout, stop reopening it at boot (an archived
-            // branch session the user chose to keep).
-            guard args.count >= 2 else { return false }   // mainRoot, branch
-            name = "worktree-unregister"; encoded = args.prefix(2).map(b64)
-        default:
-            return false
-        }
-        let line = ([name] + encoded).joined(separator: " ")
+        // Encoding lives in GuestCommand: every positional field is one
+        // non-empty token (empty → "-") so the guest's whitespace split
+        // can never shift later fields.
+        guard let line = GuestCommand.line(action: action, args: args) else { return false }
         let file = outbox.appendingPathComponent("cmd-\(UUID().uuidString).txt")
         try? (line + "\n").write(to: file, atomically: true, encoding: .utf8)
         return true
@@ -12316,6 +12281,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let archived = TaskTranscriptArchive.load(task.id) { return archived }
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
+        // Kimi: the session's own journal by id, when the task's session
+        // learned it — no folder/slug guessing (Kimi cuts bucket names).
+        if task.tool == .kimi {
+            let slug = String(branch.dropFirst(3))
+            if let id = agentSessionStore.sessions.first(where: { s in
+                s.profileID == task.profileID
+                    && (s.worktreeBranch == branch || (s.cwd as NSString).lastPathComponent == slug)
+                    && (s.agentTranscriptID.map(AgentSessionLocator.isKimiSessionID) ?? false)
+            })?.agentTranscriptID {
+                let cmd = AgentSessionLocator.kimiPinnedFragment(id: id, into: "f")
+                    + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
+                if let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 30),
+                   !out.isEmpty {
+                    return out
+                }
+            }
+        }
         if let cmd = CodingTaskEngine.taskTranscriptCommand(branch: branch,
                                                             agent: task.tool),
            let out = try? await guestExec(profileID: task.profileID,
@@ -12613,10 +12595,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             fetchReview: { [weak self] task, base in
                 await self?.fetchTaskReview(task, base: base)
             },
+            fetchSummary: { [weak self] task, target in
+                guard let self, let branch = task.branch,
+                      let root = task.rootRepo ?? task.worktreeDir else { return nil }
+                let cmd = TaskReviewSummary.command(root: root, worktreeDir: task.worktreeDir,
+                                                    branch: branch, target: target)
+                guard let out = try? await self.guestExec(profileID: task.profileID, command: cmd, timeout: 20)
+                else { return nil }
+                return TaskReviewSummary.parse(out)
+            },
+            fetchFinalReport: { [weak self] task in
+                guard let self, let text = await self.fetchTaskTranscriptRaw(task) else { return nil }
+                return TaskReviewSummary.finalReport(fromTranscript: text, agent: task.tool.rawValue)
+            },
             openTerminal: { [weak self] task in
-                guard let self, let slug = task.branchSlug else { return }
+                guard let self else { return }
+                if let a = task.assignment, a.kind == .session {
+                    self.unifiedWindow?.selectSession(a.id)
+                    return
+                }
+                guard let slug = task.branchSlug else { return }
                 self.unifiedWindow?.focusWorktreeTab(
                     profileID: task.profileID, slug: slug)
+            },
+            openTranscript: { [weak self] task in
+                self?.taskTranscriptWindows.open(taskID: task.id)
             },
             accentHex: { [weak self] id in
                 self?.profile(for: id)?.color.hexInUI ?? "#888888"
@@ -12624,22 +12627,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             workspaceName: { [weak self] id in
                 self?.profile(for: id)?.name ?? ""
             },
+            finishPreference: { [weak self] task in
+                TaskFinish.resolve(task: task.finish,
+                                   workspace: self?.profile(for: task.profileID)?.taskFinish,
+                                   app: TaskFinish.appDefault)
+            },
             sendBack: { [weak self] taskID in
                 guard let self else { return }
                 Task { @MainActor in await self.codingTaskEngine.sendBack(taskID) }
             },
-            merge: { [weak self] taskID, target, squash, cleanup in
-                self?.codingTaskEngine.merge(taskID, into: target, squash: squash,
-                                             cleanup: cleanup)
+            land: { [weak self] taskID, mode, target, keep in
+                self?.codingTaskEngine.land(taskID, mode: mode, target: target, keepBranch: keep)
             },
-            openPR: { [weak self] taskID in
-                self?.codingTaskEngine.openPR(taskID)
-            },
+            retryLanding: { [weak self] in self?.codingTaskEngine.retryLanding($0) },
+            cancelLanding: { [weak self] in self?.codingTaskEngine.cancelLanding($0) },
             markDone: { [weak self] taskID in
                 self?.codingTaskEngine.markDone(taskID)
             },
+            markMerged: { [weak self] in self?.codingTaskEngine.markMerged($0) },
+            discard: { [weak self] in self?.codingTaskEngine.closeWithoutMerge($0) },
             fetchBranches: { [weak self] task in
                 await self?.fetchTaskBranches(task) ?? []
+            },
+            setCodeChanges: { [weak self] id, n in
+                self?.codingTaskStore.mutate(id) { if $0.codeChanges != n { $0.codeChanges = n } }
             },
             addComment: { [weak self] taskID, text, file, line in
                 self?.codingTaskStore.mutate(taskID) {

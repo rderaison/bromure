@@ -80,7 +80,7 @@ This is the core group. `vm run` is deliberately Docker-shaped: it boots a works
 | `bromure-cli vm ports <workspace>` (or `vm <workspace> -L`) | Show a running workspace's listening ports (live `ss` as root): PORT, PROTO, ADDRESS, PROCESS, with loopback-only binds marked. |
 | `bromure-cli vm fsck <workspace> [--repair] [--home]` | Check a stopped workspace's system disk — or its home image with `--home` — from the Mac, with no VM and no extra tools. `--repair` replays the filesystem journal and clears a stale error flag. See [Checking a disk from the command line](#checking-a-disk-from-the-command-line). |
 | `bromure-cli workspaces create [--name N] [--tool T] [--auth A] [--api-key K] [--memory GB] [--color C] [-v <dir>]… [--generate-ssh] [--from-json <file\|->]` | Create a workspace headlessly. `--from-json` applies a full profile JSON document (flags override matching fields); `--generate-ssh` mints a host-side SSH key and prints the public key. |
-| `bromure-cli workspaces edit <workspace> [--from-json <file\|->]` | Fetch the workspace's full config, open it in `$VISUAL`/`$EDITOR` (`vi` fallback), and save changes back. Secrets show blank — leave blank to keep, type to replace. `--from-json` applies a document non-interactively. |
+| `bromure-cli workspaces edit <workspace> [--from-json <file\|->]` | Fetch the workspace's full config, open it in `$VISUAL`/`$EDITOR` (`vi` fallback), and save changes back. Secrets show blank — leave blank to keep, type to replace. Deleting a key in the editor clears that field. `--from-json` applies a document non-interactively; it may be partial — an absent key keeps its value, an explicit `null` clears it. |
 | `bromure-cli workspaces rm <workspace> [-f]` | Delete a workspace and ALL its data (disk + home) after a `y/N` confirmation, skipped with `-f`. |
 | `bromure-cli workspaces ssh-keygen <workspace>` | Generate a fresh host-side SSH key for the workspace and print the public key for your Git host. |
 
@@ -291,7 +291,7 @@ Separately from the AC MCP server, Bromure gives the agents inside every VM a se
 | vsock port | Server | Who gets it | Tools |
 |---|---|---|---|
 | 5830 | **browser** | Every agent | The 23 `browser_*` tools that drive the machine's embedded Chromium (see [below](#the-browser-server)). |
-| 5831 | **task board** | Only agents running a [coding task](06i-coding-tasks.mdx) | `board_get_task`, `board_set_plan`, `board_create_subtasks`, `board_set_dependencies`, `board_ready_for_review`. |
+| 5831 | **task board** | Only agents running a [coding task](06i-coding-tasks.mdx) | `board_get_task`, `board_set_plan`, `board_create_subtasks`, `board_set_dependencies`, `board_ready_for_review`, `board_report_landing`. |
 | 5832 | **plan stream** | Coding-task planning runs | Not an MCP server: the channel over which a task's planning run streams its plan to the board. |
 | 5833 | **automations** | Every agent | `automation_list`, `automation_get`, `automation_create`, `automation_update`, `automation_delete`, `automation_run` — limited to the automations of the agent's own machine. See [Automations](06h-automations.mdx). |
 | 5834 | **infrastructure** | Every agent | `infrastructure_overview`, `cluster_status`, `cluster_create`, `cluster_start`, `registry_status`, `registry_create`, `registry_start` — limited to the clusters and registries the machine has access to. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx). |

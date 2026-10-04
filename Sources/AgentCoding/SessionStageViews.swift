@@ -812,7 +812,10 @@ struct SessionHeaderView: View {
         // Launching or resuming: what's happening ("Waking up…" while the
         // machine boots, "Starting…" once the agent is on its way) — the
         // same words as the sidebar row.
-        if s.isLaunching || (bucket == .working && SessionHome.isStartingUp(s)) {
+        // A failed start reads "Couldn't start", like the sidebar row and
+        // the error card below — never "Ready" then "Paused".
+        if s.isLaunching || (bucket == .working && SessionHome.isStartingUp(s))
+            || !(s.lastError ?? "").isEmpty {
             return SessionHome.statusLine(for: s, in: model)
         }
         let detail: String?

@@ -1472,8 +1472,14 @@ final class DelegationEngine {
             // answer it. Held, the notice stays owed and a later tick retries.
             let out = (try? await self.guestExec(
                 profileID: s.profileID,
-                command: CodingTaskEngine.guardedTypeCommand(tabIndex: w, text: line), timeout: 20)) ?? ""
+                command: CodingTaskEngine.guardedTypeCommand(
+                    target: AgentSessionEngine.paneTarget(s) ?? .index(w), text: line), timeout: 20)) ?? ""
             typingNotice.remove(sessionID)
+            if let r = PaneTypeGuard.refusal(in: out) {
+                // Not its agent's tab (any more): nothing typed, still owed.
+                BACDebug.log("delegation", "notice for “\(s.title)” NOT typed: \(r.rawValue)")
+                return
+            }
             if out.contains(CodingTaskEngine.typeHeldMarker) {
                 BACDebug.log("delegation", "held notice for “\(s.title)”: a menu or dialog is open in its tab")
                 return

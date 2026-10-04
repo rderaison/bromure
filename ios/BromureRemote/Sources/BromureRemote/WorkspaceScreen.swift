@@ -1078,11 +1078,14 @@ private struct TranscriptReaderView: View {
         guard !text.isEmpty, !sending else { return }
         sending = true
         Task {
-            _ = try? await controller.guestExec(
+            // Guarded: nothing is typed unless the agent holds the tab (a
+            // bare shell would run it) — the draft stays then.
+            let out = (try? await controller.guestExec(
                 profileID,
                 command: CodingTaskEngine.typeCommand(tabIndex: window, text: text),
-                timeout: 20)
-            await MainActor.run { draft = ""; sending = false }
+                timeout: 20)) ?? ""
+            let refused = PaneTypeGuard.refusal(in: out) != nil
+            await MainActor.run { if !refused { draft = "" }; sending = false }
             await refreshNow()   // reflect the sent message immediately
         }
     }

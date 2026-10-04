@@ -529,3 +529,216 @@ enum AgentPhrases {
         return out
     }
 }
+
+// MARK: - Input box
+
+/// What sits in an agent's input box right now, read from a pane capture
+/// WITH its escapes (`tmux capture-pane -p -e`): the host must never type a
+/// message onto text already there (a stray "/exit" + "Please continue…"
+/// went out as "/exitPlease continue…").
+///
+/// The box is found by shape — a prompt glyph row with a horizontal rule
+/// (or box edge) right above or below it, near the bottom of the screen —
+/// and what follows the glyph is read without the agent's placeholder
+/// ("Try …", "Ask Codex to do anything": dim or grey) and without its
+/// drawn cursor (inverse video). Anything else there is a draft.
+enum AgentInputBox {
+    enum Content: Equatable {
+        /// The box is there and empty.
+        case empty
+        /// Text in the box (its first line, trimmed).
+        case text(String)
+        /// No input box recognized (a menu, a busy screen, an unknown TUI).
+        case unknown
+    }
+
+    /// Prompt glyphs agents draw at the start of their input row.
+    static let promptGlyphs: [Character] = ["❯", "›", ">", "▌"]
+
+    /// One screen row: its plain text, and for each character whether it
+    /// counts as typed content (not placeholder/cursor styling).
+    struct Row {
+        var text: String = ""
+        var content: [Bool] = []
+    }
+
+    /// Splits an `-e` capture into rows, tracking SGR state: dim (2), grey
+    /// foregrounds (90, 256-colour greys, near-grey truecolor) and inverse
+    /// video (7) mark characters as not-content.
+    static func rows(_ capture: String) -> [Row] {
+        var rows: [Row] = []
+        for rawLine in capture.split(separator: "\n", omittingEmptySubsequences: false) {
+            var row = Row()
+            var dim = false, grey = false, inverse = false
+            var it = rawLine.unicodeScalars.makeIterator()
+            var pending: Unicode.Scalar? = nil
+            func next() -> Unicode.Scalar? {
+                if let p = pending { pending = nil; return p }
+                return it.next()
+            }
+            while let c = next() {
+                if c == "\u{1B}" {
+                    guard let k = next() else { break }
+                    if k == "[" {
+                        var params = ""
+                        var final: Unicode.Scalar? = nil
+                        while let p = next() {
+                            if (0x40...0x7E).contains(p.value) { final = p; break }
+                            params.unicodeScalars.append(p)
+                        }
+                        if final == "m" {
+                            applySGR(params, dim: &dim, grey: &grey, inverse: &inverse)
+                        }
+                    } else if k == "]" {
+                        // OSC: up to BEL or ST.
+                        while let p = next() {
+                            if p == "\u{07}" { break }
+                            if p == "\u{1B}" { _ = next(); break }
+                        }
+                    }
+                    continue
+                }
+                if c == "\r" { continue }
+                row.text.unicodeScalars.append(c)
+                // Content per Character: combining scalars ride on the last.
+                if row.content.count < row.text.count {
+                    row.content.append(!(dim || grey || inverse))
+                }
+            }
+            rows.append(row)
+        }
+        return rows
+    }
+
+    private static func applySGR(_ params: String, dim: inout Bool, grey: inout Bool, inverse: inout Bool) {
+        let p = params.isEmpty ? [0] : params.split(separator: ";", omittingEmptySubsequences: false)
+            .map { Int($0) ?? 0 }
+        var i = 0
+        while i < p.count {
+            switch p[i] {
+            case 0: dim = false; grey = false; inverse = false
+            case 2: dim = true
+            case 22: dim = false
+            case 7: inverse = true
+            case 27: inverse = false
+            case 90: grey = true
+            case 30...37, 91...97, 39: grey = false
+            case 38:
+                if i + 2 < p.count, p[i + 1] == 5 {
+                    let n = p[i + 2]
+                    grey = n == 8 || (232...252).contains(n) || [59, 102, 145, 188].contains(n)
+                    i += 2
+                } else if i + 4 < p.count, p[i + 1] == 2 {
+                    let (r, g, b) = (p[i + 2], p[i + 3], p[i + 4])
+                    let spread = max(r, g, b) - min(r, g, b)
+                    grey = spread <= 20 && (70...200).contains(r)
+                    i += 4
+                }
+            default: break
+            }
+            i += 1
+        }
+    }
+
+    /// The input box's content in a capture (see the type's notes).
+    static func content(_ capture: String) -> Content {
+        var rows = rows(capture)
+        while let last = rows.last, last.text.trimmingCharacters(in: .whitespaces).isEmpty {
+            rows.removeLast()
+        }
+        guard !rows.isEmpty else { return .unknown }
+        let low = max(0, rows.count - 20)
+        func isRule(_ i: Int) -> Bool {
+            rows.indices.contains(i) && AgentScreen.isRule(rows[i].text)
+        }
+        for i in stride(from: rows.count - 1, through: low, by: -1) {
+            let text = rows[i].text
+            // Leading blanks and a box edge, then the glyph.
+            var idx = text.startIndex
+            var off = 0
+            while idx < text.endIndex, text[idx] == " " || "│┃|".contains(text[idx]) {
+                idx = text.index(after: idx); off += 1
+            }
+            guard idx < text.endIndex, promptGlyphs.contains(text[idx]) else { continue }
+            let after = text.index(after: idx)
+            guard after == text.endIndex || text[after] == " " || text[after] == "\u{00a0}" else { continue }
+            // An input box, not an echoed message: a rule hugs it.
+            guard isRule(i - 1) || isRule(i + 1) || isRule(i - 2) || isRule(i + 2) else { continue }
+            let flags = rows[i].content
+            var typed = ""
+            var k = after, n = off + 1
+            while k < text.endIndex {
+                let ch = text[k]
+                if n < flags.count, flags[n], !"│┃|".contains(ch) { typed.append(ch) }
+                else { typed.append(" ") }
+                k = text.index(after: k); n += 1
+            }
+            var t = typed.trimmingCharacters(in: .whitespaces)
+            // Continuation rows of a multi-line draft below the prompt row.
+            if t.isEmpty, i + 1 < rows.count, !isRule(i + 1) {
+                let next = AgentScreen.unboxed(rows[i + 1].text).trimmingCharacters(in: .whitespaces)
+                let nextContent = rows[i + 1].content.contains(true) && !next.isEmpty
+                if nextContent, rows.indices.contains(i + 2), isRule(i + 2) {
+                    t = next
+                }
+            }
+            return t.isEmpty ? .empty : .text(t)
+        }
+        return .unknown
+    }
+
+    /// The probe for TUIs that draw no ruled box but keep the terminal's
+    /// own cursor in their input line (prompt_toolkit — Kimi): the cursor
+    /// state, then the visible screen.
+    nonisolated static func cursorProbeCommand(target t: String) -> String {
+        "tmux display-message -p -t \(t) '#{cursor_flag} #{cursor_x} #{cursor_y} #{pane_height}' 2>/dev/null; "
+            + "tmux capture-pane -p -t \(t) 2>/dev/null"
+    }
+
+    /// Reads `cursorProbeCommand`'s output: text typed just left of a
+    /// visible cursor sitting in the screen's bottom rows is a draft; a
+    /// prompt (a glyph or a blank right before the cursor) is an empty box.
+    /// Hidden cursor or a cursor up the screen: unknown.
+    static func cursorContent(_ probe: String) -> Content {
+        var lines = probe.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard !lines.isEmpty else { return .unknown }
+        let head = lines.removeFirst().split(separator: " ").compactMap { Int($0) }
+        guard head.count == 4, head[0] == 1 else { return .unknown }
+        let (x, y, height) = (head[1], head[2], head[3])
+        guard y >= max(0, height - 12), lines.indices.contains(y), x > 0 else { return .unknown }
+        // Columns → characters (wide glyphs take two columns).
+        var left = ""
+        var col = 0
+        for ch in lines[y] {
+            if col >= x { break }
+            left.append(ch)
+            col += ch.unicodeScalars.contains { $0.properties.isEmojiPresentation
+                || (0x1100...0x115F).contains($0.value) || (0x2E80...0xA4CF).contains($0.value)
+                || (0xAC00...0xD7A3).contains($0.value) || (0xF900...0xFAFF).contains($0.value)
+                || (0xFF00...0xFF60).contains($0.value) || (0xFFE0...0xFFE6).contains($0.value) } ? 2 : 1
+        }
+        guard let last = left.last else { return .unknown }
+        let promptEnds: Set<Character> = Set(promptGlyphs).union(["$", "#", "%", ":", "»", "✨", "💫", "▶"])
+        if last.isWhitespace || promptEnds.contains(last) { return .empty }
+        // The draft: back to the prompt (a glyph followed by a space).
+        var draft = Substring(left)
+        if let g = left.lastIndex(where: { promptEnds.contains($0) }),
+           left.index(after: g) < left.endIndex, left[left.index(after: g)] == " " {
+            draft = left[left.index(after: g)...]
+        }
+        let t = draft.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? .empty : .text(t)
+    }
+
+    /// Is `draft` (as the box shows it) the start of `text` — Bromure's own
+    /// message, typed by an earlier try that held off before Enter?
+    static func isOwn(_ draft: String, of text: String) -> Bool {
+        func squash(_ s: String) -> String {
+            s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+        let d = squash(draft), t = squash(text)
+        guard !d.isEmpty else { return false }
+        let probe = String(d.prefix(40))
+        return t.hasPrefix(probe)
+    }
+}

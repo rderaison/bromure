@@ -899,6 +899,38 @@ public struct ImportedConfigFile: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// How an approved coding task leaves the board: merged into the branch it
+/// came from (the default), or opened as a pull request on the forge.
+public enum TaskFinish: String, Codable, CaseIterable, Sendable {
+    case merge
+    case pullRequest
+
+    /// UserDefaults key mirroring the Preferences template's choice.
+    public static let appDefaultKey = "codingTasks.finish"
+
+    /// The app-wide default (Preferences). Merge unless set otherwise.
+    public static var appDefault: TaskFinish {
+        get {
+            (UserDefaults.standard.string(forKey: appDefaultKey)).flatMap(TaskFinish.init(rawValue:)) ?? .merge
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: appDefaultKey) }
+    }
+
+    /// The effective choice: the task's own, else its workspace's, else the
+    /// app's.
+    public static func resolve(task: TaskFinish?, workspace: TaskFinish?,
+                               app: TaskFinish) -> TaskFinish {
+        task ?? workspace ?? app
+    }
+
+    public var label: String {
+        switch self {
+        case .merge: return NSLocalizedString("Merge into the branch", comment: "task finish preference")
+        case .pullRequest: return NSLocalizedString("Open a pull request", comment: "task finish preference")
+        }
+    }
+}
+
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public enum Tool: String, Codable, CaseIterable, Sendable {
         case claude
@@ -1722,6 +1754,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// via the LaunchAgent installed while any profile has this on). Default off.
     public var bootAtStartup: Bool
 
+    /// What happens when a coding task done in this workspace is approved
+    /// on the board: merged into its branch, or opened as a pull request.
+    /// nil = the app-wide default (Preferences, i.e. the template's own
+    /// value — see `TaskFinish.appDefault`).
+    public var taskFinish: TaskFinish? = nil
+
     public enum NetworkMode: String, Codable, CaseIterable, Sendable {
         case nat
         case bridged
@@ -2075,6 +2113,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case sshKeyRequiresApproval
         case closeAction
         case bootAtStartup
+        case taskFinish
         case mcpServers
         case homeModel
         case homeImageGB
@@ -2201,6 +2240,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .ask
         bootAtStartup = try c.decodeIfPresent(Bool.self, forKey: .bootAtStartup) ?? false
+        taskFinish = try c.decodeIfPresent(TaskFinish.self, forKey: .taskFinish)
         mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
         // Pre-upgrade profiles have no homeModel key → they stay on the
         // legacy virtiofs home until the user accepts the migration.
@@ -2382,6 +2422,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
         if bootAtStartup { try c.encode(bootAtStartup, forKey: .bootAtStartup) }
+        try c.encodeIfPresent(taskFinish, forKey: .taskFinish)
         // Encode homeModel unconditionally: its ABSENCE is what marks a
         // pre-upgrade profile (decoder defaults to .virtiofs), so a new
         // ext4 profile must always carry the key explicitly.
@@ -3208,6 +3249,9 @@ public final class ProfileStore {
         stripped.id = Self.templateID
         stripped.name = "Defaults"
         let secrets = ProfileSecrets.extract(stripping: &stripped)
+        // The template's finish choice is the app-wide default the board
+        // reads without decrypting the template (see TaskFinish.appDefault).
+        TaskFinish.appDefault = stripped.taskFinish ?? .merge
         let data = try JSONEncoder.iso8601().encode(stripped)
         try fm.createDirectory(at: templateURL.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
@@ -3252,6 +3296,9 @@ public final class ProfileStore {
         // workspace until the user ticks some (nil = "every workspace" stays
         // only for workspaces that already stored it).
         p.agentReach = []
+        // The template's finish choice is the APP default, not a
+        // per-workspace override: a new workspace follows it live.
+        p.taskFinish = nil
         return p
     }
 
@@ -5441,9 +5488,49 @@ public final class ProfileStore {
                 _wt_flags=$(printf '%s' " $_wt_flags " | sed 's/ --continue / /')
             fi ;;
         esac
+        # Type $1 into this tab's agent once it is up, with a beat for its
+        # input box to draw — a fallback for a launch that hands Kimi its
+        # opening message here (the host types board messages itself).
+        # "Up" is read from the pane's process list: an agent started from
+        # this file runs in the shell's process group, so tmux's
+        # pane_current_command keeps naming bash while it runs.
+        _bromure_type_when_up() {
+            _tw_pane="${TMUX_PANE:-}"
+            [ -n "$_tw_pane" ] || return 0
+            _tw_tty=$(tmux display-message -p -t "$_tw_pane" '#{pane_tty}' 2>/dev/null)
+            _tw_tty="${_tw_tty#/dev/}"
+            _tw_i=0
+            while [ "$_tw_i" -lt 180 ]; do
+                sleep 1; _tw_i=$((_tw_i + 1))
+                ps -t "$_tw_tty" -o args= 2>/dev/null | grep -v -E '^-?(bash|sh)( |$)' \\
+                    | grep -q -E '(^|[^A-Za-z0-9])kimi([^A-Za-z]|$)' || continue
+                sleep 4
+                tmux send-keys -t "$_tw_pane" -l -- "$1" && sleep 1 \\
+                    && tmux send-keys -t "$_tw_pane" Enter
+                return 0
+            done
+        }
+        _wt_interactive="${BROMURE_AC_WT_INTERACTIVE:-}"; unset BROMURE_AC_WT_INTERACTIVE
         if command -v "$_wt_tool" >/dev/null 2>&1; then
             printf '\\033[2m[bromure-ac] starting %s in worktree…\\033[0m\\n' "$_wt_tool"
-            if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
+            if [ "$_wt_tool" = "kimi" ] && [ -n "$_wt_interactive" ]; then
+                # A coding-board task (agentd sets BROMURE_AC_WT_INTERACTIVE):
+                # Kimi must stay in its TUI so review feedback and the
+                # landing brief reach the SAME conversation — the one-shot
+                # --prompt run exits and leaves a bare shell, where typed
+                # feedback ran as bash commands. --auto is Kimi's unattended
+                # mode (refused with --prompt, fine here). The host types the
+                # opening message in once the TUI is up; a prompt handed over
+                # here anyway is typed by the fallback above. -c (a
+                # resume) stays in $_wt_flags.
+                if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
+                    _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
+                    unset BROMURE_AC_WT_PROMPT
+                    ( _bromure_type_when_up "$_wt_prompt" </dev/null >/dev/null 2>&1 & )
+                fi
+                "$_wt_tool" $_wt_flags --auto
+                _wt_rc=$?
+            elif [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
                 _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
                 unset BROMURE_AC_WT_PROMPT
                 if [ "$_wt_tool" = "kimi" ]; then
@@ -5455,7 +5542,12 @@ public final class ProfileStore {
                     # starts with "-" unambiguously. The process exits when
                     # the turn completes — its own Stop hook reports done,
                     # and so does the clean-exit path below.
-                    "$_wt_tool" --prompt="$_wt_prompt"
+                    # A landing hand-off resumes kimi's own conversation
+                    # (-c, the one flag kept).
+                    case " $_wt_flags " in
+                        *" -c "*) "$_wt_tool" -c --prompt="$_wt_prompt" ;;
+                        *) "$_wt_tool" --prompt="$_wt_prompt" ;;
+                    esac
                     _wt_rc=$?
                     # One-shot mode exits when the turn ends, dropping to this
                     # shell. Point the way back in — the session is still there.
@@ -5499,13 +5591,18 @@ public final class ProfileStore {
             # (The automation engine still only ACTS on a done from a
             # hook-driven agent — see Profile.Tool.hasReliableDoneSignal.)
             if [ "$_wt_rc" -ne 0 ]; then
-                printf '\033[31m[bromure-ac] %s exited with status %s\033[0m\n' "$_wt_tool" "$_wt_rc"
+                printf '\\033[31m[bromure-ac] %s exited with status %s\\033[0m\\n' "$_wt_tool" "$_wt_rc"
                 sh "$HOME/.bromure/agent-status.sh" needsInput 2>/dev/null || true
             else
                 sh "$HOME/.bromure/agent-status.sh" done 2>/dev/null || true
             fi
+        else
+            # Not installed (and the install above failed): the same marker
+            # the host's launch watch looks for, so it fails fast.
+            printf '\\033[31m[bromure-ac] %s exited with status 127 (command not found)\\033[0m\\n' "$_wt_tool"
+            sh "$HOME/.bromure/agent-status.sh" needsInput 2>/dev/null || true
         fi
-        unset _wt_tool _wt_prompt _wt_flags _wt_dir
+        unset _wt_tool _wt_prompt _wt_flags _wt_dir _wt_interactive
     fi
 
     if [ "$BROMURE_AC_REGISTER" = "1" ] \\

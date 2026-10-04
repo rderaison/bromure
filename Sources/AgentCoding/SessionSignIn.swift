@@ -32,6 +32,20 @@ final class ProxySignIn {
 }
 
 extension ACAppDelegate {
+    /// Leave the agent (Ctrl-C twice, C-u for a stray keystroke) in ONE
+    /// window — resolved once to its tmux id, so the keys can't follow the
+    /// index to another tab — then type the login line only once a shell
+    /// holds that window's foreground (an agent would take it as a message).
+    nonisolated static func loginKeysCommand(window w: Int, line: String) -> String {
+        PaneTypeGuard.resolve(.index(w))
+            + "[ -n \"$_bt\" ] && { tmux send-keys -t \"$_bt\" C-c; sleep 0.4; tmux send-keys -t \"$_bt\" C-c; "
+            + "sleep 1.5; tmux send-keys -t \"$_bt\" C-u; }; "
+            + PaneTypeGuard.guardFunction(.index(w, foreground: .shell))
+            // The agent may take a few seconds to wind down.
+            + "_bn=0; until _bg >/dev/null; do _bn=$((_bn+1)); [ $_bn -ge 8 ] && break; sleep 1; done; "
+            + "if _bg; then \(PaneTypeGuard.literalSend(line)) && sleep 0.2 && tmux send-keys -t \"$_bt\" Enter; fi"
+    }
+
     /// Each CLI's login subcommand — straight to the browser hand-off, no
     /// wizard in between (nobody answers a picker in a hidden tab).
     static func loginCommand(for provider: SubscriptionProvider) -> String {
@@ -119,9 +133,7 @@ extension ACAppDelegate {
         Task { @MainActor in
             _ = try? await self.guestExec(
                 profileID: profileID,
-                command: "tmux send-keys -t bromure:\(w) C-c; sleep 0.4; tmux send-keys -t bromure:\(w) C-c; "
-                    + "sleep 1.5; tmux send-keys -t bromure:\(w) C-u; "
-                    + "tmux send-keys -t bromure:\(w) -l '\(cmd)'; sleep 0.2; tmux send-keys -t bromure:\(w) Enter",
+                command: Self.loginKeysCommand(window: w, line: cmd),
                 timeout: 20)
         }
         signIn.timeout = Task { @MainActor [weak self] in

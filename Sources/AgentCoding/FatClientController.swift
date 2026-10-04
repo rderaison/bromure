@@ -2137,6 +2137,31 @@ final class RemoteHostController {
 #if os(macOS)
 // MARK: - Connection status overlay
 
+/// Under the mirror's stage: the window's themed canvas — never a black
+/// stage — and, until the host's first snapshot lands, a "Connecting…"
+/// cue. Anything mounted on the stage covers it.
+struct RemoteStagePlaceholderView: View {
+    @Bindable var controller: RemoteHostController
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: .acCanvas)
+            if !controller.hasSnapshot {
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.regular)
+                    Text(NSLocalizedString("Connecting…", comment: "fat client stage"))
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Text(NSLocalizedString("Waiting for the host's first update.", comment: "fat client stage"))
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
+
 /// Shown over the stage while the mirror isn't connected, so an empty sidebar
 /// reads as "not connected yet" (and how to fix it) instead of "no workspaces".
 /// The fat client authenticates by SSH public key only — no password prompt —
@@ -2598,6 +2623,10 @@ final class RemoteHostWindow: NSWindow {
     let controller: RemoteHostController
 
     private let stage = NSView()
+    /// Under the stage: what shows while nothing occupies it (see
+    /// RemoteStagePlaceholderView).
+    private lazy var stagePlaceholder = NSHostingView(
+        rootView: RemoteStagePlaceholderView(controller: controller))
     private var sidebarHost: NSHostingView<SessionSidebar>!
     private var statusHost: NSHostingView<RemoteConnectionStatusView>!
     /// The "Reconnecting…" layer over sidebar + stage (see RemoteReconnectingView).
@@ -3056,8 +3085,15 @@ final class RemoteHostWindow: NSWindow {
         sidebarHost.sizingOptions = []
         stage.translatesAutoresizingMaskIntoConstraints = false
         stage.wantsLayer = true
-        stage.layer?.backgroundColor = NSColor.black.cgColor
+        // Clear: the placeholder underneath paints the themed canvas (and
+        // "Connecting…" before the first snapshot). A black stage flashed
+        // before every first render — a hosting view (the task board, the
+        // sessions home) is transparent until SwiftUI has laid it out.
+        stage.layer?.backgroundColor = NSColor.clear.cgColor
+        stagePlaceholder.translatesAutoresizingMaskIntoConstraints = false
+        stagePlaceholder.sizingOptions = []
         content.addSubview(sidebarHost)
+        content.addSubview(stagePlaceholder)
         // The session header rides above the stage (height 0 until a
         // session is on stage), spanning the stage's width.
         sessionHeaderSlot.translatesAutoresizingMaskIntoConstraints = false
@@ -3271,6 +3307,10 @@ final class RemoteHostWindow: NSWindow {
             fpHost.topAnchor.constraint(equalTo: content.topAnchor),
             fpHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             filePaneWidthConstraint,
+            stagePlaceholder.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            stagePlaceholder.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            stagePlaceholder.topAnchor.constraint(equalTo: stage.topAnchor),
+            stagePlaceholder.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
             statusHost.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             statusHost.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             statusHost.topAnchor.constraint(equalTo: stage.topAnchor),
@@ -3892,7 +3932,7 @@ final class RemoteHostWindow: NSWindow {
                     // No remote repo listing: the editor falls back to typing
                     // owner/name.
                     fetchRepos: { _ in [] }))
-            let host = NSHostingView(rootView: view)
+            let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []   // never let board sizing resize the mirror window
             host.translatesAutoresizingMaskIntoConstraints = false
             kanbanHost = host
@@ -3924,21 +3964,44 @@ final class RemoteHostWindow: NSWindow {
                     task.profileID, command: cmd, timeout: 30) else { return nil }
                 return TaskReviewData.parse(out)
             },
+            fetchSummary: { [weak self] task, target in
+                guard let self, let branch = task.branch,
+                      let root = task.rootRepo ?? task.worktreeDir else { return nil }
+                let cmd = TaskReviewSummary.command(root: root, worktreeDir: task.worktreeDir,
+                                                    branch: branch, target: target)
+                guard let out = try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 20) else { return nil }
+                return TaskReviewSummary.parse(out)
+            },
+            fetchFinalReport: { [weak self] task in
+                guard let self, let data = await self.controller.fetchTaskTranscript(task.id) else { return nil }
+                return TaskReviewSummary.finalReport(fromTranscript: String(decoding: data, as: UTF8.self),
+                                                     agent: task.tool.rawValue)
+            },
             openTerminal: { [weak self] task in self?.jumpToTask(task) },
+            openTranscript: { [weak self] task in self?.taskTranscriptWindows.open(taskID: task.id) },
             accentHex: { [weak self] id in
                 self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
             },
             workspaceName: { [weak self] id in
                 self?.controller.profile(for: id)?.name ?? ""
             },
-            sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
-            merge: { [weak self] id, target, squash, cleanup in
-                var body: [String: Any] = ["squash": squash, "cleanup": cleanup]
-                if let target { body["target"] = target }
-                self?.controller.taskCommand(id, "merge", body: body)
+            finishPreference: { [weak self] task in
+                TaskFinish.resolve(task: task.finish,
+                                   workspace: self?.controller.profile(for: task.profileID)?.taskFinish,
+                                   app: .merge)
             },
-            openPR: { [weak self] id in self?.controller.taskCommand(id, "open-pr") },
+            sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
+            land: { [weak self] id, mode, target, keep in
+                var body: [String: Any] = ["mode": mode.rawValue, "keepBranch": keep]
+                if let target { body["target"] = target }
+                self?.controller.taskCommand(id, "land", body: body)
+            },
+            retryLanding: { [weak self] id in self?.controller.taskCommand(id, "retry-landing") },
+            cancelLanding: { [weak self] id in self?.controller.taskCommand(id, "cancel-landing") },
             markDone: { [weak self] id in self?.controller.taskCommand(id, "mark-done") },
+            markMerged: { [weak self] id in self?.controller.taskCommand(id, "mark-merged") },
+            discard: { [weak self] id in self?.controller.taskCommand(id, "close-no-merge") },
             fetchBranches: { [weak self] task in
                 guard let self, let root = task.rootRepo, !root.isEmpty else { return [] }
                 let cmd = "git -C '" + root.replacingOccurrences(of: "'", with: "'\\''")
@@ -3991,10 +4054,19 @@ final class RemoteHostWindow: NSWindow {
                       let index = await self.remoteTabIndex(profileID: profileID,
                                                             branch: branch)
                 else { return false }
-                return (try? await self.controller.guestExec(
+                // Only into a RUNNING agent: a tab whose agent exited is a
+                // bare shell, which would run the text as commands. Asked of
+                // the pane's process tree (AgentPaneProbe).
+                let probe = (try? await self.controller.guestExec(
+                    profileID, command: AgentPaneProbe.command(window: index), timeout: 8)) ?? ""
+                guard case .running? = AgentPaneProbe.parse(probe) else { return false }
+                // By the task's branch, re-checked in the guest at send time:
+                // the index above may be another tab's by then.
+                guard let out = try? await self.controller.guestExec(
                     profileID,
-                    command: CodingTaskEngine.typeCommand(tabIndex: index, text: text),
-                    timeout: 20)) != nil
+                    command: CodingTaskEngine.typeCommand(target: .task(branch: branch), text: text),
+                    timeout: 20) else { return false }
+                return PaneTypeGuard.refusal(in: out) == nil
             },
             sendKeys: { [weak self] profileID, branch, keys in
                 guard let self, !keys.isEmpty,
@@ -4194,9 +4266,11 @@ final class RemoteHostWindow: NSWindow {
                     jumpToRun: { [weak self] task in self?.jumpToTask(task) },
                     moveToTesting: { c.taskCommand($0, "to-testing") },
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
-                    merge: { c.taskCommand($0, "merge") },
+                    merge: { [weak self] id in self?.taskReviewWindows.open(taskID: id, confirm: .merge) },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
                     markDone: { c.taskCommand($0, "mark-done") },
+                    stop: { c.taskCommand($0, "stop") },
+                    startOver: { c.taskCommand($0, "start-over") },
                     delete: { c.deleteTask($0) },
                     save: { c.upsertTask($0) },
                     validate: { task in
@@ -4230,8 +4304,10 @@ final class RemoteHostWindow: NSWindow {
                         }
                     },
                     answer: { id, text in c.taskCommand(id, "answer", body: ["text": text]) },
-                    recall: { c.taskCommand($0, "recall") }))
-            let host = NSHostingView(rootView: view)
+                    recall: { c.taskCommand($0, "recall") },
+                    retryLanding: { c.taskCommand($0, "retry-landing") }),
+                sessionStore: c.sessionStore)
+            let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false
             taskBoardHost = host
@@ -5473,7 +5549,9 @@ final class RemoteHostWindow: NSWindow {
             }
             return ["ok": true,
                     "boardShown": controller.listModel.taskBoardSelected,
-                    "backlog": tasks.filter { $0.stage == .backlog }.count,
+                    // What the Backlog column shows (a planned brief is
+                    // superseded by its phases).
+                    "backlog": controller.taskStore.backlogTasks().count,
                     "planning": tasks.filter { $0.stage == .planning }.count,
                     "inProgress": tasks.filter { $0.stage == .inProgress }.count,
                     "testing": tasks.filter { $0.stage == .testing }.count,

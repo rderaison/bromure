@@ -176,14 +176,21 @@ extension AgentSessionEngine {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
         }
-        guard store.session(s.id) != nil else { return }
+        guard let current = store.session(s.id), current.windowIndex == w else { return }
         let words: [String] = [s.tool.rawValue,
                                Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)),
                                Self.roleFlags(for: s)]
         let resume = words.filter { !$0.isEmpty }.joined(separator: " ")
         let cmd = "source ~/.bashrc >/dev/null 2>&1; clear; " + resume
-        _ = try? await delegate.guestExec(
-            profileID: pid, command: CodingTaskEngine.typeCommand(tabIndex: w, text: cmd), timeout: 15)
+        // The session's own window, and only once its shell is in front.
+        let target = Self.paneTarget(current, foreground: .shell) ?? .index(w, foreground: .shell)
+        let out = (try? await delegate.guestExec(
+            profileID: pid, command: CodingTaskEngine.shellLineCommand(target: target, line: cmd),
+            timeout: 15)) ?? ""
+        if let r = PaneTypeGuard.refusal(in: out) {
+            BACDebug.log("models", "restart “\(s.title)” refused (\(r.rawValue)) — nothing typed")
+            return
+        }
         if let tab = delegate.pane(for: pid)?.model.tabs.first(where: { $0.index == w }) {
             tab.agentStatus = .done
         }

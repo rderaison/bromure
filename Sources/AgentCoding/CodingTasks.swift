@@ -69,6 +69,10 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var validationRequestedAt: Date?
     /// Why the last start attempt failed, shown on the backlog card.
     var lastError: String?
+    /// A start is being checked (workspace up, folder present, a repo of
+    /// its own) — the card stays where it is with a "Starting…" spinner and
+    /// moves to In Progress only once the launch can actually happen.
+    var startingAt: Date?
     /// The implementation plan the agent recorded via board_set_plan —
     /// shown in the review window above the diff.
     var plan: String?
@@ -118,6 +122,37 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var mergeReport: String?
     /// The pull request the assignee opened for it (found in its delivery).
     var pullRequestURL: String?
+
+    /// How this task leaves review when approved (nil = its workspace's,
+    /// else the app's choice — see `TaskFinish.resolve`).
+    var finish: TaskFinish?
+    /// The landing under way (or stuck) — set from the moment the user
+    /// approves a merge or a pull request until the card goes Done.
+    var landing: TaskLanding?
+    /// How a Done card got there (nil on cards finished by older builds —
+    /// `effectiveCompletion` derives one from `merged`/`prOpened`).
+    var completion: TaskCompletion?
+    /// Files the branch changes against its target, as last measured (the
+    /// review summary). 0 = a task that produced no code; nil = unknown.
+    var codeChanges: Int?
+    /// When the idle Review sweep put the agent's session away (its tab
+    /// closed after ~2 h in Review with nobody touching it).
+    var sessionParkedAt: Date?
+    /// The agent session the task's launch opened (bound once the agent is
+    /// seen up) — how the card finds its live state even when the tab or
+    /// session doesn't carry the worktree branch.
+    var sessionID: UUID? = nil
+    /// A planned brief: when its planning session ended normally with
+    /// phases filed — the plan is complete. Only such a brief can roll up
+    /// to Done with its phases (see `briefRollUp`).
+    var planCompletedAt: Date? = nil
+    /// How many phases the planner said the plan has (board_set_plan
+    /// phaseCount). nil: not stated.
+    var plannedPhases: Int? = nil
+    /// The branch a task stopped back to the Backlog was on ("wt/…") — its
+    /// worktree stays in the workspace, and the next start resumes there
+    /// instead of cutting (and orphaning) a new one.
+    var resumeBranch: String? = nil
 
     /// The first GitHub pull-request link in `text`.
     static func pullRequestURL(in text: String) -> String? {
@@ -227,6 +262,175 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         if let done = validatedAt, done >= requested { return false }
         return Date().timeIntervalSince(requested) < 3600
     }
+
+    /// A start is being checked (see `startingAt`). Bounded so a host
+    /// crash mid-check can't pin the spinner (a cold boot plus a clone
+    /// fits well inside it).
+    var isStarting: Bool {
+        guard let at = startingAt, stage == .backlog || stage == .planning else { return false }
+        return Date().timeIntervalSince(at) < 900
+    }
+
+    /// A task with nothing to merge: no branch at all, a delegated delivery
+    /// whose worktree was never found, or a branch measured with no change
+    /// against its target. Review offers Mark Done, not git.
+    var isNoCode: Bool {
+        if branch == nil && branchSlug == nil { return true }
+        if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return true }
+        return codeChanges == 0
+    }
+
+    /// Who does (and lands) the task, for cards: the assignee ("@hotfixes")
+    /// or the agent a new-agent task ran ("Kimi Code").
+    var workerName: String {
+        if let a = assignment, a.kind != .worktree { return a.label }
+        return tool.displayName
+    }
+
+    /// The branch this task lands in: the landing's own target while one
+    /// runs, else where the work forked from.
+    var landingTarget: String? {
+        landing?.target ?? parentBranch
+    }
+
+    /// How the card got to Done — recorded, or derived for cards an older
+    /// build finished.
+    var effectiveCompletion: TaskCompletion? {
+        if let completion { return completion }
+        guard stage == .done else { return nil }
+        if merged { return .merged(target: parentBranch ?? "", verified: true, by: nil) }
+        if prOpened == true { return .prOpened(url: pullRequestURL) }
+        return .closedWithoutMerge
+    }
+
+    /// Old builds kept an in-flight merge in `mergingAt`: it becomes an
+    /// agent landing into the parent (the guest merge tab finishes it);
+    /// the old field is cleared so it never writes again.
+    static func migrateLegacy(_ t: CodingTask) -> CodingTask {
+        var t = t
+        if let at = t.mergingAt {
+            if t.landing == nil, t.stage == .testing {
+                t.landing = TaskLanding(mode: .merge, target: t.parentBranch ?? "",
+                                        phase: .agentLanding, startedAt: at)
+            }
+            t.mergingAt = nil
+        }
+        return t
+    }
+}
+
+/// An approved task on its way out of Review.
+struct TaskLanding: Codable, Equatable, Sendable {
+    enum Mode: String, Codable, Sendable { case merge, squash, pr }
+    enum Phase: String, Codable, Sendable {
+        /// Reading the branch and the target on the machine.
+        case checking
+        /// Bromure is merging it itself (a clean fast-forward).
+        case fastMerging
+        /// The agent that wrote it is rebasing, testing and merging (or
+        /// pushing and opening the pull request).
+        case agentLanding
+        /// Stuck — `detail` says why; the user decides.
+        case needsYou
+        /// In — the card is about to go Done.
+        case landed
+    }
+    var mode: Mode
+    var target: String
+    var phase: Phase
+    var detail: String?
+    var startedAt: Date
+    var prURL: String?
+    var verified: Bool = false
+    /// Keep the branch (and its checkout) once it has landed.
+    var keepBranch: Bool = false
+    /// The agent's latest line while it lands, for the card — only ever
+    /// from after the brief reached it.
+    var agentLine: String?
+    /// The landing brief is on its way to the agent (typed in, or its
+    /// conversation being resumed): not landing yet. nil once delivered.
+    var handingOver: Bool?
+}
+
+/// How a Done card got there — what its card says.
+enum TaskCompletion: Codable, Equatable, Sendable {
+    /// Merged into `target`; `verified` = Bromure saw it in the target's
+    /// history; `by` = who reported it, when Bromure couldn't look.
+    case merged(target: String, verified: Bool, by: String?)
+    case prOpened(url: String?)
+    case markedDone(byUser: Bool)
+    case closedWithoutMerge
+}
+
+/// What cards and the review window say about a task's way out.
+enum TaskLandingText {
+    /// The Review card's state line (nil: nothing to say).
+    static func line(for t: CodingTask) -> String? {
+        switch TaskLandingLine.of(t) {
+        case .readyToLand?:
+            return NSLocalizedString("Ready to land", comment: "task card")
+        case .handingOver(let agent)?:
+            return String(format: NSLocalizedString("Handing over to %@…", comment: "task card"), agent)
+        case .fastMerging(let target)?:
+            return String(format: NSLocalizedString("Landing — merging into %@…", comment: "task card"), target)
+        case .landing(let agent, let target, let mode, _)?:
+            return mode == .pr
+                ? String(format: NSLocalizedString("Landing — %1$@ is opening a pull request into %2$@…", comment: "task card"), agent, target)
+                : String(format: NSLocalizedString("Landing — %1$@ is merging into %2$@…", comment: "task card"), agent, target)
+        case .needsYou(let why)?:
+            return String(format: NSLocalizedString("Needs you — %@", comment: "task landing"), why)
+        case nil:
+            return nil
+        }
+    }
+
+    /// A Done card's outcome line, from the recorded provenance.
+    static func done(_ t: CodingTask) -> String {
+        switch t.effectiveCompletion {
+        case .merged(let target, let verified, let by)?:
+            let into = target.isEmpty
+                ? NSLocalizedString("Merged", comment: "task card: done")
+                : String(format: NSLocalizedString("Merged into %@", comment: "task card: done"), target)
+            if verified { return into }
+            if by == "user" {
+                return into + " · " + NSLocalizedString("marked by you", comment: "task card: done")
+            }
+            return into + " · " + String(format: NSLocalizedString("reported by %@, not verified", comment: "task card: done"),
+                                         by ?? NSLocalizedString("the agent", comment: "task card: done"))
+        case .prOpened(let url)?:
+            if let url, let n = URL(string: url)?.lastPathComponent, Int(n) != nil {
+                return String(format: NSLocalizedString("PR #%@ opened", comment: "task card: done"), n)
+            }
+            return NSLocalizedString("Pull request opened", comment: "task card: done")
+        case .markedDone(let byUser)?:
+            return byUser ? NSLocalizedString("Marked done by you", comment: "task card: done")
+                          : NSLocalizedString("All its phases are done", comment: "task card: done")
+        case .closedWithoutMerge?, nil:
+            return NSLocalizedString("Closed without merging", comment: "task card: done")
+        }
+    }
+}
+
+/// The card's one-line state while a task is in Review or landing.
+enum TaskLandingLine: Equatable {
+    case readyToLand
+    case landing(agent: String, target: String, mode: TaskLanding.Mode, line: String?)
+    /// The landing brief hasn't reached the agent yet.
+    case handingOver(agent: String)
+    case fastMerging(target: String)
+    case needsYou(String)
+
+    static func of(_ t: CodingTask) -> TaskLandingLine? {
+        guard t.stage == .testing else { return nil }
+        guard let l = t.landing else { return t.isNoCode ? nil : .readyToLand }
+        switch l.phase {
+        case .needsYou: return .needsYou(l.detail ?? "")
+        case .checking, .fastMerging, .landed: return .fastMerging(target: l.target)
+        case .agentLanding:
+            if l.handingOver == true { return .handingOver(agent: t.workerName) }
+            return .landing(agent: t.workerName, target: l.target, mode: l.mode, line: l.agentLine)
+        }
+    }
 }
 
 /// Who picks a backlog task up: a new agent in a fresh worktree (each
@@ -278,10 +482,12 @@ struct TaskAssignment: Codable, Equatable, Sendable, Hashable {
         return queue.firstIndex { $0.id == task.id }.map { $0 + 1 }
     }
 
-    /// Sessions and rooms finish a board task by pushing the branch and
-    /// opening a pull request (on by default), instead of leaving it local.
+    /// Explicit opt-in: sessions and rooms push their branch and open a pull
+    /// request AT DELIVERY (no local review first). Off by default — the
+    /// work comes back for review, and the approved task lands the way its
+    /// finish preference says (`TaskFinish`).
     static var finishWithPullRequest: Bool {
-        get { UserDefaults.standard.object(forKey: "codingTasks.finishWithPR") as? Bool ?? true }
+        get { UserDefaults.standard.object(forKey: "codingTasks.finishWithPR") as? Bool ?? false }
         set { UserDefaults.standard.set(newValue, forKey: "codingTasks.finishWithPR") }
     }
 
@@ -340,6 +546,9 @@ struct ReviewComment: Codable, Identifiable, Equatable, Sendable {
     /// Set when a "send back to In Progress" round delivered this comment
     /// to the agent.
     var sentAt: Date?
+    /// Still pending when the agent handed the task back to Review: it
+    /// never reached the agent (the review says so, and offers Send Back).
+    var undelivered: Bool?
 
     init(id: UUID = UUID(), text: String, file: String? = nil,
          line: Int? = nil, createdAt: Date = Date(), sentAt: Date? = nil) {
@@ -385,6 +594,7 @@ final class CodingTaskStore {
     func upsert(_ task: CodingTask) {
         if let i = tasks.firstIndex(where: { $0.id == task.id }) {
             var t = task
+            Self.settleComments(before: tasks[i], after: &t)
             if !Self.sameContent(tasks[i], t) { t.updatedAt = Date() }
             tasks[i] = t
         } else {
@@ -419,8 +629,31 @@ final class CodingTaskStore {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         let before = tasks[i]
         change(&tasks[i])
+        Self.settleComments(before: before, after: &tasks[i])
         if !Self.sameContent(before, tasks[i]) { tasks[i].updatedAt = Date() }
         save()
+    }
+
+    /// Review comments that never reached the agent, on a stage change:
+    /// handed back to Review with some still pending → they're flagged
+    /// undelivered (the review offers to send them again, never silently);
+    /// gone Done → pending ones are dropped (nobody will deliver them).
+    static func settleComments(before: CodingTask, after: inout CodingTask) {
+        guard before.stage != after.stage else { return }
+        switch after.stage {
+        case .testing where before.stage == .inProgress:
+            for i in after.comments.indices where after.comments[i].sentAt == nil {
+                after.comments[i].undelivered = true
+            }
+        case .done:
+            let n = after.comments.count
+            after.comments.removeAll { $0.sentAt == nil }
+            if after.comments.count != n {
+                BACDebug.log("tasks", "“\(after.title)”: \(n - after.comments.count) undelivered comment(s) dropped at Done")
+            }
+        default:
+            break
+        }
     }
 
     /// Equal apart from when they last changed — a save that changes
@@ -435,6 +668,7 @@ final class CodingTaskStore {
     /// snapshot, in memory only (no save — a mirror store is a read model
     /// of another machine's state). No-op when nothing changed.
     func mirror(tasks newTasks: [CodingTask]) {
+        let newTasks = newTasks.map(CodingTask.migrateLegacy)
         if tasks != newTasks { tasks = newTasks }
     }
 
@@ -452,7 +686,7 @@ final class CodingTaskStore {
         guard let data = try? Data(contentsOf: fileURL),
               let payload = try? d.decode(FilePayload.self, from: data)
         else { return }
-        tasks = payload.tasks
+        tasks = payload.tasks.map(CodingTask.migrateLegacy)
     }
 
     private func save() {
@@ -780,6 +1014,298 @@ enum AgentSessionLocator {
     }
 }
 
+// MARK: - Agent liveness in a tab
+
+/// Is a coding agent running in a tmux tab? Asked of every process on the
+/// pane's tty — never `pane_current_command` or the tab's label. An agent
+/// a tab's .bashrc starts during shell startup (before job control) shares
+/// the shell's process group, so tmux names the shell for as long as the
+/// agent runs; an agent under an interpreter reads as the interpreter; and
+/// a task tab's label is its title. Judged "a shell" on any of those, a
+/// working agent was killed and relaunched.
+enum AgentPaneProbe {
+    enum State: Equatable, Sendable {
+        /// An agent is running in the pane (its kind as seen).
+        case running(String)
+        /// Only the shell (and programs that aren't agents) left.
+        case shell
+        /// No such window.
+        case gone
+    }
+
+    /// Agent names as they show in a process's arguments (path or
+    /// interpreter script), whole words only — "omp" inside "compile" is no
+    /// agent.
+    nonisolated static let agentNames = "claude|codex|kimi|grok|omp|aider|goose|opencode|gemini"
+    nonisolated static let shellLines = "^-?([^ ]*/)?(bash|sh|zsh|dash|fish|login|tmux)( |$)"
+
+    /// One line: `pane gone`, `pane none`, or `pane <agent>`.
+    nonisolated static func command(window: Int) -> String {
+        "t=$(tmux display-message -p -t bromure:\(window) '#{pane_tty}' 2>/dev/null); "
+            + "if [ -z \"$t\" ]; then echo 'pane gone'; exit 0; fi; "
+            + "a=$(ps -t \"${t#/dev/}\" -o args= 2>/dev/null | \(agentFilter)); "
+            + "echo \"pane ${a:-none}\""
+    }
+
+    /// Process argument lines in, the first agent's name out (nothing when
+    /// only shells and other programs run).
+    nonisolated static var agentFilter: String {
+        "grep -v -E '\(shellLines)' "
+            + "| grep -E -o -m1 '(^|[^A-Za-z0-9])(\(agentNames))([^A-Za-z]|$)' "
+            + "| head -1 | tr -cd 'a-z'"
+    }
+
+    /// nil when the answer isn't one (the guest couldn't be asked).
+    nonisolated static func parse(_ out: String) -> State? {
+        for raw in out.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("pane") else { continue }
+            let v = String(line.dropFirst(4)).lowercased().filter { $0.isLetter }
+            switch v {
+            case "gone": return .gone
+            case "", "none": return .shell
+            default: return .running(v)
+            }
+        }
+        return nil
+    }
+
+    /// What delivering a message to a task's conversation does.
+    enum Route: Equatable, Sendable {
+        /// The agent is running in this window: type it in.
+        case type(window: Int)
+        /// No agent to type into: resume the conversation in a fresh tab,
+        /// closing this window first (only ever one seen with a bare shell).
+        case relaunch(closeWindow: Int?)
+        /// The tab is there but couldn't be asked — never kill it on a guess.
+        case undecided
+    }
+
+    nonisolated static func route(window: Int?, state: State?) -> Route {
+        guard let window else { return .relaunch(closeWindow: nil) }
+        switch state {
+        case .running?: return .type(window: window)
+        case .shell?: return .relaunch(closeWindow: window)
+        case .gone?: return .relaunch(closeWindow: nil)
+        case nil: return .undecided
+        }
+    }
+
+    /// `command(window:)` plus the launcher's death marker: the last
+    /// "exited with status N" line in the pane's recent output (printed by
+    /// the worktree launcher when the agent dies — Profile's .bashrc hook).
+    nonisolated static func launchCommand(window: Int) -> String {
+        command(window: window) + "; "
+            + "tmux capture-pane -p -J -t bromure:\(window) -S -120 2>/dev/null "
+            + "| grep -a -o 'exited with status [0-9]*' | tail -1"
+    }
+
+    /// The agent's exit status from the launcher's marker in `out`, nil
+    /// when there is none.
+    nonisolated static func exitStatus(_ out: String) -> Int? {
+        var found: Int? = nil
+        for raw in out.split(whereSeparator: \.isNewline) {
+            guard let r = raw.range(of: "exited with status ") else { continue }
+            let digits = raw[r.upperBound...].prefix { $0.isNumber }
+            if let n = Int(digits) { found = n }
+        }
+        return found
+    }
+
+    /// What a launch watch makes of one probe.
+    enum LaunchOutcome: Equatable, Sendable {
+        /// The agent is running in this window.
+        case up(window: Int)
+        /// The agent died (or never ran): its exit status when the launcher
+        /// printed one.
+        case died(status: Int?)
+        /// Not seen up within the time allowed.
+        case timedOut
+    }
+
+    /// The launch-watch verdict so far: running → up; a death marker with
+    /// only a shell left → died at once; a bare shell for `shellProbesToFail`
+    /// probes in a row after `grace` seconds → died. nil = keep watching.
+    nonisolated static let shellProbesToFail = 4
+    nonisolated static func launchVerdict(state: State?, exitStatus: Int?, window: Int,
+                                          elapsed: TimeInterval, grace: TimeInterval,
+                                          shellStreak: Int) -> LaunchOutcome? {
+        switch state {
+        case .running?: return .up(window: window)
+        case .shell?:
+            if let exitStatus { return .died(status: exitStatus) }
+            if elapsed >= grace && shellStreak >= shellProbesToFail { return .died(status: nil) }
+            return nil
+        default: return nil
+        }
+    }
+
+    /// Agents a task tab starts with no message on the command line (Kimi
+    /// only takes one in its one-shot mode, which exits after the turn): the
+    /// host types it in once the agent is up.
+    nonisolated static func typesOpeningMessage(_ tool: Profile.Tool) -> Bool { tool == .kimi }
+}
+
+// MARK: - Guarded host → tmux typing
+
+/// Where host-typed text goes, and what must hold there right before every
+/// keystroke batch. A tmux window INDEX is reused the moment its tab
+/// closes — a task's resume brief once landed in another task's bare bash
+/// prompt that had taken the number — so a target is resolved IN THE GUEST,
+/// at send time, to the window's stable id (`@N`), and the window's own
+/// markers (`@worktree`, `@display`, the id itself) must still name the
+/// intended task or session. On top of that the pane's FOREGROUND program
+/// must be what the text is for: an agent for a message (never a shell —
+/// bash would run it, backticks and all), a shell for a relaunch command.
+struct PaneTarget: Equatable, Sendable {
+    enum Ref: Equatable, Sendable {
+        /// `bromure:<index>` — what a pane roster knows.
+        case index(Int)
+        /// A tmux window id ("@12"): stable for the window's whole life.
+        case windowID(String)
+        /// The window tagged `@worktree <branch>` (a task's tab).
+        case worktree(String)
+    }
+    enum Foreground: Equatable, Sendable {
+        /// An agent must be in the pane's foreground process group.
+        case agent
+        /// Only a shell (no agent) — for typing a command line.
+        case shell
+    }
+    var ref: Ref
+    var expectWorktree: String? = nil
+    var expectDisplay: String? = nil
+    var expectWindowID: String? = nil
+    var foreground: Foreground = .agent
+
+    static func index(_ i: Int, foreground: Foreground = .agent) -> PaneTarget {
+        PaneTarget(ref: .index(i), foreground: foreground)
+    }
+
+    /// A board task's tab: found by its branch, and still carrying it.
+    static func task(branch: String, foreground: Foreground = .agent) -> PaneTarget {
+        PaneTarget(ref: .worktree(branch), expectWorktree: branch, foreground: foreground)
+    }
+}
+
+/// Why a guarded send typed nothing.
+enum PaneRefusal: String, Equatable, Sendable {
+    /// No such window (closed, or never resolved).
+    case gone
+    /// The window there now is somebody else's (marker mismatch).
+    case identity
+    /// A shell, not the agent, holds the pane's foreground.
+    case shell
+    /// An agent holds the pane where a shell was expected.
+    case agent
+}
+
+enum PaneTypeGuard {
+    /// Printed (with the reason) when a guard refused to type.
+    nonisolated static let refusedMarker = "BROMURE_TYPE_REFUSED"
+
+    /// What a command's output says about a refusal, nil when none.
+    nonisolated static func refusal(in out: String) -> PaneRefusal? {
+        guard let r = out.range(of: refusedMarker + " ") else { return nil }
+        let word = out[r.upperBound...].prefix { $0.isLetter }
+        return PaneRefusal(rawValue: String(word)) ?? .gone
+    }
+
+    /// A tmux window id as tmux prints it.
+    nonisolated static func isWindowID(_ s: String) -> Bool {
+        s.count >= 2 && s.first == "@" && s.dropFirst().allSatisfy(\.isNumber)
+    }
+
+    /// Single-quoted for sh.
+    nonisolated static func quote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Sets `$_bt` to the target's window id (empty when it can't be found).
+    /// Every later step of the command targets "$_bt" — never the index
+    /// again, which may name another window by then.
+    nonisolated static func resolve(_ t: PaneTarget) -> String {
+        switch t.ref {
+        case .index(let i):
+            return "_bt=$(tmux display-message -p -t bromure:\(i) '#{window_id}' 2>/dev/null); "
+        case .windowID(let id):
+            let q = isWindowID(id) ? quote(id) : "''"
+            return "_bt=$(tmux display-message -p -t \(q) '#{window_id}' 2>/dev/null); "
+        case .worktree(let b):
+            // The newest window carrying the tag (an old dead tab of the
+            // same task may linger a moment while a resume opens its new one).
+            return "_bt=$(tmux list-windows -t bromure -F '#{window_id} #{@worktree}' 2>/dev/null "
+                + "| awk -v b=\(quote(b)) '$2==b {w=$1} END {print w}'); "
+        }
+    }
+
+    /// Shell words: process args → the first agent's name (empty for shells
+    /// and other programs). Shells are recognized by path too
+    /// ("/bin/bash -c … kimi" is a launcher, not Kimi).
+    nonisolated static var shellArgs: String { AgentPaneProbe.shellLines }
+
+    /// Defines `_bg`: true (exit 0) when the window `$_bt` is still the
+    /// intended one and its foreground is what `t` wants; else prints the
+    /// refusal and is false.
+    nonisolated static func guardFunction(_ t: PaneTarget) -> String {
+        func refuse(_ r: PaneRefusal) -> String { "{ echo '\(refusedMarker) \(r.rawValue)'; return 1; }" }
+        var f = "_bg() { "
+        f += "[ -n \"$_bt\" ] || \(refuse(.gone)); "
+        f += "[ \"$(tmux display-message -p -t \"$_bt\" '#{window_id}' 2>/dev/null)\" = \"$_bt\" ] || \(refuse(.gone)); "
+        if let id = t.expectWindowID {
+            f += "[ \"$_bt\" = \(quote(id)) ] || \(refuse(.identity)); "
+        }
+        if let w = t.expectWorktree {
+            f += "[ \"$(tmux display-message -p -t \"$_bt\" '#{@worktree}' 2>/dev/null)\" = \(quote(w)) ] || \(refuse(.identity)); "
+        }
+        if let d = t.expectDisplay {
+            // A tab not named (yet) says nothing; a tab named otherwise is another's.
+            f += "_bd=$(tmux display-message -p -t \"$_bt\" '#{@display}' 2>/dev/null); "
+            f += "[ -z \"$_bd\" ] || [ \"$_bd\" = \(quote(d)) ] || \(refuse(.identity)); "
+        }
+        // The pane's foreground process group: the processes whose group
+        // is the tty's foreground group (an agent .bashrc starts before job
+        // control shares the shell's group — still the foreground one).
+        f += "_by=$(tmux display-message -p -t \"$_bt\" '#{pane_tty}' 2>/dev/null); "
+        f += "[ -n \"$_by\" ] || \(refuse(.gone)); "
+        // Every process, filtered to this tty in awk: `ps -t` with several
+        // `-o` columns misprints on macOS (an attached Mac), and procps reads
+        // a comma list after "=" as one header.
+        f += "_ba=$(ps -A -o tty= -o tpgid= -o pgid= -o args= 2>/dev/null "
+            + "| awk -v t=\"${_by#/dev/}\" '$1==t && $2==$3 { $1=\"\"; $2=\"\"; $3=\"\"; sub(/^ +/, \"\"); print }' "
+            + "| grep -v -E '\(shellArgs)' "
+            + "| grep -E -o -m1 '(^|[^A-Za-z0-9])(\(AgentPaneProbe.agentNames))([^A-Za-z]|$)' "
+            + "| head -1 | tr -cd 'a-z'); "
+        switch t.foreground {
+        case .agent: f += "[ -n \"$_ba\" ] || \(refuse(.shell)); "
+        case .shell: f += "[ -z \"$_ba\" ] || \(refuse(.agent)); "
+        }
+        f += "return 0; }; "
+        return f
+    }
+
+    /// Resolve + guard, ready for `if _bg; then …; fi`.
+    nonisolated static func prelude(_ t: PaneTarget) -> String {
+        resolve(t) + guardFunction(t)
+    }
+
+    /// The literal send of `text` (base64 through the guest shell, so no
+    /// quoting ever reaches a shell; `-l --` so tmux reads no key names or
+    /// options out of it).
+    nonisolated static func literalSend(_ text: String) -> String {
+        let b64 = Data(text.utf8).base64EncodedString()
+        return "echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \"$_bt\" -l --"
+    }
+
+    /// Guarded type + Enter: checked before the text and again before the
+    /// Enter. Nothing is typed when the check fails (the refusal is printed).
+    nonisolated static func typeCommand(target: PaneTarget, text: String) -> String {
+        prelude(target)
+            + "if _bg; then \(literalSend(text)) && sleep 1 && "
+            + "if _bg; then tmux send-keys -t \"$_bt\" Enter; fi; fi"
+    }
+}
+
 // MARK: - Engine
 
 /// Drives the coding board's transitions that touch the guest: starting a
@@ -790,8 +1316,22 @@ enum AgentSessionLocator {
 #if os(macOS)
 @MainActor
 final class CodingTaskEngine {
-    private weak var delegate: ACAppDelegate?
+    weak var delegate: ACAppDelegate?
     let store: CodingTaskStore
+    /// Landings this engine is watching (one watcher per task).
+    var landingWatches: Set<UUID> = []
+    /// Tasks Bromure saw land in git while their agent was still at it: the
+    /// card is Done but the agent's session (and its board binding) stays
+    /// for a grace period, so the agent's own `board_report_landing` lands
+    /// as a no-op success instead of "isn't bound to a board task".
+    var landingGrace: Set<UUID> = []
+    /// Grace periods the agent ended early (it reported, or its turn ended).
+    var landingGraceEnded: Set<UUID> = []
+    /// The agent's last pane line when the landing brief went in — the
+    /// previous turn's, not news (see `watchLanding`).
+    var landingBaselineLine: [UUID: String] = [:]
+    /// The idle-Review sweep's timer (see `startHousekeeping`).
+    var housekeeping: Timer?
 
     /// Workspaces this engine asked to boot and is still waiting on.
     private var pendingBoots: Set<UUID> = []
@@ -860,7 +1400,8 @@ final class CodingTaskEngine {
         dependency graph: check it, and fix any omission with \
         board_set_dependencies. The phases appear on the user's board as \
         cards.
-        2. Record a short overview of the plan with board_set_plan.
+        2. Record a short overview of the plan with board_set_plan, with \
+        phaseCount set to the total number of phases — file them all.
         Do NOT write any code, do NOT modify or commit anything. Explore in \
         THIS session directly — do NOT spawn subagents or background tasks \
         (the Task/Agent tools): the board tracks only this session, and \
@@ -969,7 +1510,7 @@ final class CodingTaskEngine {
     /// The workspace answering, booting it first when it isn't: nil once it
     /// answers, else why it won't — a start the app refused, with its reason
     /// (nobody was there to answer its prompt), or the boot timeout.
-    private func ensureWorkspaceUp(_ profileID: UUID, delegate: ACAppDelegate,
+    func ensureWorkspaceUp(_ profileID: UUID, delegate: ACAppDelegate,
                                    detached: Bool = false) async -> String? {
         if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
             return nil
@@ -1048,11 +1589,15 @@ final class CodingTaskEngine {
     /// Launch a task or plan phase: agent in a fresh worktree, fully
     /// autonomous. Dependencies gate the launch — starting a phase whose
     /// dependencies aren't Done QUEUES it instead (it auto-starts when
-    /// they land). The card moves to In Progress immediately ("One shot"
-    /// must feel instant); a failed launch moves it back with the reason.
+    /// they land). The card shows "Starting…" at once and moves to In
+    /// Progress only once the checks pass (workspace up, folder present, a
+    /// repository of its own) — a task that can't start never flashes In
+    /// Progress, on the board or over the API; it keeps its column and
+    /// shows the reason.
     func start(_ taskID: UUID) {
         guard let task = store.task(taskID),
               task.stage == .backlog || task.stage == .planning,
+              !task.isStarting,
               let delegate else { return }
         guard delegate.profile(for: task.profileID) != nil else {
             store.mutate(taskID) { $0.lastError = NSLocalizedString(
@@ -1067,29 +1612,43 @@ final class CodingTaskEngine {
             store.mutate(taskID) { $0.queuedAt = Date(); $0.lastError = nil }
             return
         }
+        // Stopped earlier: pick the work back up on its own branch.
+        if let rb = task.resumeBranch, rb.hasPrefix("wt/"), Self.isSafeBranch(rb) {
+            resumeStopped(taskID, branch: rb)
+            return
+        }
         let priorStage = task.stage
         let slug = ScheduledAutomationEngine.branchSlug(for: task.title, at: Date())
         let guestPath = ScheduledAutomationEngine.guestPath(task.repoPath)
+        // Kimi takes no opening message at launch (only its one-shot mode
+        // does): it starts interactive and the brief is typed in once its
+        // input is up.
+        let typedBrief = AgentPaneProbe.typesOpeningMessage(task.tool) ? Self.prompt(for: task) : nil
         let args = [guestPath, slug, task.title, task.tool.rawValue,
-                    Self.prompt(for: task), "task"]
+                    typedBrief == nil ? Self.prompt(for: task) : "", "task"]
         let profileID = task.profileID
         let title = task.title
         let isClaude = task.tool == .claude
 
-        // Optimistic: the card is In Progress from the click; the async
-        // half reverts it with a reason if the launch can't happen.
+        // The card says "Starting…" from the click; it moves to In
+        // Progress once the checks below pass, or shows why it can't.
         store.mutate(taskID) {
-            $0.stage = .inProgress
-            $0.branchSlug = slug
-            $0.startedAt = Date()
+            $0.startingAt = Date()
             $0.queuedAt = nil
             $0.lastError = nil
+        }
+        func refuse(_ reason: String) {
+            store.mutate(taskID) {
+                $0.startingAt = nil
+                $0.lastError = reason
+            }
         }
         func revert(_ reason: String) {
             store.mutate(taskID) {
                 $0.stage = priorStage
                 $0.branchSlug = nil
                 $0.startedAt = nil
+                $0.startingAt = nil
                 $0.lastError = reason
             }
         }
@@ -1099,7 +1658,7 @@ final class CodingTaskEngine {
             // Make sure the workspace is reachable (boot when it isn't).
             if let why = await self.ensureWorkspaceUp(profileID, delegate: delegate) {
                 BACDebug.log("tasks", "“\(title)”: \(why)")
-                revert(why)
+                refuse(why)
                 return
             }
             // The board's whole lifecycle — done-signal matching, diff
@@ -1109,7 +1668,7 @@ final class CodingTaskEngine {
             // with the reason instead.
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
             if let cloneError = await self.cloneIfRequested(task, profileID: profileID, quotedPath: q) {
-                revert(cloneError)
+                refuse(cloneError)
                 return
             }
             if task.initRepo == true {
@@ -1117,8 +1676,16 @@ final class CodingTaskEngine {
                     profileID: profileID,
                     command: Self.initRepoCommand(quotedPath: q), timeout: 15)
             }
+            let dirExists = (try? await delegate.guestExec(
+                profileID: profileID, command: "test -d \(q)", timeout: 10)) != nil
+            guard dirExists else {
+                refuse(String(format: NSLocalizedString(
+                    "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”.",
+                    comment: "task plan"), task.repoPath))
+                return
+            }
             guard await self.usableRepo(profileID: profileID, quotedPath: q) else {
-                revert(String(format: NSLocalizedString(
+                refuse(String(format: NSLocalizedString(
                     "“%@” isn't a git repository of its own — tasks run on their own branch. Pick a repo folder, or edit the task and enable “Create folder & git repo”.",
                     comment: "task start"), task.repoPath))
                 return
@@ -1132,6 +1699,20 @@ final class CodingTaskEngine {
             if isClaude {
                 await delegate.pretrustGuestPath(profileID: profileID, dir: guestPath)
             }
+            // Removed, stopped or started elsewhere while the checks ran.
+            guard let now = self.store.task(taskID), now.isStarting,
+                  now.stage == priorStage else {
+                self.store.mutate(taskID) { $0.startingAt = nil }
+                return
+            }
+            // Checks passed: In Progress, on the branch the launch makes.
+            self.store.mutate(taskID) {
+                $0.stage = .inProgress
+                $0.branchSlug = slug
+                $0.startedAt = Date()
+                $0.startingAt = nil
+                $0.lastError = nil
+            }
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "run", args: args) else {
                 revert(NSLocalizedString("Couldn't reach the workspace — is it running?",
@@ -1139,6 +1720,114 @@ final class CodingTaskEngine {
                 return
             }
             BACDebug.log("tasks", "started “\(title)” → \(slug)")
+            if let typedBrief {
+                self.typeOpeningBrief(taskID, profileID: profileID, branch: "wt/" + slug,
+                                      text: typedBrief, worker: task.workerName)
+            } else {
+                self.watchStart(taskID, profileID: profileID, branch: "wt/" + slug,
+                                worker: task.workerName)
+            }
+        }
+    }
+
+    /// An agent that takes its brief on the command line: watch the launch
+    /// so one that dies at once (bad flag, missing binary) puts the reason
+    /// on the card in seconds, not never.
+    func watchStart(_ taskID: UUID, profileID: UUID, branch: String, worker: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await self.watchLaunch(profileID: profileID, branch: branch, within: 240)
+            guard case .died = outcome, let t = self.store.task(taskID), t.stage == .inProgress,
+                  t.branchSlug.map({ "wt/" + $0 }) == branch || t.branch == branch else { return }
+            let why = Self.launchFailure(worker: worker, outcome)
+            self.store.mutate(taskID) { $0.lastError = why }
+            self.noteSessionLaunchFailed(taskID, branch: branch, reason: why)
+        }
+    }
+
+    /// A task's agent died at launch: say so on its SESSION too, so the
+    /// chat stage shows the failure (its error card) and the status chip
+    /// reads "Couldn't start" — not "Ready", then "Paused" — matching the
+    /// card. The session is the task's own when bound, else the one bound
+    /// to the task's tab (adopted a roster tick or two after the tab
+    /// opened, so it is looked for a few times).
+    func noteSessionLaunchFailed(_ taskID: UUID, branch: String, reason: String) {
+        Task { [weak self] in
+            for _ in 0..<6 {
+                guard let self, let delegate = self.delegate, let t = self.store.task(taskID) else { return }
+                let sessions = delegate.agentSessionStore
+                var sid: UUID? = t.sessionID.flatMap { id in
+                    sessions.session(id).flatMap { ($0.isArchived || $0.isDeleted) ? nil : $0.id } }
+                if sid == nil, let idx = delegate.pane(for: t.profileID)?.model.tabs
+                    .first(where: { $0.worktreeBranch == branch })?.index {
+                    sid = sessions.session(profileID: t.profileID, windowIndex: idx)?.id
+                }
+                if let sid {
+                    sessions.mutate(sid) { $0.lastError = reason; $0.launchingSince = nil }
+                    self.store.mutate(taskID) { if $0.sessionID != sid { $0.sessionID = sid } }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    /// Type a launch's opening brief into the agent once it's up (Kimi —
+    /// `AgentPaneProbe.typesOpeningMessage`). Not delivered: the card says so.
+    func typeOpeningBrief(_ taskID: UUID, profileID: UUID, branch: String, text: String,
+                          worker: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            guard let failure = await self.deliverOnceUpOutcome(
+                profileID: profileID, branch: branch, text: text, within: 240) else {
+                BACDebug.log("tasks", "opening brief typed into \(branch)")
+                return
+            }
+            BACDebug.log("tasks", "opening brief NOT delivered to \(branch)")
+            let why = Self.onceUpFailure(worker: worker, failure)
+            self.store.mutate(taskID) { $0.lastError = why }
+            if case .launch = failure { self.noteSessionLaunchFailed(taskID, branch: branch, reason: why) }
+        }
+    }
+
+    /// Start a task that was stopped back to the Backlog: on its kept
+    /// branch and checkout, the agent's conversation resumed. A branch
+    /// that's gone since means a fresh start.
+    private func resumeStopped(_ taskID: UUID, branch: String) {
+        guard let task = store.task(taskID), let delegate else { return }
+        store.mutate(taskID) { $0.startingAt = Date(); $0.queuedAt = nil; $0.lastError = nil }
+        Task { [weak self] in
+            guard let self else { return }
+            if let why = await self.ensureWorkspaceUp(task.profileID, delegate: delegate) {
+                self.store.mutate(taskID) { $0.startingAt = nil; $0.lastError = why }
+                return
+            }
+            let hint = (task.rootRepo ?? "").isEmpty
+                ? ScheduledAutomationEngine.guestPath(task.repoPath) : task.rootRepo!
+            switch await self.checkoutState(profileID: task.profileID, repoHint: hint, branch: branch) {
+            case .branchMissing, .repoMissing:
+                BACDebug.log("tasks", "“\(task.title)”: kept branch \(branch) is gone — fresh start")
+                self.store.mutate(taskID) {
+                    $0.resumeBranch = nil; $0.startingAt = nil
+                    $0.worktreeDir = nil; $0.rootRepo = nil; $0.parentBranch = nil
+                }
+                self.start(taskID)
+                return
+            case .ok, .worktreeMissing:
+                break
+            }
+            self.store.mutate(taskID) {
+                $0.stage = .inProgress
+                $0.branch = branch
+                $0.branchSlug = String(branch.dropFirst(3))
+                $0.resumeBranch = nil
+                $0.startedAt = Date()
+                $0.startingAt = nil
+                $0.lastError = nil
+            }
+            BACDebug.log("tasks", "“\(task.title)”: resuming on its kept branch \(branch)")
+            let prompt = self.store.task(taskID).map(Self.resumePrompt(for:)) ?? Self.resumePrompt(for: task)
+            _ = await self.deliverToConversation(taskID, branch: branch, text: prompt)
         }
     }
 
@@ -1164,7 +1853,8 @@ final class CodingTaskEngine {
         let args = [guestPath, slug,
                     String(format: NSLocalizedString("Plan: %@", comment: "plan tab"),
                            task.title),
-                    task.tool.rawValue, Self.plannerPrompt(for: task), "plan"]
+                    task.tool.rawValue,
+                    AgentPaneProbe.typesOpeningMessage(task.tool) ? "" : Self.plannerPrompt(for: task), "plan"]
         let profileID = task.profileID
         let isClaude = task.tool == .claude
         store.mutate(taskID) {
@@ -1218,6 +1908,10 @@ final class CodingTaskEngine {
                 return
             }
             BACDebug.log("tasks", "planning session for “\(task.title)” → \(slug)")
+            if AgentPaneProbe.typesOpeningMessage(task.tool) {
+                self.typeOpeningBrief(taskID, profileID: profileID, branch: "wt/" + slug,
+                                      text: Self.plannerPrompt(for: task), worker: task.workerName)
+            }
             self.watchPlanning(taskID, slug: slug, profileID: profileID)
         }
     }
@@ -1233,25 +1927,36 @@ final class CodingTaskEngine {
         if let slug = task.branchSlug {
             delegate?.endPlanStream(profileID: profileID, branch: "wt/" + slug)
         }
-        let branch = task.branch ?? liveBranch(of: task)
-        if let branch {
-            let root = task.rootRepo
-                ?? delegate?.pane(for: profileID)?.model.tabs
-                    .first { $0.worktreeBranch == branch }?.rootRepo
-            closeSessionTab(profileID: profileID, branch: branch, afterSeconds: 0)
+        let knownRoot = task.rootRepo
+            ?? task.branch.flatMap { b in
+                delegate?.pane(for: profileID)?.model.tabs.first { $0.worktreeBranch == b }?.rootRepo }
+        store.remove(taskID)
+        pumpQueue()
+        guard task.branch != nil || task.branchSlug != nil else { return }
+        // The branch off the card, else the live tab's — asked of the guest
+        // when the workspace runs detached (no pane roster here): the agent
+        // must stop and its checkout go even then.
+        Task { [weak self] in
+            guard let self else { return }
+            var branch = task.branch
+            if branch == nil { branch = await self.liveBranchResolved(of: task) }
+            if branch == nil, let slug = task.branchSlug { branch = "wt/" + slug }
+            guard let branch else { return }
+            self.closeSessionTab(profileID: profileID, branch: branch, afterSeconds: 0)
+            var root = knownRoot
+            if (root ?? "").isEmpty {
+                root = await self.resolveWorktreeMetadata(
+                    profileID: profileID, branch: branch, repoPath: task.repoPath).root
+            }
             if let root, !root.isEmpty {
                 // Give the tab kill a beat, then drop the checkout.
-                Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    _ = self?.delegate?.automationWorktreeCommand(
-                        profileNameOrID: profileID.uuidString,
-                        action: "remove", args: [root, branch])
-                }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                _ = self.delegate?.automationWorktreeCommand(
+                    profileNameOrID: profileID.uuidString,
+                    action: "remove", args: [root, branch])
             }
             BACDebug.log("tasks", "“\(task.title)” destroyed (\(branch))")
         }
-        store.remove(taskID)
-        pumpQueue()
     }
 
     /// Auto-start queued phases whose dependencies just reached Done.
@@ -1263,6 +1968,51 @@ final class CodingTaskEngine {
             BACDebug.log("tasks", "“\(t.title)”: dependencies met — auto-starting")
             start(t.id)
         }
+    }
+
+    /// A phase just reached Done: its planned brief goes Done too when the
+    /// whole plan is (it was hidden behind its phases in the Backlog
+    /// forever). Only ever on that transition — never on a load or a
+    /// queue pump, so an upgrade can't rewrite existing cards.
+    func rollUpBrief(afterPhaseDone phaseID: UUID) {
+        guard let parentID = Self.briefRollUp(store.tasks, phaseDone: phaseID),
+              let parent = store.task(parentID) else { return }
+        store.mutate(parentID) {
+            $0.stage = .done
+            $0.completedAt = Date()
+            $0.completion = .markedDone(byUser: false)
+        }
+        BACDebug.log("tasks", "“\(parent.title)”: every planned phase is done — brief done")
+    }
+
+    /// The brief to roll up to Done now that `phaseID` is Done, if any. All
+    /// of: its plan is complete (the planning session ended with phases
+    /// filed), every phase the plan has was FILED — as many as the planner
+    /// declared (board_set_plan phaseCount) and as the plan text numbers
+    /// ("Phase 6") — and every filed phase is Done. A brief with phases
+    /// still unfiled stays in the Backlog.
+    nonisolated static func briefRollUp(_ tasks: [CodingTask], phaseDone phaseID: UUID) -> UUID? {
+        guard let phase = tasks.first(where: { $0.id == phaseID }), phase.stage == .done,
+              let parentID = phase.parentTaskID,
+              let parent = tasks.first(where: { $0.id == parentID }),
+              parent.stage == .backlog, parent.planCompletedAt != nil else { return nil }
+        let phases = tasks.filter { $0.parentTaskID == parentID }
+        guard !phases.isEmpty, phases.allSatisfy({ $0.stage == .done }) else { return nil }
+        let expected = max(parent.plannedPhases ?? 0, phaseNumbersMentioned(in: parent.plan ?? ""))
+        guard phases.count >= expected else { return nil }
+        return parentID
+    }
+
+    /// The highest "Phase N" a plan's text names (0 when none) — a plan
+    /// listing six phases expects six cards.
+    nonisolated static func phaseNumbersMentioned(in plan: String) -> Int {
+        guard let re = try? NSRegularExpression(pattern: #"(?i)\bphase\s*#?\s*(\d{1,3})\b"#) else { return 0 }
+        let ns = plan as NSString
+        var best = 0
+        for m in re.matches(in: plan, range: NSRange(location: 0, length: ns.length)) {
+            if let n = Int(ns.substring(with: m.range(at: 1))), n <= 200 { best = max(best, n) }
+        }
+        return best
     }
 
     // MARK: Done signal (In Progress → Testing)
@@ -1297,6 +2047,21 @@ final class CodingTaskEngine {
             }
             return
         }
+        // The agent landing an approved task ended its turn: look now.
+        if let task = store.tasks.first(where: {
+            $0.stage == .testing && $0.landing?.phase == .agentLanding && matches($0)
+        }) {
+            landingAgentStopped(task.id)
+            return
+        }
+        // Landed (seen in git) while the agent was still wrapping up: its
+        // turn ending closes the post-landing grace.
+        if let task = store.tasks.first(where: {
+            $0.stage == .done && landingGrace.contains($0.id) && matches($0)
+        }) {
+            landingAgentStopped(task.id)
+            return
+        }
         // A planning session signaling done. Claude's Stop hook fires at the
         // end of EVERY turn — for an interactive interview that includes the
         // agent merely pausing for the user's reply, so "done" alone must
@@ -1322,6 +2087,7 @@ final class CodingTaskEngine {
                     return
                 }
                 BACDebug.log("tasks", "planning session done for “\(parent.title)”")
+                self.store.mutate(parent.id) { $0.planCompletedAt = Date() }
                 self.closeSessionTab(profileID: profileID, branch: branch,
                                      afterSeconds: 10)
                 self.planWatchdogs[parent.id]?.cancel()
@@ -1357,14 +2123,22 @@ final class CodingTaskEngine {
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
+            $0.sessionParkedAt = nil
+            $0.landing = nil
+            // Handed over: whatever failed on the way here (a send-back
+            // that didn't get through, a relaunch that timed out) is moot.
+            $0.lastError = nil
+            $0.restartNeeded = nil
             if let dir { $0.worktreeDir = dir }
             if let parent { $0.parentBranch = parent }
             if let root { $0.rootRepo = root }
         }
-        // The agent is done; a finished session left open is just an idle
-        // claude eating a tab. Review send-back reopens the worktree via
-        // task-resume when needed.
-        closeSessionTab(profileID: profileID, branch: branch)
+        // The agent stays in its tab through review: send-back types into
+        // the same conversation, and landing hands the merge to the agent
+        // that wrote the change. The tab is put away when the task lands, is
+        // marked done or discarded — or after a long idle spell in Review
+        // (`sweepIdleReview`).
+        await measureCodeChanges(taskID)
     }
 
     /// Tab-independent worktree metadata: the checkout dir from
@@ -1443,6 +2217,12 @@ final class CodingTaskEngine {
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
+            $0.sessionParkedAt = nil
+            $0.landing = nil
+            // Handed over: whatever failed on the way here (a send-back
+            // that didn't get through, a relaunch that timed out) is moot.
+            $0.lastError = nil
+            $0.restartNeeded = nil
             if let tab {
                 $0.worktreeDir = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
                 $0.parentBranch = tab.parentBranch
@@ -1463,7 +2243,8 @@ final class CodingTaskEngine {
                     if $0.rootRepo == nil { $0.rootRepo = m.root }
                 }
             }
-            self.closeSessionTab(profileID: profileID, branch: branch)
+            // The session stays for review (see finalizeTaskDone).
+            await self.measureCodeChanges(taskID)
         }
         return store.task(task.id)?.stage == .testing
     }
@@ -1471,58 +2252,410 @@ final class CodingTaskEngine {
     // MARK: Review round (Testing → In Progress)
 
     /// Send the unsent review comments back to the agent and return the
-    /// task to In Progress. A live tab gets the feedback typed into its
-    /// session (the agent is still sitting there); a dead one gets a fresh
-    /// agent tab reopened on the same worktree (guest `task-resume`).
+    /// task to In Progress. They go into the agent's OWN conversation: typed
+    /// into its tab only while the agent is running there (a tab whose
+    /// agent exited is a bare shell — text typed into it runs as bash
+    /// commands), else that conversation is resumed in a fresh tab with the
+    /// feedback. The comments count as sent only once the delivery is
+    /// confirmed; a failed one leaves them pending with the reason on the
+    /// card, and Restart Session sends them.
     func sendBack(_ taskID: UUID) async {
         guard let task = store.task(taskID), task.stage == .testing,
               let branch = task.branch, let delegate else { return }
         let unsent = task.comments.filter { $0.sentAt == nil }
         guard !unsent.isEmpty else { return }
+        let ids = Set(unsent.map(\.id))
         let feedback = Self.feedbackPrompt(comments: unsent)
 
         // Done by someone else's session (a board request): the feedback
         // goes back through the delegation, not into a task tab.
         if task.delegationID != nil {
             guard await delegate.taskDispatcher.sendBack(taskID, feedback: feedback) else { return }
-            let now = Date()
             store.mutate(taskID) {
                 $0.stage = .inProgress
                 $0.lastError = nil
-                $0.mergingAt = nil
+                $0.landing = nil
                 $0.deliverySummary = nil
-                for i in $0.comments.indices where $0.comments[i].sentAt == nil {
-                    $0.comments[i].sentAt = now
-                }
             }
+            markCommentsSent(taskID, ids)
             return
         }
 
-        var delivered = await typeIntoSession(
-            profileID: task.profileID, branch: branch, text: feedback)
-        if !delivered {
-            delivered = delegate.automationWorktreeCommand(
-                profileNameOrID: task.profileID.uuidString, action: "task-resume",
-                args: [task.rootRepo ?? "", branch, task.parentBranch ?? "",
-                       task.title, task.tool.rawValue, feedback])
-        }
-        guard delivered else {
-            // Workspace down (or its session gone): don't strand the card —
-            // the full resume path boots the workspace and re-launches the
-            // agent on the existing worktree with this same feedback.
-            resumeSession(taskID)
-            return
-        }
-        let now = Date()
+        // Back to In Progress now — the agent is being put back on it.
         store.mutate(taskID) {
             $0.stage = .inProgress
             $0.lastError = nil
-            $0.mergingAt = nil   // cancels a pending merge verification
-            for i in $0.comments.indices where $0.comments[i].sentAt == nil {
+            $0.landing = nil   // cancels a landing under way
+            $0.sessionParkedAt = nil
+            $0.startedAt = Date()   // restart the session-gone clock
+        }
+        if await deliverToConversation(taskID, branch: branch, text: feedback) {
+            markCommentsSent(taskID, ids)
+            BACDebug.log("tasks", "“\(task.title)”: \(unsent.count) comment(s) sent back")
+        } else {
+            store.mutate(taskID) {
+                if $0.lastError == nil {
+                    $0.lastError = NSLocalizedString(
+                        "Your review comments didn't reach the agent — they're still pending. Restart Session sends them.",
+                        comment: "task send back")
+                }
+            }
+            BACDebug.log("tasks", "“\(task.title)”: send-back not delivered — comments kept pending")
+        }
+    }
+
+    /// Stamp exactly these comments as sent (ones added meanwhile stay
+    /// pending).
+    func markCommentsSent(_ taskID: UUID, _ ids: Set<UUID>) {
+        let now = Date()
+        store.mutate(taskID) {
+            for i in $0.comments.indices where ids.contains($0.comments[i].id) && $0.comments[i].sentAt == nil {
                 $0.comments[i].sentAt = now
+                $0.comments[i].undelivered = nil
             }
         }
-        BACDebug.log("tasks", "“\(task.title)”: \(unsent.count) comment(s) sent back")
+    }
+
+    /// Put `text` into the task agent's own conversation. A tab where the
+    /// agent is RUNNING (seen in the pane's process tree) gets it typed in
+    /// (held while a menu is open); a tab left with only a shell — confirmed
+    /// over a few seconds, so an agent still starting isn't judged dead — or
+    /// no tab at all resumes the conversation (`task-resume … continue`) in
+    /// a fresh tab, booting the workspace and re-creating a removed checkout
+    /// first. A tab that can't be asked is never killed on a guess. True
+    /// once delivered: typed into the running agent. Failures put their
+    /// reason in `lastError`; a delivery clears a stale one.
+    func deliverToConversation(_ taskID: UUID, branch: String, text: String) async -> Bool {
+        guard let delegate, let task = store.task(taskID) else { return false }
+        let profileID = task.profileID
+        let idx = await tabIndex(profileID: profileID, branch: branch)
+        let state: AgentPaneProbe.State? = idx == nil ? nil
+            : await agentState(profileID: profileID, windowIndex: idx!, confirmShell: true)
+        let ok: Bool
+        switch AgentPaneProbe.route(window: idx, state: state) {
+        case .type:
+            // By the task's branch, re-checked in the guest right before each
+            // keystroke batch: the index probed a moment ago may be another
+            // tab's by now.
+            let result = await Self.typeWhenFreeResult(delegate, profileID: profileID,
+                                                       target: .task(branch: branch),
+                                                       text: text, patience: 180)
+            ok = result == .typed
+            if case .refused(let r) = result {
+                BACDebug.log("tasks", "“\(task.title)”: delivery refused (\(r.rawValue)) — nothing typed")
+                store.mutate(taskID) { $0.lastError = Self.refusalReason(r, worker: task.workerName) }
+            } else if !ok {
+                store.mutate(taskID) {
+                    $0.lastError = result == .draftInBox
+                        ? String(format: NSLocalizedString(
+                            "There's unsent text in %@'s input box in the task's session, so the message wasn't typed — open the session, send or clear it, then try again.",
+                            comment: "task send back"), task.workerName)
+                        : String(format: NSLocalizedString(
+                            "%@ kept a menu open in the task's session, so the message wasn't typed — open the session, answer it, then try again.",
+                            comment: "task send back"), task.workerName)
+                }
+            }
+        case .relaunch(let close):
+            ok = await relaunchConversation(taskID, branch: branch, prompt: text, closeWindow: close)
+        case .undecided:
+            store.mutate(taskID) {
+                $0.lastError = NSLocalizedString(
+                    "Couldn't check on the agent in the task's session — is the workspace running?",
+                    comment: "task send back")
+            }
+            ok = false
+        }
+        if ok { store.mutate(taskID) { $0.lastError = nil } }
+        return ok
+    }
+
+    /// Resume the task agent's conversation in a fresh tab on the task's
+    /// checkout, with `prompt` as its message — see `deliverToConversation`.
+    /// `closeWindow`: the task's old tab, seen with only a shell left.
+    private func relaunchConversation(_ taskID: UUID, branch: String, prompt: String,
+                                      closeWindow: Int?) async -> Bool {
+        guard let delegate, let task = store.task(taskID) else { return false }
+        let profileID = task.profileID
+        @MainActor func fail(_ reason: String, restart: Bool = false) {
+            store.mutate(taskID) {
+                $0.lastError = reason
+                $0.restartNeeded = restart ? true : nil
+            }
+        }
+        if let why = await ensureWorkspaceUp(profileID, delegate: delegate) {
+            fail(why)
+            return false
+        }
+        // Only a shell left in the tab (the agent exited): close it, never
+        // type into it — after one last look, so a live agent is never
+        // killed.
+        if let w = closeWindow {
+            if case .running? = await agentState(profileID: profileID, windowIndex: w) {
+                BACDebug.log("tasks", "“\(task.title)”: agent came up in tab \(w) — typing instead")
+                let r = await Self.typeWhenFreeResult(delegate, profileID: profileID,
+                                                      target: .task(branch: branch),
+                                                      text: prompt, patience: 180)
+                if case .refused(let why) = r { fail(Self.refusalReason(why, worker: task.workerName)) }
+                return r == .typed
+            }
+            BACDebug.log("tasks", "“\(task.title)”: agent gone from tab \(w) — resuming its conversation")
+            // Only the task's own tab, and only while just a shell is in it.
+            _ = try? await delegate.guestExec(
+                profileID: profileID,
+                command: Self.killShellTabCommand(branch: branch), timeout: 10)
+        }
+        guard let root = await ensureCheckout(taskID, branch: branch, fail: fail) else { return false }
+        // The parent branch tags the tab (@parent_branch → nested under its
+        // folder, merge target). A task resumed after Stop & Return to
+        // Backlog may not know it any more: ask the guest's registry.
+        if (store.task(taskID)?.parentBranch ?? "").isEmpty {
+            let m = await resolveWorktreeMetadata(profileID: profileID, branch: branch,
+                                                  repoPath: task.repoPath)
+            if let parent = m.parent, !parent.isEmpty {
+                store.mutate(taskID) { $0.parentBranch = parent }
+            }
+        }
+        // The task's session was put away with its old tab (Stop & Return
+        // to Backlog, a finished run): bring it back unbound, so it takes
+        // the new tab — the one task-resume opens under the same name —
+        // instead of a stranger being minted, or the archived record
+        // ending the new tab as "archived … is back".
+        if let sid = store.task(taskID)?.sessionID,
+           let s = delegate.agentSessionStore.session(sid), s.isArchived {
+            delegate.agentSessionStore.unbind(sid)
+            delegate.agentSessionStore.setArchived(sid, false)
+        }
+        let typed = AgentPaneProbe.typesOpeningMessage(task.tool)
+        guard delegate.automationWorktreeCommand(
+            profileNameOrID: profileID.uuidString, action: "task-resume",
+            args: [root, branch, store.task(taskID)?.parentBranch ?? "",
+                   task.title, task.tool.rawValue, typed ? "" : prompt, "continue"]) else {
+            fail(NSLocalizedString("Couldn't reach the workspace — is it running?", comment: "task start"))
+            return false
+        }
+        // The message rides the launch for agents that take one on their
+        // command line: delivered once the agent is seen up. Kimi gets it
+        // typed in once its input is ready.
+        if typed {
+            guard let f = await deliverOnceUpOutcome(profileID: profileID, branch: branch,
+                                                     text: prompt, within: 150) else { return true }
+            let why = Self.onceUpFailure(worker: task.workerName, f)
+            fail(why)
+            if case .launch = f { noteSessionLaunchFailed(taskID, branch: branch, reason: why) }
+            return false
+        }
+        let outcome = await watchLaunch(profileID: profileID, branch: branch, within: 150)
+        if case .up = outcome { return true }
+        let why = Self.launchFailure(worker: task.workerName, outcome)
+        fail(why)
+        noteSessionLaunchFailed(taskID, branch: branch, reason: why)
+        return false
+    }
+
+    /// The tab (by branch) once its agent is seen running, nil if it isn't
+    /// within `within` seconds.
+    func waitForAgent(profileID: UUID, branch: String, within: TimeInterval) async -> Int? {
+        if case .up(let w) = await watchLaunch(profileID: profileID, branch: branch, within: within) {
+            return w
+        }
+        return nil
+    }
+
+    /// Watch a just-launched task tab until its agent is up — failing FAST
+    /// when it dies instead of waiting out `within`: the launcher's "exited
+    /// with status N" marker with only a shell left ends the watch at once,
+    /// and a bare shell for several probes in a row after a grace period
+    /// (the agent never came up, no marker) ends it too.
+    func watchLaunch(profileID: UUID, branch: String, within: TimeInterval,
+                     grace: TimeInterval = 20) async -> AgentPaneProbe.LaunchOutcome {
+        let started = Date()
+        let deadline = started.addingTimeInterval(within)
+        var shellStreak = 0
+        var lastWindow: Int? = nil
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let delegate, let idx = await tabIndex(profileID: profileID, branch: branch) else {
+                shellStreak = 0
+                continue
+            }
+            if idx != lastWindow { shellStreak = 0; lastWindow = idx }
+            let out = try? await delegate.guestExec(
+                profileID: profileID, command: AgentPaneProbe.launchCommand(window: idx), timeout: 10)
+            let state = out.flatMap(AgentPaneProbe.parse)
+            let status = out.flatMap(AgentPaneProbe.exitStatus)
+            shellStreak = state == .shell ? shellStreak + 1 : 0
+            if let verdict = AgentPaneProbe.launchVerdict(
+                state: state, exitStatus: status, window: idx,
+                elapsed: Date().timeIntervalSince(started), grace: grace, shellStreak: shellStreak) {
+                if case .died(let st) = verdict {
+                    BACDebug.log("tasks", "\(branch): agent died at launch (status \(st.map(String.init) ?? "?"))")
+                }
+                if case .up(let w) = verdict { bindSession(profileID: profileID, branch: branch, window: w) }
+                return verdict
+            }
+        }
+        return .timedOut
+    }
+
+    /// Remember the session behind a task's tab (`CodingTask.sessionID`),
+    /// once the session store has adopted the tab (a roster tick or two).
+    func bindSession(profileID: UUID, branch: String, window: Int) {
+        guard branch.hasPrefix("wt/") else { return }
+        let slugPart = String(branch.dropFirst(3))
+        guard let task = store.tasks.first(where: { t in
+            guard t.profileID == profileID, t.stage != .done, let slug = t.branchSlug else { return false }
+            return AutomationBoard.branchMatches(branch, slug: slug) || slugPart == slug
+        }) else { return }
+        let taskID = task.id
+        Task { [weak self] in
+            for _ in 0..<10 {
+                guard let self, let delegate = self.delegate else { return }
+                if let s = delegate.agentSessionStore.session(profileID: profileID, windowIndex: window) {
+                    // Not stamped as a branch session: the board owns the
+                    // task's branch (merge/archive prompts stay the board's).
+                    self.store.mutate(taskID) { if $0.sessionID != s.id { $0.sessionID = s.id } }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    /// The card's reason for a launch that didn't come up.
+    nonisolated static func launchFailure(worker: String, _ outcome: AgentPaneProbe.LaunchOutcome) -> String {
+        switch outcome {
+        case .died(let status?):
+            return String(format: NSLocalizedString(
+                "%@ exited right after it started (status %d) — open the session to see why, then Restart Session.",
+                comment: "task launch failed"), worker, status)
+        case .died(nil):
+            return String(format: NSLocalizedString(
+                "%@ quit right after it started — open the session to see why, then Restart Session.",
+                comment: "task launch failed"), worker)
+        case .up, .timedOut:
+            return String(format: NSLocalizedString(
+                "%@ didn't start in the task's session — open it to see why, then Restart Session.",
+                comment: "task send back"), worker)
+        }
+    }
+
+    /// Type `text` into the tab's agent once it is up AND its screen has
+    /// settled (the TUI drew its input box — text typed before that is
+    /// lost): the sessions path's `deliverWhenAlive`, for a task tab. True
+    /// once typed.
+    func deliverOnceUp(profileID: UUID, branch: String, text: String,
+                       within: TimeInterval) async -> Bool {
+        await deliverOnceUpOutcome(profileID: profileID, branch: branch, text: text,
+                                   within: within) == nil
+    }
+
+    /// Why a once-up delivery typed nothing.
+    enum OnceUpFailure: Equatable {
+        /// The agent never came up (or died at launch).
+        case launch(AgentPaneProbe.LaunchOutcome)
+        /// Up, but the guard refused the tab at send time.
+        case refused(PaneRefusal)
+        /// Up, but a menu or a draft kept the text out.
+        case notTyped
+    }
+
+    nonisolated static func onceUpFailure(worker: String, _ f: OnceUpFailure) -> String {
+        switch f {
+        case .launch(let o): return launchFailure(worker: worker, o)
+        case .refused(let r): return refusalReason(r, worker: worker)
+        case .notTyped: return launchFailure(worker: worker, .timedOut)
+        }
+    }
+
+    /// `deliverOnceUp` with the reason it failed: nil = typed. Typed by the
+    /// task's BRANCH, re-checked in the guest at send time — never into
+    /// whatever tab took the index the launch watch saw.
+    func deliverOnceUpOutcome(profileID: UUID, branch: String, text: String,
+                              within: TimeInterval) async -> OnceUpFailure? {
+        let outcome = await watchLaunch(profileID: profileID, branch: branch, within: within)
+        guard case .up(let idx) = outcome, let delegate else { return .launch(outcome) }
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        await waitForSettledScreen(profileID: profileID, windowIndex: idx, maxWait: 30)
+        switch await Self.typeWhenFreeResult(delegate, profileID: profileID,
+                                             target: .task(branch: branch),
+                                             text: text, patience: 120) {
+        case .typed: return nil
+        case .refused(let r): return .refused(r)
+        case .menuOpen, .draftInBox: return .notTyped
+        }
+    }
+
+    /// Kill the task's tab — found by its branch — only while nothing but
+    /// a shell is left in it (the guard prints a refusal otherwise).
+    nonisolated static func killShellTabCommand(branch: String) -> String {
+        PaneTypeGuard.prelude(.task(branch: branch, foreground: .shell))
+            + "if _bg; then tmux kill-window -t \"$_bt\"; fi"
+    }
+
+    /// Wait until the pane shows something and stops changing (two equal
+    /// captures in a row), up to `maxWait` seconds.
+    private func waitForSettledScreen(profileID: UUID, windowIndex: Int, maxWait: TimeInterval) async {
+        guard let delegate else { return }
+        let deadline = Date().addingTimeInterval(maxWait)
+        var last: String? = nil
+        while Date() < deadline {
+            let out = (try? await delegate.guestExec(
+                profileID: profileID,
+                command: "tmux capture-pane -p -t bromure:\(windowIndex) 2>/dev/null | cksum",
+                timeout: 8)) ?? ""
+            let sum = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            // "<crc> 0": an empty pane, nothing drawn yet.
+            if !sum.isEmpty, !sum.hasSuffix(" 0"), sum == last { return }
+            last = sum
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+    }
+
+    /// Make sure the task's checkout is there to resume into: the
+    /// repository root, after re-creating a removed worktree directory. nil
+    /// (with the reason passed to `fail`) when the branch or the repository
+    /// is gone — Start Over is the way forward then.
+    private func ensureCheckout(_ taskID: UUID, branch: String,
+                                fail: @MainActor (String, Bool) -> Void) async -> String? {
+        guard let task = store.task(taskID) else { return nil }
+        let profileID = task.profileID
+        let hint = (task.rootRepo ?? "").isEmpty
+            ? ScheduledAutomationEngine.guestPath(task.repoPath) : task.rootRepo!
+        switch await checkoutState(profileID: profileID, repoHint: hint, branch: branch) {
+        case .ok(let root, let dir):
+            store.mutate(taskID) {
+                if ($0.rootRepo ?? "").isEmpty { $0.rootRepo = root }
+                if ($0.worktreeDir ?? "").isEmpty { $0.worktreeDir = dir }
+            }
+            return root
+        case .worktreeMissing(let root):
+            // The branch (and the work on it) is safe — only the checkout
+            // directory went away. Put it back.
+            BACDebug.log("tasks", "“\(task.title)”: worktree for \(branch) missing — re-creating")
+            guard let dir = await recreateWorktree(
+                profileID: profileID, root: root, branch: branch,
+                preferredDir: task.worktreeDir) else {
+                fail(String(format: NSLocalizedString(
+                    "The checkout for %@ is gone and couldn't be re-created in %@. Start Over runs the task again on a new branch.",
+                    comment: "task resume"), branch, root), true)
+                return nil
+            }
+            store.mutate(taskID) { $0.rootRepo = root; $0.worktreeDir = dir }
+            return root
+        case .branchMissing(let root):
+            fail(String(format: NSLocalizedString(
+                "The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start Over runs the task again on a new branch.",
+                comment: "task resume"), branch, root), true)
+            return nil
+        case .repoMissing:
+            fail(String(format: NSLocalizedString(
+                "The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start Over runs the task again from scratch%@.",
+                comment: "task resume"), task.repoPath,
+                task.effectiveCloneURL != nil
+                    ? NSLocalizedString(", cloning the repository first", comment: "task resume")
+                    : ""), true)
+            return nil
+        }
     }
 
     /// What is left of a task's checkout in the guest, probed before a
@@ -1594,8 +2727,9 @@ final class CodingTaskEngine {
             $0.branchSlug = nil; $0.branch = nil; $0.worktreeDir = nil
             $0.parentBranch = nil; $0.rootRepo = nil
             $0.startedAt = nil; $0.testingAt = nil; $0.completedAt = nil
-            $0.mergingAt = nil; $0.merged = false; $0.prOpened = nil
-            $0.lastError = nil; $0.restartNeeded = nil
+            $0.landing = nil; $0.merged = false; $0.prOpened = nil
+            $0.completion = nil; $0.codeChanges = nil; $0.sessionParkedAt = nil
+            $0.lastError = nil; $0.restartNeeded = nil; $0.resumeBranch = nil
         }
         start(taskID)
     }
@@ -1615,128 +2749,67 @@ final class CodingTaskEngine {
               task.stage == .inProgress || task.stage == .testing || task.stage == .done,
               let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
               delegate != nil else { return }
-        let profileID = task.profileID
         let unsent = task.comments.filter { $0.sentAt == nil }
-        let prompt = unsent.isEmpty
-            ? Self.resumePrompt(for: task)
-            : Self.feedbackPrompt(comments: unsent)
+        let ids = Set(unsent.map(\.id))
         store.mutate(taskID) { $0.lastError = nil; $0.restartNeeded = nil }
         BACDebug.log("tasks", "“\(task.title)”: restarting session (\(branch))")
         Task { [weak self] in
-            guard let self, let delegate = self.delegate else { return }
-            if let why = await self.ensureWorkspaceUp(profileID, delegate: delegate) {
-                self.store.mutate(taskID) { $0.lastError = why }
-                return
-            }
-            // Relaunch the agent on the task's branch (a fresh tab) — only
-            // once there is a checkout to land in.
-            @MainActor func relaunch(root: String) -> Bool {
-                delegate.automationWorktreeCommand(
-                    profileNameOrID: profileID.uuidString, action: "task-resume",
-                    args: [root, branch, self.store.task(taskID)?.parentBranch ?? "",
-                           task.title, task.tool.rawValue, prompt])
-            }
-            @MainActor func fail(_ reason: String, restart: Bool = false) {
-                self.store.mutate(taskID) {
-                    $0.lastError = reason
-                    $0.restartNeeded = restart ? true : nil
-                }
-            }
-            @MainActor func ensureCheckout() async -> String? {
-                let hint = (task.rootRepo ?? "").isEmpty
-                    ? ScheduledAutomationEngine.guestPath(task.repoPath) : task.rootRepo!
-                switch await self.checkoutState(profileID: profileID, repoHint: hint, branch: branch) {
-                case .ok(let root, let dir):
-                    self.store.mutate(taskID) {
-                        if ($0.rootRepo ?? "").isEmpty { $0.rootRepo = root }
-                        if ($0.worktreeDir ?? "").isEmpty { $0.worktreeDir = dir }
-                    }
-                    return root
-                case .worktreeMissing(let root):
-                    // The branch (and the work on it) is safe — only the
-                    // checkout directory went away. Put it back.
-                    BACDebug.log("tasks", "“\(task.title)”: worktree for \(branch) missing — re-creating")
-                    guard let dir = await self.recreateWorktree(
-                        profileID: profileID, root: root, branch: branch,
-                        preferredDir: task.worktreeDir) else {
-                        fail(String(format: NSLocalizedString(
-                            "The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch.",
-                            comment: "task resume"), branch, root), restart: true)
-                        return nil
-                    }
-                    self.store.mutate(taskID) { $0.rootRepo = root; $0.worktreeDir = dir }
-                    return root
-                case .branchMissing(let root):
-                    fail(String(format: NSLocalizedString(
-                        "The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch.",
-                        comment: "task resume"), branch, root), restart: true)
-                    return nil
-                case .repoMissing:
-                    fail(String(format: NSLocalizedString(
-                        "The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@.",
-                        comment: "task resume"), task.repoPath,
-                        task.effectiveCloneURL != nil
-                            ? NSLocalizedString(", cloning the repository first", comment: "task resume")
-                            : ""), restart: true)
-                    return nil
-                }
-            }
+            guard let self else { return }
             // A live session may already exist (workspace was just slow, or
-            // the user hit Resume on a session that's still there). Only a
-            // tab with a RUNNING agent can take a prompt: one where the agent
-            // exited (crash, /exit — a bare shell) is the "never done" case,
-            // so kill it and relaunch. An agent that is alive gets the
-            // comments, or a nudge to pick the task back up when there are
-            // none — before this, Resume on a live idle session did nothing.
-            if let idx = await self.tabIndex(profileID: profileID, branch: branch),
-               await self.agentAlive(profileID: profileID, windowIndex: idx, branch: branch) {
-                _ = await self.typeIntoSession(
-                    profileID: profileID, branch: branch,
-                    text: unsent.isEmpty ? Self.nudgePrompt : prompt)
+            // the user hit Resume on a session that's still there): an agent
+            // that is alive gets the comments, or a nudge to pick the task
+            // back up when there are none — before this, Resume on a live
+            // idle session did nothing. Otherwise its conversation is resumed
+            // in a fresh tab (a tab with only a shell left is closed, never
+            // typed into) — with the same context, not a new conversation.
+            let alive: Bool
+            if let idx = await self.tabIndex(profileID: task.profileID, branch: branch) {
+                alive = await self.agentAlive(profileID: task.profileID, windowIndex: idx, branch: branch)
             } else {
-                if let idx = await self.tabIndex(profileID: profileID, branch: branch) {
-                    BACDebug.log("tasks", "“\(task.title)”: agent gone from tab \(idx) — relaunching")
-                    _ = try? await delegate.guestExec(
-                        profileID: profileID,
-                        command: "tmux kill-window -t bromure:\(idx)", timeout: 10)
-                }
-                guard let root = await ensureCheckout() else { return }
-                guard relaunch(root: root) else {
-                    fail(NSLocalizedString("Couldn't reach the workspace — is it running?",
-                                           comment: "task start"))
-                    return
-                }
+                alive = false
             }
-            let now = Date()
+            let text = !unsent.isEmpty ? Self.feedbackPrompt(comments: unsent)
+                : alive ? Self.nudgePrompt : Self.resumePrompt(for: task)
+            guard await self.deliverToConversation(taskID, branch: branch, text: text) else { return }
             self.store.mutate(taskID) {
                 $0.stage = .inProgress
-                $0.startedAt = now   // restart the session-gone clock
+                $0.startedAt = Date()   // restart the session-gone clock
                 // A finished task picked back up is active again.
-                $0.completedAt = nil; $0.merged = false; $0.prOpened = nil; $0.mergingAt = nil
+                $0.completedAt = nil; $0.merged = false; $0.prOpened = nil; $0.landing = nil
+                $0.completion = nil; $0.sessionParkedAt = nil
                 $0.restartNeeded = nil
-                for i in $0.comments.indices where $0.comments[i].sentAt == nil {
-                    $0.comments[i].sentAt = now
-                }
             }
+            self.markCommentsSent(taskID, ids)
         }
     }
 
-    /// Is a coding agent still running in the session's tab? The attached
-    /// pane's roster label when there is one (the same signal the sidebar
-    /// badges agents with); a detached session asks tmux for the foreground
-    /// command. A bare shell means the agent exited.
-    private func agentAlive(profileID: UUID, windowIndex: Int, branch: String) async -> Bool {
-        if let tab = delegate?.pane(for: profileID)?.model.tabs
-            .first(where: { $0.worktreeBranch == branch }) {
-            return BromureIcons.agentKind(forLabel: tab.shownLabel) != nil
+    /// Is a coding agent still running in the session's tab? Asked of the
+    /// pane's process tree (`AgentPaneProbe`) — the tab's label is its
+    /// title and tmux's foreground command can name the shell while the
+    /// agent runs. False when it can't be told.
+    func agentAlive(profileID: UUID, windowIndex: Int, branch: String) async -> Bool {
+        if case .running? = await agentState(profileID: profileID, windowIndex: windowIndex) { return true }
+        return false
+    }
+
+    /// The tab's agent state; nil when the guest can't be asked.
+    /// `confirmShell`: a bare shell must be seen three times over ~6 s (an
+    /// agent still starting runs as its shell for a moment).
+    func agentState(profileID: UUID, windowIndex: Int,
+                    confirmShell: Bool = false) async -> AgentPaneProbe.State? {
+        guard let delegate else { return nil }
+        var last: AgentPaneProbe.State? = nil
+        for attempt in 0..<(confirmShell ? 3 : 1) {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+            let out = try? await delegate.guestExec(
+                profileID: profileID, command: AgentPaneProbe.command(window: windowIndex), timeout: 10)
+            last = out.flatMap(AgentPaneProbe.parse)
+            switch last {
+            case .running?, .gone?: return last
+            case .shell?, nil: continue
+            }
         }
-        guard let delegate else { return false }
-        let out = try? await delegate.guestExec(
-            profileID: profileID,
-            command: "tmux display-message -p -t bromure:\(windowIndex) '#{pane_current_command}' 2>/dev/null",
-            timeout: 8)
-        return BromureIcons.agentKind(
-            forLabel: (out ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+        return last
     }
 
     /// Typed into a LIVE but idle session when the user hits Resume with no
@@ -1761,11 +2834,25 @@ final class CodingTaskEngine {
     /// The guest command that types text into a session's agent (base64
     /// through the guest shell so arbitrary text survives quoting, then
     /// Enter). Shared with the fat client, which runs it over the tunnel.
+    /// Guarded (`PaneTypeGuard`): nothing is typed unless an AGENT holds
+    /// the pane's foreground — a bare shell would run the text.
     nonisolated static func typeCommand(tabIndex: Int, text: String) -> String {
-        let b64 = Data(text.utf8).base64EncodedString()
-        return "echo \(b64) | base64 -d | xargs -0 tmux send-keys "
-            + "-t bromure:\(tabIndex) -l && sleep 1 && "
-            + "tmux send-keys -t bromure:\(tabIndex) Enter"
+        PaneTypeGuard.typeCommand(target: .index(tabIndex), text: text)
+    }
+
+    /// `typeCommand` for any target (a task's tab by branch, a session's
+    /// tab with its markers).
+    nonisolated static func typeCommand(target: PaneTarget, text: String) -> String {
+        PaneTypeGuard.typeCommand(target: target, text: text)
+    }
+
+    /// Type a COMMAND LINE into a tab whose agent exited (a relaunch in
+    /// place): only while a shell — not an agent, which would take it as a
+    /// message — holds the pane, and only in the intended window.
+    nonisolated static func shellLineCommand(target: PaneTarget, line: String) -> String {
+        var t = target
+        t.foreground = .shell
+        return PaneTypeGuard.typeCommand(target: t, text: line)
     }
 
     /// What `guardedTypeCommand` prints when it held off.
@@ -1780,13 +2867,24 @@ final class CodingTaskEngine {
     /// numbered row, "❯ 1." / Grok's "1 (●)") before typing and again before Enter; with one up nothing more is
     /// sent and `typeHeldMarker` is printed, for the caller to hold the text.
     nonisolated static func guardedTypeCommand(tabIndex: Int, text: String) -> String {
-        let b64 = Data(text.utf8).base64EncodedString()
-        let t = "bromure:\(tabIndex)"
-        let menu = "tmux capture-pane -p -t \(t) 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
-            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'"
-        return "if \(menu); then echo \(typeHeldMarker); "
-            + "else echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \(t) -l && sleep 1 && "
-            + "if \(menu); then echo \(typeHeldMarker); else tmux send-keys -t \(t) Enter; fi; fi"
+        guardedTypeCommand(target: .index(tabIndex), text: text)
+    }
+
+    /// Defines `_bm`: true while a menu or dialog is up in "$_bt".
+    nonisolated static var menuFunction: String {
+        "_bm() { tmux capture-pane -p -t \"$_bt\" 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
+            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'; }; "
+    }
+
+    /// `guardedTypeCommand` on a stable target: the window is resolved once
+    /// (to its id) and re-checked — identity and an agent in the
+    /// foreground (`PaneTypeGuard`) — before the text and again before the
+    /// Enter. A failed check types nothing more and prints the refusal.
+    nonisolated static func guardedTypeCommand(target: PaneTarget, text: String) -> String {
+        PaneTypeGuard.prelude(target) + menuFunction
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); "
+            + "else \(PaneTypeGuard.literalSend(text)) && sleep 1 && "
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter; fi; fi; fi; fi"
     }
 
     /// The guest command that tails a plan session's live agent transcript.
@@ -1985,7 +3083,7 @@ final class CodingTaskEngine {
             // slug, "-N" when the guest deduped it); the cwd-derived
             // slug+hash covers non-repo runs. Main-agent journal only,
             // newest session wins.
-            return "d=$(ls -td ~/.kimi-code/sessions/wd_\(slug)_* "
+            return "d=$(ls -td ~/.kimi-code/sessions/wd_\(kimiSlug(slug))_* "
                 + "~/.kimi-code/sessions/wd_\(slug)-[0-9]*_* 2>/dev/null | head -1); "
                 + "if [ -z \"$d\" ]; then "
                 + markerCwd
@@ -2054,6 +3152,15 @@ final class CodingTaskEngine {
         }
     }
 
+    /// A worktree slug as Kimi names its workspace bucket: the folder's
+    /// basename cut to 40 characters, trailing dashes dropped (a long task
+    /// title's slug is cut — the full-slug glob never matched it).
+    nonisolated static func kimiSlug(_ slug: String) -> String {
+        var s = String(slug.prefix(40))
+        while s.hasSuffix("-") { s.removeLast() }
+        return s.isEmpty ? slug : s
+    }
+
     /// The guest command that prints the age (seconds) of the newest write
     /// to a session's transcript — the "are background subagents still
     /// working?" probe. Project dir by worktree-slug glob, with the
@@ -2071,7 +3178,7 @@ final class CodingTaskEngine {
         // instead of it: a run uses one agent, so at most one can match, and
         // the probe stays tool-agnostic.
         return "d=$(ls -td ~/.claude/projects/*-\(slug) "
-            + "~/.kimi-code/sessions/wd_\(slug)_* "
+            + "~/.kimi-code/sessions/wd_\(kimiSlug(slug))_* "
             + "~/.kimi-code/sessions/wd_\(slug)-[0-9]*_* 2>/dev/null | head -1); "
             + "if [ -z \"$d\" ]; then "
             + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
@@ -2148,7 +3255,7 @@ final class CodingTaskEngine {
         }
     }
 
-    private nonisolated static func shellQuote(_ s: String) -> String {
+    nonisolated static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
@@ -2271,16 +3378,21 @@ final class CodingTaskEngine {
             .first { AutomationBoard.branchMatches($0, slug: slug) }
     }
 
-    /// Type text into a live session's agent. Used by review send-back and
-    /// the plan window's input box.
+    /// Type text into a live session's agent — the plan window's input box.
+    /// Only while the agent is RUNNING in the tab: one that exited leaves a
+    /// bare shell, which would run the text as commands. False then (the
+    /// caller says so); review send-back resumes the conversation instead
+    /// (`deliverToConversation`).
     func typeIntoSession(profileID: UUID, branch: String, text: String) async -> Bool {
         guard let delegate,
-              let index = await tabIndex(profileID: profileID, branch: branch)
+              let index = await tabIndex(profileID: profileID, branch: branch),
+              await agentAlive(profileID: profileID, windowIndex: index, branch: branch),
+              let out = try? await delegate.guestExec(
+                profileID: profileID,
+                command: Self.typeCommand(target: .task(branch: branch), text: text),
+                timeout: 20)
         else { return false }
-        return (try? await delegate.guestExec(
-            profileID: profileID,
-            command: Self.typeCommand(tabIndex: index, text: text),
-            timeout: 20)) != nil
+        return PaneTypeGuard.refusal(in: out) == nil
     }
 
     // MARK: Planning watchdog
@@ -2288,7 +3400,7 @@ final class CodingTaskEngine {
     private var planWatchdogs: [UUID: Task<Void, Never>] = [:]
     /// Tasks whose done signal arrived and is settling (see
     /// waitForSessionQuiet) — later Stop signals are ignored meanwhile.
-    private var settling: Set<UUID> = []
+    var settling: Set<UUID> = []
 
     /// End a planning session's in-flight state with a reason — the card
     /// stops spinning and says what to do, instead of waiting forever.
@@ -2302,21 +3414,42 @@ final class CodingTaskEngine {
         guard branch.allSatisfy({
             $0.isLowercase || $0.isNumber || $0 == "-" || $0 == "/"
         }), !branch.isEmpty else { return }
+        let scheduledAt = Date()
         Task { [weak self] in
+            // The tabs to close are the ones there NOW, by window id: a tab
+            // the task opens on the same branch during the grace (Start right
+            // after Stop & Return to Backlog) is a new window and is spared.
+            guard let first = self?.delegate,
+                  let ids = try? await first.guestExec(
+                    profileID: profileID, command: Self.windowIDsCommand(branch: branch), timeout: 10)
+            else { return }
+            let windows = ids.split(whereSeparator: \.isNewline).map(String.init)
+                .filter(PaneTypeGuard.isWindowID)
             try? await Task.sleep(nanoseconds: afterSeconds * 1_000_000_000)
             guard let delegate = self?.delegate else { return }
             // The run is finished: its session is put away with the tab,
             // not left as Ended. Just before the kill — archiving ends the
             // agent too, and the grace above is for its last words.
-            delegate.archiveFinishedSession(profileID: profileID, worktreeBranch: branch)
-            let cmd = "for i in $(tmux list-windows -t bromure "
-                + "-F '#{window_index} #{@worktree}' "
-                + "| awk -v b='\(branch)' '$2==b {print $1}'); "
-                + "do tmux kill-window -t bromure:$i; done"
+            // Restarted meanwhile (the task's new tab carries the same
+            // branch): only sessions provably on the closing windows go.
+            let restarted = self?.store.tasks.contains { t in
+                t.profileID == profileID && (t.branch == branch || t.branchSlug.map { "wt/" + $0 } == branch)
+                    && (t.startedAt ?? .distantPast) > scheduledAt
+            } ?? false
+            delegate.archiveFinishedSession(profileID: profileID, worktreeBranch: branch,
+                                            windowIDs: Set(windows), strict: restarted)
+            guard !windows.isEmpty else { return }
+            let cmd = windows.map { "tmux kill-window -t '\($0)' 2>/dev/null" }.joined(separator: "; ") + "; true"
             _ = try? await delegate.guestExec(profileID: profileID,
                                               command: cmd, timeout: 15)
             BACDebug.log("tasks", "closed session tab for \(branch)")
         }
+    }
+
+    /// The tmux window ids of the tabs tagged with `branch`, one per line.
+    nonisolated static func windowIDsCommand(branch: String) -> String {
+        "tmux list-windows -t bromure -F '#{window_id} #{@worktree}' 2>/dev/null "
+            + "| awk -v b='\(branch)' '$2==b {print $1}'"
     }
 
     private func abortPlanning(_ taskID: UUID, reason: String) {
@@ -2377,7 +3510,7 @@ final class CodingTaskEngine {
                 }
                 if Date().timeIntervalSince(started) > 3600 {
                     self.abortPlanning(taskID, reason: NSLocalizedString(
-                        "The planning session timed out without filing phases — click Plan to retry.",
+                        "The planning session timed out without filing phases — click Plan First to retry.",
                         comment: "plan watchdog"))
                     return
                 }
@@ -2401,33 +3534,32 @@ final class CodingTaskEngine {
                     if seenTab || Date().timeIntervalSince(started) > 240 {
                         self.abortPlanning(taskID, reason: seenTab
                             ? NSLocalizedString(
-                                "The planning session ended before filing phases — click Plan to retry.",
+                                "The planning session ended before filing phases — click Plan First to retry.",
                                 comment: "plan watchdog")
-                            : NSLocalizedString(
-                                "The planning session never started — is the workspace running? Click Plan to retry.",
-                                comment: "plan watchdog"))
+                            : String(format: NSLocalizedString(
+                                "The planning session didn't start — %@ may not be set up in this workspace. Open a session there to check, then click Plan First to retry.",
+                                comment: "plan watchdog"), t.tool.displayName))
                         return
                     }
                     continue
                 }
                 seenTab = true
                 // Did the agent exit back to a bare shell (user quit claude)?
-                let cmd = "tmux list-panes -t bromure:\(index) "
-                    + "-F '#{pane_current_command}' 2>/dev/null | head -1"
-                guard let out = try? await delegate.guestExec(
-                    profileID: profileID, command: cmd, timeout: 5) else { continue }
-                let proc = out.trimmingCharacters(in: .whitespacesAndNewlines)
-                if ["bash", "zsh", "sh", "dash"].contains(proc) {
+                // Asked of the pane's process tree: tmux's foreground
+                // command names the shell while a Kimi started from .bashrc runs.
+                guard let state = await self.agentState(profileID: profileID, windowIndex: index)
+                else { continue }
+                if state == .shell {
                     if sawAgent {
                         bareShellPolls += 1
                         if bareShellPolls >= 2 {
-                            self.abortPlanning(taskID, reason: NSLocalizedString(
-                                "Claude exited before filing phases — click Plan to retry.",
-                                comment: "plan watchdog"))
+                            self.abortPlanning(taskID, reason: String(format: NSLocalizedString(
+                                "%@ exited before filing phases — click Plan First to retry.",
+                                comment: "plan watchdog"), t.tool.displayName))
                             return
                         }
                     }
-                } else if !proc.isEmpty {
+                } else if case .running = state {
                     sawAgent = true
                     bareShellPolls = 0
                 }
@@ -2452,10 +3584,11 @@ final class CodingTaskEngine {
         if store.task(parent.id)?.validationInFlight == true {
             abortPlanning(parent.id, reason: (error?.isEmpty == false ? error! : nil)
                 ?? NSLocalizedString(
-                    "The planning session ended before filing phases — click Plan to retry.",
+                    "The planning session ended before filing phases — click Plan First to retry.",
                     comment: "plan watchdog"))
         } else {
             BACDebug.log("tasks", "“\(parent.title)”: streamed planning complete")
+            store.mutate(parent.id) { $0.planCompletedAt = Date() }
             planWatchdogs[parent.id]?.cancel()
             planWatchdogs[parent.id] = nil
         }
@@ -2471,7 +3604,7 @@ final class CodingTaskEngine {
                 watchPlanning(t.id, slug: slug, profileID: t.profileID)
             } else {
                 abortPlanning(t.id, reason: NSLocalizedString(
-                    "The planning session was interrupted — click Plan to retry.",
+                    "The planning session was interrupted — click Plan First to retry.",
                     comment: "plan watchdog"))
             }
         }
@@ -2483,7 +3616,8 @@ final class CodingTaskEngine {
     /// archive — durable across branch deletion, workspace deletion, even
     /// the VM — then optionally drop the worktree + branch in the guest.
     /// Strictly in that order; cleanup must never outrun the archive.
-    private func archiveTranscriptThenCleanup(_ taskID: UUID, removeWorktree: Bool) {
+    func archiveTranscriptThenCleanup(_ taskID: UUID, removeWorktree: Bool,
+                                      removeIfEmpty: Bool = false) {
         guard let task = store.task(taskID) else { return }
         let branch = task.branch
         let root = task.rootRepo
@@ -2499,7 +3633,18 @@ final class CodingTaskEngine {
                 BACDebug.log("tasks", "“\(task.title)”: transcript archived "
                     + "(\(text.utf8.count) bytes)")
             }
-            if removeWorktree, let branch, let root, !root.isEmpty {
+            var remove = removeWorktree
+            if !remove, removeIfEmpty, let branch, let root, !root.isEmpty,
+               let parent = task.parentBranch, !parent.isEmpty,
+               let out = try? await delegate.guestExec(
+                profileID: profileID,
+                command: Self.emptyBranchCommand(root: root, branch: branch, parent: parent,
+                                                 worktreeDir: task.worktreeDir),
+                timeout: 15),
+               out.contains("EMPTY") {
+                remove = true
+            }
+            if remove, let branch, let root, !root.isEmpty {
                 _ = delegate.automationWorktreeCommand(
                     profileNameOrID: profileID.uuidString,
                     action: "remove", args: [root, branch])
@@ -2508,207 +3653,130 @@ final class CodingTaskEngine {
         }
     }
 
-    // MARK: Merge (Testing → Done)
-
-    /// Merge the task's branch into its parent — or `target`, when the
-    /// review picked another branch — and mark the task Done. The guest
-    /// opens the usual merge tab (squash flavor on request); conflicts
-    /// spawn the resolver flow.
-    func merge(_ taskID: UUID, into targetOverride: String? = nil,
-               squash: Bool = false, cleanup: Bool = true) {
-        guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch, let delegate else { return }
-        // Done by an assignee (a session, a room, the Switchboard): it merges
-        // its own work where it did it — the board may not even reach that
-        // machine (a native one), and the worktree is the assignee's.
-        if task.delegationID != nil {
-            Task { _ = await delegate.taskDispatcher.requestMerge(
-                taskID, into: targetOverride, squash: squash, cleanup: cleanup) }
-            return
+    /// Prints EMPTY when `branch` adds no commit to `parent` and its
+    /// checkout has nothing uncommitted (ignored files and build/cache
+    /// litter don't count — `TaskLitter`).
+    nonisolated static func emptyBranchCommand(root: String, branch: String, parent: String,
+                                               worktreeDir: String?) -> String {
+        var cmd = "[ \"$(git -C \(shellQuote(root)) rev-list --count \(shellQuote(parent + ".." + branch)) 2>/dev/null)\" = 0 ] || exit 0; "
+        if let wt = worktreeDir, !wt.isEmpty {
+            cmd += "[ -z \"$(\(TaskLitter.status(shellQuote(wt))))\" ] || exit 0; "
         }
-        guard let target = targetOverride ?? task.parentBranch,
-              let root = task.rootRepo else {
-            // Metadata capture failed at hand-to-review (workspace down at
-            // the time?). Resolve it now and retry once — a silent return
-            // here looked like "merge did nothing" on the board.
-            Task { [weak self] in
-                guard let self else { return }
-                let m = await self.resolveWorktreeMetadata(
-                    profileID: task.profileID, branch: branch,
-                    repoPath: task.repoPath)
-                self.store.mutate(taskID) {
-                    if $0.worktreeDir == nil { $0.worktreeDir = m.dir }
-                    if $0.parentBranch == nil { $0.parentBranch = m.parent }
-                    if $0.rootRepo == nil { $0.rootRepo = m.root }
-                }
-                if let t = self.store.task(taskID),
-                   (targetOverride ?? t.parentBranch) != nil, t.rootRepo != nil {
-                    self.merge(taskID, into: targetOverride, squash: squash, cleanup: cleanup)
-                } else {
-                    self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                        "Couldn't determine the branch's parent or repo root — is the workspace running?",
-                        comment: "task merge") }
-                }
-            }
-            return
-        }
-        guard task.mergingAt == nil else { return }   // one merge in flight
-        let ok = delegate.automationWorktreeCommand(
-            profileNameOrID: task.profileID.uuidString, action: "merge",
-            args: [branch, target, root,
-                   String(format: NSLocalizedString("Merge → %@", comment: "merge tab"),
-                          target),
-                   task.tool.rawValue, squash ? "squash" : "merge", "auto"])
-        guard ok else {
-            store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                "Couldn't reach the workspace — is it running?", comment: "task merge") }
-            return
-        }
-        BACDebug.log("tasks",
-                     "“\(task.title)”: \(squash ? "squash-" : "")merging \(branch) → \(target)")
-        // NOT Done yet: the guest merge can take a while (agent committing
-        // outstanding work, conflict resolution awaiting the user) — and
-        // dependent phases queued on this card must not start until the
-        // changes actually exist on the target. Verify, then finish.
-        store.mutate(taskID) { $0.mergingAt = Date(); $0.lastError = nil }
-        Task { [weak self] in
-            await self?.verifyMergeLanded(taskID, branch: branch, target: target,
-                                          root: root, squash: squash,
-                                          cleanup: cleanup)
-        }
+        return cmd + "echo EMPTY"
     }
 
-    private static let mergeVerifyTimeout: TimeInterval = 1800   // 30 min
-    private static let mergeVerifyInterval: UInt64 = 5_000_000_000  // 5s
+    // MARK: Review → Done
+    //
+    // Landing (merge / pull request) lives in CodingTaskLanding.swift.
 
-    /// Poll the guest's git state until the branch's changes are contained
-    /// in the target, then flip the card Done and pump the queue. Merge
-    /// flavor decides the check: a normal merge makes the branch an ancestor
-    /// of the target; a squash merge doesn't, but leaves the two trees
-    /// identical. The task's worktree must also be clean — the agent-driven
-    /// dirty-merge path commits there first, and until it has, an
-    /// "already-an-ancestor" branch (uncommitted-only work) must not count.
-    private func verifyMergeLanded(_ taskID: UUID, branch: String,
-                                   target: String, root: String,
-                                   squash: Bool, cleanup: Bool) async {
-        func q(_ s: String) -> String {
-            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }
-        var check = squash
-            ? "git -C \(q(root)) diff --quiet \(q(target)) \(q(branch)) -- 2>/dev/null"
-            : "git -C \(q(root)) merge-base --is-ancestor \(q(branch)) \(q(target)) 2>/dev/null"
-        if let wt = store.task(taskID)?.worktreeDir, !wt.isEmpty {
-            check = "[ -z \"$(git -C \(q(wt)) status --porcelain 2>/dev/null)\" ] && " + check
-        }
-        let cmd = check + " && echo MERGED"
-        let deadline = Date().addingTimeInterval(Self.mergeVerifyTimeout)
-        while Date() < deadline {
-            // Merge cancelled or superseded (sent back to In Progress,
-            // closed without merge, card deleted) → stop quietly.
-            guard let task = store.task(taskID), task.stage == .testing,
-                  task.mergingAt != nil, let delegate else { return }
-            let out = try? await delegate.guestExec(
-                profileID: task.profileID, command: cmd, timeout: 10)
-            if out?.contains("MERGED") == true {
-                BACDebug.log("tasks", "“\(task.title)”: merge verified on \(target)")
-                store.mutate(taskID) {
-                    $0.stage = .done
-                    $0.completedAt = Date()
-                    $0.merged = true
-                    $0.mergingAt = nil
-                    $0.lastError = nil
-                }
-                pumpQueue()
-                // The merge landed — archive the transcript, then remove the
-                // worktree (checkout + branch) unless the user kept the
-                // option off; failures surface via worktree-error as usual.
-                archiveTranscriptThenCleanup(taskID, removeWorktree: cleanup)
-                return
-            }
-            try? await Task.sleep(nanoseconds: Self.mergeVerifyInterval)
-        }
-        store.mutate(taskID) {
-            guard $0.mergingAt != nil else { return }
-            $0.mergingAt = nil
-            $0.lastError = NSLocalizedString(
-                "The merge hasn't completed — check the merge tab in the workspace (conflicts wait for your confirmation), then click Merge again, or use Close (no merge).",
-                comment: "task merge")
-        }
-    }
-
-    /// "Create Pull Request": the existing worktree-pr flow — an agent tab
-    /// that reviews, pushes, and `gh pr create`s the branch. The task closes
-    /// as "PR opened"; the merge happens on the forge.
-    func openPR(_ taskID: UUID) {
-        guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch, let parent = task.parentBranch,
-              let root = task.rootRepo, let delegate else { return }
-        let ok = delegate.automationWorktreeCommand(
-            profileNameOrID: task.profileID.uuidString, action: "pr",
-            args: [branch, parent, root,
-                   String(format: NSLocalizedString("PR: %@", comment: "pr tab"),
-                          task.title),
-                   task.tool.rawValue])
-        guard ok else {
-            store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                "Couldn't reach the workspace — is it running?", comment: "task pr") }
-            return
-        }
-        BACDebug.log("tasks", "“\(task.title)”: opening PR for \(branch)")
-        store.mutate(taskID) {
-            $0.stage = .done
-            $0.completedAt = Date()
-            $0.merged = false
-            $0.prOpened = true
-            $0.lastError = nil
-        }
-        pumpQueue()
-        // Transcript only — the PR agent tab is pushing FROM this worktree
-        // right now, so the checkout must survive (the branch then lives on
-        // the forge; local cleanup for the PR flow stays manual).
-        archiveTranscriptThenCleanup(taskID, removeWorktree: false)
-    }
-
-    /// Close a task without merging (abandoned, or merged by hand). The
-    /// worktree + branch go away like a merged task's would — "abandoned"
-    /// means exactly that, and the archived transcript keeps the durable
-    /// record of what the agent did.
     /// Done as it stands — nothing merged, nothing removed: the worktree and
-    /// its branch stay exactly where they are (merged by hand, or kept).
-    /// Only the transcript is archived, as for any finished task.
+    /// its branch stay exactly where they are (merged by hand, or kept, or a
+    /// task that produced no code). The agent's session is put away; the
+    /// transcript is archived as for any finished task. From Review, or
+    /// straight from In Progress (the agent is stopped).
     func markDone(_ taskID: UUID) {
-        guard let task = store.task(taskID), task.stage == .testing else { return }
+        guard let task = store.task(taskID),
+              task.stage == .testing || task.stage == .inProgress else { return }
         store.mutate(taskID) {
             $0.stage = .done
             $0.completedAt = Date()
             $0.merged = false
-            $0.mergingAt = nil
+            $0.prOpened = nil
+            $0.landing = nil
             $0.lastError = nil
+            $0.completion = .markedDone(byUser: true)
         }
         BACDebug.log("tasks", "“\(task.title)”: marked done")
+        putSessionAway(task)
+        rollUpBrief(afterPhaseDone: taskID)
         pumpQueue()
-        archiveTranscriptThenCleanup(taskID, removeWorktree: false)
+        // A branch with nothing on it (a task that produced no code) goes
+        // with it — kept, it's just litter in the Branches window.
+        archiveTranscriptThenCleanup(taskID, removeWorktree: false,
+                                     removeIfEmpty: task.delegationID == nil)
     }
 
+    /// Discard: Done without merging, the worktree and its branch removed.
+    /// The archived transcript keeps the record of what the agent did.
     func closeWithoutMerge(_ taskID: UUID) {
+        guard let task = store.task(taskID), task.stage != .done else { return }
         store.mutate(taskID) {
             $0.stage = .done
             $0.completedAt = Date()
             $0.merged = false
-            $0.mergingAt = nil
+            $0.prOpened = nil
+            $0.landing = nil
+            $0.completion = .closedWithoutMerge
         }
+        putSessionAway(task)
+        rollUpBrief(afterPhaseDone: taskID)
         pumpQueue()
         archiveTranscriptThenCleanup(taskID, removeWorktree: true)
     }
 
-    /// Manual Testing → In Progress with no feedback (the user just wants
-    /// the agent tab back in play), and manual In Progress → Testing for
-    /// non-Claude agents that never signal done.
+    /// Stop the agent and put the task back in the Backlog — nothing is
+    /// deleted: the worktree and its branch stay in the workspace (the
+    /// Branches window finds them), the card is a plain brief again.
+    func stopToBacklog(_ taskID: UUID) {
+        guard let task = store.task(taskID), task.stage == .inProgress else { return }
+        if task.delegationID != nil {
+            delegate?.taskDispatcher.recall(taskID)
+            return
+        }
+        // The branch is remembered (not just left in the workspace): the
+        // next start resumes on it rather than orphaning it for a new one.
+        // So is its worktree metadata (parent branch, checkout, repo root),
+        // read off the live tab before it is put away — the resume tags the
+        // new tab with the parent branch.
+        let kept = task.branch ?? liveBranch(of: task) ?? task.branchSlug.map { "wt/" + $0 }
+        let tab = kept.flatMap { b in
+            delegate?.pane(for: task.profileID)?.model.tabs.first { $0.worktreeBranch == b } }
+        putSessionAway(task)
+        store.mutate(taskID) {
+            if let tab {
+                if ($0.parentBranch ?? "").isEmpty, let p = tab.parentBranch, !p.isEmpty { $0.parentBranch = p }
+                if ($0.rootRepo ?? "").isEmpty, let r = tab.rootRepo, !r.isEmpty { $0.rootRepo = r }
+                if ($0.worktreeDir ?? "").isEmpty {
+                    let d = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
+                    if let d, !d.isEmpty { $0.worktreeDir = d }
+                }
+            }
+            $0.stage = .backlog
+            $0.startedAt = nil
+            $0.branchSlug = nil
+            $0.branch = nil
+            $0.resumeBranch = kept
+            $0.lastError = nil
+            $0.restartNeeded = nil
+        }
+        BACDebug.log("tasks", "“\(task.title)”: stopped, back to the backlog")
+        pumpQueue()
+    }
+
+    /// End a task's agent session: archive it and close its tab — resolved
+    /// in the guest when the workspace runs detached (no pane roster here).
+    /// A task done by someone else's session leaves that session alone.
+    func putSessionAway(_ task: CodingTask, afterSeconds: UInt64 = 3) {
+        guard task.delegationID == nil else { return }
+        if let b = task.branch ?? liveBranch(of: task) {
+            closeSessionTab(profileID: task.profileID, branch: b, afterSeconds: afterSeconds)
+            return
+        }
+        guard task.branchSlug != nil else { return }
+        Task { [weak self] in
+            guard let self, let b = await self.liveBranchResolved(of: task) else { return }
+            self.closeSessionTab(profileID: task.profileID, branch: b, afterSeconds: afterSeconds)
+        }
+    }
+
+    /// Manual Review → In Progress with no feedback (the user just wants
+    /// the agent back at work), and manual In Progress → Review for agents
+    /// that never signal done.
     func moveToInProgress(_ taskID: UUID) {
         store.mutate(taskID) {
             if $0.stage == .testing || $0.stage == .planning {
                 $0.stage = .inProgress
-                $0.mergingAt = nil   // cancels a pending merge verification
+                $0.landing = nil   // cancels a landing under way
             }
         }
     }
@@ -2719,7 +3787,26 @@ final class CodingTaskEngine {
                       worktreeBranch: liveBranch(of: task))
         // No live tab to derive metadata from → still move, without it.
         if store.task(taskID)?.stage == .inProgress {
-            store.mutate(taskID) { $0.stage = .testing; $0.testingAt = Date() }
+            store.mutate(taskID) { $0.stage = .testing; $0.testingAt = Date(); $0.lastError = nil }
+        }
+    }
+
+    /// Whether a board task that isn't finished owns the tab on `branch`
+    /// (its `@worktree` tag is the task's mark): such a tab is never ended
+    /// on behalf of a session that was put away — it's the task's relaunch.
+    func ownsLiveTab(profileID: UUID, branch: String) -> Bool {
+        Self.taskOwnsTab(store.tasks, profileID: profileID, branch: branch)
+    }
+
+    nonisolated static func taskOwnsTab(_ tasks: [CodingTask], profileID: UUID, branch: String) -> Bool {
+        guard branch.hasPrefix("wt/") else { return false }
+        return tasks.contains { t in
+            guard t.profileID == profileID, t.stage != .done else { return false }
+            if t.branch == branch { return true }
+            if let slug = t.branchSlug {
+                return AutomationBoard.branchMatches(branch, slug: slug) || branch == "wt/" + slug
+            }
+            return false
         }
     }
 
@@ -2737,24 +3824,142 @@ final class CodingTaskEngine {
 extension CodingTaskEngine {
     /// Type `text` into an agent's tab with `guardedTypeCommand`, trying
     /// again every few seconds while a menu or dialog is open there, for up
-    /// to `patience`. True once it went in.
+    /// to `patience`. True once it went in. Never when the tab turns out to
+    /// be someone else's or shows a shell (`PaneTypeGuard`).
     @MainActor
     static func typeWhenFree(_ delegate: ACAppDelegate, profileID: UUID, tabIndex: Int, text: String,
                              patience: TimeInterval = 600) async -> Bool {
-        await typeWhenFree(exec: { cmd in try await delegate.guestExec(profileID: profileID, command: cmd, timeout: 20) },
-                           tabIndex: tabIndex, text: text, patience: patience)
+        await typeWhenFree(delegate, profileID: profileID, target: .index(tabIndex), text: text,
+                           patience: patience)
+    }
+
+    @MainActor
+    static func typeWhenFree(_ delegate: ACAppDelegate, profileID: UUID, target: PaneTarget, text: String,
+                             patience: TimeInterval = 600) async -> Bool {
+        await typeWhenFreeResult(delegate, profileID: profileID, target: target, text: text,
+                                 patience: patience) == .typed
     }
 
     /// The same, through any machine's exec (an attached Mac's, say).
     static func typeWhenFree(exec: @escaping (String) async throws -> String, tabIndex: Int, text: String,
                              patience: TimeInterval = 600) async -> Bool {
+        await typeWhenFreeResult(exec: exec, target: .index(tabIndex), text: text, patience: patience) == .typed
+    }
+
+    enum TypeResult: Equatable {
+        case typed
+        /// A menu or dialog stayed open.
+        case menuOpen
+        /// Someone else's text sat in the agent's input box.
+        case draftInBox
+        /// The guard refused: the window isn't the intended one any more, or
+        /// no agent holds it. Nothing was typed; never retried.
+        case refused(PaneRefusal)
+    }
+
+    @MainActor
+    static func typeWhenFreeResult(_ delegate: ACAppDelegate, profileID: UUID, tabIndex: Int, text: String,
+                                   patience: TimeInterval = 600) async -> TypeResult {
+        await typeWhenFreeResult(delegate, profileID: profileID, target: .index(tabIndex), text: text,
+                                 patience: patience)
+    }
+
+    @MainActor
+    static func typeWhenFreeResult(_ delegate: ACAppDelegate, profileID: UUID, target: PaneTarget, text: String,
+                                   patience: TimeInterval = 600) async -> TypeResult {
+        await typeWhenFreeResult(exec: { cmd in try await delegate.guestExec(profileID: profileID, command: cmd, timeout: 20) },
+                                 target: target, text: text, patience: patience)
+    }
+
+    /// The pane's bottom rows with their escapes, for `AgentInputBox`.
+    nonisolated static func inputProbeCommand(tabIndex: Int) -> String {
+        inputProbeCommand(target: .index(tabIndex))
+    }
+
+    nonisolated static func inputProbeCommand(target: PaneTarget) -> String {
+        PaneTypeGuard.resolve(target)
+            + "[ -n \"$_bt\" ] && tmux capture-pane -p -e -t \"$_bt\" 2>/dev/null | tail -n 30"
+    }
+
+    nonisolated static func cursorProbeCommand(target: PaneTarget) -> String {
+        PaneTypeGuard.resolve(target)
+            + "[ -n \"$_bt\" ] && { \(AgentInputBox.cursorProbeCommand(target: "\"$_bt\"")); }"
+    }
+
+    /// `typeWhenFree` with why it gave up. Never types onto text already
+    /// in the agent's input box: our own message from an earlier try that
+    /// held off before Enter just gets its Enter; anything else (a user's
+    /// draft, a stray command) holds the text until the box is clear —
+    /// concatenating the two would send neither as meant. A guard refusal
+    /// (wrong window, a shell in the foreground) ends it at once.
+    static func typeWhenFreeResult(exec: @escaping (String) async throws -> String, target: PaneTarget,
+                                   text: String, patience: TimeInterval = 600) async -> TypeResult {
         let deadline = Date().addingTimeInterval(patience)
+        var last: TypeResult = .menuOpen
+        let label = "\(target.ref)"
         while true {
-            let out = (try? await exec(guardedTypeCommand(tabIndex: tabIndex, text: text))) ?? ""
-            if !out.contains(typeHeldMarker) { return true }
-            BACDebug.log("type", "held text for tab \(tabIndex): a menu or dialog is open")
-            guard Date() < deadline else { return false }
+            let screen = (try? await exec(inputProbeCommand(target: target))) ?? ""
+            var command = guardedTypeCommand(target: target, text: text)
+            var held = false
+            var box = AgentInputBox.content(screen)
+            if box == .unknown {
+                // No ruled box: the terminal cursor's line (Kimi's prompt).
+                let probe = (try? await exec(cursorProbeCommand(target: target))) ?? ""
+                box = AgentInputBox.cursorContent(probe)
+            }
+            if case .text(let draft) = box {
+                if AgentInputBox.isOwn(draft, of: text) {
+                    BACDebug.log("type", "\(label): our text is already in the box — Enter only")
+                    command = guardedEnterCommand(target: target)
+                } else {
+                    BACDebug.log("type", "held text for \(label): the input box has text in it")
+                    held = true
+                    last = .draftInBox
+                }
+            }
+            if !held {
+                guard let out = try? await exec(command) else {
+                    // The guest couldn't be asked: nothing is known typed.
+                    last = .refused(.gone)
+                    guard Date() < deadline else { return last }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    continue
+                }
+                if let r = PaneTypeGuard.refusal(in: out) {
+                    BACDebug.log("type", "REFUSED to type into \(label): \(r.rawValue)")
+                    return .refused(r)
+                }
+                if !out.contains(typeHeldMarker) { return .typed }
+                BACDebug.log("type", "held text for \(label): a menu or dialog is open")
+                last = .menuOpen
+            }
+            guard Date() < deadline else { return last }
             try? await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+    /// Enter for text already in the box — unless a menu came up, or the
+    /// window stopped being the intended agent's.
+    nonisolated static func guardedEnterCommand(tabIndex: Int) -> String {
+        guardedEnterCommand(target: .index(tabIndex))
+    }
+
+    nonisolated static func guardedEnterCommand(target: PaneTarget) -> String {
+        PaneTypeGuard.prelude(target) + menuFunction
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter; fi; fi"
+    }
+
+    /// The user-facing reason a guarded send typed nothing.
+    nonisolated static func refusalReason(_ r: PaneRefusal, worker: String) -> String {
+        switch r {
+        case .shell:
+            return String(format: NSLocalizedString(
+                "%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back.",
+                comment: "task send refused"), worker)
+        case .identity, .gone, .agent:
+            return String(format: NSLocalizedString(
+                "The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back.",
+                comment: "task send refused"), worker)
         }
     }
 }
@@ -2765,32 +3970,34 @@ extension CodingTaskEngine {
 /// types a message into a session's tmux tab), so expose those and nothing
 /// else. Kept byte-identical to the macOS engine's statics.
 enum CodingTaskEngine {
+    /// Guarded (`PaneTypeGuard`): nothing is typed unless an AGENT holds
+    /// the pane's foreground — a bare shell would run the text.
     nonisolated static func typeCommand(tabIndex: Int, text: String) -> String {
-        let b64 = Data(text.utf8).base64EncodedString()
-        return "echo \(b64) | base64 -d | xargs -0 tmux send-keys "
-            + "-t bromure:\(tabIndex) -l && sleep 1 && "
-            + "tmux send-keys -t bromure:\(tabIndex) Enter"
+        PaneTypeGuard.typeCommand(target: .index(tabIndex), text: text)
+    }
+
+    nonisolated static func typeCommand(target: PaneTarget, text: String) -> String {
+        PaneTypeGuard.typeCommand(target: target, text: text)
     }
 
     /// What `guardedTypeCommand` prints when it held off.
     nonisolated static let typeHeldMarker = "BROMURE_TYPE_HELD"
 
-    /// `typeCommand` for text nobody watches arrive (a delegation or
-    /// Switchboard notice, a message for a session just brought back). An
-    /// Enter into an open menu or dialog picks its default — a permission
-    /// granted, an "auto mode" setup accepted — and a digit in the text can
-    /// pick a numbered option. So the tab is checked for one (the picker
-    /// footers every agent prints — `AgentPhrases` — or a highlighted
-    /// numbered row, "❯ 1." / Grok's "1 (●)") before typing and again before Enter; with one up nothing more is
-    /// sent and `typeHeldMarker` is printed, for the caller to hold the text.
     nonisolated static func guardedTypeCommand(tabIndex: Int, text: String) -> String {
-        let b64 = Data(text.utf8).base64EncodedString()
-        let t = "bromure:\(tabIndex)"
-        let menu = "tmux capture-pane -p -t \(t) 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
-            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'"
-        return "if \(menu); then echo \(typeHeldMarker); "
-            + "else echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \(t) -l && sleep 1 && "
-            + "if \(menu); then echo \(typeHeldMarker); else tmux send-keys -t \(t) Enter; fi; fi"
+        guardedTypeCommand(target: .index(tabIndex), text: text)
+    }
+
+    nonisolated static var menuFunction: String {
+        "_bm() { tmux capture-pane -p -t \"$_bt\" 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
+            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'; }; "
+    }
+
+    /// Mirrors the macOS engine's `guardedTypeCommand(target:text:)`.
+    nonisolated static func guardedTypeCommand(target: PaneTarget, text: String) -> String {
+        PaneTypeGuard.prelude(target) + menuFunction
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); "
+            + "else \(PaneTypeGuard.literalSend(text)) && sleep 1 && "
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter; fi; fi; fi; fi"
     }
 
     /// The guest command that tails a plan session's live agent transcript.

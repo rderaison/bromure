@@ -899,9 +899,9 @@ struct WorkspacesEdit: ParsableCommand {
         abstract: "Edit a workspace's full settings — opens its JSON in $EDITOR (kubectl-style).",
         discussion: """
         With no --from-json this fetches the workspace's entire configuration,
-        opens it in $EDITOR (or vi), and saves your changes back. Secrets are shown
-        blank: leave one blank to keep the stored value, or type a new value to
-        change it. Pass --from-json to apply a document non-interactively; it may
+        opens it in $EDITOR (or vi), and saves your changes back; deleting a key
+        clears that field. Secrets are shown blank: leave one blank to keep the
+        stored value, or type a new value to change it. Pass --from-json to apply a document non-interactively; it may
         be partial (only the fields to change — the rest keep their values, and
         an explicit null clears an optional field).
         """)
@@ -926,7 +926,9 @@ struct WorkspacesEdit: ParsableCommand {
             guard let edited = try editJSONInEditor(cur.json) else {
                 print("No changes."); return
             }
-            body = edited
+            // The editor held the WHOLE document: a key deleted there is a
+            // field cleared, not one left alone (--from-json stays partial).
+            body = ProfileDocument.editedDocument(fetched: cur.json, edited: edited)
         }
         let resp = try client.request("PUT", "/profiles/\(seg)", body: body)
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
@@ -1070,6 +1072,20 @@ enum ProfileDocument {
         } catch {
             return .failure(ProfileDocumentError(message: "Invalid profile document: " + describe(error)))
         }
+    }
+
+    /// The document an editor session saves back. It started from the full
+    /// fetched document, so a top-level key the user deleted means "clear
+    /// it": sent as an explicit null (which `merge` treats as a clear —
+    /// absent would mean "unchanged", the partial-document rule). Keys only
+    /// the editor added go as typed. (Objects are replaced whole by `merge`,
+    /// so a key removed inside one is already gone.)
+    static func editedDocument(fetched: [String: Any], edited: [String: Any]) -> [String: Any] {
+        var out = edited
+        for key in fetched.keys where edited[key] == nil {
+            out[key] = NSNull()
+        }
+        return out
     }
 
     /// "folderPaths[2]: expected a string" — the path and the problem, from a

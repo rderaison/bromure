@@ -447,8 +447,10 @@ final class SwitchboardEngine {
             // Held while a menu or dialog is open in its tab: owed again.
             let out = (try? await delegate.guestExec(
                 profileID: c.profileID,
-                command: CodingTaskEngine.guardedTypeCommand(tabIndex: w, text: line), timeout: 20)) ?? ""
-            if out.contains(CodingTaskEngine.typeHeldMarker), self.noticed[c.id] == newest.seq {
+                command: CodingTaskEngine.guardedTypeCommand(
+                    target: AgentSessionEngine.paneTarget(c) ?? .index(w), text: line), timeout: 20)) ?? ""
+            if out.contains(CodingTaskEngine.typeHeldMarker) || PaneTypeGuard.refusal(in: out) != nil,
+               self.noticed[c.id] == newest.seq {
                 self.noticed[c.id] = before
             }
         }
@@ -502,7 +504,8 @@ final class SwitchboardEngine {
         } else if let w = c.windowIndex, !c.hasEnded, c.agentAlive == true, !c.isLaunching, let delegate {
             // Typed even mid-turn: the agent queues it for its next turn.
             Task {
-                _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: c.profileID, tabIndex: w, text: line)
+                _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: c.profileID,
+                                                        target: AgentSessionEngine.paneTarget(c) ?? .index(w), text: line)
             }
         } else if c.isLaunching {
             deliverAfterLaunch(id, line)
@@ -552,7 +555,8 @@ final class SwitchboardEngine {
                         return
                     }
                     _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: c.profileID,
-                                                           tabIndex: w, text: line)
+                                                           target: AgentSessionEngine.paneTarget(c) ?? .index(w),
+                                                           text: line)
                     BACDebug.log("switchboard", "finding \(findingID) routed to Switchboard \(sid)")
                     return
                 }
@@ -570,7 +574,10 @@ final class SwitchboardEngine {
                 guard let self, let c = self.sessions.session(id) else { return }
                 if let w = c.windowIndex, c.agentAlive == true, !c.isLaunching, let delegate = self.delegate {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: c.profileID, tabIndex: w, text: line)
+                    let now = self.sessions.session(id) ?? c
+                    _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: c.profileID,
+                                                            target: AgentSessionEngine.paneTarget(now) ?? .index(w),
+                                                            text: line)
                     return
                 }
             }
@@ -773,10 +780,10 @@ final class SwitchboardEngine {
         if live, let w = s.windowIndex {
             // Guarded (an Enter into an open menu or dialog would answer it),
             // through the session's own machine — its VM or an attached Mac.
-            Task { _ = await CodingTaskEngine.typeWhenFree(exec: { [weak self] cmd in
+            Task { _ = await CodingTaskEngine.typeWhenFreeResult(exec: { [weak self] cmd in
                 guard let self else { return "" }
                 return try await self.exec(s, cmd, timeout: 20)
-            }, tabIndex: w, text: line) }
+            }, target: AgentSessionEngine.paneTarget(s) ?? .index(w), text: line) }
         } else {
             resume(s, message: line)
         }
@@ -798,8 +805,16 @@ final class SwitchboardEngine {
             throw ActError.refused("Keys must be 1–12 of: " + Self.allowedKeys.sorted().joined(separator: " "))
         }
         markTouched(s.id)
-        let cmd = keys.map { "tmux send-keys -t bromure:\(w) \($0)" }.joined(separator: " && sleep 0.15 && ")
-        _ = try await exec(s, cmd, timeout: 15)
+        // Into the session's own window (resolved once to its id and checked
+        // to still be its agent's), never whatever took its index.
+        let target = AgentSessionEngine.paneTarget(s) ?? .index(w)
+        let cmd = PaneTypeGuard.prelude(target) + "if _bg; then "
+            + keys.map { "tmux send-keys -t \"$_bt\" \($0)" }.joined(separator: " && sleep 0.15 && ")
+            + "; fi"
+        let out = try await exec(s, cmd, timeout: 15)
+        if PaneTypeGuard.refusal(in: out) != nil {
+            throw ActError.refused("That session's tab no longer shows its agent — nothing was pressed.")
+        }
     }
 
     // MARK: Provenance

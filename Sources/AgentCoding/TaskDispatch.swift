@@ -95,7 +95,8 @@ final class TaskDispatcher {
         }
         for a in assignees {
             let running = tasks.filter {
-                Self.sameAssignee($0.assignment, a) && $0.stage == .inProgress
+                // A start still being checked holds its slot too.
+                Self.sameAssignee($0.assignment, a) && ($0.stage == .inProgress || $0.isStarting)
             }.count
             // A session or room takes one task at a time; new agents run a
             // few side by side, each in its own worktree.
@@ -107,7 +108,7 @@ final class TaskDispatcher {
             if a.kind == .session, !sessionIsFree(a.id) { continue }
             let ready = tasks
                 .filter { $0.stage == .backlog && Self.sameAssignee($0.assignment, a)
-                          && $0.lastError == nil
+                          && $0.lastError == nil && !$0.isStarting
                           && $0.unmetDependencies(in: tasks).isEmpty
                           && !$0.title.trimmingCharacters(in: .whitespaces).isEmpty }
                 .sorted { $0.createdAt < $1.createdAt }
@@ -202,6 +203,9 @@ final class TaskDispatcher {
             if let s = delegate.sessionRecord(target) {
                 store.mutate(taskID) { $0.profileID = s.profileID }
             }
+            // Pull request at delivery is an explicit opt-in (the board's
+            // toggle); by default the work comes back for review and lands
+            // the way the task's finish preference says once approved.
             let text = Self.brief(for: task, slug: slug, viaRoom: assignment.kind == .room,
                                   viaSwitchboard: assignment.kind == .switchboard,
                                   pullRequest: TaskAssignment.finishWithPullRequest)
@@ -264,8 +268,9 @@ final class TaskDispatcher {
             """
         } else {
             s += """
-            - When it's done and committed, call `deliver` with what changed and how to verify it. The user \
-            reviews the branch's diff on the board before anything is merged — don't merge or push it yourself.
+            - When it's done, commit on your branch and hand it back for review: call `deliver` with what \
+            changed and how to verify it. Do not merge or push — the user reviews the branch's diff on the \
+            board, and when they approve it you'll be asked to land it.
             """
         }
         return s
@@ -284,23 +289,41 @@ final class TaskDispatcher {
             store.mutate(task.id) {
                 $0.pendingQuestion = m.text
                 $0.pendingAskID = m.id
+                // Asked while landing: it's stuck on something — the user decides.
+                if $0.stage == .testing, $0.landing?.phase == .agentLanding {
+                    $0.landing?.phase = .needsYou
+                    $0.landing?.detail = m.text
+                }
             }
         case .report:
             store.mutate(task.id) { $0.assigneeNote = m.text }
-        case .deliver where task.mergingAt != nil && task.stage == .testing:
-            // The assignee merged it, as asked on acceptance.
+        case .deliver where task.landing != nil && task.stage == .testing:
+            // The assignee landed it, as asked on approval — verified in git
+            // when this host can look (its worktree is on one of our
+            // machines), recorded as its report otherwise.
             store.mutate(task.id) {
-                $0.stage = .done
-                $0.completedAt = Date()
-                $0.merged = true
-                $0.mergingAt = nil
-                $0.lastError = nil
                 $0.mergeReport = m.text
                 $0.pendingQuestion = nil
                 $0.pendingAskID = nil
+                if $0.landing?.phase == .needsYou { $0.landing?.phase = .agentLanding }
             }
-            BACDebug.log("tasks", "“\(task.title)”: merged by \(task.assignment?.label ?? "its assignee")")
-            pump()
+            let pr = task.landing?.mode == .pr
+            Task {
+                let r = await delegate.codingTaskEngine.reportLanding(
+                    task.id, status: pr ? "pr_opened" : "merged", summary: m.text,
+                    prURL: CodingTask.pullRequestURL(in: m.text))
+                if !r.ok, let now = delegate.codingTaskStore.task(task.id), now.stage == .testing {
+                    let target = now.landingTarget ?? ""
+                    delegate.codingTaskStore.mutate(task.id) {
+                        $0.landing?.phase = .needsYou
+                        $0.landing?.detail = String(format: NSLocalizedString(
+                            "%1$@ says it's done, but Bromure doesn't see it in %2$@: %3$@",
+                            comment: "task landing"),
+                            task.assignment?.label ?? "", target, m.text)
+                    }
+                }
+                self.pump()
+            }
         case .deliver:
             store.mutate(task.id) {
                 $0.deliverySummary = m.text
@@ -323,7 +346,7 @@ final class TaskDispatcher {
         }
     }
 
-    /// Delivered: find the worktree the brief named, then Testing/Review.
+    /// Delivered: find the worktree the brief named, then Review.
     private func toReview(_ taskID: UUID, delegation d: Delegation) async {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
               let slug = task.branchSlug else { return }
@@ -422,16 +445,13 @@ final class TaskDispatcher {
         }
     }
 
-    /// An assigned task accepted on the board: its assignee merges its own
-    /// branch — into the branch it started from (its checkout's), or
-    /// `target` — where it did the work, a native machine included, and
-    /// delivers again; that delivery makes the card Done. A merge it can't
-    /// finish comes back as a question on the card.
-    func requestMerge(_ taskID: UUID, into target: String?, squash: Bool, cleanup: Bool) async -> Bool {
+    /// An assigned task approved on the board: its assignee lands its own
+    /// branch where it did the work (a native machine included) — the
+    /// landing brief goes on the same delegation thread, and its next
+    /// delivery is checked and makes the card Done. True when it went.
+    func steerLanding(_ taskID: UUID, text: String) async -> Bool {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
-              task.stage == .testing, task.mergingAt == nil, let did = task.delegationID else { return false }
-        let text = Self.mergeRequest(branch: task.branch ?? "wt/\(task.branchSlug ?? "")",
-                                     into: target ?? task.parentBranch, squash: squash, cleanup: cleanup)
+              let did = task.delegationID else { return false }
         do {
             try await delegate.delegationEngine.steer(
                 from: DelegationEngine.boardSessionID, delegationKey: did.uuidString, text: text, by: .user)
@@ -441,23 +461,8 @@ final class TaskDispatcher {
             }
             return false
         }
-        delegate.codingTaskStore.mutate(taskID) { $0.mergingAt = Date(); $0.lastError = nil }
-        BACDebug.log("tasks", "“\(task.title)”: asked \(task.assignment?.label ?? "its assignee") to merge")
+        BACDebug.log("tasks", "“\(task.title)”: asked \(task.assignment?.label ?? "its assignee") to land it")
         return true
-    }
-
-    /// What the assignee is asked to do on acceptance.
-    nonisolated static func mergeRequest(branch: String, into target: String?,
-                                         squash: Bool, cleanup: Bool) -> String {
-        let dest = target.map { "into \($0)" }
-            ?? "into the branch your own checkout was on when you started this task"
-        return "Accepted on the board — merge it. Merge \(branch) \(dest)"
-            + (squash ? " as a single squashed commit" : "") + ": commit anything still outstanding in its "
-            + "worktree first, resolve any conflicts, and check the result still builds. "
-            + (cleanup ? "Then remove the worktree and delete the branch. "
-                       : "Keep the worktree and the branch. ")
-            + "Deliver again with one line saying where it landed. If you can't merge it, don't deliver: "
-            + "ask, saying what's in the way."
     }
 
     /// Take a task back from its assignee (back to the backlog).
@@ -499,8 +504,14 @@ final class TaskDispatcher {
                 continue
             }
             guard task.stage == .done else { continue }
-            let accepted = task.merged || task.prOpened == true
-            let note = task.merged ? "Merged." : (task.prOpened == true ? "A pull request was opened." : "Closed without merging.")
+            let note: String
+            let accepted: Bool
+            switch task.effectiveCompletion {
+            case .merged(let target, _, _)?: accepted = true; note = target.isEmpty ? "Merged." : "Merged into \(target)."
+            case .prOpened?: accepted = true; note = "A pull request was opened."
+            case .markedDone?: accepted = true; note = "Marked done on the board."
+            case .closedWithoutMerge?, nil: accepted = false; note = "Closed without merging."
+            }
             Task { try? await engine.close(from: DelegationEngine.boardSessionID,
                                            delegationKey: d.id.uuidString,
                                            verdict: accepted ? "accepted" : "rejected", note: note, by: .user) }

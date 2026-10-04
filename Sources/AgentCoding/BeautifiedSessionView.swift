@@ -149,9 +149,17 @@ extension BeautifiedTranscriptProvider {
     }
 
     /// Type `text` into the running agent (base64 → tmux send-keys + Enter).
-    func send(_ text: String) async {
-        guard let idx = activeTabIndex() else { return }
-        _ = await execGuest(CodingTaskEngine.typeCommand(tabIndex: idx, text: text), timeout: 15)
+    /// Guarded: nothing is typed unless an agent holds the tab's foreground
+    /// (a shell would run the text). False when refused.
+    @discardableResult
+    func send(_ text: String) async -> Bool {
+        guard let idx = activeTabIndex() else { return false }
+        let out = await execGuest(CodingTaskEngine.typeCommand(tabIndex: idx, text: text), timeout: 15) ?? ""
+        if let r = PaneTypeGuard.refusal(in: out) {
+            BACDebug.log("beautified", "send refused (\(r.rawValue)) — nothing typed into tab \(idx)")
+            return false
+        }
+        return true
     }
 
     /// The active tab's visible terminal — for detecting states the transcript
@@ -171,8 +179,9 @@ extension BeautifiedTranscriptProvider {
     /// Named keys only, with a beat so the TUI's debounce doesn't swallow them.
     func pressKeys(_ keys: [String]) async {
         guard let idx = activeTabIndex(), !keys.isEmpty else { return }
-        let cmd = keys.map { "tmux send-keys -t bromure:\(idx) \($0)" }
-            .joined(separator: "; sleep 0.4; ")
+        let cmd = PaneTypeGuard.prelude(.index(idx)) + "if _bg; then "
+            + keys.map { "tmux send-keys -t \"$_bt\" \($0)" }.joined(separator: "; sleep 0.4; ")
+            + "; fi"
         _ = await execGuest(cmd, timeout: 15)
     }
 
@@ -180,10 +189,10 @@ extension BeautifiedTranscriptProvider {
     /// field like `/login`'s "Paste code here >", not the chat composer.
     func typeText(_ text: String) async {
         guard let idx = activeTabIndex() else { return }
-        let quoted = "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
         _ = await execGuest(
-            "tmux send-keys -t bromure:\(idx) -l \(quoted); sleep 0.3; "
-            + "tmux send-keys -t bromure:\(idx) Enter", timeout: 15)
+            PaneTypeGuard.prelude(.index(idx))
+            + "if _bg; then \(PaneTypeGuard.literalSend(text)) && sleep 0.3 && tmux send-keys -t \"$_bt\" Enter; fi",
+            timeout: 15)
     }
 
     /// Write dropped/attached files into the guest at deterministic paths and
@@ -966,7 +975,11 @@ final class BeautifiedSessionModel: ObservableObject {
     private func runKeys(_ steps: [[String]]) async {
         guard let idx = provider.activeTabIndex() else { return }
         for keys in steps {
-            _ = await provider.execGuest("tmux send-keys -t bromure:\(idx) \(keys.joined(separator: " "))", timeout: 10)
+            let out = await provider.execGuest(
+                PaneTypeGuard.prelude(.index(idx))
+                    + "if _bg; then tmux send-keys -t \"$_bt\" \(keys.joined(separator: " ")); fi",
+                timeout: 10) ?? ""
+            if PaneTypeGuard.refusal(in: out) != nil { return }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
     }

@@ -505,7 +505,9 @@ struct DelegationTests {
                                                           "summary": "Fixed on wt/fix"]), branch: "w9")
         #expect(f.store.delegation(d.id)?.status == .delivered)
         // The board's acceptance reaches the delivered request as a steer…
-        let accept = TaskDispatcher.mergeRequest(branch: "wt/fix", into: nil, squash: false, cleanup: true)
+        let accept = CodingTaskEngine.landingPrompt(mode: .merge, branch: "wt/fix", target: "main",
+                                                    rootRepo: "/home/ubuntu/repo", title: "Fix it",
+                                                    remote: nil, viaBoard: false)
         try await f.engine.steer(from: DelegationEngine.boardSessionID, delegationKey: d.id.uuidString,
                                  text: accept, by: .user)
         #expect(f.store.delegation(d.id)?.messages.last?.kind == .steer)
@@ -516,14 +518,14 @@ struct DelegationTests {
         #expect(got.last?.kind == .deliver && got.last?.text == "Merged into hotfixes-v5")
     }
 
-    @Test("the merge request names the branch and where it goes — the assignee's own branch by default")
-    func mergeRequestText() {
-        let own = TaskDispatcher.mergeRequest(branch: "wt/fix", into: nil, squash: false, cleanup: true)
-        #expect(own.contains("Merge wt/fix into the branch your own checkout was on"))
-        #expect(own.contains("remove the worktree") && own.contains("ask"))
-        let main = TaskDispatcher.mergeRequest(branch: "wt/fix", into: "main", squash: true, cleanup: false)
-        #expect(main.contains("Merge wt/fix into main as a single squashed commit"))
-        #expect(main.contains("Keep the worktree"))
+    @Test("a delegated landing brief names the branch and target, and reports with deliver / ask")
+    func landingRequestText() {
+        let p = CodingTaskEngine.landingPrompt(mode: .merge, branch: "wt/fix", target: "main",
+                                               rootRepo: "/r", title: "Fix", remote: nil, viaBoard: false)
+        #expect(p.contains("land it in 'main'"))
+        #expect(p.contains("git merge --ff-only wt/fix"))
+        #expect(p.contains("`deliver`") && p.contains("`ask`"))
+        #expect(!p.contains("board_report_landing"))
     }
 
     @Test("a board task that reads like an injection is withheld")
@@ -549,6 +551,9 @@ struct DelegationTests {
         let sb = TaskDispatcher.brief(for: task, slug: "s", viaRoom: false, viaSwitchboard: true, pullRequest: true)
         #expect(sb.contains("You are the Switchboard"))
         #expect(sb.contains("gh pr create"))
+        // By default the work comes back for review: no merge, no push.
+        #expect(direct.contains("Do not merge or push"))
+        #expect(!direct.contains("gh pr create"))
         #expect(TaskAssignment.switchboard.same(as: TaskAssignment(kind: .switchboard, id: UUID(), label: "x")))
     }
 

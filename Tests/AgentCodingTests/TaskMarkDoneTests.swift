@@ -24,11 +24,16 @@ struct TaskMarkDoneTests {
         #expect(done?.lastError == nil)
         // The worktree is left exactly where it was.
         #expect(done?.branch == "wt/fix-it" && done?.worktreeDir == t.worktreeDir)
-        // Only from review: a task still in progress isn't touched.
+        #expect(done?.completion == .markedDone(byUser: true))
+        // From In Progress too (the agent is stopped); not from the Backlog.
         var running = CodingTask(title: "Busy", profileID: UUID(), tool: .claude)
         running.stage = .inProgress
         store.upsert(running)
         engine.markDone(running.id)
-        #expect(store.task(running.id)?.stage == .inProgress)
+        #expect(store.task(running.id)?.stage == .done)
+        let idle = CodingTask(title: "Later", profileID: UUID(), tool: .claude)
+        store.upsert(idle)
+        engine.markDone(idle.id)
+        #expect(store.task(idle.id)?.stage == .backlog)
     }
 }

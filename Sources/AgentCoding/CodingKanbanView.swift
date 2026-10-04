@@ -135,6 +135,101 @@ struct MarkdownBlocks: View {
     }
 }
 
+// MARK: - Plurals
+
+/// Counted phrases with a real singular (no "comment(s)"): one key for 1,
+/// one for the rest — the languages shipped have at most that split for
+/// the counts shown here (never 0).
+enum TaskPlurals {
+    static func comments(_ n: Int) -> String {
+        n == 1 ? NSLocalizedString("1 comment", comment: "task card: one unsent review comment")
+               : String(format: NSLocalizedString("%d comments", comment: "task card: unsent review comments, 2 or more"), n)
+    }
+
+    static func commentsDrafted(_ n: Int) -> String {
+        n == 1 ? NSLocalizedString("1 comment drafted", comment: "diff pane")
+               : String(format: NSLocalizedString("%d comments drafted", comment: "diff pane: 2 or more"), n)
+    }
+
+    /// Unsent review comments a Done / Discard drops.
+    static func undeliveredDropped(_ n: Int) -> String {
+        n == 1 ? NSLocalizedString("1 review comment that never reached the agent will be discarded.",
+                                   comment: "review")
+               : String(format: NSLocalizedString(
+                    "%d review comments that never reached the agent will be discarded.",
+                    comment: "review: 2 or more"), n)
+    }
+
+    static func undeliveredBanner(_ n: Int) -> String {
+        n == 1 ? NSLocalizedString(
+                    "1 comment didn't reach the agent before it handed the task back. Send it back again?",
+                    comment: "review")
+               : String(format: NSLocalizedString(
+                    "%d comments didn't reach the agent before it handed the task back. Send them back again?",
+                    comment: "review: 2 or more"), n)
+    }
+
+    /// "\n\n<dropped comments>" when a task has unsent comments, else "".
+    static func droppedSuffix(_ task: CodingTask) -> String {
+        let n = task.comments.filter { $0.sentAt == nil }.count
+        return n == 0 ? "" : "\n\n" + undeliveredDropped(n)
+    }
+}
+
+// MARK: - Live state
+
+/// A started task's agent, read the way the sidebar reads the session that
+/// runs it — the one source for the card's pill, the board's "need you"
+/// count and the sidebar badge, so a card never spins "Working" beside a
+/// session row that says "Ready".
+@MainActor
+enum TaskLiveState {
+    /// The task's session bucket; nil when no tab or session is found for
+    /// it (starting, or gone).
+    static func bucket(of task: CodingTask, in model: SessionListModel,
+                       sessions: AgentSessionStore?) -> SessionBucket? {
+        // Demo fixture (doc/video captures): in-progress cards run, no VM behind them.
+        #if os(macOS)
+        if DemoMode.isOn, task.stage == .inProgress { return .working }
+        #endif
+        // The session the launch was bound to (see CodingTaskEngine.bindSession)
+        // first: it holds even when nothing carries the worktree branch.
+        // Only while it holds a tab: a relaunch opens a new session.
+        if let sessions, let id = task.sessionID, let s = sessions.session(id), !s.isDeleted,
+           !s.isArchived, s.windowIndex != nil, s.profileID == task.profileID {
+            return SessionHome.bucket(for: s, in: model)
+        }
+        let slugs = [task.branchSlug, task.branch.map { String($0.dropFirst(3)) }].compactMap { $0 }
+        guard !slugs.isEmpty else { return nil }
+        func matches(_ branch: String?) -> Bool {
+            slugs.contains { AutomationBoard.branchMatches(branch, slug: $0) }
+        }
+        let tabs = model.entries.first { $0.id == task.profileID }?.model.tabs ?? []
+        // By branch, else by the checkout the tab runs in (a tab whose
+        // @worktree tag didn't make it).
+        let tab = tabs.first { matches($0.worktreeBranch) }
+            ?? tabs.first { t in
+                guard let cwd = t.cwd, !cwd.isEmpty else { return false }
+                if let dir = task.worktreeDir, !dir.isEmpty, cwd == dir { return true }
+                return slugs.contains { cwd.hasSuffix("/" + $0) }
+            }
+        if let sessions {
+            let session = tab.flatMap { sessions.session(profileID: task.profileID, windowIndex: $0.index) }
+                ?? sessions.sessions.first {
+                    $0.profileID == task.profileID && !$0.isDeleted && matches($0.worktreeBranch)
+                }
+            if let session { return SessionHome.bucket(for: session, in: model) }
+        }
+        // No session record (an older mirror): the tab's own status.
+        guard let tab else { return nil }
+        switch tab.agentStatus {
+        case .needsInput: return .needsYou
+        case .working:    return .working
+        case .done:       return .idle
+        }
+    }
+}
+
 // MARK: - Sidebar section
 
 /// "Tasks" — the sidebar entry for the coding board: a header with the
@@ -146,6 +241,8 @@ struct CodingTasksSection: View {
     let onShowBoard: () -> Void
     /// "+": the board with a blank task's editor open.
     var onNew: () -> Void = {}
+    /// The sessions behind running tasks (see `TaskLiveState`).
+    var sessionStore: AgentSessionStore? = nil
 
     /// Everything not done — the header's count.
     private var openCount: Int {
@@ -182,14 +279,8 @@ struct CodingTasksSection: View {
     /// What the badge counts: running tasks whose agent is waiting on the
     /// user right now.
     private var attentionCount: Int {
-        store.tasks(in: .inProgress).filter { task in
-            guard let slug = task.branchSlug,
-                  let entry = model.entries.first(where: { $0.id == task.profileID })
-            else { return false }
-            return entry.model.tabs.contains {
-                AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
-                    && $0.agentStatus == .needsInput
-            }
+        store.tasks(in: .inProgress).filter {
+            TaskLiveState.bucket(of: $0, in: model, sessions: sessionStore) == .needsYou
         }.count
     }
 
@@ -202,7 +293,7 @@ struct CodingTasksSection: View {
                                  help: NSLocalizedString("Open Coding Tasks (⇧⌘T)", comment: ""),
                                  onTitle: onShowBoard,
                                  onAdd: onNew,
-                                 addHelp: NSLocalizedString("New task", comment: ""))
+                                 addHelp: NSLocalizedString("New Task", comment: ""))
 
             Button(action: onShowBoard) {
                 HStack(spacing: 8) {
@@ -228,10 +319,10 @@ struct CodingTasksSection: View {
 
 // MARK: - Coding board
 
-/// The coding kanban: Backlog → In Progress → Testing → Done. Backlog cards
+/// The coding kanban: Backlog → In Progress → Review → Done. Backlog cards
 /// carry a markdown brief written in the editor sheet; Start launches the
 /// agent in a fresh worktree; the agent's done signal lands the card in
-/// Testing, where the review window shows the branch diff; merge closes it.
+/// Review, where the review window shows the branch diff; landing closes it.
 struct CodingKanbanView: View {
     struct Actions {
         var start: (UUID) -> Void = { _ in }
@@ -242,10 +333,21 @@ struct CodingKanbanView: View {
         var jumpToRun: (CodingTask) -> Void = { _ in }
         var moveToTesting: (UUID) -> Void = { _ in }
         var backToInProgress: (UUID) -> Void = { _ in }
+        /// Merge from a card: opens the review on its Merge confirmation
+        /// (where a review window exists), else lands it — after the
+        /// board's own confirm when `mergeNeedsConfirm`.
         var merge: (UUID) -> Void = { _ in }
+        /// Discard: Done without merging, the branch and its checkout deleted.
         var closeNoMerge: (UUID) -> Void = { _ in }
-        /// Testing → Done as it stands (no merge, nothing removed).
+        /// Review / In Progress → Done as it stands (no merge, branch kept).
         var markDone: (UUID) -> Void = { _ in }
+        /// Stop the agent, back to the Backlog (worktree and branch kept).
+        var stop: (UUID) -> Void = { _ in }
+        /// A fresh run on a new branch, when there's nothing left to resume
+        /// into (repository or branch gone).
+        var startOver: (UUID) -> Void = { _ in }
+        /// No review window here (iOS): the board confirms a Merge itself.
+        var mergeNeedsConfirm = false
         var delete: (UUID) -> Void = { _ in }
         var save: (CodingTask) -> Void = { _ in }
         /// Persist the draft, then run the plan-validation agent; the
@@ -272,6 +374,8 @@ struct CodingKanbanView: View {
         var recall: (UUID) -> Void = { _ in }
         /// Show the session (or room) working on a handed-off task.
         var openAssignee: (CodingTask) -> Void = { _ in }
+        /// Retry a landing that needs the user, with the same choices.
+        var retryLanding: ((UUID) -> Void)? = nil
     }
 
     var store: CodingTaskStore
@@ -279,6 +383,9 @@ struct CodingKanbanView: View {
     /// Fresh profile snapshot for the editor sheet's pickers.
     let profilesProvider: () -> [Profile]
     let actions: Actions
+    /// The sessions behind the cards: a running card reads its agent's
+    /// state exactly as the sidebar row does. nil: the tab roster alone.
+    var sessionStore: AgentSessionStore? = nil
 
     /// The editor sheet's subject: an existing task or a fresh draft.
     @State private var editing: CodingTask?
@@ -291,6 +398,11 @@ struct CodingKanbanView: View {
     /// Plan-column multi-selection (batch start).
     @State private var selectedPhases: Set<UUID> = []
     @State private var confirmingBatchDelete = false
+    /// Card actions that ask first: Mark Done on a task with code (its
+    /// branch is kept), Discard, and Merge where no review window confirms.
+    @State private var confirmingDone: CodingTask?
+    @State private var confirmingDiscard: CodingTask?
+    @State private var confirmingMerge: CodingTask?
     /// Compact = iPhone portrait → columns stack in one vertical scroll.
     @Environment(\.horizontalSizeClass) private var hSize
     private var compact: Bool { hSize == .compact }
@@ -381,6 +493,7 @@ struct CodingKanbanView: View {
                 } ?? [],
                 isNew: store.task(task.id) == nil,
                 onSave: { saved in
+                    TaskDraftDefaults.remember(saved)
                     actions.save(saved)
                     // A queued task (or a new one under the board's standing
                     // choice) goes to its assignee's queue now.
@@ -413,6 +526,53 @@ struct CodingKanbanView: View {
                 },
                 onCancel: { assigning = nil })
         }
+        .confirmationDialog(
+            NSLocalizedString("Mark done without merging?", comment: "review"),
+            isPresented: Binding(get: { confirmingDone != nil }, set: { if !$0 { confirmingDone = nil } }),
+            titleVisibility: .visible, presenting: confirmingDone) { t in
+            Button(NSLocalizedString("Mark Done", comment: "review")) { actions.markDone(t.id) }
+            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
+        } message: { t in
+            Text((t.stage == .inProgress
+                 ? String(format: NSLocalizedString("The agent is stopped. Nothing is merged; the branch %@ and its checkout are kept in the workspace.", comment: "task card"),
+                          t.branch ?? t.branchSlug.map { "wt/" + $0 } ?? "")
+                 : String(format: NSLocalizedString("Nothing is merged. The branch %@ and its checkout are kept in the workspace.", comment: "review"),
+                          t.branch ?? "")) + TaskPlurals.droppedSuffix(t))
+        }
+        .confirmationDialog(
+            NSLocalizedString("Discard this branch?", comment: "review"),
+            isPresented: Binding(get: { confirmingDiscard != nil }, set: { if !$0 { confirmingDiscard = nil } }),
+            titleVisibility: .visible, presenting: confirmingDiscard) { t in
+            Button(NSLocalizedString("Discard Branch", comment: "review"), role: .destructive) { actions.closeNoMerge(t.id) }
+            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
+        } message: { t in
+            Text(String(format: NSLocalizedString(
+                "The branch %@ and its checkout are deleted and the agent's session is put away. The task goes to Done as closed without merging; its transcript is kept.",
+                comment: "review"), t.branch ?? t.branchSlug.map { "wt/" + $0 } ?? "")
+                 + TaskPlurals.droppedSuffix(t))
+        }
+        .confirmationDialog(
+            String(format: NSLocalizedString("Merge into %@?", comment: "landing confirm"),
+                   confirmingMerge?.landingTarget ?? NSLocalizedString("parent", comment: "kanban menu")),
+            isPresented: Binding(get: { confirmingMerge != nil }, set: { if !$0 { confirmingMerge = nil } }),
+            titleVisibility: .visible, presenting: confirmingMerge) { t in
+            Button(NSLocalizedString("Merge", comment: "landing confirm")) { actions.merge(t.id) }
+            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
+        } message: { t in
+            Text(String(format: NSLocalizedString(
+                "Bromure merges it directly when it can; otherwise %1$@, the agent that wrote it, rebases onto %2$@, fixes conflicts, runs the tests and merges. Afterwards the branch is removed and the session archived.",
+                comment: "landing confirm"), t.workerName, t.landingTarget ?? ""))
+        }
+    }
+
+    /// Mark Done from a card: straight away for a task with nothing to
+    /// merge, after a confirm for one with code (its branch is kept).
+    private func requestMarkDone(_ t: CodingTask) {
+        if t.stage == .testing && t.isNoCode { actions.markDone(t.id) } else { confirmingDone = t }
+    }
+
+    private func requestMerge(_ t: CodingTask) {
+        if actions.mergeNeedsConfirm { confirmingMerge = t } else { actions.merge(t.id) }
     }
 
     private func consumeNewTaskRequest() {
@@ -425,61 +585,87 @@ struct CodingKanbanView: View {
     /// queued for the board's standing choice, if it has one.
     private func newDraft() -> CodingTask {
         let profiles = profilesProvider()
-        var t = CodingTask(profileID: profiles.first?.id ?? UUID(),
-                           tool: profiles.first?.tool ?? .claude)
+        // The workspace (and its folder) the last task was written for —
+        // the first workspace in the list is rarely the one being worked on.
+        let last = TaskDraftDefaults.lastWorkspace.flatMap { id in profiles.first { $0.id == id } }
+        let profile = last ?? profiles.first
+        var t = CodingTask(profileID: profile?.id ?? UUID(),
+                           repoPath: profile.flatMap { TaskDraftDefaults.lastFolder(for: $0.id) } ?? "~",
+                           tool: profile?.tool ?? .claude)
         if actions.assign != nil { t.assignment = autoAssign }
         return t
     }
 
     private var header: some View {
-        let running = store.tasks(in: .inProgress).count
-        let review = store.tasks(in: .testing).count
-        let needsYou = store.tasks(in: .inProgress).filter { liveStatus(of: $0) == .needsInput }.count
-        return HStack(spacing: 12) {
-            Image(systemName: "checklist")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(.tint)
-            Text(NSLocalizedString("Coding Tasks", comment: "coding kanban title"))
-                .font(.system(size: 16, weight: .bold))
-            HStack(spacing: 6) {
-                if needsYou > 0 {
-                    CardStatusPill(text: String(format: NSLocalizedString("%d need you", comment: "task board"), needsYou),
-                                   tint: .red)
-                }
-                if running > 0 {
-                    CardStatusPill(text: String(format: NSLocalizedString("%d running", comment: ""), running),
-                                   tint: .blue)
-                }
-                if review > 0 {
-                    CardStatusPill(text: String(format: NSLocalizedString("%d to review", comment: "task board"), review),
-                                   tint: .purple)
-                }
-            }
-            Spacer()
-            if actions.assign != nil {
-                autoAssignMenu
-            }
-            Button { editing = newDraft() } label: {
-                Label(NSLocalizedString("New Task", comment: ""), systemImage: "plus")
-            }
-            .modifier(ProminentGlassButton())
-            .help(NSLocalizedString("New task — or ⇧⌥Space from any app for a quick one", comment: "task board"))
+        // A narrow window drops the pills, then the labels — never wraps the
+        // title or the button one letter per line.
+        ViewThatFits(in: .horizontal) {
+            headerRow(compact: false)
+            headerRow(compact: true)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .modifier(GlassCapsule(cornerRadius: 20))
     }
 
+    private func headerRow(compact: Bool) -> some View {
+        let running = store.tasks(in: .inProgress).count
+        let review = store.tasks(in: .testing).count
+        let needsYou = store.tasks(in: .inProgress).filter { liveStatus(of: $0) == .needsYou }.count
+            + store.tasks(in: .testing).filter { $0.landing?.phase == .needsYou }.count
+        return HStack(spacing: 12) {
+            Image(systemName: "checklist")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(.tint)
+            Text(NSLocalizedString("Coding Tasks", comment: "coding kanban title"))
+                .font(.system(size: 16, weight: .bold))
+                .lineLimit(1)
+                .fixedSize()
+            if !compact {
+                HStack(spacing: 6) {
+                    if needsYou > 0 {
+                        CardStatusPill(text: String(format: NSLocalizedString("%d need you", comment: "task board"), needsYou),
+                                       tint: .red)
+                    }
+                    if running > 0 {
+                        CardStatusPill(text: String(format: NSLocalizedString("%d in progress", comment: ""), running),
+                                       tint: .blue)
+                    }
+                    if review > 0 {
+                        CardStatusPill(text: String(format: NSLocalizedString("%d to review", comment: "task board"), review),
+                                       tint: .purple)
+                    }
+                }
+                .fixedSize()
+            }
+            Spacer(minLength: 8)
+            if actions.assign != nil {
+                autoAssignMenu(compact: compact)
+            }
+            Button { editing = newDraft() } label: {
+                if compact {
+                    Image(systemName: "plus")
+                } else {
+                    Label(NSLocalizedString("New Task", comment: ""), systemImage: "plus")
+                        .fixedSize()
+                }
+            }
+            .modifier(ProminentGlassButton())
+            .accessibilityLabel(NSLocalizedString("New Task", comment: ""))
+            .help(NSLocalizedString("New task — or ⇧⌥Space from any app for a quick one", comment: "task board"))
+        }
+    }
+
     /// "New items go to: …" — the board's standing choice for new backlog
     /// items, so they're picked up without assigning each one.
-    private var autoAssignMenu: some View {
+    private func autoAssignMenu(compact: Bool) -> some View {
         let choices = actions.assignees()
         return Menu {
-            Section(NSLocalizedString("New backlog items go to", comment: "auto assign")) {
+            Section(NSLocalizedString("Assign new tasks to", comment: "auto assign")) {
                 Button {
                     setAutoAssign(nil)
                 } label: {
-                    Label(NSLocalizedString("Nobody — I start them", comment: "auto assign"),
+                    Label(NSLocalizedString("Unassigned — I'll start it", comment: "task editor"),
                           systemImage: autoAssign == nil ? "checkmark" : "hand.raised")
                 }
                 Button {
@@ -523,17 +709,22 @@ struct CodingKanbanView: View {
                 }
             }
             Divider()
-            Toggle(NSLocalizedString("Sessions and rooms open a pull request when done", comment: "auto assign"),
+            Toggle(NSLocalizedString("Sessions and rooms open a pull request at delivery (skips review)", comment: "auto assign"),
                    isOn: Binding(get: { finishWithPR }, set: { finishWithPR = $0; TaskAssignment.finishWithPullRequest = $0 }))
         } label: {
-            Label(autoAssign.map {
-                String(format: NSLocalizedString("New items → %@", comment: "auto assign"), $0.label)
-            } ?? NSLocalizedString("Auto-pickup: off", comment: "auto assign"),
-                  systemImage: autoAssign == nil ? "tray.and.arrow.down" : "bolt.fill")
+            let title = autoAssign.map {
+                String(format: NSLocalizedString("New tasks: assigned to %@", comment: "auto assign"), $0.label)
+            } ?? NSLocalizedString("New tasks: Unassigned", comment: "auto assign")
+            if compact {
+                Image(systemName: autoAssign == nil ? "tray.and.arrow.down" : "bolt.fill")
+            } else {
+                Label(title, systemImage: autoAssign == nil ? "tray.and.arrow.down" : "bolt.fill")
+                    .lineLimit(1)
+            }
         }
         .fixedSize()
         .help(NSLocalizedString(
-            "Who picks up new backlog items on their own and takes them to Testing/Review. Each task can still be assigned by hand.",
+            "Who new tasks are queued for when you create them — they pick them up on their own and take them to Review. Each task can still be assigned by hand.",
             comment: "auto assign"))
     }
 
@@ -568,19 +759,10 @@ struct CodingKanbanView: View {
             ?? NSLocalizedString("Deleted workspace", comment: "task card workspace chip")
     }
 
-    /// Live tab status for a started task, via the sidebar's tab models
-    /// (observable — status changes redraw the board).
-    private func liveStatus(of task: CodingTask) -> AgentStatus? {
-        // Demo fixture (doc/video captures): in-progress cards run, no VM behind them.
-        #if os(macOS)
-        if DemoMode.isOn, task.stage == .inProgress { return .working }
-        #endif
-        guard let slug = task.branchSlug,
-              let entry = model.entries.first(where: { $0.id == task.profileID })
-        else { return nil }
-        return entry.model.tabs.first {
-            AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
-        }?.agentStatus
+    /// A started task's agent, as the sidebar reads its session (observable
+    /// — status changes redraw the board).
+    private func liveStatus(of task: CodingTask) -> SessionBucket? {
+        TaskLiveState.bucket(of: task, in: model, sessions: sessionStore)
     }
 
     // MARK: Columns
@@ -592,7 +774,7 @@ struct CodingKanbanView: View {
                             count: tasks.count,
                             emptyText: NSLocalizedString("No tasks yet — write one.",
                                                          comment: "kanban"),
-                            subtitle: NSLocalizedString("Briefs waiting to start", comment: "kanban column")) {
+                            subtitle: NSLocalizedString("Tasks waiting to start", comment: "kanban column")) {
             ForEach(tasks) { task in
                 BacklogTaskCard(
                     task: task,
@@ -607,6 +789,7 @@ struct CodingKanbanView: View {
                     queuePosition: TaskAssignment.queuePosition(of: task, in: store.tasks),
                     onAssign: actions.assign == nil ? nil : { assigning = task },
                     onUnassign: actions.assign.map { assign in { assign(task.id, nil) } })
+                    .draggable(task.id.uuidString)
                     .modifier(RemovableCard(title: task.title, stage: task.stage) {
                         actions.delete(task.id)
                     })
@@ -624,7 +807,7 @@ struct CodingKanbanView: View {
                             count: tasks.count,
                             tint: .blue,
                             emptyText: NSLocalizedString(
-                                "No phases yet — click Plan on a backlog card.",
+                                "No phases yet — click Plan First on a Backlog task.",
                                 comment: "kanban"),
                             subtitle: NSLocalizedString("Phases, in order", comment: "kanban column")) {
             if !selected.isEmpty {
@@ -636,13 +819,13 @@ struct CodingKanbanView: View {
                         selectedPhases.removeAll()
                     } label: {
                         Label(String(format: NSLocalizedString(
-                            "Start %d selected", comment: "plan column"), selected.count),
+                            "Start %d Selected", comment: "plan column"), selected.count),
                               systemImage: "play.fill")
                     }
                     .controlSize(.small)
                     .buttonStyle(.borderedProminent)
                     .help(NSLocalizedString(
-                        "One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are.",
+                        "Starts every selected phase. Phases whose dependencies aren't Done queue and start automatically when they are.",
                         comment: "plan column"))
                     Button(NSLocalizedString("Clear", comment: "plan column")) {
                         selectedPhases.removeAll()
@@ -652,7 +835,7 @@ struct CodingKanbanView: View {
                     Button(role: .destructive) {
                         confirmingBatchDelete = true
                     } label: {
-                        Label(NSLocalizedString("Delete", comment: "plan column"),
+                        Label(NSLocalizedString("Remove", comment: "plan column"),
                               systemImage: "trash")
                     }
                     .controlSize(.small)
@@ -660,11 +843,11 @@ struct CodingKanbanView: View {
                                             comment: "plan column"))
                     .confirmationDialog(
                         String(format: NSLocalizedString(
-                            "Delete %d selected phase(s)?", comment: "plan column"),
+                            "Remove %d selected phase(s)?", comment: "plan column"),
                             selected.count),
                         isPresented: $confirmingBatchDelete, titleVisibility: .visible
                     ) {
-                        Button(NSLocalizedString("Delete", comment: "plan column"),
+                        Button(NSLocalizedString("Remove", comment: "plan column"),
                                role: .destructive) {
                             for id in tasks.map(\.id) where selected.contains(id) {
                                 actions.delete(id)
@@ -683,6 +866,7 @@ struct CodingKanbanView: View {
                     task: task,
                     number: index + 1,
                     accentHex: accentHex(for: task.profileID),
+                    workspaceName: workspaceName(for: task.profileID),
                     parentTitle: task.parentTaskID.flatMap { store.task($0)?.title },
                     dependsOnNumbers: (task.dependsOn ?? []).compactMap { depID in
                         tasks.firstIndex { $0.id == depID }.map { $0 + 1 }
@@ -693,20 +877,24 @@ struct CodingKanbanView: View {
                         if selectedPhases.contains(task.id) { selectedPhases.remove(task.id) }
                         else { selectedPhases.insert(task.id) }
                     },
-                    onEdit: { editing = task })
+                    onEdit: { editing = task },
+                    menu: CardMenuItem.list([
+                        .init(title: NSLocalizedString("Start", comment: "")) { actions.start(task.id) },
+                        .init(title: NSLocalizedString("Edit…", comment: "")) { editing = task },
+                        .init(title: selectedPhases.contains(task.id)
+                              ? NSLocalizedString("Deselect", comment: "plan card menu")
+                              : NSLocalizedString("Select", comment: "plan card menu")) {
+                            if selectedPhases.contains(task.id) { selectedPhases.remove(task.id) }
+                            else { selectedPhases.insert(task.id) }
+                        },
+                        .divider,
+                        .init(title: NSLocalizedString("Remove Task", comment: "task card"),
+                              role: .destructive) { actions.delete(task.id) },
+                    ]))
+                    .draggable(task.id.uuidString)
                     .modifier(RemovableCard(title: task.title, stage: task.stage) {
                         actions.delete(task.id)
                     })
-                    .contextMenu {
-                        Button(NSLocalizedString("Start", comment: "")) {
-                            actions.start(task.id)
-                        }
-                        Button(NSLocalizedString("Edit…", comment: "")) { editing = task }
-                        Divider()
-                        Button(NSLocalizedString("Delete", comment: ""), role: .destructive) {
-                            actions.delete(task.id)
-                        }
-                    }
             }
         }
     }
@@ -724,6 +912,7 @@ struct CodingKanbanView: View {
                     AssignedTaskCard(
                         task: task,
                         accentHex: accentHex(for: task.profileID),
+                        workspaceName: workspaceName(for: task.profileID),
                         onOpen: { actions.openAssignee(task) },
                         onAnswer: { actions.answer(task.id, $0) },
                         onRecall: { actions.recall(task.id) })
@@ -734,39 +923,57 @@ struct CodingKanbanView: View {
                     workspaceName: workspaceName(for: task.profileID),
                     status: liveStatus(of: task),
                     onOpen: { actions.jumpToRun(task) },
-                    onResume: { actions.resume(task.id) })
+                    onResume: { actions.resume(task.id) },
+                    onStartOver: { actions.startOver(task.id) },
+                    onMarkDone: { requestMarkDone(task) },
+                    menu: CardMenuItem.list([
+                        .init(title: NSLocalizedString("Open Session", comment: "task card")) {
+                            actions.jumpToRun(task)
+                        },
+                        task.restartNeeded == true
+                            ? .init(title: NSLocalizedString("Start Over", comment: "task card")) {
+                                actions.startOver(task.id)
+                            }
+                            : .init(title: NSLocalizedString("Restart Session", comment: "")) {
+                                actions.resume(task.id)
+                            },
+                        .init(title: NSLocalizedString("Move to Review", comment: "")) {
+                            actions.moveToTesting(task.id)
+                        },
+                        .init(title: NSLocalizedString("Mark Done", comment: "review")) {
+                            requestMarkDone(task)
+                        },
+                        .init(title: NSLocalizedString("Stop & Return to Backlog", comment: "task card")) {
+                            actions.stop(task.id)
+                        },
+                        .divider,
+                        .init(title: NSLocalizedString("Stop & Discard Branch", comment: ""),
+                              role: .destructive) { actions.destroy(task.id) },
+                        .init(title: NSLocalizedString("Remove Task Only", comment: ""),
+                              role: .destructive) { actions.delete(task.id) },
+                    ]))
                     .modifier(RemovableCard(title: task.title, stage: task.stage,
                                             onRemove: { actions.delete(task.id) },
                                             onDestroy: { actions.destroy(task.id) }))
-                    .contextMenu {
-                        Button(NSLocalizedString("Restart Session", comment: "")) {
-                            actions.resume(task.id)
-                        }
-                        Button(NSLocalizedString("Move to Testing", comment: "")) {
-                            actions.moveToTesting(task.id)
-                        }
-                        Button(NSLocalizedString("Close Without Merging", comment: "")) {
-                            actions.closeNoMerge(task.id)
-                        }
-                        Divider()
-                        Button(NSLocalizedString("Stop Agent & Delete Worktree",
-                                                 comment: ""),
-                               role: .destructive) {
-                            actions.destroy(task.id)
-                        }
-                        Button(NSLocalizedString("Remove Card Only", comment: ""),
-                               role: .destructive) {
-                            actions.delete(task.id)
-                        }
-                    }
                 }
             }
+        }
+        .dropDestination(for: String.self) { items, _ in
+            // Backlog → In Progress: start it (a new agent in a worktree).
+            var took = false
+            for id in items.compactMap(UUID.init(uuidString:)) {
+                guard let t = store.task(id), t.stage == .backlog || t.stage == .planning,
+                      !t.title.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+                actions.start(id)
+                took = true
+            }
+            return took
         }
     }
 
     private var testingColumn: some View {
         let tasks = store.tasks(in: .testing)
-        return KanbanColumn(title: NSLocalizedString("Testing/Review", comment: "kanban column"),
+        return KanbanColumn(title: NSLocalizedString("Review", comment: "kanban column"),
                             systemImage: "eye",
                             count: tasks.count,
                             tint: .purple,
@@ -777,40 +984,79 @@ struct CodingKanbanView: View {
                     task: task,
                     accentHex: accentHex(for: task.profileID),
                     workspaceName: workspaceName(for: task.profileID),
-                    onOpen: { actions.openReview(task.id) })
+                    onOpen: { actions.openReview(task.id) },
+                    onOpenSession: { task.delegationID != nil ? actions.openAssignee(task) : actions.jumpToRun(task) },
+                    onMarkDone: { requestMarkDone(task) },
+                    onRetry: actions.retryLanding.map { retry in { retry(task.id) } },
+                    menu: testingMenu(task))
+                    .draggable(task.id.uuidString)
                     .modifier(RemovableCard(title: task.title, stage: task.stage,
                                             onRemove: { actions.delete(task.id) },
-                                            onDestroy: { actions.destroy(task.id) }))
-                    .contextMenu {
-                        Button(NSLocalizedString("Mark as Done", comment: "kanban menu")) {
-                            actions.markDone(task.id)
-                        }
-                        Divider()
-                        Button(String(format: NSLocalizedString("Merge into %@…",
-                                                                comment: "kanban menu"),
-                                      task.parentBranch ?? NSLocalizedString(
-                                        "parent", comment: "kanban menu"))) {
-                            actions.merge(task.id)
-                        }
-                        Button(NSLocalizedString("Back to In Progress", comment: "")) {
-                            actions.backToInProgress(task.id)
-                        }
-                        Button(NSLocalizedString("Close Without Merging", comment: "")) {
-                            actions.closeNoMerge(task.id)
-                        }
-                        Divider()
-                        Button(NSLocalizedString("Delete Worktree & Branch",
-                                                 comment: ""),
-                               role: .destructive) {
-                            actions.destroy(task.id)
-                        }
-                        Button(NSLocalizedString("Remove Card Only", comment: ""),
-                               role: .destructive) {
-                            actions.delete(task.id)
-                        }
-                    }
+                                            onDestroy: { confirmingDiscard = task }))
             }
         }
+    }
+
+    /// A Review card's menu: right-click, AXShowMenu and VoiceOver actions.
+    private func testingMenu(_ task: CodingTask) -> [CardMenuItem] {
+        let landable = task.landing == nil || task.landing?.phase == .needsYou
+        var d: [CardMenuItem.Draft] = [
+            .init(title: task.isNoCode ? NSLocalizedString("Read Report", comment: "task card")
+                                       : NSLocalizedString("Review Changes", comment: "task card")) {
+                actions.openReview(task.id)
+            },
+            .init(title: NSLocalizedString("Open Session", comment: "task card")) {
+                task.delegationID != nil ? actions.openAssignee(task) : actions.jumpToRun(task)
+            },
+        ]
+        if task.landing?.phase == .needsYou, let retry = actions.retryLanding {
+            d.append(.init(title: NSLocalizedString("Retry Landing", comment: "task card")) {
+                retry(task.id)
+            })
+        }
+        if landable {
+            d.append(.init(title: NSLocalizedString("Mark Done", comment: "review")) { requestMarkDone(task) })
+        }
+        if !task.isNoCode, landable {
+            d.append(.init(title: String(format: NSLocalizedString("Merge into %@…", comment: "kanban menu"),
+                                         task.landingTarget ?? NSLocalizedString("parent", comment: "kanban menu"))) {
+                requestMerge(task)
+            })
+        }
+        d.append(.init(title: NSLocalizedString("Back to In Progress", comment: "")) {
+            actions.backToInProgress(task.id)
+        })
+        d.append(.divider)
+        if task.branch != nil {
+            d.append(.init(title: NSLocalizedString("Discard Branch…", comment: "review"),
+                           role: .destructive) { confirmingDiscard = task })
+        }
+        d.append(.init(title: NSLocalizedString("Remove Task Only", comment: ""),
+                       role: .destructive) { actions.delete(task.id) })
+        return CardMenuItem.list(d)
+    }
+
+    /// A Done card's menu: the transcript, the pull request, the session
+    /// while it's still alive, removal.
+    private func doneMenu(_ task: CodingTask) -> [CardMenuItem] {
+        var d: [CardMenuItem.Draft] = [
+            .init(title: NSLocalizedString("Read Transcript", comment: "task card menu")) {
+                actions.openTranscript(task.id)
+            },
+        ]
+        if let status = liveStatus(of: task), status != .ended, status != .asleep {
+            d.append(.init(title: NSLocalizedString("Open Session", comment: "task card")) {
+                actions.jumpToRun(task)
+            })
+        }
+        if let pr = task.pullRequestURL, let url = URL(string: pr) {
+            d.append(.link(NSLocalizedString("Open Pull Request", comment: "review"), url))
+        }
+        d.append(.divider)
+        d.append(.init(title: NSLocalizedString("Remove Task", comment: ""), role: .destructive) {
+            actions.delete(task.id)
+        })
+        return CardMenuItem.list(d)
     }
 
     private var doneColumn: some View {
@@ -819,25 +1065,27 @@ struct CodingKanbanView: View {
                             systemImage: "checkmark.circle",
                             count: tasks.count,
                             tint: .green,
-                            emptyText: NSLocalizedString("Nothing shipped yet", comment: "kanban"),
-                            subtitle: NSLocalizedString("Merged or closed", comment: "kanban column")) {
+                            emptyText: NSLocalizedString("Nothing done yet", comment: "kanban"),
+                            subtitle: NSLocalizedString("Landed or closed", comment: "kanban column: Done subtitle")) {
             ForEach(tasks) { task in
                 DoneTaskCard(task: task,
                              accentHex: accentHex(for: task.profileID),
                              workspaceName: workspaceName(for: task.profileID),
-                             onOpen: { actions.openTranscript(task.id) })
+                             onOpen: { actions.openTranscript(task.id) },
+                             menu: doneMenu(task))
                     .modifier(RemovableCard(title: task.title, stage: task.stage) {
                         actions.delete(task.id)
                     })
-                    .contextMenu {
-                        Button(NSLocalizedString("View Transcript", comment: "")) {
-                            actions.openTranscript(task.id)
-                        }
-                        Button(NSLocalizedString("Delete", comment: ""), role: .destructive) {
-                            actions.delete(task.id)
-                        }
-                    }
             }
+        }
+        .dropDestination(for: String.self) { items, _ in
+            // Review → Done: Mark Done (asks first when there's code).
+            for id in items.compactMap(UUID.init(uuidString:)) {
+                guard let t = store.task(id), t.stage == .testing else { continue }
+                requestMarkDone(t)
+                return true
+            }
+            return false
         }
     }
 }
@@ -875,8 +1123,10 @@ private struct RemovableCard: ViewModifier {
                             .foregroundStyle(Color.white, Color.secondary)
                     }
                     .buttonStyle(.plain)
-                    .padding(3)
-                    .help(NSLocalizedString("Remove from board", comment: ""))
+                    // Just outside the card's corner: inside it, it sat on
+                    // the card's own top-right controls (Assign).
+                    .offset(x: 7, y: -7)
+                    .help(NSLocalizedString("Remove Task", comment: ""))
                 }
             }
             .onHover { hovering = $0 }
@@ -887,14 +1137,14 @@ private struct RemovableCard: ViewModifier {
             ) {
                 if hasBackingWork {
                     Button(stage == .inProgress
-                           ? NSLocalizedString("Stop Agent & Delete Worktree",
+                           ? NSLocalizedString("Stop & Discard Branch",
                                                comment: "remove card")
-                           : NSLocalizedString("Delete Worktree & Branch",
+                           : NSLocalizedString("Discard Branch",
                                                comment: "remove card"),
                            role: .destructive) {
                         onDestroy?()
                     }
-                    Button(NSLocalizedString("Remove Card Only", comment: "remove card")) {
+                    Button(NSLocalizedString("Remove Task Only", comment: "remove card")) {
                         onRemove()
                     }
                 } else {
@@ -906,7 +1156,7 @@ private struct RemovableCard: ViewModifier {
             } message: {
                 Text(hasBackingWork
                      ? NSLocalizedString(
-                        "Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace.",
+                        "Discarding ends the agent's session and deletes its branch and worktree, with any uncommitted or unmerged work. “Remove Task Only” leaves them in the workspace.",
                         comment: "remove card")
                      : NSLocalizedString("This can't be undone.", comment: "remove card"))
             }
@@ -922,12 +1172,15 @@ private struct PlanPhaseCard: View {
     let task: CodingTask
     let number: Int
     let accentHex: String
+    var workspaceName: String = ""
     let parentTitle: String?
     let dependsOnNumbers: [Int]
     let depsMet: Bool
     let isSelected: Bool
     let onToggleSelect: () -> Void
     let onEdit: () -> Void
+    /// The card's menu (built by the column).
+    var menu: [CardMenuItem] = []
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -967,7 +1220,10 @@ private struct PlanPhaseCard: View {
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 0)
-                        if task.queuedAt != nil {
+                        if task.isStarting {
+                            CardStatusPill(text: NSLocalizedString("Starting…", comment: "task card"),
+                                           tint: .blue, spinning: true)
+                        } else if task.queuedAt != nil {
                             Text(NSLocalizedString("queued", comment: "plan card"))
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(.orange)
@@ -995,6 +1251,17 @@ private struct PlanPhaseCard: View {
             .buttonStyle(.plain)
         }
         .modifier(CardChrome(borderTint: isSelected ? .accentColor : .clear))
+        .modifier(CardAccessibility(
+            label: [String(format: NSLocalizedString("Phase %d", comment: "plan card: accessibility"), number),
+                    task.title,
+                    workspaceName.isEmpty ? nil : workspaceName,
+                    isSelected ? NSLocalizedString("Selected", comment: "plan card: accessibility") : nil,
+                    task.isStarting ? NSLocalizedString("Starting…", comment: "task card")
+                        : task.queuedAt != nil ? NSLocalizedString("queued", comment: "plan card") : nil,
+                    task.lastError].compactMap { $0 }.joined(separator: ", "),
+            hint: NSLocalizedString("Edit…", comment: ""),
+            onPress: onEdit,
+            menu: menu))
     }
 }
 
@@ -1050,6 +1317,42 @@ private struct CardErrorLine: View {
         .accessibilityHint(expanded
             ? NSLocalizedString("Click to fold the error", comment: "task card")
             : NSLocalizedString("Click to read the whole error", comment: "task card"))
+    }
+}
+
+/// A running/review card's header: the workspace chip, its date and the
+/// card's pill on one line when they fit; else the date goes; else the pill
+/// takes a row of its own — the chip is never squeezed to "…" (or
+/// "QA-…rity") by the pill beside it.
+struct CardHeader<Trailing: View>: View {
+    let workspaceName: String
+    let accentHex: String
+    let task: CodingTask
+    @ViewBuilder var trailing: Trailing
+
+    private var chip: some View { WorkspaceChip(name: workspaceName, accentHex: accentHex) }
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                chip.fixedSize()
+                TaskDateLabel(task: task).fixedSize()
+                Spacer(minLength: 4)
+                trailing.fixedSize()
+            }
+            HStack(spacing: 6) {
+                chip.fixedSize()
+                Spacer(minLength: 4)
+                trailing.fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                chip
+                HStack(spacing: 0) {
+                    trailing.fixedSize()
+                    Spacer(minLength: 0)
+                }
+            }
+        }
     }
 }
 
@@ -1129,8 +1432,10 @@ private struct BacklogTaskCard: View {
                     if planningLive {
                         CardStatusPill(text: NSLocalizedString("Planning", comment: "task card"),
                                        tint: .blue, spinning: true)
+                            .fixedSize()
+                            .layoutPriority(3)
                             .help(NSLocalizedString(
-                                "A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them.",
+                                "A visible planning session is running — click the task to open it; phases appear in the Plan column as it files them.",
                                 comment: ""))
                     } else if task.validation != nil {
                         Image(systemName: "person.fill.checkmark")
@@ -1162,7 +1467,19 @@ private struct BacklogTaskCard: View {
                 if let err = task.lastError {
                     CardErrorLine(text: err)
                 }
-                if let a = task.assignment, let pos = queuePosition, task.lastError == nil {
+                if task.isStarting {
+                    // Checks run before the card moves (workspace up, folder
+                    // there, a repository of its own): an In Progress card
+                    // is a task that really started.
+                    HStack(spacing: 6) {
+                        Spacer(minLength: 0)
+                        CardStatusPill(text: NSLocalizedString("Starting…", comment: "task card"),
+                                       tint: .blue, spinning: true)
+                            .help(NSLocalizedString(
+                                "Checking the workspace and the folder — the task moves to In Progress once its agent can start.",
+                                comment: "task card"))
+                    }
+                } else if let a = task.assignment, let pos = queuePosition, task.lastError == nil {
                     HStack(spacing: 6) {
                         Image(systemName: "hourglass")
                         Text(pos == 1
@@ -1183,22 +1500,24 @@ private struct BacklogTaskCard: View {
                 } else {
                     HStack(spacing: 6) {
                         Spacer(minLength: 0)
-                        Button(NSLocalizedString("Plan", comment: "task card")) { onPlan() }
+                        Button(NSLocalizedString("Plan First", comment: "task card")) { onPlan() }
                             .controlSize(.small)
                             .disabled(untitled || task.validationInFlight)
                             .help(NSLocalizedString(
-                                "A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column.",
+                                "A planner agent reads the task and the repository, then files ordered phases (with dependencies) in the Plan column.",
                                 comment: "task card"))
                         Button {
                             onStart()
                         } label: {
-                            Label(NSLocalizedString("One shot", comment: "task card"), systemImage: "play.fill")
+                            Label(NSLocalizedString("Start", comment: "task card"), systemImage: "play.fill")
                         }
                         .controlSize(.small)
                         .buttonStyle(.borderedProminent)
-                        .disabled(untitled)
+                        // Not while it's being planned: that would run the
+                        // whole task in parallel with its own planning.
+                        .disabled(untitled || planningLive)
                         .help(NSLocalizedString(
-                            "Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Testing/Review. To give it to a session or a room, use Assign.",
+                            "Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Review. To give it to a session or a room, use Assign.",
                             comment: "task card"))
                     }
                 }
@@ -1207,21 +1526,42 @@ private struct BacklogTaskCard: View {
         }
         .buttonStyle(.plain)
         .modifier(CardChrome(borderTint: task.lastError != nil ? .red : .clear))
-        .contextMenu {
-            Button(NSLocalizedString("Edit…", comment: ""), action: onEdit)
-            if !untitled {
-                Button(NSLocalizedString("Start: New Agent in a Worktree", comment: "task card"), action: onStart)
-            }
-            if let onAssign {
-                Button(NSLocalizedString("Assign…", comment: "task card"), action: onAssign)
-            }
-            if task.assignment != nil, let onUnassign {
-                Button(NSLocalizedString("Unassign", comment: "task card"), action: onUnassign)
-            }
-            Divider()
-            Button(NSLocalizedString("Delete", comment: ""), role: .destructive,
-                   action: onDelete)
+        .modifier(CardAccessibility(
+            label: [untitled ? NSLocalizedString("Untitled task", comment: "task card") : task.title,
+                    workspaceName.isEmpty ? nil : workspaceName,
+                    planningLive ? NSLocalizedString("Planning", comment: "task card")
+                        : task.isStarting ? NSLocalizedString("Starting…", comment: "task card")
+                        : NSLocalizedString("In backlog", comment: "task card: accessibility state"),
+                    task.lastError].compactMap { $0 }.joined(separator: ", "),
+            hint: planningLive ? NSLocalizedString("Open Session", comment: "task card")
+                               : NSLocalizedString("Edit…", comment: ""),
+            onPress: { planningLive ? onOpenSession() : onEdit() },
+            menu: menu))
+    }
+
+    /// Right-click, AXShowMenu and VoiceOver actions (see CardMenuItem).
+    private var menu: [CardMenuItem] {
+        var d: [CardMenuItem.Draft] = []
+        if planningLive {
+            d.append(.init(title: NSLocalizedString("Open Session", comment: "task card"), action: onOpenSession))
         }
+        d.append(.init(title: NSLocalizedString("Edit…", comment: ""), action: onEdit))
+        if !untitled && !planningLive {
+            d.append(.init(title: NSLocalizedString("Start", comment: "task card"), action: onStart))
+            if !task.validationInFlight {
+                d.append(.init(title: NSLocalizedString("Plan First", comment: "task card"), action: onPlan))
+            }
+        }
+        if let onAssign {
+            d.append(.init(title: NSLocalizedString("Assign…", comment: "task card"), action: onAssign))
+        }
+        if task.assignment != nil, let onUnassign {
+            d.append(.init(title: NSLocalizedString("Unassign", comment: "task card"), action: onUnassign))
+        }
+        d.append(.divider)
+        d.append(.init(title: NSLocalizedString("Remove Task", comment: "task card"),
+                       role: .destructive, action: onDelete))
+        return CardMenuItem.list(d)
     }
 }
 
@@ -1336,11 +1676,11 @@ struct AssignTaskSheet: View {
             }
             Divider()
             HStack {
-                Toggle(NSLocalizedString("Open a pull request when done", comment: "assign sheet"),
+                Toggle(NSLocalizedString("Open a pull request at delivery (skips review)", comment: "assign sheet"),
                        isOn: Binding(get: { prWhenDone }, set: { prWhenDone = $0; TaskAssignment.finishWithPullRequest = $0 }))
                     .platformCheckboxToggle()
                     .font(.system(size: 11.5))
-                    .help(NSLocalizedString("A session or room pushes its branch and opens a pull request before the card moves to Testing/Review.", comment: "assign sheet"))
+                    .help(NSLocalizedString("Off: the session or room hands its branch back for your review, and lands it once you approve. On: it pushes and opens a pull request before the task moves to Review.", comment: "assign sheet"))
                 Spacer()
                 if task.assignment != nil {
                     Button(NSLocalizedString("Unassign", comment: "task card")) { onPick(nil) }
@@ -1396,6 +1736,7 @@ struct AssignTaskSheet: View {
 private struct AssignedTaskCard: View {
     let task: CodingTask
     let accentHex: String
+    var workspaceName: String = ""
     var onOpen: () -> Void
     var onAnswer: (String) -> Void
     var onRecall: () -> Void
@@ -1466,10 +1807,23 @@ private struct AssignedTaskCard: View {
         .buttonStyle(.plain)
         .modifier(CardChrome(borderTint: task.pendingQuestion != nil ? .red : .indigo))
         .help(NSLocalizedString("Show the session working on it", comment: "task card"))
-        .contextMenu {
-            Button(NSLocalizedString("Show the Session", comment: "task card"), action: onOpen)
-            Button(NSLocalizedString("Take It Back", comment: "task card"), role: .destructive, action: onRecall)
-        }
+        .modifier(CardAccessibility(
+            label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
+                    task.assignment?.label,
+                    task.pendingQuestion != nil ? NSLocalizedString("Needs you", comment: "task card: accessibility state")
+                        : NSLocalizedString("In progress", comment: "task card: accessibility state"),
+                    task.pendingQuestion, task.lastError]
+                .compactMap { $0 }.joined(separator: ", "),
+            hint: NSLocalizedString("Show the session working on it", comment: "task card"),
+            onPress: onOpen,
+            menu: CardMenuItem.list(
+                [.init(title: NSLocalizedString("Open Session", comment: "task card"), action: onOpen)]
+                + (task.pendingQuestion != nil
+                   ? [.init(title: NSLocalizedString("Answer…", comment: "task card"),
+                            action: { answering = true })] : [])
+                + [.divider,
+                   .init(title: NSLocalizedString("Stop & Return to Backlog", comment: "task card"),
+                         role: .destructive, action: onRecall)])))
         .alert(String(format: NSLocalizedString("Answer %@", comment: "task card"), task.assignment?.label ?? ""),
                isPresented: $answering) {
             TextField(NSLocalizedString("Your answer", comment: "task card"), text: $reply)
@@ -1489,9 +1843,29 @@ private struct InProgressTaskCard: View {
     let task: CodingTask
     let accentHex: String
     var workspaceName: String = ""
-    let status: AgentStatus?
+    /// The task's session, as the sidebar shows it (`TaskLiveState`).
+    let status: SessionBucket?
     let onOpen: () -> Void
     var onResume: () -> Void = {}
+    var onStartOver: () -> Void = {}
+    var onMarkDone: () -> Void = {}
+    /// The card's menu (built by the column: it knows every action).
+    var menu: [CardMenuItem] = []
+    @State private var hovering = false
+
+    /// No live agent to open: its session is paused, or no tab turned up
+    /// within the boot window.
+    private func sessionLost(at now: Date) -> Bool {
+        switch status {
+        case .asleep, .ended: return true
+        case nil:
+            // A launch that failed (its reason on the card) isn't starting.
+            if task.lastError != nil { return true }
+            guard let started = task.startedAt else { return true }
+            return now.timeIntervalSince(started) >= 300
+        default: return false
+        }
+    }
 
     var body: some View {
         Button(action: onOpen) {
@@ -1500,25 +1874,29 @@ private struct InProgressTaskCard: View {
                 // the relative time ticks, and "starting…" ages into
                 // "session gone" even when nothing else redraws the board.
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    HStack(spacing: 6) {
-                        WorkspaceChip(name: workspaceName, accentHex: accentHex)
-                            .layoutPriority(1)
-                        CardDateSlot(task: task)
-                        Spacer(minLength: 4)
-                        if status == .needsInput {
-                            CardStatusPill(text: NSLocalizedString("Needs you", comment: "task card"),
-                                           tint: .red, systemImage: "hand.raised.fill")
-                        } else if status == .done {
-                            CardStatusPill(text: NSLocalizedString("Finishing", comment: "task card"),
-                                           tint: .green)
+                    CardHeader(workspaceName: workspaceName, accentHex: accentHex, task: task) {
+                        // The same words, tints and spinner as the session's
+                        // sidebar row (SessionBucket).
+                        if let status, status != .asleep, status != .ended {
+                            CardStatusPill(text: status.title, tint: status.tint,
+                                           spinning: status == .working,
+                                           systemImage: status == .needsYou ? "hand.raised.fill" : nil)
+                                .layoutPriority(2)
+                                .help(status == .idle
+                                      ? NSLocalizedString("The agent is waiting at its prompt without having handed the task over — open its session to see where it is.", comment: "task card")
+                                      : "")
                         } else if status != nil {
-                            CardStatusPill(text: NSLocalizedString("Working", comment: "task card"),
-                                           tint: .blue, spinning: true)
+                            CardStatusPill(text: SessionBucket.asleep.title, tint: .secondary,
+                                           systemImage: "pause.fill")
+                        } else if task.lastError != nil {
+                            // The error line below says what went wrong —
+                            // never "Starting…" beside it.
+                            EmptyView()
                         } else if let started = task.startedAt,
                                   context.date.timeIntervalSince(started) < 300 {
                             // No tab yet: within the boot/attach window that's
                             // normal startup, not a lost session.
-                            CardStatusPill(text: NSLocalizedString("Starting", comment: "task card"),
+                            CardStatusPill(text: NSLocalizedString("Starting…", comment: "task card"),
                                            tint: .secondary, spinning: true)
                         } else {
                             CardStatusPill(text: NSLocalizedString("Session gone", comment: "task card"),
@@ -1544,15 +1922,31 @@ private struct InProgressTaskCard: View {
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
                         }
-                        if status == nil, let started = task.startedAt,
-                           context.date.timeIntervalSince(started) >= 300 {
+                        if let err = task.lastError {
+                            CardErrorLine(text: err)
+                        }
+                        HStack(spacing: 6) {
+                        if task.restartNeeded == true {
+                            // Nothing left to resume into: a fresh run.
+                            Button {
+                                onStartOver()
+                            } label: {
+                                Label(NSLocalizedString("Start Over", comment: "task card"),
+                                      systemImage: "arrow.counterclockwise")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .controlSize(.small)
+                            .help(NSLocalizedString(
+                                "Runs the task again from scratch on a new branch.",
+                                comment: "task card"))
+                        } else if sessionLost(at: context.date) {
                             // A lost session isn't a dead end: reboot the
                             // workspace and re-launch the agent on the
                             // existing worktree.
                             Button {
                                 onResume()
                             } label: {
-                                Label(NSLocalizedString("Restart session", comment: "task card"),
+                                Label(NSLocalizedString("Restart Session", comment: ""),
                                       systemImage: "arrow.clockwise")
                                     .frame(maxWidth: .infinity)
                             }
@@ -1562,12 +1956,18 @@ private struct InProgressTaskCard: View {
                                 comment: "task card"))
                         } else {
                             HStack(spacing: 3) {
-                                Text(NSLocalizedString("Open session", comment: "task card"))
+                                Text(NSLocalizedString("Open Session", comment: "task card"))
+                                    .lineLimit(1)
                                 Image(systemName: "arrow.up.right")
                                     .font(.system(size: 9, weight: .semibold))
                             }
                             .font(.system(size: 10.5, weight: .medium))
                             .foregroundStyle(.tint)
+                            Spacer(minLength: 0)
+                        }
+                        // In the card's action row, beside the action —
+                        // never on top of a control.
+                        if hovering { QuickDoneButton(action: onMarkDone) }
                         }
                     }
                 }
@@ -1575,8 +1975,179 @@ private struct InProgressTaskCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .modifier(CardChrome(borderTint: status == .needsInput ? .red : .blue))
+        .modifier(CardChrome(borderTint: status == .needsYou || task.lastError != nil ? .red : .blue))
+        .onHover { hovering = $0 }
         .help(NSLocalizedString("Open the task's live session", comment: ""))
+        .modifier(CardAccessibility(
+            label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
+                    status?.title
+                        ?? (task.lastError == nil ? NSLocalizedString("Starting…", comment: "task card") : nil),
+                    task.lastError].compactMap { $0 }.joined(separator: ", "),
+            hint: NSLocalizedString("Open the task's live session", comment: ""),
+            onPress: onOpen,
+            menu: menu))
+    }
+}
+
+/// One entry of a card's menu. The same list feeds the right-click menu,
+/// AXShowMenu and VoiceOver's actions, so all three always agree.
+struct CardMenuItem: Identifiable {
+    enum Role { case normal, destructive, divider }
+    let id: Int
+    let title: String
+    var role: Role = .normal
+    var url: URL? = nil
+    var action: () -> Void = {}
+
+    /// Items with ids by position (stable while the menu reads the same).
+    static func list(_ items: [CardMenuItem.Draft]) -> [CardMenuItem] {
+        items.enumerated().map { i, d in
+            CardMenuItem(id: i, title: d.title, role: d.role, url: d.url, action: d.action)
+        }
+    }
+
+    /// An entry before it gets its position.
+    struct Draft {
+        let title: String
+        var role: Role = .normal
+        var url: URL? = nil
+        var action: () -> Void = {}
+        static var divider: Draft { Draft(title: "", role: .divider) }
+        static func link(_ title: String, _ url: URL) -> Draft { Draft(title: title, url: url) }
+    }
+}
+
+/// A card's right-click menu from its `CardMenuItem`s.
+private struct CardMenuContent: View {
+    let items: [CardMenuItem]
+    var body: some View {
+        ForEach(items) { item in
+            switch item.role {
+            case .divider: Divider()
+            case .destructive:
+                Button(item.title, role: .destructive, action: item.action)
+            case .normal:
+                if let url = item.url {
+                    Link(item.title, destination: url)
+                } else {
+                    Button(item.title, action: item.action)
+                }
+            }
+        }
+    }
+}
+
+#if os(macOS)
+/// Pops a card's menu for AXShowMenu (VoiceOver's "show menu"), at the
+/// pointer — the same entries as its right-click menu.
+@MainActor
+private final class CardMenuPopper: NSObject {
+    private let items: [CardMenuItem]
+    private let openURL: (URL) -> Void
+    init(items: [CardMenuItem], openURL: @escaping (URL) -> Void) {
+        self.items = items
+        self.openURL = openURL
+    }
+
+    func popUp() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in items {
+            if item.role == .divider { menu.addItem(.separator()); continue }
+            let m = NSMenuItem(title: item.title, action: #selector(run(_:)), keyEquivalent: "")
+            m.target = self
+            m.tag = item.id
+            menu.addItem(m)
+        }
+        // Synchronous: the menu tracks until dismissed, `self` alive throughout.
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    @objc private func run(_ sender: NSMenuItem) {
+        guard let item = items.first(where: { $0.id == sender.tag }) else { return }
+        if let url = item.url { openURL(url) } else { item.action() }
+    }
+}
+#endif
+
+extension View {
+    /// Stand a plain text-titled button in for this control in the
+    /// accessibility tree: an icon (or icon + label) button exposed its name
+    /// only as AXAttributedDescription — AXTitle/AXDescription were empty
+    /// for tools that read the plain attributes. The visual control is
+    /// unchanged; modifiers after this (hint, value) apply to the stand-in.
+    func plainAccessibilityButton(_ title: String, action: @escaping () -> Void) -> some View {
+        accessibilityRepresentation { Button(title, action: action) }
+    }
+}
+
+/// A board card as one accessible control: named by its title and state
+/// (VoiceOver reads the label — a `.contain` container dropped it), pressed
+/// (AXPress) to open it, its menu on AXShowMenu and as named actions —
+/// which is also how its inner buttons stay reachable.
+private struct CardAccessibility: ViewModifier {
+    let label: String
+    let hint: String
+    let onPress: () -> Void
+    var menu: [CardMenuItem] = []
+    @Environment(\.openURL) private var openURL
+
+    private func run(_ item: CardMenuItem) {
+        if let url = item.url { openURL(url) } else { item.action() }
+    }
+
+    /// The menu's actions in the order `accessibilityActions` needs to show
+    /// them as the menu does (it lists them in reverse).
+    static func actionOrder(_ menu: [CardMenuItem]) -> [CardMenuItem] {
+        Array(menu.filter { $0.role != .divider }.reversed())
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .contextMenu { CardMenuContent(items: menu) }
+            .accessibilityElement(children: .ignore)
+            // A real button stands in for the card: it carries the label as
+            // a plain AXTitle/AXDescription too (a bare label exposed only
+            // AXAttributedDescription, which some tools never read).
+            .accessibilityRepresentation { Button(label) { onPress() } }
+            .accessibilityLabel(label)
+            .accessibilityHint(hint)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(.default) { onPress() }
+            .accessibilityActions {
+                // Named actions come out last-first; fed reversed they list
+                // in the context menu's order.
+                ForEach(Self.actionOrder(menu)) { item in
+                    Button(item.title) { run(item) }
+                }
+            }
+            #if os(macOS)
+            .accessibilityAction(.showMenu) {
+                guard !menu.isEmpty else { return }
+                CardMenuPopper(items: menu, openURL: { openURL($0) }).popUp()
+            }
+            #endif
+    }
+}
+
+/// The hover ✓ on In Progress and Review cards: Mark Done.
+private struct QuickDoneButton: View {
+    let action: () -> Void
+    var body: some View {
+        // Icon only: a word here wrapped a letter or two per line beside
+        // the card's own action at the narrowest column width.
+        Button(action: action) {
+            Image(systemName: "checkmark")
+                .font(.system(size: 10.5, weight: .bold))
+                .frame(width: 22, height: 20)
+                .background(Circle().fill(Color.green.opacity(0.16)))
+                .foregroundStyle(.green)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help(NSLocalizedString("Mark Done", comment: "review"))
+        .accessibilityLabel(NSLocalizedString("Mark Done", comment: "review"))
     }
 }
 
@@ -1585,20 +2156,23 @@ private struct TestingTaskCard: View {
     let accentHex: String
     var workspaceName: String = ""
     let onOpen: () -> Void
+    var onOpenSession: () -> Void = {}
+    var onMarkDone: () -> Void = {}
+    /// Retry a landing that needs the user (nil: not offered here).
+    var onRetry: (() -> Void)? = nil
+    /// The card's menu (built by the column).
+    var menu: [CardMenuItem] = []
+    @State private var hovering = false
 
     private var unsent: Int { task.comments.filter { $0.sentAt == nil }.count }
+    private var needsYou: Bool { task.landing?.phase == .needsYou }
 
     var body: some View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    WorkspaceChip(name: workspaceName, accentHex: accentHex)
-                        .layoutPriority(1)
-                    CardDateSlot(task: task)
-                    Spacer(minLength: 4)
+                CardHeader(workspaceName: workspaceName, accentHex: accentHex, task: task) {
                     if unsent > 0 {
-                        CardStatusPill(text: String(format: NSLocalizedString("%d comment(s)", comment: "task card"),
-                                                    unsent),
+                        CardStatusPill(text: TaskPlurals.comments(unsent),
                                        tint: .purple, systemImage: "text.bubble.fill")
                             .help(NSLocalizedString("Draft review comments", comment: ""))
                     }
@@ -1607,7 +2181,7 @@ private struct TestingTaskCard: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
-                if let branch = task.branch {
+                if let branch = task.branch, !task.isNoCode {
                     Label(branch, systemImage: "arrow.triangle.branch")
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -1635,32 +2209,118 @@ private struct TestingTaskCard: View {
                             .lineLimit(3)
                     }
                 }
-                if task.mergingAt != nil {
-                    HStack(spacing: 5) {
-                        ProgressView().controlSize(.mini)
-                        Text(NSLocalizedString("Merging… goes Done once the changes land",
-                                               comment: "task card"))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
-                    }
-                } else if let err = task.lastError {
-                    CardErrorLine(text: err)
-                } else {
-                    HStack {
-                        Spacer(minLength: 0)
-                        Label(NSLocalizedString("Review Changes", comment: "task card"), systemImage: "eye")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(Color.purple))
-                    }
-                }
+                stateLine
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .modifier(CardChrome(borderTint: .purple))
+        .modifier(CardChrome(borderTint: needsYou ? .red : .purple))
+        .onHover { hovering = $0 }
+        .modifier(CardAccessibility(
+            label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
+                    TaskLandingText.line(for: task)
+                        ?? (task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                                          : NSLocalizedString("Ready to land", comment: "task card")),
+                    unsent > 0 ? TaskPlurals.comments(unsent) : nil,
+                    task.lastError].compactMap { $0 }.joined(separator: ", "),
+            hint: task.isNoCode ? NSLocalizedString("Read Report", comment: "task card")
+                                : NSLocalizedString("Review Changes", comment: "task card"),
+            onPress: onOpen,
+            menu: menu))
+    }
+
+    /// The hover ✓, in the action row next to the card's own control —
+    /// an overlay sat on top of the Review pill.
+    @ViewBuilder private var quickDone: some View {
+        if hovering, task.landing == nil || needsYou {
+            QuickDoneButton(action: onMarkDone)
+        }
+    }
+
+    /// "Review Changes" (or "Read Report") — the card's own action, never
+    /// wrapped: the short form when the full one doesn't fit.
+    private func reviewPill(short: Bool) -> some View {
+        let title = task.isNoCode
+            ? (short ? NSLocalizedString("Report", comment: "task card: short Read Report")
+                     : NSLocalizedString("Read Report", comment: "task card"))
+            : (short ? NSLocalizedString("Review", comment: "task card: short Review Changes")
+                     : NSLocalizedString("Review Changes", comment: "task card"))
+        return Label(title, systemImage: task.isNoCode ? "doc.text" : "eye")
+            .font(.system(size: 11, weight: .semibold))
+            .lineLimit(1)
+            .fixedSize()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.purple))
+    }
+
+    @ViewBuilder private var stateLine: some View {
+        if let l = task.landing, l.phase != .needsYou {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(TaskLandingText.line(for: task) ?? "")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                if let line = l.agentLine, !line.isEmpty {
+                    Text(line)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .help(line)
+                }
+            }
+        } else if needsYou {
+            VStack(alignment: .leading, spacing: 6) {
+                // The reason, two lines on the card, all of it on hover.
+                let reason = TaskLandingText.line(for: task) ?? ""
+                Text(reason)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(task.landing?.detail ?? reason)
+                HStack(spacing: 6) {
+                    if let onRetry {
+                        Button(NSLocalizedString("Retry", comment: ""), action: onRetry)
+                            .controlSize(.small)
+                            .help(NSLocalizedString("Land it again with the same choices", comment: "task card"))
+                    }
+                    Button(NSLocalizedString("Open Session", comment: "task landing"), action: onOpenSession)
+                        .controlSize(.small)
+                    Spacer(minLength: 0)
+                    quickDone
+                }
+            }
+        } else if let err = task.lastError {
+            HStack(alignment: .top, spacing: 6) {
+                CardErrorLine(text: err)
+                Spacer(minLength: 0)
+                quickDone
+            }
+        } else {
+            // The state on its own row, the actions below it: side by side
+            // at the narrowest column they wrapped mid-word.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                                   : NSLocalizedString("Ready to land", comment: "task card"))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    ViewThatFits(in: .horizontal) {
+                        reviewPill(short: false)
+                        reviewPill(short: true)
+                    }
+                    Spacer(minLength: 0)
+                    quickDone
+                }
+            }
+        }
     }
 }
 
@@ -1669,22 +2329,21 @@ private struct DoneTaskCard: View {
     let accentHex: String
     var workspaceName: String = ""
     var onOpen: () -> Void = {}
-
-    private var outcomeText: String {
-        if task.merged {
-            return String(format: NSLocalizedString("merged into %@", comment: ""),
-                          task.parentBranch ?? "parent")
-        }
-        if task.prOpened == true {
-            return NSLocalizedString("pull request opened", comment: "")
-        }
-        return NSLocalizedString("closed without merge", comment: "")
-    }
+    /// The card's menu (built by the column).
+    var menu: [CardMenuItem] = []
 
     private var outcomeGlyph: (name: String, tint: Color) {
-        if task.merged { return ("arrow.triangle.merge", .green) }
-        if task.prOpened == true { return ("arrow.up.forward.square", .blue) }
-        return ("xmark.circle", .secondary)
+        switch task.effectiveCompletion {
+        case .merged?: return ("arrow.triangle.merge", .green)
+        case .prOpened?: return ("arrow.triangle.pull", .blue)
+        case .markedDone?: return ("checkmark.circle", .green)
+        case .closedWithoutMerge?, nil: return ("xmark.circle", .secondary)
+        }
+    }
+
+    private var closed: Bool {
+        if case .closedWithoutMerge? = task.effectiveCompletion { return true }
+        return false
     }
 
     var body: some View {
@@ -1699,9 +2358,9 @@ private struct DoneTaskCard: View {
                     Text(task.title)
                         .font(.system(size: 12.5, weight: .medium))
                         .lineLimit(2)
-                        .foregroundStyle(task.merged || task.prOpened == true ? .primary : .secondary)
+                        .foregroundStyle(closed ? .secondary : .primary)
                         .help(task.title)
-                    Text(outcomeText)
+                    Text(TaskLandingText.done(task))
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -1721,6 +2380,12 @@ private struct DoneTaskCard: View {
         .help(NSLocalizedString("Read the agent's full session transcript",
                                 comment: "task transcript"))
         .modifier(CardChrome())
+        .modifier(CardAccessibility(
+            label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
+                    TaskLandingText.done(task)].compactMap { $0 }.joined(separator: ", "),
+            hint: NSLocalizedString("Read Transcript", comment: "task card menu"),
+            onPress: onOpen,
+            menu: menu))
     }
 }
 
@@ -1850,6 +2515,17 @@ struct TaskEditorSheet: View {
 
             chips
 
+            if let err = task.lastError, !isNew {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(err).fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.system(size: 11.5))
+                .foregroundStyle(.red)
+            }
+
+            optionsRow
+
             descriptionCard
                 .layoutPriority(1)
 
@@ -1945,7 +2621,7 @@ struct TaskEditorSheet: View {
         Menu {
             Button {
                 task.assignment = nil
-            } label: { Label(NSLocalizedString("Nobody — I'll start it", comment: "task editor"), systemImage: "tray") }
+            } label: { Label(NSLocalizedString("Unassigned — I'll start it", comment: "task editor"), systemImage: "tray") }
             Button {
                 task.assignment = .newAgent
             } label: { Label(NSLocalizedString("A new agent (in its own worktree)", comment: "task editor"),
@@ -1979,7 +2655,7 @@ struct TaskEditorSheet: View {
             }
         } label: {
             chipLabel(task.assignment?.systemImage ?? "person.crop.circle.badge.plus",
-                      task.assignment.map { String(format: NSLocalizedString("Queue for %@", comment: "quick task"), $0.label) }
+                      task.assignment.map { String(format: NSLocalizedString("Assigned to %@", comment: "task card"), $0.label) }
                         ?? NSLocalizedString("Unassigned", comment: "task editor"),
                       tint: .indigo, active: task.assignment != nil)
         }
@@ -2003,6 +2679,8 @@ struct TaskEditorSheet: View {
         } label: {
             chipLabel("macwindow", selectedProfile?.name ?? NSLocalizedString("Workspace", comment: ""))
         }
+        .accessibilityLabel(String(format: NSLocalizedString("Workspace: %@", comment: "task editor chip"),
+                                   selectedProfile?.name ?? ""))
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
@@ -2018,6 +2696,8 @@ struct TaskEditorSheet: View {
         } label: {
             chipLabel("cpu", task.tool.displayName)
         }
+        .accessibilityLabel(String(format: NSLocalizedString("Agent: %@", comment: "task editor chip"),
+                                   task.tool.displayName))
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
@@ -2031,6 +2711,8 @@ struct TaskEditorSheet: View {
         } label: {
             chipLabel("folder", task.repoPath.isEmpty ? "~" : task.repoPath)
         }
+        .accessibilityLabel(String(format: NSLocalizedString("Folder: %@", comment: "task editor chip"),
+                                   task.repoPath.isEmpty ? "~" : task.repoPath))
         .buttonStyle(.plain)
         .help(NSLocalizedString("Start the agent in — a folder inside the workspace", comment: "task editor"))
         .popover(isPresented: $editingFolder, arrowEdge: .bottom) {
@@ -2041,12 +2723,17 @@ struct TaskEditorSheet: View {
                 TextField("", text: $task.repoPath, prompt: Text(verbatim: "~/my-repo"))
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 13, design: .monospaced))
+                    .accessibilityLabel(NSLocalizedString("Folder", comment: "task editor"))
+                Text(NSLocalizedString("Clone this repository first (optional)", comment: "task editor"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
                 TextField("", text: Binding(
                     get: { task.cloneURL ?? "" },
                     set: { task.cloneURL = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }),
                           prompt: Text(verbatim: "https://github.com/org/repo.git"))
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
+                    .accessibilityLabel(NSLocalizedString("Clone this repository first (optional)", comment: "task editor"))
                     .help(NSLocalizedString(
                         "Optional: clone this git repository into the folder above before the first start, using the workspace's git credentials. Skipped when the folder already holds a repository.",
                         comment: "task editor"))
@@ -2059,6 +2746,39 @@ struct TaskEditorSheet: View {
             .padding(14)
             .frame(width: 380)
         }
+    }
+
+    /// The folder's "create it" switch (the start error points at it) and
+    /// how the task leaves review once approved.
+    private var optionsRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) { optionsList }
+            VStack(alignment: .leading, spacing: 8) { optionsList }
+        }
+        .font(.system(size: 11.5))
+    }
+
+    @ViewBuilder private var optionsList: some View {
+        if decidedByAssignee == nil {
+            Toggle(NSLocalizedString("Create folder & git repo if needed", comment: "task editor"),
+                   isOn: Binding(get: { task.initRepo ?? false },
+                                 set: { task.initRepo = $0 ? true : nil }))
+                .platformCheckboxToggle()
+                .help(NSLocalizedString("Make the folder and an empty git repository when they don't exist yet — tasks run on their own branch.", comment: "task editor"))
+        }
+        Picker(NSLocalizedString("When a task is approved", comment: "task finish preference"), selection: Binding(
+            get: { task.finish },
+            set: { task.finish = $0 })) {
+            Text(String(format: NSLocalizedString("Workspace default (%@)", comment: "task editor"),
+                        (selectedProfile?.taskFinish ?? TaskFinish.appDefault).label))
+                .tag(TaskFinish?.none)
+            ForEach(TaskFinish.allCases, id: \.self) { f in
+                Text(f.label).tag(TaskFinish?.some(f))
+            }
+        }
+        .pickerStyle(.menu)
+        .fixedSize()
+        .help(NSLocalizedString("What happens when you approve the task in Review: merged into the branch it came from, or opened as a pull request.", comment: "task editor"))
     }
 
     // MARK: Description
@@ -2158,13 +2878,13 @@ struct TaskEditorSheet: View {
                 } label: {
                     Image(systemName: "trash")
                 }
-                .help(NSLocalizedString("Delete", comment: ""))
+                .help(NSLocalizedString("Remove Task", comment: "task card"))
             }
             Text(task.assignment.map { a -> String in
                 a.kind == .worktree
-                    ? NSLocalizedString("A new agent picks it up from the queue and takes it to Testing/Review.", comment: "task editor")
-                    : String(format: NSLocalizedString("%@ picks it up on its own and takes it to Testing/Review.", comment: "task editor"), a.label)
-            } ?? NSLocalizedString("Start it from the board: One shot, or Plan to split it into phases.", comment: "task editor"))
+                    ? NSLocalizedString("A new agent picks it up from the queue and takes it to Review.", comment: "task editor")
+                    : String(format: NSLocalizedString("%@ picks it up on its own and takes it to Review.", comment: "task editor"), a.label)
+            } ?? NSLocalizedString("Start it from the board, or Plan First to split it into phases.", comment: "task editor"))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -2174,11 +2894,11 @@ struct TaskEditorSheet: View {
                 Button {
                     onPlan(Self.titled(task))
                 } label: {
-                    Label(NSLocalizedString("Plan", comment: "task editor"), systemImage: "list.number")
+                    Label(NSLocalizedString("Plan First", comment: "task editor"), systemImage: "list.number")
                 }
                 .disabled(!canSave)
                 .help(NSLocalizedString(
-                    "Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column.",
+                    "Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phases with dependencies into the Plan column.",
                     comment: "task editor"))
             }
             Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
@@ -2256,5 +2976,30 @@ struct TaskDateLabel: View {
                                 m.formatted(date: .long, time: .shortened)))
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// What a new task starts from: the workspace the last one was written for,
+/// and the folder last used in that workspace ("~" is rarely a repository).
+enum TaskDraftDefaults {
+    private static let workspaceKey = "codingTasks.lastWorkspace"
+    private static let foldersKey = "codingTasks.lastFolders"
+
+    static var lastWorkspace: UUID? {
+        UserDefaults.standard.string(forKey: workspaceKey).flatMap(UUID.init(uuidString:))
+    }
+
+    static func lastFolder(for workspace: UUID) -> String? {
+        let map = UserDefaults.standard.dictionary(forKey: foldersKey) as? [String: String]
+        return map?[workspace.uuidString]
+    }
+
+    static func remember(_ t: CodingTask) {
+        UserDefaults.standard.set(t.profileID.uuidString, forKey: workspaceKey)
+        let folder = t.repoPath.trimmingCharacters(in: .whitespaces)
+        guard !folder.isEmpty, folder != "~" else { return }
+        var map = (UserDefaults.standard.dictionary(forKey: foldersKey) as? [String: String]) ?? [:]
+        map[t.profileID.uuidString] = folder
+        UserDefaults.standard.set(map, forKey: foldersKey)
     }
 }

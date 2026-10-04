@@ -212,7 +212,16 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var openingMessage: String?
     var createdAt: Date
     /// tmux window index of the live tab; nil once the tab is gone.
-    var windowIndex: Int?
+    /// Rebinding (or unbinding) forgets the window id stamped for the old one.
+    var windowIndex: Int? {
+        didSet { if oldValue != windowIndex { windowID = nil } }
+    }
+    /// The tmux window id ("@12") of the bound tab, as the liveness probe
+    /// first saw it at `windowIndex`. Unlike the index it is never reused
+    /// while the tmux server lives: a different id at the index means the
+    /// tab is somebody else's (ours closed, another took its number) —
+    /// see `AgentSessionStore.checkWindow`.
+    var windowID: String?
     /// Set while a start/resume is in flight (boot, clone, tab creation),
     /// with the highest window index seen at launch so the new tab can be
     /// told apart from the ones already there.
@@ -675,6 +684,41 @@ final class AgentSessionStore {
         return false
     }
 
+    /// The liveness probe read the tmux window id at the session's index.
+    /// The first one seen is stamped; a different one later means the tab
+    /// was closed and the index went to another window (a task's resumed
+    /// tab, a new session): unbind, exactly like a boot change. Archived and
+    /// deleted sessions are never stamped — a tab they'd claim now could
+    /// only be a newcomer at their old index. False when the session is no
+    /// longer bound to that window.
+    @discardableResult
+    func checkWindow(_ id: UUID, windowID: String, now: Date = Date()) -> Bool {
+        guard !windowID.isEmpty, let i = sessions.firstIndex(where: { $0.id == id }),
+              sessions[i].windowIndex != nil else { return false }
+        if sessions[i].windowID == nil {
+            if sessions[i].isArchived || sessions[i].isDeleted { return false }
+            sessions[i].windowID = windowID
+            save()
+            return true
+        }
+        guard sessions[i].windowID != windowID else { return true }
+        sessions[i].windowIndex = nil   // forgets the window id too
+        if !sessions[i].isLaunching { sessions[i].endedAt = now }
+        sessions[i].agentAlive = nil
+        save()
+        return false
+    }
+
+    /// Let go of the session's tab (it is being closed, or it is another's).
+    func unbind(_ id: UUID, now: Date = Date()) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }),
+              sessions[i].windowIndex != nil else { return }
+        sessions[i].windowIndex = nil
+        if !sessions[i].isLaunching { sessions[i].endedAt = now }
+        sessions[i].agentAlive = nil
+        save()
+    }
+
     /// What the agent's transcript says about its turn (see
     /// `AgentSession.transcriptWorking`). Persisted only on change.
     func setTranscriptWorking(_ id: UUID, _ working: Bool?) {
@@ -710,8 +754,12 @@ final class AgentSessionStore {
     private var missingSince: [UUID: Date] = [:]
 
     /// The session bound to a workspace's tmux window, if any.
+    /// A live (not archived, not deleted) one first: an archived session can
+    /// still hold the index a newcomer just took, until the probe lets go.
     func session(profileID: UUID, windowIndex: Int) -> AgentSession? {
-        sessions.first { $0.profileID == profileID && $0.windowIndex == windowIndex }
+        sessions.first { $0.profileID == profileID && $0.windowIndex == windowIndex
+            && !$0.isArchived && !$0.isDeleted }
+            ?? sessions.first { $0.profileID == profileID && $0.windowIndex == windowIndex }
     }
 
     /// Bring the store in line with what the workspaces actually show:
@@ -845,13 +893,25 @@ final class AgentSessionStore {
                 let cwd = tab.cwd ?? "~"
                 // The agent's own name for it, minus its glyphs ("π > tmp"
                 // is not a title) — else the plain "<Agent> in <folder>".
-                let title = Self.agentTitle(from: tab)
-                    .flatMap { SessionHome.cleanAgentTitle($0, agent: kind, cwd: cwd) }
+                // A board task's (or automation's) tab carries the name WE
+                // gave it — the task's title: the session is called that from
+                // the start, and keeps it (not "<Agent> in <slug>" first,
+                // then whatever the agent's terminal title says — an
+                // internal prompt, after a send-back).
+                let named = Self.boardTabTitle(tab)
+                let title = named
+                    ?? Self.agentTitle(from: tab)
+                        .flatMap { SessionHome.cleanAgentTitle($0, agent: kind, cwd: cwd) }
                     ?? AgentSession.defaultTitle(tool: tool, cwd: cwd)
                 let guestCwd = SessionHome.guestPath(cwd)
                 if let i = sessions.firstIndex(where: { cand in
+                    // Archived and deleted sessions want no tab: one carrying
+                    // their old name now is a newcomer (a task's resumed tab
+                    // reuses the task title) — binding it to them had it
+                    // ended as "archived … is back" seconds after it opened.
                     guard cand.profileID == entry.id, cand.windowIndex == nil,
-                          cand.launchingSince == nil, cand.tool == tool else { return false }
+                          cand.launchingSince == nil, cand.tool == tool,
+                          !cand.isArchived, !cand.isDeleted else { return false }
                     // The tab still carries the name we opened it under…
                     if let d = tab.display, !d.isEmpty, d == cand.launchDisplay { return true }
                     // …or it reads exactly like the session, in the same folder.
@@ -867,6 +927,7 @@ final class AgentSessionStore {
                 }
                 var s = AgentSession(profileID: entry.id, tool: tool, title: title,
                                      cwd: cwd, windowIndex: tab.index)
+                if named != nil { s.userTitled = true; s.launchDisplay = tab.display }
                 s.lastSeenAt = now
                 sessions.append(s)
                 changed = true
@@ -954,6 +1015,15 @@ final class AgentSessionStore {
             }
         }
         return (drop, unbind)
+    }
+
+    /// The name the board gave a task tab (`@display` on a wt/ tab), when
+    /// it is one — merge / PR helper tabs ("Merge → main") aside.
+    static func boardTabTitle(_ tab: TabsModel.Tab) -> String? {
+        guard tab.worktreeBranch?.hasPrefix("wt/") == true,
+              let d = tab.display?.trimmingCharacters(in: .whitespaces), !d.isEmpty,
+              !d.hasPrefix("Merge → "), !d.hasPrefix("PR → ") else { return nil }
+        return d
     }
 
     /// The name an agent gave its session, as the guest folds it into the
@@ -1295,7 +1365,9 @@ enum SessionHome {
         #endif
         if s.isLaunching { return .working }
         if s.needsSignIn == true, !s.hasEnded, liveTab(for: s, in: model) != nil { return .needsYou }
-        if s.hasEnded { return .ended }
+        // An agent that died at launch (the error says why) needs the user —
+        // the same "Couldn't start" the card and the stage show, not "Paused".
+        if s.hasEnded { return !(s.lastError ?? "").isEmpty && !s.isArchived ? .needsYou : .ended }
         let ws = workspaceState(of: s, in: model)
         guard ws == .running || ws == .booting else { return .asleep }
         // Up, but tmux hasn't reported yet (a boot, a resume): still asleep

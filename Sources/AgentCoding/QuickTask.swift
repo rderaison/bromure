@@ -535,8 +535,8 @@ struct QuickTaskView: View {
 
     private var assigneeMenu: some View {
         Menu {
-            Button(NSLocalizedString("Backlog only — I'll start it", comment: "quick task")) { assignment = nil }
-            Button(NSLocalizedString("A new agent (own worktree)", comment: "quick task")) { assignment = .newAgent }
+            Button(NSLocalizedString("Unassigned — I'll start it", comment: "quick task")) { assignment = nil }
+            Button(NSLocalizedString("A new agent (in its own worktree)", comment: "quick task")) { assignment = .newAgent }
             Button(NSLocalizedString("The Switchboard — it picks a session", comment: "quick task")) { assignment = .switchboard }
             if let here {
                 Button(String(format: NSLocalizedString("This session (%@)", comment: "quick task"), here.label)) {
@@ -563,8 +563,8 @@ struct QuickTaskView: View {
             HStack(spacing: 5) {
                 Image(systemName: assignment?.systemImage ?? "tray")
                 Text(assignment.map {
-                    String(format: NSLocalizedString("Queue for %@", comment: "quick task"), $0.label)
-                } ?? NSLocalizedString("Backlog only", comment: "quick task"))
+                    String(format: NSLocalizedString("Assigned to %@", comment: "quick task"), $0.label)
+                } ?? NSLocalizedString("Unassigned", comment: "quick task"))
                 Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
             }
             .font(.system(size: 11.5, weight: .semibold))

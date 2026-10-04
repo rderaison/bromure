@@ -836,9 +836,7 @@ private struct DiffView: View {
                     Image(systemName: "text.bubble.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(.purple)
-                    Text(String(format: NSLocalizedString(
-                        "%d comment(s) drafted", comment: "diff pane"),
-                        model.reviewDrafts.count))
+                    Text(TaskPlurals.commentsDrafted(model.reviewDrafts.count))
                         .font(.system(size: 11))
                     Spacer(minLength: 8)
                     Button(NSLocalizedString("Discard", comment: "diff pane")) {

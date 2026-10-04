@@ -43,8 +43,11 @@ struct GuardedTypeTests {
         let env = ["TMUX_TMPDIR": dir.path, "PATH": "\(bin):/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"]
         defer { Self.sh("tmux kill-server", env: env) }
 
-        let picker = "printf 'Try auto mode?\\n\\n❯ 1. Yes, set it up\\n  2. Not now\\n\\nEnter to confirm · Esc to cancel\\n'; exec cat"
-        Self.sh("tmux new-session -d -s bromure -x 100 -y 20 \"\(picker)\" && tmux new-window -t bromure:1 'exec cat'", env: env)
+        // Both windows run an "agent" (a process named claude): the typing
+        // guard types only into an agent's foreground.
+        let picker = "printf 'Try auto mode?\\n\\n❯ 1. Yes, set it up\\n  2. Not now\\n\\nEnter to confirm · Esc to cancel\\n'; exec -a claude cat"
+        Self.sh("tmux new-session -d -s bromure -x 100 -y 20 \"bash -c \\\"\(picker)\\\"\" "
+                + "&& tmux new-window -t bromure:1 \"bash -c 'exec -a claude cat'\"", env: env)
         Thread.sleep(forTimeInterval: 0.5)
 
         let text = "[Delegation notice] @peer asks: 1. hello"

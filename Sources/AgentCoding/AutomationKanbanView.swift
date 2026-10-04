@@ -467,10 +467,13 @@ struct BoardPrimaryButtonStyle: ButtonStyle {
 /// Liquid Glass on macOS 26 (a thin material before, and off the Mac).
 struct GlassCapsule: ViewModifier {
     var cornerRadius: CGFloat
+    @Environment(\.colorScheme) private var scheme
 
     func body(content: Content) -> some View {
         #if os(macOS)
-        if #available(macOS 26.0, *) {
+        // Dark: the glass picks its text color from what it thinks is
+        // behind it and drew titles dark-on-dark — the material is legible.
+        if #available(macOS 26.0, *), scheme != .dark {
             content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         } else {
             fallback(content)
@@ -547,7 +550,9 @@ struct CardChrome: ViewModifier {
         content
             .padding(.vertical, 12)
             .padding(.horizontal, 13)
-            .padding(.leading, borderTint == .clear ? 0 : 6)
+            // Room for the state bar on EVERY card, so a card that gains
+            // one (an error) doesn't shift its content sideways.
+            .padding(.leading, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 shape
@@ -612,7 +617,9 @@ struct CardStatusPill: View {
             } else {
                 Circle().fill(tint).frame(width: 6, height: 6)
             }
-            Text(text).lineLimit(1)
+            // Never squeezed away: the word is the point of the pill (it
+            // must match the session's sidebar row). Neighbours truncate.
+            Text(text).lineLimit(1).fixedSize()
         }
         .font(.system(size: 10.5, weight: .semibold))
         .foregroundStyle(tint)

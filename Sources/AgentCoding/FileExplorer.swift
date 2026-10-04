@@ -309,8 +309,11 @@ final class FileExplorerModel {
         }
         sendingReview = true
         defer { sendingReview = false }
+        // Guarded: typed only while an agent holds that tab (a shell would
+        // run the feedback as commands); the drafts stay otherwise.
         let cmd = CodingTaskEngine.typeCommand(tabIndex: index, text: msg)
-        guard (try? await exec(cmd, timeout: 25)) != nil else { return false }
+        guard let out = try? await exec(cmd, timeout: 25),
+              PaneTypeGuard.refusal(in: out) == nil else { return false }
         reviewDrafts.removeAll()
         return true
     }

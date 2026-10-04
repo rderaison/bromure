@@ -475,16 +475,21 @@ struct CodingBoardScreen: View {
                 jumpToRun: { _ in },
                 moveToTesting: { controller.taskCommand($0, "to-testing") },
                 backToInProgress: { controller.taskCommand($0, "to-in-progress") },
-                merge: { controller.taskCommand($0, "merge") },
+                merge: { controller.taskCommand($0, "land", body: ["mode": "merge"]) },
                 closeNoMerge: { controller.taskCommand($0, "close-no-merge") },
                 markDone: { controller.taskCommand($0, "mark-done") },
+                stop: { controller.taskCommand($0, "stop") },
+                startOver: { controller.taskCommand($0, "start-over") },
+                mergeNeedsConfirm: true,
                 delete: { controller.deleteTask($0) },
                 save: { controller.upsertTask($0) },
                 validate: { controller.upsertTask($0) },
                 openPlanSession: { _ in },
                 destroy: { controller.taskCommand($0, "destroy") },
                 resume: { controller.taskCommand($0, "resume") },
-                openTranscript: { openedTask = TranscriptTarget(id: $0) }))
+                openTranscript: { openedTask = TranscriptTarget(id: $0) },
+                retryLanding: { controller.taskCommand($0, "retry-landing") }),
+            sessionStore: controller.sessionStore)
         // Title, icon and "New Task" come from the board itself, straight into
         // this stack's navigation bar — one header, not two.
         .sheet(item: $openedTask) { t in

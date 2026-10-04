@@ -278,7 +278,8 @@ final class AgentSessionEngine {
                     if let message {
                         // Its own task: a dialog up in the tab can hold it a while.
                         let pid = s.profileID
-                        Task { _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: pid, tabIndex: w, text: message) }
+                        let target = Self.paneTarget(self.store.session(id) ?? s) ?? .index(w)
+                        Task { _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: pid, target: target, text: message) }
                     }
                 } else {
                     // The agent exited, its shell is still there: relaunch
@@ -304,10 +305,29 @@ final class AgentSessionEngine {
                                 roomName: delegate.agentRoomStore.room(s.roomID)?.name),
                             timeout: 15)
                     }
-                    _ = try? await delegate.guestExec(
+                    // Into the session's own window, and only while its shell
+                    // (not an agent, which would take it as a message) is up.
+                    let target = Self.paneTarget(self.store.session(id) ?? s, foreground: .shell)
+                        ?? .index(w, foreground: .shell)
+                    let out = (try? await delegate.guestExec(
                         profileID: s.profileID,
-                        command: CodingTaskEngine.typeCommand(tabIndex: w, text: cmd),
-                        timeout: 15)
+                        command: CodingTaskEngine.shellLineCommand(target: target, line: cmd),
+                        timeout: 15)) ?? ""
+                    if let r = PaneTypeGuard.refusal(in: out) {
+                        if r == .agent {
+                            // It came back on its own: just the message, if any.
+                            BACDebug.log("sessions", "“\(s.title)”: agent is up in tab \(w) — no relaunch")
+                            if let message, let t = Self.paneTarget(self.store.session(id) ?? s) {
+                                _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: s.profileID,
+                                                                        target: t, text: message)
+                            }
+                            return
+                        }
+                        BACDebug.log("sessions", "relaunch of “\(s.title)” in tab \(w) refused (\(r.rawValue)) — fresh tab instead")
+                        self.store.unbind(id)
+                        self.relaunchInFreshTab(id, s, message: message)
+                        return
+                    }
                 }
                 // A fresh start of the agent in the tab: the "exited" verdict
                 // waits until it has been seen running again, and the status
@@ -393,11 +413,35 @@ final class AgentSessionEngine {
                 if await self.probeAlive(profileID: s.profileID, window: w) == true {
                     // A beat for the TUI to draw its prompt before the text lands.
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: s.profileID, tabIndex: w, text: text)
+                    // Still this session's tab? (The probe may just have
+                    // found the binding stale.) Then into ITS window only —
+                    // its stamped id and launch name, an agent in front.
+                    guard let now = self.store.session(id), now.windowIndex == w,
+                          let target = Self.paneTarget(now) else { continue }
+                    let r = await CodingTaskEngine.typeWhenFreeResult(delegate, profileID: s.profileID,
+                                                                      target: target, text: text)
+                    if case .refused(let why) = r {
+                        BACDebug.log("sessions", "message for “\(s.title)” NOT typed: \(why.rawValue)")
+                        self.store.mutate(id) {
+                            $0.lastError = NSLocalizedString(
+                                "The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again.",
+                                comment: "session deliver refused")
+                        }
+                    }
                     return
                 }
             }
         }
+    }
+
+    /// Where text typed for session `s` may go: its window (by the id the
+    /// probe stamped, else its index), still carrying the name we launched
+    /// it under, with — by default — an agent in the foreground.
+    static func paneTarget(_ s: AgentSession, foreground: PaneTarget.Foreground = .agent) -> PaneTarget? {
+        guard let w = s.windowIndex else { return nil }
+        var t = PaneTarget(ref: s.windowID.map { .windowID($0) } ?? .index(w), foreground: foreground)
+        t.expectDisplay = s.launchDisplay
+        return t
     }
 
     /// End the session: close its tab (the agent with it). The record stays
@@ -878,8 +922,11 @@ final class AgentSessionEngine {
         // window indices are only meaningful within one boot.
         "printf 'boot\\t%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"; "
             + "h=$(hostname 2>/dev/null); "
-            + "tmux list-panes -s -t bromure -F '#{window_index} #{pane_tty} #{pane_title}' 2>/dev/null "
-            + "| while read -r i t title; do \(window.isEmpty ? "" : "[ \"$i\" = \(window) ] || continue; ")"
+            + "tmux list-panes -s -t bromure -F '#{window_index} #{window_id} #{pane_tty} #{pane_title}' 2>/dev/null "
+            + "| while read -r i wid t title; do \(window.isEmpty ? "" : "[ \"$i\" = \(window) ] || continue; ")"
+            // The window's stable id (its own line): an index is reused the
+            // moment its tab closes, the id never is.
+            + "printf 'win\\t%s\\t%s\\n' \"$i\" \"$wid\"; "
             + "[ \"$title\" = \"$h\" ] && title=''; "
             + "a=$(ps -t \"${t#/dev/}\" -o args= 2>/dev/null "
             + "| grep -v -E '\(shellNames)' "
@@ -899,6 +946,38 @@ final class AgentSessionEngine {
         var transcriptID: String? = nil
         let title: String
     }
+    /// index → tmux window id, from the probe's `win` lines.
+    nonisolated static func parseWindowIDs(_ out: String) -> [Int: String] {
+        var ids: [Int: String] = [:]
+        for line in out.split(whereSeparator: \.isNewline) where line.hasPrefix("win\t") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count >= 3, let i = Int(parts[1]) else { continue }
+            let id = parts[2].trimmingCharacters(in: .whitespaces)
+            if PaneTypeGuard.isWindowID(id), ids[i] == nil { ids[i] = id }
+        }
+        return ids
+    }
+
+    /// What becomes of an archived or deleted session's binding when the
+    /// probe shows a tab at its index. Only a tab PROVABLY its own — same
+    /// boot, same tmux window id as stamped while it was live, the name we
+    /// gave it, and not a board task's live tab — is ended; anything else is
+    /// a newcomer at the old index (a task resumed after Stop & Return to
+    /// Backlog reuses the index and the title) and the session just lets go.
+    enum ArchivedTabVerdict: Equatable { case end, unbind, wait }
+
+    nonisolated static func archivedTabVerdict(sessionBoot: String?, probeBoot: String?,
+                                   sessionWindowID: String?, probeWindowID: String?,
+                                   sessionDisplay: String?, tabDisplay: String?,
+                                   taskOwned: Bool) -> ArchivedTabVerdict {
+        guard let probeBoot, let probeWindowID else { return .wait }
+        guard sessionBoot == probeBoot else { return .unbind }
+        if let mine = sessionDisplay, let d = tabDisplay, !d.isEmpty, d != mine { return .unbind }
+        if taskOwned { return .unbind }
+        guard let sessionWindowID, sessionWindowID == probeWindowID else { return .unbind }
+        return .end
+    }
+
     /// The guest boot id the probe leads with (nil from an older probe, or
     /// when the guest couldn't read it).
     static func parseBootID(_ out: String) -> String? {
@@ -1057,6 +1136,9 @@ final class AgentSessionEngine {
                 // runs at this index now isn't its agent.
                 guard store.checkBoot(s.id, bootID: boot) else { return nil }
             }
+            // Same boot, but another window at the index: ours was closed.
+            if let wid = Self.parseWindowIDs(out)[window],
+               !store.checkWindow(s.id, windowID: wid) { return nil }
             apply(p, to: s)
         }
         return p.alive
@@ -1091,23 +1173,8 @@ final class AgentSessionEngine {
         // was asleep when it was put away, and just woke): both meant "end
         // it". A deleted one keeps its binding until the roster drops the
         // tab — that's what purges it.
-        for s in store.sessions where (s.isArchived || s.isDeleted) && s.windowIndex != nil {
-            guard let entry = entries.first(where: { $0.id == s.profileID }), entry.model.rosterLive,
-                  let tab = entry.model.tabs.first(where: { $0.index == s.windowIndex })
-            else { continue }
-            // Kill only a tab that is provably this session's: bound in the
-            // boot the probe sees now (after a fresh boot the index belongs
-            // to whatever opened since — a new session's tab, once) and,
-            // when we named it, still carrying that name.
-            guard let boot = bootIDs[s.profileID], s.bootID == boot else { continue }
-            if let mine = s.launchDisplay, let d = tab.display, !d.isEmpty, d != mine { continue }
-            if s.isDeleted {
-                killTabIfShown(s)
-            } else {
-                BACDebug.log("sessions", "archived “\(s.title)” is back — ending it")
-                close(s.id)
-            }
-        }
+        // (Decided in the probe below, on that probe's fresh window ids —
+        // see `reapArchived`.)
         let now = Date()
         for entry in entries {
             let bound = store.sessions.filter { $0.profileID == entry.id && $0.windowIndex != nil }
@@ -1125,12 +1192,53 @@ final class AgentSessionEngine {
                                        uniquingKeysWith: { a, _ in a })
                 let boot = Self.parseBootID(out)
                 if let boot { self.bootIDs[profileID] = boot }
+                let windowIDs = Self.parseWindowIDs(out)
+                self.reapArchived(entry: entry, boot: boot, windowIDs: windowIDs)
                 for s in self.store.sessions where s.profileID == profileID {
-                    guard s.windowIndex != nil else { continue }
+                    guard s.windowIndex != nil, !s.isArchived, !s.isDeleted else { continue }
                     // A binding from an earlier boot is unbound, not probed.
                     if let boot, !self.store.checkBoot(s.id, bootID: boot) { continue }
-                    guard let w = s.windowIndex, let p = lines[w] else { continue }
+                    guard let w = s.windowIndex else { continue }
+                    // Another window at the index (ours closed): unbound too.
+                    if let wid = windowIDs[w], !self.store.checkWindow(s.id, windowID: wid) { continue }
+                    guard let p = lines[w] else { continue }
                     self.apply(p, to: s)
+                }
+            }
+        }
+    }
+
+    /// An archived or deleted session whose tab is back (its workspace was
+    /// asleep when it was put away, and just woke): both meant "end it" —
+    /// but only a tab provably its own (`archivedTabVerdict`), judged on
+    /// the probe just taken, never a cached one: a tab killed and replaced
+    /// at the same index between two probes is a newcomer. A deleted one
+    /// keeps its binding until the roster drops the tab — that's what
+    /// purges it.
+    private func reapArchived(entry: SessionListModel.VMEntry, boot: String?, windowIDs: [Int: String]) {
+        let profileID = entry.id
+        guard let delegate, entry.model.rosterLive else { return }
+        for s in store.sessions where s.profileID == profileID && (s.isArchived || s.isDeleted) {
+            guard let w = s.windowIndex, let tab = entry.model.tabs.first(where: { $0.index == w })
+            else { continue }
+            let owned = tab.worktreeBranch.map {
+                delegate.codingTaskEngine.ownsLiveTab(profileID: profileID, branch: $0)
+            } ?? false
+            switch Self.archivedTabVerdict(sessionBoot: s.bootID, probeBoot: boot,
+                                           sessionWindowID: s.windowID, probeWindowID: windowIDs[w],
+                                           sessionDisplay: s.launchDisplay, tabDisplay: tab.display,
+                                           taskOwned: owned) {
+            case .wait:
+                continue
+            case .unbind:
+                BACDebug.log("sessions", "\(s.isDeleted ? "deleted" : "archived") “\(s.title)”: tab \(w) is someone else's now — letting go")
+                store.unbind(s.id)
+            case .end:
+                if s.isDeleted {
+                    killTabIfShown(s)
+                } else {
+                    BACDebug.log("sessions", "archived “\(s.title)” is back — ending it")
+                    close(s.id)
                 }
             }
         }

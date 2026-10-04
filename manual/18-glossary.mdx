@@ -80,7 +80,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Cloudflare quick tunnel** — A way to publish one web service running in a machine at a random `https://….trycloudflare.com` address, with no Cloudflare account; the address changes whenever the tunnel restarts. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Coding task** — A card on the **Coding Tasks** board (⇧⌘T) that an agent plans, implements and hands back for review in its own branch. See [Coding Tasks](06i-coding-tasks.mdx).
+**Coding task** — A unit of work on the **Coding Tasks** board (⇧⌘T) — Backlog, Plan, In Progress, Review, Done — that an agent plans, implements and hands back for review in its own branch; once approved, the same agent lands it (merges it, or opens a pull request). See [Coding Tasks](06i-coding-tasks.mdx).
 
 **Command palette** — The ⌘K search box ("Search sessions, rooms, machines, actions…") that jumps to any session, room or machine, finds text in conversations, and runs common actions. See [The Sessions Home](05-sessions-home.mdx).
 
@@ -185,6 +185,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 **Kubernetes cluster** — A small k3s cluster Bromure runs on your Mac, made of sibling VMs ("nodes") listed under **Virtual Machines › Kubernetes**. Machines on its access list get it in `~/.kube/config`. Separate from the Kubernetes *credentials* you can add to a machine for outside clusters. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx).
 
 ## L
+
+**Landing** — Taking an approved coding task out of Review: Bromure fast-forwards a clean branch itself; otherwise the agent that wrote the change rebases, runs the checks and merges it (or opens the pull request), and Bromure verifies it in git before the card goes Done. See [Coding Tasks](06i-coding-tasks.mdx).
 
 **Leaf certificate** — An enrolled Mac's own certificate, issued by its organization and used to prove the Mac's identity when it sends activity data. It renews itself before it expires. See [Enterprise](15-enterprise.mdx).
 

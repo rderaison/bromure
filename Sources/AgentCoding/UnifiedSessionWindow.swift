@@ -2454,7 +2454,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             sessionSlot.layer?.add(t, forKey: "surface")
         }
         sessionHosting?.removeFromSuperview()
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.sizingOptions = []   // never let SwiftUI size the window
         host.translatesAutoresizingMaskIntoConstraints = false
         sessionSlot.addSubview(host)
@@ -2765,7 +2765,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onInstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtInstall(in: p) } },
             onUninstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtUninstall(in: p) } },
             initialContainerID: container)
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         dockerSlot.addSubview(host)
         NSLayoutConstraint.activate([
@@ -2834,7 +2834,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             store: delegate.kubeClusterStore, clusterID: id,
             workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
             actions: actions)
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.sizingOptions = []
         host.translatesAutoresizingMaskIntoConstraints = false
         kubeSlot.addSubview(host)
@@ -2962,7 +2962,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             store: delegate.kubeClusterStore, registryID: id,
             workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
             actions: actions)
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.sizingOptions = []
         host.translatesAutoresizingMaskIntoConstraints = false
         registrySlot.addSubview(host)
@@ -3100,7 +3100,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
             onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
             onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() })
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.addSubview(host)
         NSLayoutConstraint.activate([
@@ -3186,7 +3186,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 guard let self, self.clearAutomationEditor() else { return }
                 self.showAutomationBoard()
             })
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         automationSlot.addSubview(host)
         NSLayoutConstraint.activate([
@@ -3293,7 +3293,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     fetchRepos: { [weak self] pid in
                         try await self?.acDelegate?.fetchGitHubRepos(profileID: pid) ?? []
                     }))
-            let host = NSHostingView(rootView: view)
+            let host = NonMovableHostingView(rootView: view)
             // The board's SwiftUI max-width must never resize the WINDOW —
             // same required-constraint gotcha as the file pane (sizingOptions).
             host.sizingOptions = []
@@ -3365,13 +3365,20 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         self?.acDelegate?.codingTaskEngine.moveToInProgress(id)
                     },
                     merge: { [weak self] id in
-                        self?.acDelegate?.codingTaskEngine.merge(id)
+                        // The review window, on its Merge confirmation.
+                        self?.acDelegate?.taskReviewWindows.open(taskID: id, confirm: .merge)
                     },
                     closeNoMerge: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.closeWithoutMerge(id)
                     },
                     markDone: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.markDone(id)
+                    },
+                    stop: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.stopToBacklog(id)
+                    },
+                    startOver: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.startOver(id)
                     },
                     delete: { [weak self] id in
                         self?.acDelegate?.codingTaskStore.remove(id)
@@ -3414,8 +3421,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                                 self.selectSession(sid)
                             }
                         }
-                    }))
-            let host = NSHostingView(rootView: view)
+                    },
+                    retryLanding: { [weak self] id in self?.acDelegate?.codingTaskEngine.retryLanding(id) }),
+                sessionStore: delegate.homeSessionStore)
+            let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false
             taskBoardSlot.addSubview(host)
@@ -3867,7 +3876,8 @@ struct SessionSidebar: View {
                         store: taskStore,
                         model: model,
                         onShowBoard: onShowTaskBoard,
-                        onNew: onNewTask)
+                        onNew: onNewTask,
+                        sessionStore: sessionStore)
                 }
                 SidebarSectionHeader(title: NSLocalizedString("Workspaces", comment: "sidebar section"),
                                      count: model.profileRows.count,
@@ -3949,7 +3959,8 @@ struct SessionSidebar: View {
                     store: taskStore,
                     model: model,
                     onShowBoard: onShowTaskBoard,
-                    onNew: onNewTask)
+                    onNew: onNewTask,
+                    sessionStore: sessionStore)
                 AutomationsSection(
                     store: automationStore,
                     model: model,

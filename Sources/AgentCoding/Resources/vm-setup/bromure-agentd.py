@@ -1676,7 +1676,14 @@ def _set_window_option(win, name, value):
 
 
 def _b64d(s):
-    """base64 -d, returning '' on failure (matches the shell pipeline)."""
+    """base64 -d, returning '' on failure (matches the shell pipeline).
+
+    "-" is the host's placeholder for an EMPTY field: base64("") is the empty
+    string, which the whitespace split in `_fields` would drop, shifting every
+    later field one slot left. The host (GuestCommand.arg) sends "-" instead.
+    """
+    if not s or s == "-":
+        return ""
     try:
         return base64.b64decode(s).decode("utf-8", "replace")
     except Exception:
@@ -2508,29 +2515,11 @@ def _task_mcp_setup(branch, tool, workdir):
         return (' -c mcp_servers.bromure_board.command="python3"'
                 ' -c mcp_servers.bromure_board.args=' + args)
     if tool in ("grok", "kimi"):
-        subdir, fname = ((".grok", "settings.json") if tool == "grok"
-                         else (".kimi-code", "mcp.json"))
-        try:
-            d = os.path.join(workdir, subdir)
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, fname), "w") as f:
-                json.dump({"mcpServers": {"bromure-board": {
-                    "command": "python3",
-                    "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
-            ex = _capture(["git", "-C", workdir, "rev-parse",
-                           "--git-path", "info/exclude"]).strip()
-            if ex:
-                path = ex if os.path.isabs(ex) else os.path.join(workdir, ex)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                current = ""
-                if os.path.exists(path):
-                    with open(path) as f:
-                        current = f.read()
-                if (subdir + "/") not in current:
-                    with open(path, "a") as f:
-                        f.write("\n" + subdir + "/\n")
-        except OSError as e:
-            log("worktree", "%s task-mcp setup failed: %s" % (tool, e))
+        # MERGED into the project file (a resumed tab's file already holds
+        # the delegation/display entries — overwriting dropped them).
+        # Kimi only reads it in a folder it trusts: every Kimi launch path
+        # pre-trusts its folder (see _pretrust).
+        _project_mcp_add(tool, workdir, "bromure-board", _TASK_MCP_SHIM, [branch])
         return ""
     if tool == "omp":
         # omp reads a project-root `.mcp.json` (Claude-Code-compatible
@@ -2618,9 +2607,10 @@ def _switchboard_mcp_setup(tool, workdir):
     _project_mcp_add(tool, workdir, "switchboard", _SWITCHBOARD_MCP_SHIM)
 
 
-def _project_mcp_add(tool, workdir, name, shim):
+def _project_mcp_add(tool, workdir, name, shim, extra_args=None):
     """Merge one stdio MCP server into the project-scope file grok, kimi or
-    omp reads in `workdir` (git-excluded). No-op for other agents."""
+    omp reads in `workdir` (git-excluded). No-op for other agents.
+    `extra_args` follow the shim path (the board shim's branch)."""
     if tool not in ("grok", "kimi", "omp") or not os.path.exists(shim):
         return
     if tool == "omp":
@@ -2639,7 +2629,7 @@ def _project_mcp_add(tool, workdir, name, shim):
             except (OSError, ValueError):
                 existing = {}
         servers = existing.get("mcpServers", {}) or {}
-        servers[name] = {"command": "python3", "args": [shim]}
+        servers[name] = {"command": "python3", "args": [shim] + list(extra_args or [])}
         existing["mcpServers"] = servers
         with open(path, "w") as f:
             json.dump(existing, f, indent=2)
@@ -2714,6 +2704,23 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
         _preonboard(tool, wt_dir)
+    elif tool == "kimi":
+        # Kimi has no YOLO flag, so the gate above never pre-trusted its
+        # folder — and an untrusted folder makes Kimi skip EVERY
+        # project-scope MCP server (board, delegation, display).
+        _pretrust(tool, wt_dir, main_root)
+    if task:
+        # A board task stays a conversation (send-back, landing): see
+        # _interactive_task_env.
+        _env.update(_interactive_task_env(tool))
+        # Build/cache litter a run leaves untracked isn't the task's change:
+        # keep it out of the review's diff and uncommitted counts (the
+        # checkout's local exclude only — never a tracked .gitignore).
+        for pat in _TASK_LITTER:
+            try:
+                _git_exclude(wt_dir, pat)
+            except OSError as e:
+                log("worktree", "litter exclude failed: %s" % e)
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env, background=background)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
@@ -2731,7 +2738,36 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
         _wt_registry_add(repo_name, branch, parent_branch, display, tool)
 
 
-def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
+_TASK_LITTER = ("__pycache__/", "*.pyc", ".DS_Store", "node_modules/")
+
+
+def _interactive_task_env(tool):
+    """Launch env that keeps a coding-board agent ALIVE after its first
+    turn. Every agent but Kimi takes its opening message on the command
+    line and stays in its TUI; Kimi only takes one through `--prompt`, a
+    one-shot mode that exits when the turn ends — leaving a bare shell in
+    the task's tab, so review feedback typed there later ran as bash
+    commands. With BROMURE_AC_WT_INTERACTIVE the tab launcher starts Kimi
+    interactively (`--auto`, its unattended mode) and types the opening
+    message in once the TUI is up. Automations keep the one-shot run: their
+    result is the branch, and the exit is their finish signal."""
+    return {"BROMURE_AC_WT_INTERACTIVE": "1"} if tool == "kimi" else {}
+
+
+# Flags that make each agent pick its OWN last conversation in the folder
+# back up (a landing hand-off after review: the agent that wrote the change
+# finishes it, with its whole context). Word-split by .bashrc, so no spaces
+# inside a flag; codex's is a subcommand and must come first.
+_RESUME_FLAGS = {
+    "claude": "--continue",
+    "codex": "resume --last",
+    "kimi": "-c",
+    "omp": "--continue",
+}
+
+
+def _task_resume(main_root, branch, parent, display, tool, prompt_b64,
+                 resume=False):
     """Coding-board review feedback: reopen an agent tab in an EXISTING
     worktree checkout (no new worktree) with a follow-up prompt. Yolo —
     a task run is unattended until its next review. The host only sends
@@ -2753,12 +2789,19 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
         return
     env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
     flags = _YOLO_FLAGS.get(tool, "") + _task_mcp_setup(branch, tool, wt_dir)
+    _delegation_mcp_setup(tool, wt_dir)
+    if resume and _RESUME_FLAGS.get(tool):
+        # Resume flags FIRST (codex's is a subcommand).
+        flags = (_RESUME_FLAGS[tool] + " " + flags).strip()
     if flags:
         env["BROMURE_AC_WT_FLAGS"] = flags
     if _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
         _preonboard(tool, wt_dir)
+    elif tool == "kimi":
+        _pretrust(tool, wt_dir, main_root)
+    env.update(_interactive_task_env(tool))
     win = _new_window(command="bash -l", cwd=wt_dir, env=env)
     if not win:
         worktree_err("task-resume: could not open a tab for %s" % branch)
@@ -2790,6 +2833,8 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
         _preonboard(tool, cwd)
+    elif tool == "kimi":
+        _pretrust(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)
@@ -2910,6 +2955,11 @@ def _plan_tab(cwd, slug, display, tool, prompt_b64):
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
         _preonboard(tool, cwd)
+    elif tool == "kimi":
+        _pretrust(tool, cwd)
+    # The interview is a back-and-forth: the agent must still be there to
+    # read the user's answers.
+    env.update(_interactive_task_env(tool))
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("plan: could not open a tab at %s" % cwd)
@@ -2975,6 +3025,11 @@ def _plan_claude_sdk_ready():
             return False
 
 
+# Agents bromure-plan-driver.py can drive headlessly; any other plans in a
+# visible tmux tab.
+_PLAN_DRIVER_TOOLS = ("claude", "codex", "grok")
+
+
 def _plan_stream(cwd, slug, display, tool, prompt_b64):
     """Planning interview over the plan-stream driver: a headless process
     that runs the agent's machine protocol and emits normalized NDJSON to
@@ -2987,6 +3042,12 @@ def _plan_stream(cwd, slug, display, tool, prompt_b64):
         worktree_err("plan: no such directory: " + cwd)
         return
     branch = "wt/" + slug
+    if tool not in _PLAN_DRIVER_TOOLS:
+        # No machine-protocol driver for this agent (kimi, omp): the
+        # visible tmux planning session works for every agent.
+        log("plan", "no plan driver for %s — tmux planning session" % tool)
+        _plan_tab(cwd, slug, display, tool, prompt_b64)
+        return
     if not os.path.exists(_PLAN_DRIVER) or not shutil.which(tool):
         log("plan", "driver or %s binary missing — tmux fallback" % tool)
         _plan_tab(cwd, slug, display, tool, prompt_b64)
@@ -3251,14 +3312,26 @@ _DIRTY_SQUASH_STEP = (
     " `git -C '%(tdir)s' commit -m 'Squash-merge %(src)s'`.")
 
 
+def _merge_target_dir(root, target):
+    """The checkout a merge into `target` must run in: wherever `target` is
+    checked out (the main checkout included). ("", why) when it isn't
+    checked out anywhere — never the main checkout on some OTHER branch:
+    merging there lands the work in the wrong branch."""
+    tdir = _worktree_dir_for_branch(root, target)
+    if not tdir:
+        return "", ("'%s' isn't checked out anywhere — check it out (in the "
+                    "main checkout, if that is free), then merge again" % target)
+    if not os.path.isdir(tdir):
+        return "", "the checkout of '%s' (%s) is gone" % (target, tdir)
+    return tdir, ""
+
+
 def _worktree_merge(branch, target, root, display, tool, mode="merge",
                     autonomy="ask"):
     _ensure_seed_current()
-    tdir = _worktree_dir_for_branch(root, target)
+    tdir, why = _merge_target_dir(root, target)
     if not tdir:
-        tdir = root
-    if not os.path.isdir(tdir):
-        worktree_err("merge: no checkout for '%s'" % target)
+        worktree_err("merge: " + why)
         return
     squash = (mode == "squash")
     # Board merges run to completion without asking (the user already
@@ -4055,17 +4128,19 @@ def _dispatch_command(action, arg):
     elif action == "task-resume":
         # Coding board: reopen the agent in an existing worktree with a
         # follow-up prompt. Fields 1-5 base64, field 6 the raw prompt b64.
-        f = _fields(arg, 6)
+        # Optional 7th, raw: "continue" — resume the agent's own
+        # conversation (landing an approved task) instead of a fresh one.
+        f = _fields(arg, 7)
         _bg(_task_resume, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), _b64d(f[4]), f[5])
+            _b64d(f[3]), _b64d(f[4]), f[5], f[6] == "continue")
     elif action == "worktree-merge":
         # Optional 6th field: merge mode ("merge" default, "squash");
         # optional 7th: autonomy ("ask" default, "auto" = board merges,
         # which commit without asking).
         f = _fields(arg, 7)
         _bg(_worktree_merge, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), _b64d(f[4]), _b64d(f[5]) if f[5] else "merge",
-            _b64d(f[6]) if f[6] else "ask")
+            _b64d(f[3]), _b64d(f[4]), _b64d(f[5]) or "merge",
+            _b64d(f[6]) or "ask")
     elif action == "worktree-pr":
         f = _fields(arg, 5)
         _bg(_worktree_pr, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
