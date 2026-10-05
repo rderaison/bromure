@@ -126,7 +126,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     /// What else the sidebar search finds it by.
     var keywords: String {
         switch self {
-        case .general:         return "name color close login notes defaults task approved merge pull request kimi approvals never ask auto yolo"
+        case .general:         return "name color close login notes defaults task approved merge pull request kimi approvals never ask auto yolo sensitive reach delegation nickname"
         case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
         case .fusion:          return "mount mac folders fusion"
         case .folders:         return "shared folder mount directory"
@@ -594,6 +594,11 @@ struct ProfileEditorView: View {
     let codexReauthRequiredAt: (() -> Date?)?
     let grokReauthRequiredAt: (() -> Date?)?
     let kimiReauthRequiredAt: (() -> Date?)?
+    #if os(macOS)
+    /// Per provider: last host refresh, access-token expiry, unreadable store
+    /// (Settings › Models). Set after init by the hosts that know it.
+    var subscriptionHealth: ((ModelProvider) -> SubscriptionLoginHealth?)? = nil
+    #endif
     /// Launch the "Register with Claude" flow (scope baked in by the caller).
     let onRegisterClaude: (() -> Void)?
     /// Forget the stored Claude credential for this scope.
@@ -916,15 +921,52 @@ struct ProfileEditorView: View {
         onSave(draft, generateSSH)
     }
 
+    /// "Create" / "Save", localized. A bare `isNew ? "Create" : "Save"`
+    /// is a String (not a LocalizedStringKey), so it skipped localization.
+    private var saveTitle: String {
+        isNew ? NSLocalizedString("Create", comment: "workspace editor: create button")
+              : NSLocalizedString("Save", comment: "workspace editor: save button")
+    }
+
+    private var cancelTitle: String {
+        NSLocalizedString("Cancel", comment: "workspace editor: cancel button")
+    }
+
+    /// The editor's footer buttons. Each one's name IS its visible Text
+    /// label (`Text(verbatim:)` of the already-localized title), so VoiceOver
+    /// and UI scripting read "Save" / "Cancel" / "Create" from the same view
+    /// the user sees — no separate `.accessibilityLabel` override for a
+    /// button style or shortcut wrapper to lose (QA read them as a bare
+    /// "button"). The identifiers stay for scripts.
+    ///
+    /// On macOS that alone is not enough: out of process, a SwiftUI Button
+    /// exposes its name only as AXAttributedDescription — no AXTitle, no
+    /// AXDescription — so System Events read "missing value" / "button"
+    /// whatever label modifiers it had. An AppKit element stands in for
+    /// each (`appKitAccessibleButton`), carrying the plain description.
     private var bottomBar: some View {
-        HStack {
-            Button("Cancel", action: onCancel)
+        let cancelHint = NSLocalizedString("Closes the editor without saving changes", comment: "workspace editor: cancel button accessibility hint")
+        let saveID = isNew ? "profileEditor.create" : "profileEditor.save"
+        return HStack {
+            Button(action: onCancel) { Text(verbatim: cancelTitle) }
                 .keyboardShortcut(.cancelAction)
+                #if os(macOS)
+                .appKitAccessibleButton(cancelTitle, hint: cancelHint, identifier: "profileEditor.cancel",
+                                        action: onCancel)
+                #else
+                .accessibilityHint(Text(cancelHint))
+                .accessibilityIdentifier("profileEditor.cancel")
+                #endif
             Spacer()
-            Button(isNew ? "Create" : "Save") { commitSave() }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.defaultAction)
-            .disabled(!isValid)
+            Button(action: commitSave) { Text(verbatim: saveTitle) }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isValid)
+                #if os(macOS)
+                .appKitAccessibleButton(saveTitle, identifier: saveID, enabled: isValid, action: commitSave)
+                #else
+                .accessibilityIdentifier(saveID)
+                #endif
         }
         .padding(12)
     }
@@ -937,8 +979,10 @@ struct ProfileEditorView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                     TextField(NSLocalizedString("Search settings", comment: "preferences search"), text: $categorySearch)
                         .textFieldStyle(.plain)
+                        .accessibilityLabel(Text(NSLocalizedString("Search settings", comment: "preferences search")))
                         .font(.system(size: 12.5))
                 }
                 .padding(.horizontal, 8).padding(.vertical, 6)
@@ -1033,7 +1077,8 @@ struct ProfileEditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel)
+                    Button(action: onCancel) { Text(verbatim: cancelTitle) }
+                        .accessibilityIdentifier("profileEditor.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) { phoneSaveButton }
             }
@@ -1055,8 +1100,9 @@ struct ProfileEditorView: View {
     }
 
     private var phoneSaveButton: some View {
-        Button(isNew ? "Create" : "Save") { commitSave() }
+        Button(action: commitSave) { Text(verbatim: saveTitle) }
             .disabled(!isValid)
+            .accessibilityIdentifier(isNew ? "profileEditor.create" : "profileEditor.save")
     }
     #endif
 
@@ -1216,7 +1262,8 @@ struct ProfileEditorView: View {
                 case .moonshot:  return onForgetKimi != nil
                 case .zai, .bedrock, .openrouter, .custom: return false
                 }
-            })
+            },
+            health: { provider in subscriptionHealth?(provider) })
     }
     #endif
 
@@ -1425,7 +1472,7 @@ struct ProfileEditorView: View {
             ForEach(KimiApprovals.allCases, id: \.self) { Text($0.label).tag($0) }
         }
         .pickerStyle(.menu)
-        .help(NSLocalizedString("Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume.", comment: "Kimi approvals setting"))
+        .help(NSLocalizedString("Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume.", comment: "Kimi approvals setting"))
     }
 
     @ViewBuilder
@@ -1530,8 +1577,9 @@ struct ProfileEditorView: View {
         }
     }
 
-    /// Which workspaces the agents here may reach: every one (the default),
-    /// or only the ones ticked. Directional — the other workspace's own
+    /// Which workspaces the agents here may reach: only the ones ticked —
+    /// none by default (a new workspace reaches nobody until the user ticks
+    /// some) — or every one. Directional — the other workspace's own
     /// setting says whether its agents can reach back.
     @ViewBuilder
     private var agentReachSection: some View {
@@ -1549,6 +1597,12 @@ struct ProfileEditorView: View {
             }
             .toggleStyle(.switch)
             if draft.agentReach != nil {
+                if draft.agentReach?.isEmpty == true, !siblingWorkspaces.isEmpty {
+                    Text("Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace).")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if siblingWorkspaces.isEmpty {
                     Text("No other workspace yet — agents here can only reach each other.")
                         .font(.caption)
@@ -6859,4 +6913,15 @@ private struct AutomationDefaultsStore {
     }
 }
 
+#endif
+
+#if os(macOS)
+extension ProfileEditorView {
+    /// Attach the per-provider sign-in health Settings › Models shows.
+    func withSubscriptionHealth(_ f: ((ModelProvider) -> SubscriptionLoginHealth?)?) -> ProfileEditorView {
+        var copy = self
+        copy.subscriptionHealth = f
+        return copy
+    }
+}
 #endif

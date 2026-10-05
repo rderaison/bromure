@@ -266,6 +266,33 @@ struct AgentScreenTests {
         #expect(p.keys(picking: 2) == ["Down", "Enter"])
     }
 
+    @Test("Grok 1.0.46's folder-trust gate is a trust card that waits on the user (never Ready)")
+    @MainActor func grokTrustGate() throws {
+        let screen = """
+          Grok Build
+
+          Do you trust the contents of this directory?
+          /mnt/bromure-share-1
+          Grok Build may run or modify contents in this directory,
+          posing security risks.
+
+          y  Yes, proceed
+          n  No, quit
+
+          Enter or y to trust
+        """
+        let p = try #require(TerminalPrompt.detect(inScreen: screen, agent: "grok"))
+        #expect(p.kind == .trust)
+        #expect(p.detail == "/mnt/bromure-share-1")
+        #expect(p.canAnswerTrust)
+        #expect(p.trustKeys == ["Enter"])
+        #expect(BeautifiedSessionModel.isDialog(p))
+        // Typing into the tab would answer it: the composer holds messages.
+        #expect(BeautifiedSessionModel.looksLikeMenu(screen))
+        // Without knowing the agent (a scan that can't tell), still a dialog.
+        #expect(TerminalPrompt.detect(inScreen: screen)?.kind == .trust)
+    }
+
     @Test("omp's boxed approval (unnumbered, title in the box edge) becomes a card")
     func ompApproval() throws {
         let screen = """

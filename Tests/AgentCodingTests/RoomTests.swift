@@ -271,10 +271,26 @@ struct TurnChangesTests {
         let changes = rows.compactMap { r -> TurnChanges? in if case .changes(let c, _) = r { return c } else { return nil } }
         #expect(changes.count == 1)
         #expect(changes.first?.files == ["/a/x.swift", "/a/y.swift", "z.py"])
-        #expect(changes.first?.added == 3 + 3 + 2)
-        #expect(changes.first?.removed == 2 + 1)
+        // The edit's kept lines ("a", "b") are no change: +1, as the review counts it.
+        #expect(changes.first?.added == 1 + 3 + 2)
+        #expect(changes.first?.removed == 0 + 1)
         // It sits right before the next message.
         if case .changes = rows[rows.count - 2] {} else { Issue.record("changes not at the turn's end") }
+    }
+
+    @Test("The chip counts an edit's net line diff, the review's numbers (QA: chip +12 −3, review +9 −0)")
+    func netLineDiff() {
+        let old = "def add(a, b):\n    return a + b\n\n"
+        let new = old + "def mul(a, b):\n    return a * b\n\n\ndef sub(a, b):\n    return a - b\n\n\ndef div(a, b):\n"
+        // Every line of each side: +12 −3. The diff: 9 lines added, none removed.
+        #expect(TurnChanges.lineDiff(old, new) == (9, 0))
+        #expect(TurnChanges.lineDiff("a\nb\nc", "a\nB\nc") == (1, 1))
+        #expect(TurnChanges.lineDiff("", "x\ny") == (2, 0))
+        #expect(TurnChanges.lineDiff("x\ny\n", "") == (0, 2))
+        let edit = #"{"file_path":"/a/calc.py","old_string":"def add(a, b):\n    return a + b\n\n","new_string":"def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"}"#
+        let c = TurnChanges.of([item(1, .toolUse(name: "Edit", summary: "", detail: edit)),
+                                item(2, .toolResult(tool: "Edit", content: "ok", isError: false))])
+        #expect(c?.added == 3 && c?.removed == 0)
     }
 
     @Test("Token use: the context of the latest model call, not a running sum")

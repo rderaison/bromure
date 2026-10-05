@@ -934,9 +934,13 @@ public enum TaskFinish: String, Codable, CaseIterable, Sendable {
 /// How much Kimi Code asks before acting in a workspace. The VM is the
 /// sandbox and Bromure's host-side guardrails watch its traffic, so the
 /// default is Kimi's "Never Ask" mode (`--auto`): no tool approvals at all,
-/// Bromure's own MCP tools included. "Ask When Needed" (`--yolo`) runs
-/// routine edits and commands but still asks before risky actions, questions
-/// and plans. Kimi has no working per-tool allow list (it ignores
+/// Bromure's own MCP tools included, and Kimi answers its own questions and
+/// plan exits. "Ask When Needed" (`--yolo`, Kimi's former YOLO mode) still
+/// runs ordinary commands and edits WITHOUT asking — it only stops before
+/// sensitive files (.env, SSH keys), dangerous commands (rm -rf, shutdown),
+/// leaving Plan mode, and when the agent has a question. The UI labels it by
+/// that behavior ("Ask before sensitive actions"), since "ask when needed"
+/// reads as if routine commands were approved one by one. Kimi has no working per-tool allow list (it ignores
 /// `[[permission.rules]]`), so the mode is the only lever — passed on every
 /// interactive launch and resume (a resume without it falls back to Kimi's
 /// "Always Ask").
@@ -956,7 +960,7 @@ public enum KimiApprovals: String, Codable, CaseIterable, Sendable {
     public var label: String {
         switch self {
         case .neverAsk: return NSLocalizedString("Never ask", comment: "Kimi approvals setting")
-        case .askWhenNeeded: return NSLocalizedString("Ask when needed", comment: "Kimi approvals setting")
+        case .askWhenNeeded: return NSLocalizedString("Ask before sensitive actions", comment: "Kimi approvals setting: --yolo (Kimi’s Ask When Needed mode); ordinary commands still run without asking")
         }
     }
 }
@@ -1703,6 +1707,22 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var createdAt: Date
     public var lastUsedAt: Date?
 
+    /// Fields the app maintains itself, never the editor: a save from a
+    /// working copy takes them from the stored profile instead.
+    public mutating func adoptRuntimeFields(from stored: Profile) {
+        createdAt = stored.createdAt
+        // The later of the two: a use recorded while the editor was open
+        // wins; nothing ever moves it backwards.
+        switch (lastUsedAt, stored.lastUsedAt) {
+        case let (a?, b?): lastUsedAt = max(a, b)
+        case (nil, let b): lastUsedAt = b
+        default: break
+        }
+        if stored.baseImageVersionAtClone != nil {
+            baseImageVersionAtClone = stored.baseImageVersionAtClone
+        }
+    }
+
     /// The base-image version stamp captured the moment this profile's
     /// disk was clonefile()'d from base.img. Used to detect when the base
     /// has been rebuilt since the clone (so we can offer to reset).
@@ -1714,8 +1734,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// passed — so the next boot after it, whichever comes last.
     public var baseImageUpgradeRemindAfter: Date?
     /// Which workspaces agents here may reach — delegate work into, ask a
-    /// session of by @nickname. nil = every workspace (the default); a list
-    /// names the only ones (empty = none but this one).
+    /// session of by @nickname. A list names the only ones (empty = none
+    /// but this one) — what a new workspace starts with
+    /// (`newProfileFromTemplate`): reach is opened by the user, workspace
+    /// by workspace, in General › Reach. nil = every workspace (and remote
+    /// hosts): only for workspaces that stored it before, or once the user
+    /// turns "Every workspace" on.
     public var agentReach: [UUID]?
 
     /// Visual color in the picker sidebar. Optional in JSON for forward
@@ -3507,6 +3531,23 @@ public final class ProfileStore {
         secrets.apply(to: &profile)
     }
 
+    /// The stored copy of a workspace (profile.json only — no secrets), or
+    /// nil when it isn't saved yet.
+    public func storedProfile(id: UUID) -> Profile? {
+        let json = rootDir.appendingPathComponent(id.uuidString, isDirectory: true)
+            .appendingPathComponent("profile.json")
+        guard let data = try? Data(contentsOf: json) else { return nil }
+        return try? JSONDecoder.iso8601().decode(Profile.self, from: data)
+    }
+
+    /// Save an editor's working copy without clobbering what the app kept
+    /// up to date while the editor was open (`lastUsedAt` moves every
+    /// launch; an older copy wrote it backwards).
+    public func saveEdited(_ profile: inout Profile) throws {
+        if let stored = storedProfile(id: profile.id) { profile.adoptRuntimeFields(from: stored) }
+        try save(profile)
+    }
+
     public func touch(_ profile: Profile) throws {
         var p = profile
         p.lastUsedAt = Date()
@@ -3936,6 +3977,23 @@ public final class ProfileStore {
     /// reaches the host, which enforces the per-workspace reach policy.
     /// And `display`: showing the user a picture or a chart touches nothing.
     static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"]
+
+    /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
+    /// (`StopCancelled`, fired instead of `Stop`) reports the tab done.
+    static let grokStatusHooksJSON = """
+    {
+      "hooks": {
+        "StopCancelled": [
+          {
+            "hooks": [
+              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh done", "timeout": 5 }
+            ]
+          }
+        ]
+      }
+    }
+
+    """
 
     public func prepareHomeDirectory(for profile: Profile,
                                      terminalDefaults: TerminalAppDefaults,
@@ -4542,8 +4600,17 @@ public final class ProfileStore {
             fi
             # "start" (SessionStart) says nothing about the turn — it's only
             # here to record the transcript below before the first prompt.
+            # Line 2: the conversation the hook is about. Codex runs its
+            # hooks in its SHARED background server, which carries the
+            # $TMUX_PANE of the tab that started it — a second Codex tab's
+            # turns were stamped onto the first tab (shown "Working" while
+            # idle). The host re-routes by this id.
+            sid=""
+            if [ -n "$hook_json" ]; then
+              sid=$(printf '%s' "$hook_json" | sed -n 's/.*"session_\{0,1\}[iI]d"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z_-]*\)".*/\1/p' 2>/dev/null | head -1)
+            fi
             if [ "$signal" != "start" ]; then
-              printf '%s' "$signal" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+              printf '%s\n%s' "$signal" "$sid" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
                 && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
             fi
             # Remember the transcript per tab: the host then reads THIS
@@ -4645,6 +4712,24 @@ public final class ProfileStore {
             try? ompHook.write(to: ompHookURL, atomically: true, encoding: .utf8)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o644)],
                                   ofItemAtPath: ompHookURL.path)
+        }
+        do {
+            // Grok's turn-end hooks it has and Claude Code doesn't. A turn
+            // the user cancels (Ctrl+C / Esc) fires `StopCancelled` INSTEAD
+            // of `Stop` (Grok ≥ 1.0.46), so the tab read "working" until
+            // Grok's idle_prompt notification a minute or more later — and
+            // the composer held every message that long. These can't live in
+            // ~/.claude/settings.json (where Grok picks up the shared hooks):
+            // Claude Code rejects hook events it doesn't know. Grok's own
+            // global hooks dir is always trusted. Written for every profile,
+            // inert where Grok never runs.
+            let grokHooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+            try? fm.createDirectory(at: grokHooksDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o755)])
+            let grokHooks = Self.grokStatusHooksJSON
+            let url = grokHooksDir.appendingPathComponent("bromure-status.json")
+            try? grokHooks.write(to: url, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o644)], ofItemAtPath: url.path)
         }
 
         // ~/.docker/config.json — Docker stores per-registry HTTP Basic
@@ -5116,8 +5201,9 @@ public final class ProfileStore {
             && mv -f "$HOME/.codex/config.toml.tmp.$$" "$HOME/.codex/config.toml"
     fi
 
-    # Grok: agent-to-agent traffic (our delegation MCP to the host) never
-    # waits on an approval. Marker-guarded strip + append; skipped when the
+    # Grok: agent-to-agent traffic (our delegation MCP to the host) and a
+    # board task's own tools (bromure-board, declared per worktree in
+    # .grok/config.toml by agentd) never wait on an approval. Marker-guarded strip + append; skipped when the
     # user keeps their own [permission] table (a second one breaks the TOML).
     # Runs BEFORE the grok-local block: that one strips from
     # [model.grok-build] to the next table, which would eat our start marker.
@@ -5126,7 +5212,7 @@ public final class ProfileStore {
         touch "$HOME/.grok/config.toml"
         if sed '/# >>> bromure-permission/,/# <<< bromure-permission/d' "$HOME/.grok/config.toml" > "$HOME/.grok/config.toml.tmp.$$" 2>/dev/null \\
            && ! grep -q '^\\[permission\\]' "$HOME/.grok/config.toml.tmp.$$"; then
-            printf '%s\\n' '# >>> bromure-permission' '[permission]' 'allow = ["MCPTool(delegation__*)", "MCPTool(display__*)"]' '# <<< bromure-permission' >> "$HOME/.grok/config.toml.tmp.$$"
+            printf '%s\\n' '# >>> bromure-permission' '[permission]' 'allow = ["MCPTool(delegation__*)", "MCPTool(display__*)", "MCPTool(bromure-board__*)"]' '# <<< bromure-permission' >> "$HOME/.grok/config.toml.tmp.$$"
             mv -f "$HOME/.grok/config.toml.tmp.$$" "$HOME/.grok/config.toml"
         else
             rm -f "$HOME/.grok/config.toml.tmp.$$"
@@ -5474,6 +5560,31 @@ public final class ProfileStore {
                 npx --yes @socketsecurity/cli npm install -g @moonshot-ai/kimi-code@latest
                 hash -r 2>/dev/null || true ;;
             *) command kimi "$@" ;;
+        esac
+    }
+    #  • grok: keep the approval mode Grok's OWN config names. Grok ≥ 1.0.46
+    #    also obeys Claude Code's ~/.claude/settings.json permissions.defaultMode
+    #    (its "Claude-compatible settings"), which Bromure seeds to "auto" for
+    #    Claude — so in a workspace with both, a Grok whose config.toml says
+    #    [ui] permission_mode = "ask" ran shell commands and writes unasked.
+    #    When Grok's config asks (or names no mode), pin that on the command
+    #    line (`--permission-mode default` = Ask; the CLI wins over every
+    #    config file). Any other mode the user chose, an explicit mode flag,
+    #    a headless -p run and the subcommands pass straight through. Only
+    #    ever stricter, never looser.
+    grok() {
+        case "${1:-}" in
+            agent|clone|completions|cursor-worker|dashboard|doctor|du|disk-usage|export|help|inspect|leader|login|logout|mcp|memory|models|plugin|sessions|setup|trace|update|upgrade|usage|version|v|worktree|wrap)
+                command grok "$@"; return ;;
+        esac
+        case " $* " in
+            *" --always-approve "*|*" --yolo "*|*" --permission-mode "*|*" --permission-mode="*|*" -p "*|*" --single "*|*" -h "*|*" --help "*|*" -v "*|*" --version "*)
+                command grok "$@"; return ;;
+        esac
+        _bg_mode=$(awk '/^\\[/{ui=($0 ~ /^\\[ui\\][[:space:]]*$/)} ui && /^[[:space:]]*(permission_mode|approval_mode)[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*"/,""); sub(/".*/,""); print; exit}' "$HOME/.grok/config.toml" 2>/dev/null)
+        case "${_bg_mode:-ask}" in
+            ask|default) command grok --permission-mode default "$@" ;;
+            *) command grok "$@" ;;
         esac
     }
 

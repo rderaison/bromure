@@ -43,14 +43,25 @@ final class PendingPromptBroker {
     /// prompts should route to its NSAlert. Window matches `ask`'s own guard.
     nonisolated private static let listenerWindow: TimeInterval = 10
 
-    private static func recordPoll() {
+    /// A FAT CLIENT was in touch: a `/state` poll stamped with its console
+    /// idle time (`X-Bromure-Console-Idle-Ms`, which only the mirror sends),
+    /// or a wake of its `/state/subscribe` push stream. NOT any `/state`
+    /// read: a script or `curl` polling `/state` made every consent prompt
+    /// route to `pendingPrompts`, no local panel appeared, and the prompt
+    /// expired to a block with the user never asked.
+    nonisolated static func recordFatClientContact() {
         pollLock.lock(); lastPollAt = Date(); pollLock.unlock()
     }
 
-    /// True when a fat client polled `/state` within the last few seconds — a
-    /// rich GUI client is connected and can render a consent NSAlert on its
-    /// own screen. Thread-safe: the MITM consent brokers call this from their
-    /// actors to decide between a fat-client alert and a tmux popup.
+    /// Tests: forget any fat-client contact.
+    nonisolated static func resetFatClientContact() {
+        pollLock.lock(); lastPollAt = nil; pollLock.unlock()
+    }
+
+    /// True when a fat client was in touch within the last few seconds (see
+    /// `recordFatClientContact`) — a rich GUI client is connected and can
+    /// render a consent alert on its own screen. Thread-safe: the MITM
+    /// consent brokers call this from their actors.
     nonisolated static func hasLiveListener() -> Bool {
         pollLock.withLock {
             guard let t = lastPollAt else { return false }
@@ -58,10 +69,9 @@ final class PendingPromptBroker {
         }
     }
 
-    /// Unanswered prompts, for `/state`. Also records the poll so `ask` and
-    /// `hasLiveListener` know a client is listening.
+    /// Unanswered prompts, for `/state`. Reading them says nothing about who
+    /// is listening — see `recordFatClientContact`.
     func pendingList() -> [[String: Any]] {
-        Self.recordPoll()
         return prompts.values.filter { $0.answer == nil }.map {
             [
                 "id": $0.id.uuidString,
@@ -122,7 +132,17 @@ final class PendingPromptBroker {
     /// initiated, sequential, and called from synchronous @MainActor code.
     func askAsync(profileID: UUID?, title: String, message: String,
                   buttons: [String], fallback: Int, timeout: TimeInterval = 120) async -> Int {
-        guard Self.hasLiveListener() else { return fallback }
+        await answerAsync(profileID: profileID, title: title, message: message,
+                          buttons: buttons, fallback: fallback, timeout: timeout) ?? fallback
+    }
+
+    /// `askAsync`, telling an answer from none: nil when nobody answered —
+    /// no client, the client went away, the timeout, or the asking task was
+    /// cancelled (another surface got the answer first; the prompt leaves
+    /// `/state` at once).
+    func answerAsync(profileID: UUID?, title: String, message: String,
+                     buttons: [String], fallback: Int, timeout: TimeInterval = 120) async -> Int? {
+        guard Self.hasLiveListener(), !Task.isCancelled else { return nil }
         let id = UUID()
         prompts[id] = Prompt(id: id, profileID: profileID, title: title,
                              message: message, buttons: buttons, fallback: fallback)
@@ -130,9 +150,10 @@ final class PendingPromptBroker {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if let a = prompts[id]?.answer { return a }
-            if !Self.hasLiveListener() { return fallback }   // client gone → fail fast
+            if Task.isCancelled { return nil }
+            if !Self.hasLiveListener() { return nil }   // client gone → fail fast
             try? await Task.sleep(nanoseconds: 100_000_000)  // 0.1s; yields the main actor
         }
-        return fallback
+        return nil
     }
 }

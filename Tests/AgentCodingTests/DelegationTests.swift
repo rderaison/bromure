@@ -747,6 +747,10 @@ struct DelegationTests {
         #expect(isError(unknown) && text(unknown).contains("list_peers"))
         let intoProd = parse(await f.server.handle(line: call("delegate", ["title": "x", "brief": "y", "workspace": "Prod"]), branch: "w3"))
         #expect(isError(intoProd))
+        // One plain instruction: where to go, what to tick — no repetition.
+        #expect(text(intoProd).contains("Workspace “Prod” isn't reachable from this workspace. "
+            + "Ask the user to open “Dev” settings › General › Reach and tick “Prod” "
+            + "(or turn on “Every workspace”), then try again."), "\(text(intoProd))")
         // Open by default: no policy, every workspace.
         f.engine.profiles = { [ws(f.profileID, "Dev"), ws(prod, "Prod")] }
         #expect(f.engine.canReach(from: f.profileID, to: prod))
@@ -831,7 +835,8 @@ struct DelegationTests {
         #expect(AgentSessionEngine.resumeFlags(for: s) == Profile.Tool.claude.resumeFlags)
         var c = AgentSession(profileID: UUID(), tool: .codex, title: "B", cwd: "~/proj")
         c.agentTranscriptID = "60fb3816-3c57-4774-99e4-0508ff1ca840"
-        #expect(AgentSessionEngine.resumeFlags(for: c) == Profile.Tool.codex.resumeFlags)
+        // Codex too: its own conversation by id (`codex resume <uuid>`).
+        #expect(AgentSessionEngine.resumeFlags(for: c) == "resume 60fb3816-3c57-4774-99e4-0508ff1ca840")
         // Another session in the folder: "continue the last one here" would
         // be ITS conversation — no id of our own means a fresh start.
         s.agentTranscriptID = nil

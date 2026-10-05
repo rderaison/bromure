@@ -378,7 +378,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Bromure Agentic Coding を終了しますか？";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "現在実行中の %d 個の VM (%@) は、各ワークスペースの終了動作に従って閉じられます。";
+"The workspace %@ is running. It will be closed according to its close action." = "ワークスペース %@ が実行中です。終了動作に従って閉じられます。";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d 個のワークスペースが実行中です (%2$@)。それぞれの終了動作に従って閉じられます。";
+"The infrastructure machine %@ is running and will be suspended." = "インフラストラクチャマシン %@ が実行中です。サスペンドされます。";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d 台のインフラストラクチャマシンが実行中です (%2$@)。サスペンドされます。";
 "Quit" = "終了";
 
 /* Guardrails: new prompt-on-write mode */
@@ -3624,6 +3627,7 @@
 "%1$@ is off for %2$@. Click to turn it on." = "%2$@ では %1$@ がオフです。クリックしてオンにします。";
 /* Security Timeline: skipped content scans, coalesced rows (WS-B) */
 "not scanned — %@" = "スキャンされていません — %@";
+"blocked, not sent — %@" = "ブロック、未送信 — %@";
 "%1$@ (%2$d times, last one shown)" = "%1$@（%2$d 回、最新のものを表示）";
 
 "Security…" = "セキュリティ…";
@@ -3901,8 +3905,8 @@
 /* Kimi approvals setting */
 "Kimi approvals" = "Kimi の承認";
 "Never ask" = "確認しない";
-"Ask when needed" = "必要なときに確認";
-"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "確認しない：Kimi Code はすべてのコマンドとツールを確認なしで実行します。ワークスペースの VM と Bromure のガードレールが安全の境界になります。必要なときに確認：日常的な編集やコマンドは自動で実行され、危険な操作・質問・計画は引き続きあなたの確認を待ちます。次回の起動または再開から適用されます。";
+"Ask before sensitive actions" = "機密性の高い操作の前に確認";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "確認しない：Kimi Code はすべてのコマンド、編集、ツールを止まらずに実行し、質問やプランも自分で判断します。ワークスペースの VM と Bromure のガードレールが安全の境界になります。機密性の高い操作の前に確認（Kimi の「Ask When Needed」モード）：通常のコマンドや編集は引き続き確認なしで実行されます。Kimi が止まるのは、機密ファイル（.env や SSH 鍵など）に触れる前、危険なコマンド（rm -rf など）を実行する前、Plan モードを終了する前、そしてあなたに質問があるときだけです。次回の起動または再開から適用されます。";
 
 /* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
 "Blocked by Bromure — prompt injection" = "Bromure がブロック — プロンプトインジェクション";
@@ -3919,3 +3923,30 @@
 "denied — no answer in time; the next request asks again" = "拒否 — 時間内に応答がありませんでした。次のリクエストで再度確認します";
 "denied — you said no a moment ago" = "拒否 — 先ほど拒否されました";
 "denied by you" = "ユーザーが拒否";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "ログインストアを読み取れません — Bromure は上書きしません。読み取れるようになるまで、保存されたサインインは使用できません。";
+"Last refreshed %@" = "最終更新 %@";
+"Not refreshed since sign-in" = "サインイン以降は更新されていません";
+"access token expires %@" = "アクセストークンの有効期限 %@";
+"access token renews on next use" = "アクセストークンは次回使用時に更新されます";
+"(exit code %d)" = "(終了コード %d)";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "未配信 — エージェントが受け取りませんでした。編集するか、もう一度送信してください。";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "デフォルトはオフ：下でチェックを入れる（または「すべてのワークスペース」をオンにする）まで、ここのエージェントは他のワークスペースに届きません。";
+"Closes the editor without saving changes" = "変更を保存せずにエディタを閉じます";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok が xAI によるコーディングデータの保持を許可するか尋ねています";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "質問しています";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "プロバイダーには何も送信されていません。Bromure はブロックしたツール出力をこの会話の以降のリクエストから取り除くので、次のメッセージを送信できます。エージェントが失敗し続ける場合は、その手順より前まで会話を巻き戻すか、新しいセッションを開始してください。";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "%1$d 秒以内に応答がない場合は「%2$@」になります。";
+"The workspace %@ will be shut down." = "ワークスペース %@ はシャットダウンされます。";
+"The workspaces %@ will be shut down." = "ワークスペース %@ はシャットダウンされます。";
+"The workspace %@ will be suspended and resume where it left off." = "ワークスペース %@ はサスペンドされ、次回は中断したところから再開します。";
+"The workspaces %@ will be suspended and resume where they left off." = "ワークスペース %@ はサスペンドされ、次回は中断したところから再開します。";

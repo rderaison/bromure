@@ -111,7 +111,8 @@ struct AgentTranscriptParserTests {
         """
         let items = GrokTranscriptParser.parse(Data(jsonl.utf8))
         #expect(items.count == 2)
-        guard case .toolResult("edit_file", "no such file", true) = items.last?.kind else {
+        // Grok's built-in edit reads as the Edit card (GrokSessionTests).
+        guard case .toolResult("Edit", "no such file", true) = items.last?.kind else {
             Issue.record("expected a failed tool result"); return
         }
     }

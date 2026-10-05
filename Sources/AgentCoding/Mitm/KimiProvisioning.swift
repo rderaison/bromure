@@ -297,10 +297,11 @@ public actor KimiProvisioner {
             do {
                 let token = try await refresher.accessToken(for: profileID)
                 let toml = try await Self.provision(token: token, credentialName: record.credentialName)
-                guard var fresh = store.record(for: profileID) else { return false }
+                guard let fresh = store.record(for: profileID) else { return false }
                 if Self.isProvisioned(fresh.configTOML) { return true }   // raced a capture
-                fresh.configTOML = toml
-                try store.update(fresh, for: profileID)
+                // Written against the CURRENT record, so a refresh that
+                // rotated the tokens meanwhile isn't undone.
+                try store.setConfigTOML(toml, for: profileID, unlessProvisioned: { Self.isProvisioned($0) })
                 FileHandle.standardError.write(Data(
                     "[kimi] provisioned managed config from /models (\(record.credentialName))\n".utf8))
                 return true

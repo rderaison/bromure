@@ -217,6 +217,7 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         didSet {
             if oldValue != windowIndex {
                 windowID = nil; agentProcessStart = nil
+                agentProcessPID = nil; agentProcessUptime = nil
                 if windowIndex != nil { releasedWindowIndex = nil }
             }
         }
@@ -227,6 +228,14 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// resume of ours, is somebody's new run: a new session (see
     /// `AgentSessionStore.checkAgentProcess`).
     var agentProcessStart: Int?
+    /// That process's pid, and when it started in seconds since the guest
+    /// booted (/proc/<pid>/stat's starttime). Unlike `agentProcessStart`
+    /// (boot time + uptime, on the guest's wall clock) both survive a
+    /// restore from saved state: the guest resyncs its clock after the
+    /// restore, which moves the wall-clock start forward by however long
+    /// the workspace was suspended — the same process, not a new run.
+    var agentProcessPID: Int?
+    var agentProcessUptime: Int?
     /// The tab index the session let go of because a new agent run started
     /// in it: never the session that run binds back to (it is a new one).
     var releasedWindowIndex: Int?
@@ -278,6 +287,11 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// The agent is sitting at its sign-in screen (the beautified view saw
     /// it) — surfaced as "needs you" until the host signs in for it.
     var needsSignIn: Bool?
+    /// The agent's screen shows a dialog waiting on the user — a picker
+    /// (Codex `/model`), a checklist, a trust question — read by the
+    /// beautified view. Its hooks still say "done", so without this the
+    /// sidebar read "Ready" while the chat said the agent was asking.
+    var awaitingAnswer: Bool?
     /// The user put the conversation away: it leaves the session list for
     /// the Archived fold, still readable, and comes back the moment it is
     /// resumed. Archiving ends the agent (a running one, or one found
@@ -493,7 +507,16 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// the opening request cut short gets the same first-request title
     /// every agent gets — one titling path, whatever the agent.
     static func title(fromAgent raw: String, of s: AgentSession, firstPrompt: String? = nil) -> String? {
+        // A dialog up: the terminal title is about what's asked, not the
+        // conversation — Grok shows the pending action before the cut
+        // title ("Remove the specified drop file… - Single-word ALPHA and…").
+        if s.awaitingAnswer == true, !s.title.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
         guard let t = SessionHome.cleanAgentTitle(raw, agent: s.tool.rawValue, cwd: s.cwd) else { return nil }
+        // The session's name, cut, as one part beside something else (that
+        // pending action): the name stays.
+        if hasCutOwnTitlePart(t, of: s.title) || hasCutOwnTitlePart(raw, of: s.title) {
+            return s.title.trimmingCharacters(in: .whitespaces)
+        }
         let prompt = [s.openingMessage, firstPrompt].compactMap { $0 }.first { !$0.isEmpty }
         if let p = prompt, isCutPrompt(t, of: p) || isCutPrompt(raw, of: p) {
             return title(fromMessage: p)
@@ -509,7 +532,41 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
             if have.count > cut.count, have.lowercased().hasPrefix(cut.lowercased()) { return have }
             return SessionHome.wordCut(cut, limit: cut.count, cutPartialWord: true)
         }
+        // A title cut short on its way here (the guest's tab roster caps a
+        // pane title at 60 characters, spinner and status included: "…the
+        // code word MA" of "…the code word MANGO") never replaces the
+        // fuller name the session already has.
+        if isPrefixCut(t, of: s.title) { return s.title.trimmingCharacters(in: .whitespaces) }
         return t
+    }
+
+    /// `title` is several parts (" - " and the like) and one of them —
+    /// not the first — is the session's own name, whole or cut (8+
+    /// characters): the rest is status the agent put beside it.
+    static func hasCutOwnTitlePart(_ title: String, of name: String) -> Bool {
+        let full = name.trimmingCharacters(in: .whitespaces)
+        guard full.count >= 8 else { return false }
+        var parts = [title]
+        for sep in [" - ", " – ", " — ", " | ", " · "] { parts = parts.flatMap { $0.components(separatedBy: sep) } }
+        guard parts.count >= 2 else { return false }
+        return parts.dropFirst().contains { p in
+            var c = p.trimmingCharacters(in: .whitespaces)
+            for mark in ["…", "..."] where c.hasSuffix(mark) { c = String(c.dropLast(mark.count)) }
+            c = c.trimmingCharacters(in: .whitespaces)
+            return c.count >= 8 && (c.lowercased() == full.lowercased() || isPrefixCut(c, of: full))
+        }
+    }
+
+    /// `cut` is `full` with its end missing: a strict, case-insensitive
+    /// prefix of it (a trailing "…" on either side ignored).
+    static func isPrefixCut(_ cut: String, of full: String) -> Bool {
+        func bare(_ s: String) -> String {
+            var t = s.trimmingCharacters(in: .whitespaces)
+            for mark in ["…", "..."] where t.hasSuffix(mark) { t = String(t.dropLast(mark.count)) }
+            return t.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        let c = bare(cut), f = bare(full)
+        return !c.isEmpty && f.count > c.count && f.hasPrefix(c)
     }
 
     /// Where Kimi cuts the session title it puts in the terminal's title,
@@ -748,11 +805,153 @@ final class AgentSessionStore {
         }
     }
 
+    /// `kimiSessionsClaimed` for a session the roster adopted, minus the
+    /// conversations of unbound sessions it may be the twin of (the one it
+    /// took the tab from, or one that let go of this very tab): reading
+    /// and learning such a conversation is what folds the adoptee back
+    /// into its original (`setTranscriptID`). Anyone else's stay off limits.
+    func kimiSessionsClaimed(byAdoptee s: AgentSession) -> [String] {
+        guard s.isPlainAdoptee || successorOf[s.id] != nil, let w = s.windowIndex else {
+            return kimiSessionsClaimed(profileID: s.profileID, besides: s.id)
+        }
+        let twins = Set(sessions.filter { o in
+            o.id != s.id && o.profileID == s.profileID && o.tool == s.tool
+                && o.windowIndex == nil && o.launchingSince == nil && !o.isArchived && !o.isDeleted
+                && (successorOf[s.id] == o.id || o.releasedWindowIndex == w)
+        }.map(\.id))
+        return sessions.compactMap { o in
+            guard o.id != s.id, !twins.contains(o.id), o.profileID == s.profileID, o.tool == .kimi,
+                  !o.isDeleted, let id = o.agentTranscriptID,
+                  AgentSessionLocator.isKimiSessionID(id) else { return nil }
+            return id
+        }
+    }
+
+    /// Whether `s` is the only live Kimi tab in its folder that doesn't
+    /// know its conversation yet — so the newest journal there nobody
+    /// else claims can only be its own.
+    func isSoleUnpinnedKimi(_ s: AgentSession) -> Bool {
+        let cwd = SessionHome.guestPath(s.cwd)
+        return !sessions.contains { o in
+            o.id != s.id && o.profileID == s.profileID && o.tool == .kimi && !o.isDeleted
+                && o.windowIndex != nil && SessionHome.guestPath(o.cwd) == cwd
+                && o.agentTranscriptID.map(AgentSessionLocator.isKimiSessionID) != true
+        }
+    }
+
+    #if os(macOS)
+    /// The Codex conversations (rollout uuids) the sessions on `profileID`
+    /// other than `besides` own — never another session's to resume.
+    func codexConversationsClaimed(profileID: UUID, besides: UUID?) -> [String] {
+        conversationsClaimed(tool: .codex, profileID: profileID, besides: besides)
+    }
+
+    /// The same for Grok (its session folders' uuids).
+    func grokConversationsClaimed(profileID: UUID, besides: UUID?) -> [String] {
+        conversationsClaimed(tool: .grok, profileID: profileID, besides: besides)
+    }
+
+    /// The uuid-named conversations sessions of `tool` on `profileID` other
+    /// than `besides` own, lowercased.
+    func conversationsClaimed(tool: Profile.Tool, profileID: UUID, besides: UUID?) -> [String] {
+        sessions.compactMap { o in
+            guard o.id != besides, o.profileID == profileID, o.tool == tool, !o.isDeleted,
+                  let id = o.agentTranscriptID, AgentSessionEngine.isTranscriptID(id) else { return nil }
+            return id.lowercased()
+        }
+    }
+
+    /// The window a hook's status report belongs to: the one it was filed
+    /// under (`index`), unless the conversation it names (`conversation`,
+    /// the hook's session id) says otherwise —
+    ///  • a session that owns that conversation: its window;
+    ///  • a Codex window whose own conversation is another: not its report.
+    ///    Codex runs hooks in its shared background server, which carries
+    ///    the tab of whichever Codex started it — a second Codex session's
+    ///    turns showed the first, idle one "Working". The report goes to
+    ///    the one live Codex session that has no conversation of its own
+    ///    yet, or nowhere (nil) when that's ambiguous.
+    /// No conversation named (an older reporter): `index`.
+    nonisolated static func statusWindow(index: Int, conversation: String?, profileID: UUID,
+                                         sessions: [AgentSession]) -> Int? {
+        guard let sid = conversation?.lowercased(), AgentSessionLocator.isConversationUUID(sid) else { return index }
+        let mine = sessions.filter { $0.profileID == profileID && !$0.isDeleted && !$0.isArchived }
+        if let owner = mine.first(where: { $0.agentTranscriptID?.lowercased() == sid && $0.windowIndex != nil }),
+           let w = owner.windowIndex {
+            return w
+        }
+        guard let here = mine.first(where: { $0.windowIndex == index }), here.tool == .codex,
+              let own = here.agentTranscriptID, AgentSessionLocator.isConversationUUID(own),
+              own.lowercased() != sid else { return index }
+        let unpinned = mine.filter {
+            $0.tool == .codex && $0.windowIndex != nil && $0.id != here.id
+                && $0.agentTranscriptID.map(AgentSessionLocator.isConversationUUID) != true
+        }
+        return unpinned.count == 1 ? unpinned[0].windowIndex : nil
+    }
+    #endif
+
     /// The conversation id the agent's hook reported for this session.
+    /// A session the roster just adopted whose conversation turns out to be
+    /// an unbound session's own is that session's tab, not a new one: the
+    /// original gets its tab back and the adoptee goes (`foldTwin`).
     func setTranscriptID(_ id: UUID, _ tid: String) {
         guard let i = sessions.firstIndex(where: { $0.id == id }), sessions[i].agentTranscriptID != tid else { return }
+        if let o = Self.twinOrigin(of: sessions[i], transcriptID: tid, in: sessions,
+                                   successorOf: successorOf[id]) {
+            foldTwin(adoptee: id, into: o)
+            return
+        }
         sessions[i].agentTranscriptID = tid
         save()
+    }
+
+    /// The unbound session `adoptee` (a roster adoption: no launch, no
+    /// words of the user's) duplicates, now that its live tab named
+    /// conversation `tid`: same machine, same agent, same conversation id,
+    /// let go of its tab (a restore read as a new run; a roster hiccup) and
+    /// not being relaunched, archived or deleted.
+    nonisolated static func twinOrigin(of adoptee: AgentSession, transcriptID tid: String,
+                                       in list: [AgentSession], successorOf: UUID?) -> UUID? {
+        guard adoptee.windowIndex != nil, !adoptee.isDeleted, !adoptee.isArchived,
+              adoptee.isPlainAdoptee || successorOf != nil else { return nil }
+        let t = tid.lowercased()
+        let matches = list.filter { o in
+            o.id != adoptee.id && o.profileID == adoptee.profileID && o.tool == adoptee.tool
+                && o.windowIndex == nil && o.launchingSince == nil
+                && !o.isDeleted && !o.isArchived
+                && o.agentTranscriptID?.lowercased() == t
+        }
+        // The one it took the tab from, else the only candidate.
+        if let p = successorOf, matches.contains(where: { $0.id == p }) { return p }
+        return matches.count == 1 ? matches[0].id : nil
+    }
+
+    /// `original` takes back `adoptee`'s tab, liveness and process stamps;
+    /// the adoptee leaves the store. The window showing the adoptee follows.
+    private func foldTwin(adoptee: UUID, into original: UUID, now: Date = Date()) {
+        guard let a = sessions.first(where: { $0.id == adoptee }),
+              let i = sessions.firstIndex(where: { $0.id == original }) else { return }
+        sessions[i].windowIndex = a.windowIndex      // clears releasedWindowIndex
+        sessions[i].windowID = a.windowID
+        sessions[i].bootID = a.bootID
+        sessions[i].agentProcessStart = a.agentProcessStart
+        sessions[i].agentProcessPID = a.agentProcessPID
+        sessions[i].agentProcessUptime = a.agentProcessUptime
+        sessions[i].releasedWindowIndex = nil
+        sessions[i].endedAt = nil
+        sessions[i].lastError = nil
+        sessions[i].agentAlive = a.agentAlive
+        sessions[i].agentSeenAt = a.agentSeenAt ?? sessions[i].agentSeenAt
+        sessions[i].lastSeenAt = now
+        if let w = a.windowIndex { succeededAt[entryKey(a.profileID, w)] = nil }
+        sessions.removeAll { $0.id == adoptee }
+        successorOf[adoptee] = nil
+        deadSince[adoptee] = nil
+        missingSince[adoptee] = nil
+        onRemove?(adoptee)
+        save()
+        onSucceeded?(adoptee, original)
     }
 
     /// The session called "@nick", if any (case-insensitive).
@@ -842,19 +1041,34 @@ final class AgentSessionStore {
     /// transcript and held messages) and the roster adopts the tab as a
     /// session of its own. False when the session no longer holds the tab.
     @discardableResult
-    func checkAgentProcess(_ id: UUID, start: Int, now: Date = Date()) -> Bool {
+    func checkAgentProcess(_ id: UUID, start: Int, pid: Int? = nil, uptime: Int? = nil,
+                           now: Date = Date()) -> Bool {
         guard start > 0, let i = sessions.firstIndex(where: { $0.id == id }),
               let w = sessions[i].windowIndex else { return false }
         let s = sessions[i]
-        guard let known = s.agentProcessStart else {
+        func stamp() {
+            let changed = sessions[i].agentProcessStart != start
+                || (pid != nil && sessions[i].agentProcessPID != pid)
+                || (uptime != nil && sessions[i].agentProcessUptime != uptime)
+            guard changed else { return }
             sessions[i].agentProcessStart = start
+            if let pid { sessions[i].agentProcessPID = pid }
+            if let uptime { sessions[i].agentProcessUptime = uptime }
             save()
-            return true
         }
-        if abs(known - start) <= 2 { return true }
+        guard let known = s.agentProcessStart else { stamp(); return true }
+        switch Self.sameAgentProcess(s, start: start, pid: pid, uptime: uptime,
+                                     restoredAt: restoredAt[s.profileID], now: now) {
+        case .same:
+            stamp()   // a restore's clock resync moved the wall-clock start
+            return true
+        case .different:
+            break
+        case .unknown:
+            if abs(known - start) <= 2 { stamp(); return true }
+        }
         guard Self.isNewAgentRun(s, start: start, now: now) else {
-            sessions[i].agentProcessStart = start
-            save()
+            stamp()
             return true
         }
         sessions[i].windowIndex = nil          // forgets the window id and start
@@ -865,6 +1079,39 @@ final class AgentSessionStore {
         save()
         succeededAt[entryKey(s.profileID, w)] = id
         return false
+    }
+
+    enum ProcessIdentity: Equatable { case same, different, unknown }
+
+    /// Whether the process the probe saw is the one stamped on `s`, judged
+    /// on what a restore from saved state doesn't change: the pid and its
+    /// start in seconds since boot (the boot and the tmux window were
+    /// checked before — `checkBoot`, `checkWindow`). A stamp from before
+    /// the pid was read (an older build) can't tell; then, right after the
+    /// workspace was restored, any shift of the wall-clock start is the
+    /// guest's clock catching up, never a new run (a pid the stamp does
+    /// know and that differs is a different process, restore or not).
+    nonisolated static func sameAgentProcess(_ s: AgentSession, start: Int, pid: Int?, uptime: Int?,
+                                             restoredAt: Date?, now: Date = Date()) -> ProcessIdentity {
+        if let pid, let known = s.agentProcessPID {
+            guard pid == known else { return .different }
+            if let uptime, let k = s.agentProcessUptime, abs(uptime - k) > 2 { return .different }
+            return .same
+        }
+        if let r = restoredAt, now.timeIntervalSince(r) < restoreGrace { return .same }
+        return .unknown
+    }
+
+    /// How long after a restore from saved state a session's stamp that
+    /// carries no pid (an older build's) forgives a shifted start.
+    nonisolated static let restoreGrace: TimeInterval = 600
+    /// Workspaces restored from saved state (in this app run), and when.
+    @ObservationIgnored private(set) var restoredAt: [UUID: Date] = [:]
+
+    /// A workspace came back from saved state: its agents are the very
+    /// processes that were suspended, whatever their start reads now.
+    func noteRestored(profileID: UUID, at: Date = Date()) {
+        restoredAt[profileID] = at
     }
 
     /// A different agent process in `s`'s tab (started at `start`, guest
@@ -1260,6 +1507,15 @@ final class AgentSessionStore {
         save()
     }
 
+    /// The beautified view's verdict on whether the agent's screen shows a
+    /// dialog waiting on the user. Persisted only on change.
+    func setAwaitingAnswer(_ id: UUID, _ waiting: Bool) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }),
+              (sessions[i].awaitingAnswer == true) != waiting else { return }
+        sessions[i].awaitingAnswer = waiting ? true : nil
+        save()
+    }
+
     /// The agent named its session (its terminal title, read by the
     /// liveness probe): take it unless the user named the session by hand.
     func setAgentTitle(_ id: UUID, _ title: String) {
@@ -1289,6 +1545,7 @@ final class AgentSessionStore {
             if s.launchingSince != nil { s.launchingSince = nil; s.launchBaselineIndex = nil }
             s.agentAlive = nil
             s.transcriptWorking = nil
+            s.awaitingAnswer = nil
             // A title an earlier build took from the terminal with its
             // glyphs still on ("π ⁘ folder"): clean it, or fall back.
             if s.userTitled != true, s.title.hasPrefix("π") || s.title.hasPrefix("✳") {
@@ -1611,7 +1868,10 @@ enum SessionHome {
         case .needsInput: return .needsYou
         case .working:    return .working
         // Its hooks say done, its transcript says a turn is running (Kimi).
-        case .done:       return s.transcriptWorking == true ? .working : .idle
+        case .done:
+            if s.transcriptWorking == true { return .working }
+            // A dialog on its screen waits for the user's answer.
+            return s.awaitingAnswer == true ? .needsYou : .idle
         }
     }
 
@@ -1670,6 +1930,9 @@ enum SessionHome {
         switch bucket(for: s, in: model) {
         case .needsYou:
             if s.needsSignIn == true { return NSLocalizedString("Sign in needed", comment: "session status") }
+            if s.providerError == nil, s.awaitingAnswer == true {
+                return NSLocalizedString("Asking you something", comment: "session status: the agent shows a dialog (a picker, a question) waiting on the user")
+            }
             switch s.providerError {
             case "generic"?: return NSLocalizedString("Provider unreachable", comment: "session status")
             case "blocked"?: return NSLocalizedString("Blocked by Bromure", comment: "session status: Bromure's proxy blocked the agent's request")
@@ -1728,6 +1991,12 @@ enum SessionHome {
         guard let first = t.firstIndex(where: { $0.isLetter || $0.isNumber }) else { return nil }
         t = String(t[first...])
         t = t.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        // Status the agent shows in its title while it works ("Waiting for
+        // response…", Grok's "Action Required - ⠼ - Running: Fetch: …"):
+        // never a name. Its parts that are status or a spinner go; nothing
+        // left = no title.
+        guard let unstatused = stripStatusSegments(t) else { return nil }
+        t = unstatused
         let lower = t.lowercased()
         guard !lower.isEmpty else { return nil }
         let agentNames: Set<String> = [agent, "claude code", "codex", "kimi code", "oh my pi", "omp", "grok", "grok build", "bash", "shell", "tmux"]
@@ -1740,6 +2009,7 @@ enum SessionHome {
                 if lower.hasPrefix(name + sep) { return nil }   // "claude · resume": a launch, not a title
             }
         }
+        t = stripCutAgentSuffix(t, agent: agent)
         t = t.trimmingCharacters(in: .whitespaces)
         // Cut by the agent ("Countin…", "run-this-exact-shell-..."): end on
         // a whole word.
@@ -1757,6 +2027,81 @@ enum SessionHome {
         }
         if truncated { return wordCut(t, limit: t.count, cutPartialWord: true) }
         return t.count > 60 ? wordCut(t, limit: 60) : t
+    }
+
+    /// `title` without the agent's name tacked on and then cut short by
+    /// whoever truncated the title ("… MANGO - gro", "… - gr", "… -"): the
+    /// last part after a separator that is the start of the agent's own
+    /// name (2+ letters) or of another agent's (3+).
+    static func stripCutAgentSuffix(_ title: String, agent: String) -> String {
+        var t = title.trimmingCharacters(in: .whitespaces)
+        for sep in [" -", " –", " —", " |", " ·"] where t.hasSuffix(sep) {
+            return String(t.dropLast(sep.count)).trimmingCharacters(in: .whitespaces)
+        }
+        let own = agent.lowercased()
+        let others = ["claude code", "claude", "codex", "kimi code", "kimi", "oh my pi", "omp", "grok build", "grok"]
+        for sep in [" - ", " – ", " — ", " | ", " · "] {
+            guard let r = t.range(of: sep, options: .backwards) else { continue }
+            let tail = t[r.upperBound...].trimmingCharacters(in: .whitespaces).lowercased()
+            guard !tail.isEmpty, !t[..<r.lowerBound].trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            let cutOwn = tail.count >= 2 && own.count > tail.count && own.hasPrefix(tail)
+            let cutOther = tail.count >= 3 && others.contains { $0.count > tail.count && $0.hasPrefix(tail) }
+            if cutOwn || cutOther {
+                t = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+                break
+            }
+        }
+        return t
+    }
+
+    /// A gerund status part with a count or an ellipsis, as Grok writes
+    /// while it works ("Writing edit (5)…", "Running command…",
+    /// "Reading 3 files…"): status when it sits beside the title.
+    static func isGerundStatus(_ text: String) -> Bool {
+        var t = text.trimmingCharacters(in: .whitespaces)
+        if let first = t.firstIndex(where: { $0.isLetter || $0.isNumber }) { t = String(t[first...]) }
+        let opts: String.CompareOptions = [.regularExpression, .caseInsensitive]
+        if isCountedAction(t) { return true }
+        // A short gerund phrase ending in an ellipsis ("Running command…").
+        return t.count <= 40 && t.range(of: #"^[a-z]+ing\b[^…]{0,36}(…|\.\.\.)$"#, options: opts) != nil
+    }
+
+    /// "Writing edit (5)…", "Reading files (2)": a counted action — status
+    /// even on its own (no conversation is named like that).
+    static func isCountedAction(_ text: String) -> Bool {
+        var t = text.trimmingCharacters(in: .whitespaces)
+        if let first = t.firstIndex(where: { $0.isLetter || $0.isNumber }) { t = String(t[first...]) }
+        return t.range(of: #"^[a-z]+ing(\s+[a-z]+){0,2}\s*\(\d+\)\s*(…|\.\.\.)?$"#,
+                       options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// `title` without the parts (between " - ", " | ", " · " …) that are an
+    /// agent's status or spinner; nil when nothing else is left.
+    static func stripStatusSegments(_ title: String) -> String? {
+        let seps = [" - ", " – ", " — ", " | ", " · "]
+        var parts = [title]
+        for sep in seps { parts = parts.flatMap { $0.components(separatedBy: sep) } }
+        let several = parts.filter { p in p.contains(where: { $0.isLetter || $0.isNumber }) }.count > 1
+        let kept = parts.map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { p in p.contains(where: { $0.isLetter || $0.isNumber }) && !isAgentStatus(p)
+                && !isCountedAction(p) && !(several && isGerundStatus(p)) }
+        if kept.isEmpty { return nil }
+        // Nothing dropped: as it was (its own separators kept).
+        if kept.count == parts.count { return title }
+        return kept.joined(separator: " - ")
+    }
+
+    /// An agent's working status, as it writes it into its terminal title
+    /// ("Thinking…", "Waiting for response…", "Running: Fetch: …",
+    /// "Action Required").
+    static func isAgentStatus(_ text: String) -> Bool {
+        var t = text.trimmingCharacters(in: .whitespaces)
+        // A leading spinner or status glyph.
+        if let first = t.firstIndex(where: { $0.isLetter || $0.isNumber }) { t = String(t[first...]) }
+        let phrase = #"^(action required|needs? (your )?(input|approval|attention|permission)|permission required|approval required|(waiting|awaiting) (for )?(the )?(a )?(response|reply|input|approval|permission|confirmation|model|tools?|you|user)|press .{1,20} to [a-z ]{1,24})\s*(…|\.\.\.)?$"#
+        let word = #"^(thinking|running|working|generating|responding|processing|compacting|loading|starting|connecting|ready|idle|done|interrupted|cancell?ed|retrying|streaming|executing|reasoning|planning|searching|reading|editing|writing|fetching|calling|summarizing|waiting)\s*(…|\.\.\.|:.*)?$"#
+        let opts: String.CompareOptions = [.regularExpression, .caseInsensitive]
+        return t.range(of: phrase, options: opts) != nil || t.range(of: word, options: opts) != nil
     }
 
     /// `text` cut to at most `limit` characters on a word boundary, with

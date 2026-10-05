@@ -79,9 +79,62 @@ enum AgentScreen {
         for r in rows[(startAt + 1)...] where r.1.index == run.count + 1 { run.append(r) }
         guard run.count >= 2, let cursor = run.first(where: { $0.1.cursor }),
               let first = run.first, let last = run.last else { return nil }
-        guard tailIsFooter(lines, after: last.0) else { return nil }
-        return Menu(options: run.map { LoginOption(index: $0.1.index, label: $0.1.label) },
-                    selected: cursor.1.index, firstOffset: first.0, lastOffset: last.0, numbered: true)
+        // A row too long for a narrow pane goes on, wrapped, on the lines
+        // under it: Grok at 52 columns draws "1 (●) Yes, and don't ask again
+        // for anything (" + "always-approve mode)". Join them back.
+        var labels = run.map { $0.1.label }
+        var lastLine = last.0
+        for k in run.indices {
+            let limit = k + 1 < run.count ? run[k + 1].0 : min(lines.count, run[k].0 + 4)
+            var i = run[k].0 + 1
+            while i < limit, let more = wrappedContinuation(lines[i], of: labels[k]) {
+                labels[k] = joinWrapped(labels[k], more)
+                if k == run.count - 1 { lastLine = i }
+                i += 1
+            }
+        }
+        guard tailIsFooter(lines, after: lastLine) else { return nil }
+        return Menu(options: zip(run, labels).map { LoginOption(index: $0.0.1.index, label: $0.1) },
+                    selected: cursor.1.index, firstOffset: first.0, lastOffset: lastLine, numbered: true)
+    }
+
+    /// `line` as the wrapped rest of an option whose label so far is
+    /// `label`, or nil: never another row, a rule, the key-hint footer, or
+    /// a description under a complete label — only text that finishes a
+    /// label that was cut (an open parenthesis, a lowercase word going on).
+    static func wrappedContinuation(_ line: String, of label: String) -> String? {
+        let t = unboxed(line).trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, !isRule(line), numberedRow(line) == nil, !glyphRow(line),
+              !isKeyHintLine(line), !isStatusChrome(line) else { return nil }
+        let opens = label.filter { $0 == "(" || $0 == "[" }.count
+        let closes = label.filter { $0 == ")" || $0 == "]" }.count
+        if opens > closes { return t }
+        guard let c = t.first, c.isLowercase,
+              let end = label.last, !".!?:;)]。？".contains(end) else { return nil }
+        return t
+    }
+
+    /// "anything (" + "always-approve mode)" → "anything (always-approve
+    /// mode)"; words otherwise get their space back.
+    static func joinWrapped(_ head: String, _ tail: String) -> String {
+        if let e = head.last, "(/[-".contains(e) { return head + tail }
+        return head + " " + tail
+    }
+
+    /// A footer of key hints, however it wrapped at a narrow width — "1/3:
+    /// select │ Tab:next option │ ←/→:scope", "Ctrl+c:cancel", "↑/↓ to move".
+    static func isKeyHintLine(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return false }
+        if AgentPhrases.matches(t, .footer, agent: nil) { return true }
+        let low = t.lowercased()
+        if low.range(of: #"(ctrl|tab|esc|enter|shift|space|alt)\s*[+:]"#, options: .regularExpression) != nil {
+            return true
+        }
+        if low.range(of: #"^[0-9]+/[0-9]+\s*:"#, options: .regularExpression) != nil { return true }
+        // Hints separated by a bar inside the line ("a:b │ c:d").
+        let inner = t.dropFirst().dropLast()
+        return inner.contains("│") && t.contains(":")
     }
 
     /// "❯ No, exit" + "  Yes, I trust this folder": the cursor row and the
@@ -211,7 +264,11 @@ enum AgentScreen {
     /// Below the list: at most a few footer lines, blanks and box edges.
     private static func tailIsFooter(_ lines: [String], after last: Int) -> Bool {
         guard last + 1 < lines.count else { return true }
-        return lines[(last + 1)...].filter { !unboxed($0).isEmpty && !isRule($0) }.count <= 3
+        // Key-hint lines don't count: a footer wraps onto several at a
+        // narrow width and is still just the footer.
+        return lines[(last + 1)...].filter {
+            !unboxed($0).trimmingCharacters(in: .whitespaces).isEmpty && !isRule($0) && !isKeyHintLine($0)
+        }.count <= 3
     }
 
     /// Where a cursor row's label starts (in the unboxed line), when the
@@ -276,9 +333,11 @@ enum AgentScreen {
     /// Questions end in "?" or a full-width "？".
     static func title(_ lines: [String], before end: Int) -> String {
         let above = lines[0..<end].suffix(12).reversed()
+        let banner = dataRetentionRange(lines)
         func prose(_ l: String) -> String? {
             let t = deglyphed(unboxed(l).trimmingCharacters(in: .whitespaces))
-            guard !t.isEmpty, t.count <= 90, t.contains(where: \.isLetter),
+            guard !t.isEmpty, t.count <= 90, t.contains(where: \.isLetter), !isStatusChrome(l),
+                  !(banner.map { r in lines[r].contains(l) } ?? false),
                   !t.hasPrefix("·"), !t.hasPrefix("•"), !t.hasPrefix("-"), !t.hasPrefix("—")
             else { return nil }
             return t
@@ -289,19 +348,93 @@ enum AgentScreen {
             let t = edge.trimmingCharacters(in: CharacterSet(charactersIn: " ╭╮─┬"))
             if t.contains(where: \.isLetter) { return t }
         }
-        return above.compactMap(prose).first ?? ""
+        // A line carrying a link is the dialog's fine print ("Release
+        // notes: https://…" under Codex's "Update available!"), not its
+        // heading — unless there is nothing else.
+        let lines = above.compactMap(prose)
+        return lines.first(where: { !$0.contains("://") }) ?? lines.first ?? ""
     }
 
     /// What the dialog is about: its lines between the box's top edge (or 12
     /// lines up) and the options, minus the title. A dashed rule is inside
     /// the dialog (Claude frames a diff with ╌╌╌), not its edge.
+    /// With no edge at all (Codex draws its dialogs unboxed), what sits
+    /// above the title past a blank line is the conversation's scrollback
+    /// ("• Ran …", "11:50 AM"): the body is the title's own paragraph (a
+    /// "Bash command: …" line right above it) and what follows it.
     static func context(_ lines: [String], before first: Int, title: String) -> String {
         let edge = { (l: String) in isRule(l) && !l.contains("╌") && !l.contains("┄") }
-        let start = lines[..<first].lastIndex(where: edge).map { $0 + 1 } ?? max(0, first - 12)
-        return lines[max(start, first - 12)..<first]
-            .map { deglyphed(unboxed($0).trimmingCharacters(in: .whitespaces)) }
+        let floor = max(0, first - 12)
+        var start = lines[..<first].lastIndex(where: edge).map { $0 + 1 } ?? floor
+        if start <= floor, !title.isEmpty,
+           let t = lines[floor..<first].lastIndex(where: {
+               deglyphed(unboxed($0).trimmingCharacters(in: .whitespaces)) == title
+           }) {
+            var top = t
+            while top - 1 >= floor, !unboxed(lines[top - 1]).trimmingCharacters(in: .whitespaces).isEmpty { top -= 1 }
+            start = top
+        }
+        // Not the dialog's: the agent's spinner line, and Grok's
+        // data-retention banner (a card of its own — see `TerminalPrompt`).
+        let banner = dataRetentionRange(lines)
+        return lines.indices[max(start, floor)..<first]
+            .filter { !(banner?.contains($0) ?? false) && !isStatusChrome(lines[$0]) }
+            .map { deglyphed(unboxed(lines[$0]).trimmingCharacters(in: .whitespaces)) }
             .filter { !$0.isEmpty && $0 != title && $0.contains(where: \.isLetter) }
             .joined(separator: "\n")
+    }
+
+    /// The agent's working line, not anything a dialog says: Grok's "◆
+    /// Fetch https://… 25s   28s ↓22.5k" and its "[stop]" button, an
+    /// "esc to interrupt" hint, a token counter.
+    static func isStatusChrome(_ line: String) -> Bool {
+        let t = unboxed(line).trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return false }
+        let low = t.lowercased()
+        if low == "[stop]" || low.hasSuffix(" [stop]") || low.contains("esc to interrupt")
+            || low.contains("esc to cancel") || low.contains("ctrl+c to interrupt") { return true }
+        // A token counter ("↓22.5k", "↑ 1.2k tokens").
+        if t.range(of: #"[↓↑]\s?[0-9][0-9.,]*\s?[kKmM]?(\s+tokens)?\s*\)?$"#, options: .regularExpression) != nil {
+            return true
+        }
+        // A spinner glyph, what's running, how long ("◆ Fetch … 25s").
+        if let g = t.unicodeScalars.first, !g.properties.isAlphabetic, !("0"..."9").contains(Character(g)),
+           !"[(\"'`/~.-".unicodeScalars.contains(g),
+           t.range(of: #"\s[0-9]+(m\s?[0-9]+)?s$"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
+    /// Grok's "Help improve Grok [Opt out] [Opt in]" banner (whether xAI may
+    /// keep your coding data): its line range on screen, nil when it isn't up.
+    static func dataRetentionRange(_ lines: [String]) -> ClosedRange<Int>? {
+        guard let start = lines.firstIndex(where: {
+            let l = $0.lowercased()
+            return l.contains("help improve grok") || (l.contains("[opt in]") && l.contains("[opt out]"))
+        }) else { return nil }
+        var end = start
+        var i = start + 1
+        while i < lines.count, i <= start + 9 {
+            let l = unboxed(lines[i]).trimmingCharacters(in: .whitespaces)
+            if l.isEmpty { break }
+            end = i
+            if l.lowercased().contains("privacy policy") { break }
+            i += 1
+        }
+        return start...end
+    }
+
+    /// What the data-retention banner says, its buttons left out; nil when
+    /// it isn't up. (Grok's own words: its TUI isn't translated.)
+    static func dataRetentionNotice(_ lines: [String]) -> String? {
+        guard let r = dataRetentionRange(lines) else { return nil }
+        let text = lines[r].dropFirst().map { l -> String in
+            unboxed(l).replacingOccurrences(of: "[Opt out]", with: "")
+                .replacingOccurrences(of: "[Opt in]", with: "")
+                .trimmingCharacters(in: .whitespaces)
+        }.filter { $0.contains(where: \.isLetter) }.joined(separator: " ")
+        return text.isEmpty ? "" : text
     }
 
     /// A heading without the marker some agents draw before it — Kimi 2.1
@@ -469,8 +602,15 @@ enum AgentPhrases {
             .login: ["grok login", "approve in your browser", "to sign in, open this url", "not signed in"],
             .auth: ["run /login to re-authenticate", "authentication rejected", "not signed in"],
             .quota: ["hit your weekly limit", "hit your free usage limit"],
-            .trust: ["do you trust the contents of this directory"],
+            // 1.0.46's folder-trust gate: "Do you trust the contents of this
+            // directory? / Grok Build may run or modify contents in this
+            // directory, posing security risks. / y Yes, proceed / n No,
+            // quit / Enter or y to trust".
+            .trust: ["do you trust the contents of this directory", "enter or y to trust",
+                     "grok build may run or modify contents"],
             .permission: ["yes, proceed", "no, reject", "don't ask again"],
+            // Its trust gate's key line: a dialog is up (typing would answer it).
+            .footer: ["enter or y to trust"],
         ],
         "omp": [
             .login: ["set up your providers", "select provider to login", "paste the authorization code",

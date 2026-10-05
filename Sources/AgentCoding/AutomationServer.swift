@@ -518,6 +518,9 @@ final class ACAutomationServer {
             let ms = Int(headerBlock.lowercased()[r.upperBound...]
                 .drop(while: { $0 == " " }).prefix(while: { $0.isNumber })) ?? Int.max / 2
             ConsolePresence.shared.noteRemote(idleMs: ms)
+            // Only the fat client stamps its polls: it is connected, and can
+            // show consent prompts (see `RemoteConsent.route`).
+            if path == "/state" { PendingPromptBroker.recordFatClientContact() }
         }
 
         var bodyJSON: [String: Any] = [:]
@@ -2341,6 +2344,8 @@ final class ACAutomationServer {
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             if poll(&pfd, 1, 0) > 0,
                (pfd.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0 { break }
+            // A held push stream is a connected fat client.
+            PendingPromptBroker.recordFatClientContact()
             let alive = autoreleasepool { () -> Bool in
                 let snapshot = buildStateSnapshot()
                 let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()

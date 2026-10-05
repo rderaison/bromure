@@ -36,6 +36,9 @@ struct ModelsSubscriptionHooks {
     /// Whether this host can log the provider out here (a hook is wired) —
     /// "Log out" is hidden rather than left as a button that does nothing.
     var canForget: (ModelProvider) -> Bool = { _ in true }
+    /// The saved sign-in's health (last host refresh, access-token expiry, an
+    /// unreadable store) — nil when the host can't tell.
+    var health: (ModelProvider) -> SubscriptionLoginHealth? = { _ in nil }
 }
 
 /// A workspace's LAYER over the global settings (see `ModelOverride`): the
@@ -290,6 +293,7 @@ struct ModelsSettingsView: View {
                     hasCapture: provider.supportsSubscription && subscription != nil,
                     savedAt: { subscription?.savedAt(provider) },
                     reauthAt: { subscription?.reauthAt(provider) },
+                    health: { subscription?.health(provider) },
                     onSignIn: { subscription?.register(provider) },
                     onLogOut: (subscription?.canForget(provider) ?? false)
                         ? { subscription?.forget(provider) } : nil,
@@ -1061,10 +1065,30 @@ struct ModelsSettingsView: View {
 /// `savedAt` here and flips the controls, without depending on the parent
 /// popover being re-evaluated.
 private struct ProviderConfigPopover: View {
+    /// "Last refreshed 3 minutes ago · access token expires in 2 hours" — the
+    /// host's view of the saved sign-in, no token data.
+    static func healthLine(_ h: SubscriptionLoginHealth) -> String {
+        var parts: [String] = []
+        if let at = h.lastRefreshedAt {
+            parts.append(String(format: NSLocalizedString("Last refreshed %@", comment: "subscription health: when the host last refreshed the login"),
+                                at.formatted(.relative(presentation: .named))))
+        } else {
+            parts.append(NSLocalizedString("Not refreshed since sign-in", comment: "subscription health"))
+        }
+        if let exp = h.accessExpiresAt {
+            parts.append(exp > Date()
+                ? String(format: NSLocalizedString("access token expires %@", comment: "subscription health: relative time, e.g. 'in 2 hours'"),
+                         exp.formatted(.relative(presentation: .named)))
+                : NSLocalizedString("access token renews on next use", comment: "subscription health"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     let provider: ModelProvider
     let hasCapture: Bool
     let savedAt: () -> Date?
     let reauthAt: () -> Date?
+    var health: () -> SubscriptionLoginHealth? = { nil }
     let onSignIn: () -> Void
     /// nil: this host can't log the provider out from here.
     let onLogOut: (() -> Void)?
@@ -1081,6 +1105,7 @@ private struct ProviderConfigPopover: View {
         let _ = tick
         let saved = hasCapture ? savedAt() : nil
         let expired = saved != nil ? reauthAt() : nil
+        let loginHealth = hasCapture ? health() : nil
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(provider.displayName).font(.headline)
@@ -1096,6 +1121,13 @@ private struct ProviderConfigPopover: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            if loginHealth?.storeUnreadable == true {
+                Label(NSLocalizedString("Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again.",
+                                        comment: "subscription store file exists but can't be decrypted"),
+                      systemImage: "exclamationmark.octagon.fill")
+                    .font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if hasCapture {
                 if let saved, expired != nil {
                     // The provider rejected the saved sign-in: nothing works
@@ -1122,6 +1154,10 @@ private struct ProviderConfigPopover: View {
                     Label("Signed in \(saved.formatted(.relative(presentation: .named)))",
                           systemImage: "checkmark.circle.fill")
                         .font(.callout).foregroundStyle(.green)
+                    if let loginHealth {
+                        Text(Self.healthLine(loginHealth))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         Button { onSignIn() } label: {
                             Label("Sign in again…", systemImage: "arrow.clockwise")

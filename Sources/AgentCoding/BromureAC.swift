@@ -1307,9 +1307,15 @@ final class RunningSession {
     var vmDiskUsedKB: Int = 0
     var vmDiskTotalKB: Int = 0
 
+    /// The profile the VM was BOOTED with — unlike `profile`, never moved by
+    /// a live edit. A setting changed and then changed back to this value
+    /// needs no restart.
+    var bootProfile: Profile
+
     init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) {
         self.profileID = profileID
         self.profile = profile
+        self.bootProfile = profile
         self.sandbox = sandbox
         self.startedAt = Date()
     }
@@ -2435,6 +2441,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let existing = runningSessions[profile.id] {
             existing.sandbox = sandbox
             existing.profile = profile
+            existing.bootProfile = profile   // a new boot
             return existing
         }
         let session = RunningSession(profileID: profile.id, profile: profile, sandbox: sandbox)
@@ -3291,6 +3298,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The chat reads a shared folder's mount (/mnt/bromure-share-N) as
+        // the folder the user knows (~/<name>).
+        GuestSharePaths.resolver = { [weak self] id in
+            guard let p = self?.profile(for: id) else { return [:] }
+            return GuestSharePaths.names(mountNames: SessionDisk.sharedFolders(p.folderPaths).map(\.mountName))
+        }
         // Sessions-first UI + the beautified transcript are the defaults; a
         // user who flipped either off before keeps their choice (register
         // only fills in missing keys).
@@ -5699,10 +5712,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // the workspaces whose own sign-in shadows the shared record —
                 // the invisible state behind "I re-registered and nothing
                 // changed".
-                func entry(_ savedAt: Date?, _ reauth: Date?, hasOwn: (UUID) -> Bool) -> [String: Any]? {
-                    guard let savedAt else { return nil }
+                // `health`: last real host refresh, access-token expiry, the
+                // re-auth flag and an unreadable store — never token data — so
+                // a dead login is visible from /state.
+                func entry(_ savedAt: Date?, _ reauth: Date?, health: SubscriptionLoginHealth?,
+                           hasOwn: (UUID) -> Bool) -> [String: Any]? {
+                    guard let savedAt else {
+                        return health?.storeUnreadable == true ? ["storeUnreadable": true] : nil
+                    }
                     var d: [String: Any] = ["registeredAt": savedAt.timeIntervalSince1970]
                     if let reauth { d["reauthRequiredAt"] = reauth.timeIntervalSince1970 }
+                    if let health { d.merge(health.stateJSON) { cur, _ in cur } }
                     if let pid {
                         d["scope"] = hasOwn(pid) ? "workspace" : "shared"
                     } else {
@@ -5714,15 +5734,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 var out: [String: Any] = [:]
                 if let e = entry(engine.claudeSubscriptionStore.record(for: pid)?.savedAt,
                                  engine.claudeSubscriptionStore.reauthRequiredAt(for: pid),
+                                 health: engine.claudeSubscriptionStore.health(for: pid),
                                  hasOwn: engine.claudeSubscriptionStore.hasProfileRecord) { out["claude"] = e }
                 if let e = entry(engine.codexSubscriptionStore.record(for: pid)?.savedAt,
                                  engine.codexSubscriptionStore.reauthRequiredAt(for: pid),
+                                 health: engine.codexSubscriptionStore.health(for: pid),
                                  hasOwn: engine.codexSubscriptionStore.hasProfileRecord) { out["codex"] = e }
                 if let e = entry(engine.grokSubscriptionStore.record(for: pid)?.savedAt,
                                  engine.grokSubscriptionStore.reauthRequiredAt(for: pid),
+                                 health: engine.grokSubscriptionStore.health(for: pid),
                                  hasOwn: engine.grokSubscriptionStore.hasProfileRecord) { out["grok"] = e }
                 if let e = entry(engine.kimiSubscriptionStore.record(for: pid)?.savedAt,
                                  engine.kimiSubscriptionStore.reauthRequiredAt(for: pid),
+                                 health: engine.kimiSubscriptionStore.health(for: pid),
                                  hasOwn: engine.kimiSubscriptionStore.hasProfileRecord) { out["kimi"] = e }
                 return out
             }
@@ -6923,14 +6947,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func confirmQuit() -> Bool {
         let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
         if running.isEmpty { return true }
+        // A background agent (`--headless`: no window, nobody at the Mac to
+        // click) never asks — a modal there would wedge the quit for good.
+        if headless {
+            AppLog.stamp("quit: headless — no confirmation, \(running.count) VM(s) close per their close action")
+            return true
+        }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Quit Bromure Agentic Coding?", comment: "")
-        let names = running.map { $0.profile.name }.joined(separator: ", ")
-        alert.informativeText = String(
-            format: NSLocalizedString(
-                "%d VM(s) currently running (%@) will be closed according to each workspace's close action.",
-                comment: ""),
-            running.count, names)
+        // Workspaces close per their own close action; the infrastructure
+        // machines (Kubernetes nodes, registries, the messaging connector —
+        // `kubeClusterID` set) aren't workspaces and are suspended.
+        let workspaces = running.filter { $0.kubeClusterID == nil }
+            .map { (name: $0.profile.name, action: $0.homeJustMigrated ? .shutdown : $0.profile.closeAction) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let machines = running.filter { $0.kubeClusterID != nil }.map(\.profile.name).sorted()
+        alert.informativeText = Self.quitConfirmationText(workspaces: workspaces, machines: machines)
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
@@ -6943,6 +6975,53 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.activate(ignoringOtherApps: true)
         quitAlert = alert
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// The quit confirmation's body: what happens to each running workspace,
+    /// grouped by what its close action does at quit (shut down; anything
+    /// else — suspend, ask, run in the background — is suspended, as
+    /// `stopSession` does), and the infrastructure machines (suspended).
+    /// Each group has its own singular / plural sentence.
+    nonisolated static func quitConfirmationText(workspaces: [(name: String, action: Profile.CloseAction)],
+                                                 machines: [String]) -> String {
+        func list(_ names: [String]) -> String {
+            ListFormatter.localizedString(byJoining: names)
+        }
+        let down = workspaces.filter { $0.action == .shutdown }.map(\.name)
+        let suspended = workspaces.filter { $0.action != .shutdown }.map(\.name)
+        var parts: [String] = []
+        if down.count == 1 {
+            parts.append(String(format: NSLocalizedString(
+                "The workspace %@ will be shut down.",
+                comment: "quit confirmation: one running workspace whose close action is Shut down"), down[0]))
+        } else if down.count > 1 {
+            parts.append(String(format: NSLocalizedString(
+                "The workspaces %@ will be shut down.",
+                comment: "quit confirmation: several running workspaces (a list of names) whose close action is Shut down"),
+                list(down)))
+        }
+        if suspended.count == 1 {
+            parts.append(String(format: NSLocalizedString(
+                "The workspace %@ will be suspended and resume where it left off.",
+                comment: "quit confirmation: one running workspace that is suspended at quit"), suspended[0]))
+        } else if suspended.count > 1 {
+            parts.append(String(format: NSLocalizedString(
+                "The workspaces %@ will be suspended and resume where they left off.",
+                comment: "quit confirmation: several running workspaces (a list of names) suspended at quit"),
+                list(suspended)))
+        }
+        if machines.count == 1 {
+            parts.append(String(format: NSLocalizedString(
+                "The infrastructure machine %@ is running and will be suspended.",
+                comment: "quit confirmation: one infrastructure machine (cluster node, registry, messaging connector) running"),
+                machines[0]))
+        } else if machines.count > 1 {
+            parts.append(String(format: NSLocalizedString(
+                "%1$d infrastructure machines are running (%2$@) and will be suspended.",
+                comment: "quit confirmation: several infrastructure machines running"),
+                machines.count, machines.joined(separator: ", ")))
+        }
+        return parts.joined(separator: " ")
     }
 
     /// Quit driven from the guest-bounced ⌘Q. Runs on its own MainActor Task so
@@ -8695,7 +8774,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let cwd = ScheduledAutomationEngine.guestPath(s.cwd)
         // A Kimi session's own journal when the engine pinned it — the
         // folder's newest may be another conversation (B72).
-        var pin = TranscriptPin()
+        var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
         if s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
             pin.kimiSession = id
         } else if s.tool == .kimi {
@@ -8940,6 +9019,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             }
         )
+        .withSubscriptionHealth({ [weak self] provider in self?.localSubscriptionHealth(provider, profileID: nil) })
     }
 
     /// The same editor over a REMOTE's template, round-tripped through its
@@ -9008,6 +9088,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             }
         )
+        .withSubscriptionHealth({ [weak controller] provider in provider.subscriptionKey.flatMap { controller?.subscriptionStatus[$0]?.loginHealth } })
     }
 
     @objc func openRemoteAccessAction(_ sender: Any?) {
@@ -9655,7 +9736,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     await MainActor.run { completion(m) }
                 }
             }
-        ))
+        )
+        .withSubscriptionHealth({ [weak self] provider in self?.localSubscriptionHealth(provider, profileID: editing?.id) }))
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)
         editorWindow = win
@@ -9946,7 +10028,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             applyLiveSessionRefresh(from: runningProfile, to: profile,
                                     terminalDefaults: terminalDefaults, window: win,
                                     sandbox: win.sandbox)
-            let restartItems = restartRequiringChanges(from: runningProfile, to: profile)
+            let restartItems = restartRequiringChanges(
+                from: runningProfile, to: profile, booted: runningSessions[profile.id]?.bootProfile)
             if !restartItems.isEmpty {
                 promptRestartForChanges(items: restartItems, window: win)
             }
@@ -9976,7 +10059,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var t = $0; t.realValue = t.realValue.trimmingCharacters(in: .whitespacesAndNewlines); return t
         }
 
-        try store.save(profile)
+        // The editor's copy is as old as the window: keep what the app
+        // updated meanwhile (lastUsedAt went backwards on a save).
+        try store.saveEdited(&profile)
         // Write the managed home with FAKE credentials, not reals. The editor
         // save previously called prepareHomeDirectory with NO token plan, so
         // its git / gh / glab / docker writers fell back to the real secret —
@@ -10349,7 +10434,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per-field categories that change behaviour inside the booted
     /// VM (and therefore need a restart to take effect). Used to
     /// coalesce diffs into a small, user-facing list of bullet points.
-    private enum RestartChange: CaseIterable {
+    enum RestartChange: CaseIterable {
         case memory
         case homeSize
         case networking
@@ -10422,7 +10507,42 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// caller has already applied them live or they're consulted at
     /// host-side decision points where re-reading the saved profile
     /// is enough.
-    private func restartRequiringChanges(from old: Profile, to new: Profile) -> [String] {
+    ///
+    /// Both sides are compared through the global-model overlay. The running
+    /// pane holds the LAUNCH-TIME copy (`overlaidWithGlobalModels` appends
+    /// every agent to `additionalTools` and recomputes auth modes/keys from
+    /// Preferences › Models), while the editor hands back the STORED profile —
+    /// diffing those raw made the first save after every launch report
+    /// "Additional tools" (and often "Primary tool / auth mode") even when
+    /// nothing tool-related was touched. Projecting both through the same
+    /// settings compares like with like (the overlay is idempotent, so an
+    /// already-overlaid `old` is unaffected).
+    private func restartRequiringChanges(from old: Profile, to new: Profile,
+                                         booted: Profile? = nil) -> [String] {
+        let settings = ModelSettingsStore.shared.effective(for: new)
+        let subscribed = subscribedProviders(for: new)
+        let project = { (p: Profile) in p.overlaidWithGlobalModels(settings, subscribed: subscribed) }
+        return Self.restartChangesToPrompt(previous: project(old), new: project(new),
+                                           booted: booted.map(project))
+            .map { restartLabel(for: $0) }
+    }
+
+    /// What a save should prompt a restart for: what THIS edit changed
+    /// (previous → new) that the running VM doesn't already have — a value
+    /// put back to what it booted with (memory 6 → 4 GB on a VM booted
+    /// with 4) needs nothing, and a setting changed earlier (restart
+    /// declined) isn't asked about again on an unrelated save.
+    nonisolated static func restartChangesToPrompt(previous: Profile, new: Profile,
+                                                   booted: Profile?) -> [RestartChange] {
+        let edited = restartRequiringChangeKinds(from: previous, to: new)
+        guard let booted else { return edited }
+        let pending = Set(restartRequiringChangeKinds(from: booted, to: new))
+        return edited.filter { pending.contains($0) }
+    }
+
+    /// The pure diff behind `restartRequiringChanges` (callers project both
+    /// profiles through the model overlay first).
+    nonisolated static func restartRequiringChangeKinds(from old: Profile, to new: Profile) -> [RestartChange] {
         var changes: [RestartChange] = []
         if old.memoryGB != new.memoryGB { changes.append(.memory) }
         if old.homeImageGB != new.homeImageGB { changes.append(.homeSize) }
@@ -10470,7 +10590,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // fields are dead (no guest X keymap post-framebuffer). None of these
         // need a restart anymore.
         // Git identity (~/.gitconfig) is rewritten live into the home share.
-        return changes.map { restartLabel(for: $0) }
+        return changes
     }
 
     /// True if an edit touches anything the live refresh re-emits: env
@@ -11465,6 +11585,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         try await sandbox.restore()
                         FileHandle.standardError.write(Data(
                             "[ac] restored '\(profile.name)' from saved state\n".utf8))
+                        // Its agents are the suspended processes, though the
+                        // guest's clock catching up moves their start time:
+                        // the sessions keep their tabs (checkAgentProcess).
+                        self.agentSessionStore.noteRestored(profileID: profile.id)
                     } catch {
                         // Restore failed — bad snapshot, configuration
                         // drift (an app or base-image update since the
@@ -14061,7 +14185,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sandbox.onAgentStatus = { [weak self] index, signal in
             Task { @MainActor in
                 guard let self, let status = AgentStatus(signal: signal) else { return }
-                self.setTabAgentStatus(pid, index: index, status)
+                // Line 2 names the hook's conversation: a report Codex's
+                // shared server filed under another tab goes to its own.
+                let lines = signal.split(whereSeparator: \.isNewline)
+                let conversation = lines.count > 1 ? String(lines[1]).trimmingCharacters(in: .whitespaces) : nil
+                guard let w = AgentSessionStore.statusWindow(
+                    index: index, conversation: conversation, profileID: pid,
+                    sessions: self.agentSessionStore.sessions) else { return }
+                self.setTabAgentStatus(pid, index: w, status)
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
@@ -14963,7 +15094,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if profile.sshPublicKey != nil {
                 FileHandle.standardError.write(Data(
                     "[mitm] profile '\(profile.name)' has an SSH public key on file but no agent/id_ed25519.raw — regenerate via Credentials → SSH key → Regenerate\n".utf8))
-            } else {
+            } else if runningSessions[profile.id]?.kubeClusterID == nil,
+                      profiles.contains(where: { $0.id == profile.id }) {
+                // Only a user workspace: the infrastructure machines (cluster
+                // nodes, registries, the messaging connector) never have one.
                 FileHandle.standardError.write(Data(
                     "[mitm] profile '\(profile.name)' has no SSH key configured — toggle 'Generate' in Credentials if you want one\n".utf8))
             }
@@ -15448,19 +15582,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let engine = mitmEngine,
               profile.allToolSpecs.contains(where: { $0.tool == .grok && $0.authMode == .subscription }),
               let real = engine.grokSubscriptionStore.record(for: profile.id) else { return }
-        let saltA = Data("grok-bogus-access:\(profile.id)".utf8)
-        let saltR = Data("grok-bogus-refresh:\(profile.id)".utf8)
-        // Grok's access token is a JWT — mint a JWT-shaped bogus (real claims,
-        // far-future exp, fake signature) so grok can decode it locally;
-        // an opaque placeholder makes grok treat the session as logged out.
-        let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.accessToken, salt: saltA)
-            ?? SessionTokenPlan.deriveFake(
-                prefix: "grok-brm-", real: real.accessToken, salt: saltA,
-                targetLength: max(40, real.accessToken.count))
-        let bogusRefresh = SessionTokenPlan.deriveFake(
-            prefix: "grokrt-brm-", real: real.refreshToken, salt: saltR,
-            targetLength: max(40, real.refreshToken.count))
+        // JWT-shaped stand-ins (real claims, far-future exp, Bromure-marked
+        // signature) — the proxy recognises them by that mark even after an
+        // app restart emptied its registry.
+        let standIn = GrokStandIn.mint(real, profileID: profile.id)
+        let bogusAccess = standIn.access, bogusRefresh = standIn.refresh
         engine.grokSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
 
         // Rebuild grok's scope entry from the captured template (which carries
@@ -15955,6 +16081,44 @@ struct RebuildBaseImageView: View {
         if panel.runModal() == .OK, let url = panel.url {
             path = url.path
             customize = true
+        }
+    }
+}
+
+// MARK: - Sign-in health (Settings › Models, /state)
+
+extension ModelProvider {
+    /// The subscription-store key (`/state.subscriptions.<key>`), or nil for
+    /// providers without a host-kept sign-in.
+    var subscriptionKey: String? {
+        switch self {
+        case .anthropic: return "claude"
+        case .openai:    return "codex"
+        case .xai:       return "grok"
+        case .moonshot:  return "kimi"
+        case .zai, .bedrock, .openrouter, .custom: return nil
+        }
+    }
+}
+
+extension RemoteHostController.SubscriptionState {
+    /// The remote host's view of this sign-in, for Settings › Models.
+    var loginHealth: SubscriptionLoginHealth {
+        SubscriptionLoginHealth(lastRefreshedAt: lastRefreshedAt, accessExpiresAt: accessExpiresAt,
+                                reauthRequiredAt: reauthRequiredAt, storeUnreadable: storeUnreadable)
+    }
+}
+
+extension ACAppDelegate {
+    /// This Mac's view of the sign-in `profileID` reads for `provider`.
+    @MainActor func localSubscriptionHealth(_ provider: ModelProvider, profileID: UUID?) -> SubscriptionLoginHealth? {
+        guard let e = mitmEngine else { return nil }
+        switch provider {
+        case .anthropic: return e.claudeSubscriptionStore.health(for: profileID)
+        case .openai:    return e.codexSubscriptionStore.health(for: profileID)
+        case .xai:       return e.grokSubscriptionStore.health(for: profileID)
+        case .moonshot:  return e.kimiSubscriptionStore.health(for: profileID)
+        case .zai, .bedrock, .openrouter, .custom: return nil
         }
     }
 }

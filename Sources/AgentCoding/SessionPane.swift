@@ -692,6 +692,12 @@ final class SessionPane {
             else { return }
             delegate.agentSessionStore.setNeedsSignIn(s.id, needs)
         }
+        m.dialogPromptChanged = { [weak self] waiting in
+            guard let self, let delegate = self.acDelegate,
+                  let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return }
+            delegate.agentSessionStore.setAwaitingAnswer(s.id, waiting)
+        }
         m.recordedFailureAppeared = { [weak self] in
             guard let self, let delegate = self.acDelegate,
                   self.model.tabs.first(where: { $0.index == windowIndex })?.agentStatus == .working
@@ -743,6 +749,12 @@ final class SessionPane {
         let s = acDelegate?.sessionRecord(profileID: profile.id, windowIndex: window)
         if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
             return TranscriptPin(kimiSession: id)
+        }
+        // Grok / Codex: the session's own conversation, never the folder's
+        // newest (an archived session's, a second session's live one).
+        if let s, s.tool == .grok || s.tool == .codex {
+            let pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
+            if pin != TranscriptPin() { return pin }
         }
         var pin = TranscriptPin()
         pin.kimiExclude = acDelegate?.agentSessionStore

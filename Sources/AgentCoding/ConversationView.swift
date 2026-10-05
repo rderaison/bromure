@@ -26,6 +26,10 @@ struct Conversation {
     /// system / messages — e.g. OpenAI Responses' `tools`, `tool_choice`,
     /// `metadata`, or whatever new top-level keys ship next.
     var requestEnvelope: String?
+    /// Parsed from the OpenAI Responses wire (Codex): every input item is
+    /// its own message — one tool call or one tool output each — so "the
+    /// turn's fresh tool output" is a trailing run of items, not one message.
+    var responsesItems = false
 
     enum Provider: String { case anthropic, openai, gemini, cohere, unknown }
 
@@ -225,6 +229,7 @@ enum ConversationParser {
                                  systemPrompt: nil, messages: [],
                                  inputTokens: nil, outputTokens: nil,
                                  raw: false, requestEnvelope: nil)
+        convo.responsesItems = true
 
         // Per-turn assistant accumulator. Flushed on response.completed
         // (or end-of-transcript for a still-streaming final turn).
@@ -283,7 +288,7 @@ enum ConversationParser {
                         for item in items {
                             let fp = fingerprint(for: item)
                             guard emitted.insert(fp).inserted else { continue }
-                            let role = mapResponsesRole(item["role"] as? String)
+                            let role = responsesRole(item)
                             let blocks = responsesItemBlocks(from: item)
                             if !blocks.isEmpty {
                                 convo.messages.append(Conversation.Message(
@@ -740,6 +745,7 @@ enum ConversationParser {
                                  systemPrompt: nil, messages: [],
                                  inputTokens: nil, outputTokens: nil, raw: false,
                                  requestEnvelope: nil)
+        convo.responsesItems = true
         if let json = reqJSON {
             convo.model = (json["model"] as? String)
                 ?? (json["response"] as? [String: Any])?["model"] as? String
@@ -770,7 +776,7 @@ enum ConversationParser {
                     var added = false
                     for item in items {
                         let blocks = responsesItemBlocks(from: item)
-                        let role = mapResponsesRole(item["role"] as? String)
+                        let role = responsesRole(item)
                         if !blocks.isEmpty {
                             convo.messages.append(Conversation.Message(
                                 role: role, content: blocks))
@@ -796,7 +802,7 @@ enum ConversationParser {
             if let json = try? JSONSerialization.jsonObject(with: res) as? [String: Any] {
                 if let output = json["output"] as? [[String: Any]] {
                     for item in output {
-                        let role = mapResponsesRole(item["role"] as? String)
+                        let role = responsesRole(item)
                         let blocks = responsesItemBlocks(from: item)
                         if !blocks.isEmpty {
                             convo.messages.append(Conversation.Message(
@@ -824,6 +830,16 @@ enum ConversationParser {
             return nil
         }
         return convo
+    }
+
+    /// A Responses item's role: typed items carry none — a call is the
+    /// model's, an output is the tool's.
+    private static func responsesRole(_ item: [String: Any]) -> Conversation.Message.Role {
+        if let r = item["role"] as? String { return mapResponsesRole(r) }
+        let type = item["type"] as? String ?? ""
+        if type.hasSuffix("_output") { return .tool }
+        if type.hasSuffix("_call") || type == "reasoning" { return .assistant }
+        return .user
     }
 
     private static func mapResponsesRole(_ raw: String?) -> Conversation.Message.Role {
@@ -858,10 +874,41 @@ enum ConversationParser {
                     argsString = ""
                 }
                 return [.toolUse(name: name, input: argsString)]
-            case "function_call_output", "tool_call_output", "function_output":
-                let id = item["call_id"] as? String
-                let output = (item["output"] as? String) ?? ""
-                return [.toolResult(toolUseId: id, content: output, isError: false)]
+            case "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call",
+                 "computer_call":
+                // Codex's freeform tools (code-mode `exec`, `apply_patch`) carry
+                // their input as raw text; the shell / computer calls an action.
+                let name = (item["name"] as? String) ?? type
+                let input = (item["input"] as? String)
+                    ?? (item["action"] ?? item["operation"]).flatMap { prettyJSONString($0) }
+                    ?? ""
+                return [.toolUse(name: name, input: input)]
+            case "mcp_call":
+                // A hosted MCP call carries its own result (or error) inline.
+                let name = (item["name"] as? String) ?? "mcp"
+                var blocks: [Conversation.Block] = [
+                    .toolUse(name: name, input: (item["arguments"] as? String) ?? ""),
+                ]
+                let out = responsesOutputText(item["output"])
+                let err = responsesOutputText(item["error"])
+                if !out.isEmpty || !err.isEmpty {
+                    blocks.append(.toolResult(toolUseId: item["id"] as? String,
+                                              content: out.isEmpty ? err : out,
+                                              isError: out.isEmpty))
+                }
+                return blocks
+            case let t where t.hasSuffix("_output"):
+                // Every tool-output item: function_call_output,
+                // custom_tool_call_output (Codex 0.157 code mode — a LIST of
+                // input_text parts), local_shell_call_output,
+                // shell_call_output, apply_patch_call_output,
+                // computer_call_output, tool_call_output, function_output…
+                // `output` may be a string, a list of typed parts, or an object.
+                let id = item["call_id"] as? String ?? item["id"] as? String
+                let text = responsesOutputText(item["output"])
+                let isImage = text.isEmpty && Self.outputHasImage(item["output"])
+                if isImage { return [.image(mediaType: "image")] }
+                return [.toolResult(toolUseId: id, content: text, isError: false)]
             default:
                 break
             }
@@ -886,6 +933,43 @@ enum ConversationParser {
             }
         }
         return []
+    }
+
+    /// The text of a Responses tool output: a plain string, a list of typed
+    /// parts (`input_text` / `output_text` / `text`, shell `stdout`/`stderr`),
+    /// or an object carrying one of those. Images and files contribute nothing.
+    static func responsesOutputText(_ output: Any?) -> String {
+        if let s = output as? String { return s }
+        if let parts = output as? [Any] {
+            return parts.map { responsesOutputText($0) }.filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        }
+        if let d = output as? [String: Any] {
+            if let t = d["text"] as? String { return t }
+            var pieces: [String] = []
+            for k in ["output", "stdout", "stderr", "message", "content"] {
+                let v = responsesOutputText(d[k])
+                if !v.isEmpty { pieces.append(v) }
+            }
+            return pieces.joined(separator: "\n")
+        }
+        return ""
+    }
+
+    private static func outputHasImage(_ output: Any?) -> Bool {
+        if let d = output as? [String: Any] {
+            let t = d["type"] as? String ?? ""
+            return t.contains("image") || t.contains("screenshot")
+        }
+        if let a = output as? [Any] { return a.contains { outputHasImage($0) } }
+        return false
+    }
+
+    private static func prettyJSONString(_ v: Any) -> String? {
+        if let s = v as? String { return s }
+        guard JSONSerialization.isValidJSONObject(v),
+              let d = try? JSONSerialization.data(withJSONObject: v, options: [.sortedKeys]) else { return nil }
+        return String(data: d, encoding: .utf8)
     }
 
     /// SSE for /v1/responses — `event: response.output_text.delta`

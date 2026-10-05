@@ -87,6 +87,27 @@ struct ConsentPanelLayoutTests {
         return ConsentPanelWindow(request: req, answer: { _ in }, show: false, screenFrame: Self.screen)
     }
 
+    @Test("The countdown follows the wall clock and answers Don't allow at zero")
+    func countdownIsRealTime() {
+        _ = NSApplication.shared
+        let req = ConsentPanelPresenter.Request(profileID: UUID(), title: "t", message: "m",
+                                                choices: ["Block", "Allow"], denyIndex: 0, style: .critical,
+                                                detailText: nil, timeout: 15)
+        var answers: [Int?] = []
+        let w = ConsentPanelWindow(request: req, answer: { answers.append($0) }, show: false, screenFrame: Self.screen)
+        defer { w.dismiss() }
+        let start = Date()
+        #expect(ConsentPanelWindow.secondsLeft(until: start.addingTimeInterval(15), now: start) == 15)
+        // However late the ticks come, the number is the time actually left.
+        w.tick(now: Date().addingTimeInterval(6.2))
+        #expect(w.countdownText.contains("9"))
+        #expect(answers.isEmpty)
+        w.tick(now: Date().addingTimeInterval(20))
+        #expect(answers.count == 1 && answers.first! == nil)
+        w.tick(now: Date().addingTimeInterval(21))
+        #expect(answers.count == 1)   // answered once
+    }
+
     @Test("Every variant: buttons inside the panel, panel inside a 1366×768 screen")
     func fitsAndShowsButtons() {
         for v in Self.variants {

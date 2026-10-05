@@ -111,6 +111,31 @@ struct DroppedFile {
         return files
     }
 
+    /// The host files the user is handing over right now: file URLs on the
+    /// drag pasteboard (a drop onto a text field pastes their paths) and on
+    /// the clipboard (a Finder copy, then ⌘V). Standardized paths.
+    static func offeredHostPaths() -> Set<String> {
+        #if canImport(AppKit)
+        var out: Set<String> = []
+        for pb in [NSPasteboard(name: .drag), NSPasteboard.general] {
+            let urls = pb.readObjects(forClasses: [NSURL.self],
+                                      options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+            for u in urls { out.insert(u.standardizedFileURL.path) }
+        }
+        return out
+        #else
+        return []
+        #endif
+    }
+
+    /// A readable host FILE for `token` (absolute path, `~`, or `file://`)
+    /// that is among `offered` (see ``offeredHostPaths()``), or nil.
+    static func hostFileURL(_ token: String, offered: Set<String>) -> URL? {
+        guard let url = hostFileURL(token),
+              offered.contains(url.standardizedFileURL.path) else { return nil }
+        return url
+    }
+
     /// A readable host FILE for `token` (absolute path, `~`, or `file://`), or nil.
     static func hostFileURL(_ token: String) -> URL? {
         var path = token
@@ -128,7 +153,13 @@ struct DroppedFile {
     /// anything. Each becomes a file and leaves the text. Lines and the whole
     /// text are tried first, so a path with spaces is found whole; then the
     /// whitespace-separated tokens.
-    static func absorbHostPaths(in text: String) -> (text: String, files: [DroppedFile]) {
+    ///
+    /// Only paths of files the user actually handed over count — on the drag
+    /// pasteboard (a drop) or the clipboard as files (a paste): a path merely
+    /// TYPED (`~/.ssh/id_rsa`) is text, never an upload into the machine.
+    static func absorbHostPaths(in text: String,
+                                offered: Set<String> = offeredHostPaths()) -> (text: String, files: [DroppedFile]) {
+        guard !offered.isEmpty else { return (text, []) }
         var out = text
         var files: [DroppedFile] = []
         var candidates: [String] = [text.trimmingCharacters(in: .whitespacesAndNewlines)]
@@ -137,7 +168,7 @@ struct DroppedFile {
         var seen: Set<String> = []
         for tok in candidates where !tok.isEmpty && !seen.contains(tok) {
             seen.insert(tok)
-            guard out.contains(tok), let url = hostFileURL(tok),
+            guard out.contains(tok), let url = hostFileURL(tok, offered: offered),
                   let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= maxBytes else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             files.append(DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg))
@@ -501,9 +532,11 @@ struct SessionHeaderView: View {
     }
 
     /// The quiet line under the title: @nick · status · agent · machine ·
-    /// folder · …, at a level of detail (3 = all; 2 drops the model, the
-    /// folder, the clone and the tokens; 1 also the machine, branch and
-    /// time; 0 keeps @nick · status · agent). The header picks the richest
+    /// folder · …, at a level of detail (5 = all; 4 drops the clone and the
+    /// tokens; 3 also the model; 2 also the folder; 1 also the machine,
+    /// branch and time; 0 keeps @nick · status · agent). One step at a
+    /// time: a nickname (or a longer status) used to push the row from
+    /// "everything" straight to "no model, no folder, no tokens". The header picks the richest
     /// that fits (B14: an overflowing row was centred and spilled over the
     /// sidebar; B4: nothing in it truncates, so a status change never
     /// re-truncates the folder frame by frame).
@@ -534,7 +567,7 @@ struct SessionHeaderView: View {
                 AgentAvatar(tool: s.tool, size: 13)
                 Text(s.tool.displayName)
                 #if os(macOS)
-                if detail >= 3, let m = TranscriptSearchIndex.shared.model(for: s, among: store.sessions) {
+                if detail >= 4, let m = TranscriptSearchIndex.shared.model(for: s, among: store.sessions) {
                     Text(m)
                         .foregroundStyle(.tertiary)
                         .help(NSLocalizedString("The model the agent last answered with", comment: "session header"))
@@ -588,7 +621,7 @@ struct SessionHeaderView: View {
                     String(format: NSLocalizedString("Its own git branch, off %@ — merge it back when it's ready", comment: "session header"), $0)
                 } ?? NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
             }
-            if detail >= 3, let url = s.cloneURL, !url.isEmpty {
+            if detail >= 5, let url = s.cloneURL, !url.isEmpty {
                 metaDot
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.down.circle").font(.system(size: 10.5))
@@ -642,7 +675,7 @@ struct SessionHeaderView: View {
                     }
                 }
             }
-            if detail >= 3, let t = TranscriptSearchIndex.shared.tokens(s.id) {
+            if detail >= 5, let t = TranscriptSearchIndex.shared.tokens(s.id) {
                 metaDot
                 HStack(spacing: 4) {
                     Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 10.5))
@@ -695,6 +728,8 @@ struct SessionHeaderView: View {
                         }
                         // One quiet line: @nick · status · agent · machine · folder.
                         ViewThatFits(in: .horizontal) {
+                            metaLine(s, bucket: bucket, gone: gone, detail: 5)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 4)
                             metaLine(s, bucket: bucket, gone: gone, detail: 3)
                             metaLine(s, bucket: bucket, gone: gone, detail: 2)
                             metaLine(s, bucket: bucket, gone: gone, detail: 1)
@@ -1147,10 +1182,11 @@ struct SessionLaunchView: View {
         let id = s.id
         let source = cachedTranscript
         let agent = s.tool.rawValue
+        let names = GuestSharePaths.names(profileID: s.profileID)
         let data: Data? = source.map { $0(s) } ?? SessionTranscriptCache.shared.load(id)
         guard let data, !data.isEmpty else { return }
         let items = await Task.detached(priority: .userInitiated) {
-            AgentTranscript.parse(data, agent: agent)
+            GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
         }.value
         guard !items.isEmpty, items.count >= history.count else { return }
         history = items
@@ -1343,10 +1379,11 @@ struct SessionRestView: View {
         let id = s.id
         if let memo = StageTranscriptMemo.get(id) { load = .loaded(memo) } else { load = .loading }
         let agent = s.tool.rawValue
+        let names = GuestSharePaths.names(profileID: s.profileID)
         let cached = cachedTranscript(s)
         if let cached, !cached.isEmpty {
             let items = await Task.detached(priority: .userInitiated) {
-                AgentTranscript.parse(cached, agent: agent)
+                GuestSharePaths.rewrite(AgentTranscript.parse(cached, agent: agent), names: names)
             }.value
             if !items.isEmpty {
                 load = .loaded(items)
@@ -1369,7 +1406,7 @@ struct SessionRestView: View {
             data = liveData
         }
         let items = await Task.detached(priority: .userInitiated) {
-            AgentTranscript.parse(data, agent: agent)
+            GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
         }.value
         if !items.isEmpty, items.count >= loadedCount {
             load = .loaded(items)

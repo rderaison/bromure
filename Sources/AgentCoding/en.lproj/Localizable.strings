@@ -379,7 +379,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Quit Bromure Agentic Coding?";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d VM(s) currently running (%@) will be closed according to each workspace's close action.";
+"The workspace %@ is running. It will be closed according to its close action." = "The workspace %@ is running. It will be closed according to its close action.";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d workspaces are running (%2$@). Each will be closed according to its close action.";
+"The infrastructure machine %@ is running and will be suspended." = "The infrastructure machine %@ is running and will be suspended.";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d infrastructure machines are running (%2$@) and will be suspended.";
 "Quit" = "Quit";
 
 /* Guardrails: new prompt-on-write mode */
@@ -3658,6 +3661,7 @@
 "%1$@ is off for %2$@. Click to turn it on." = "%1$@ is off for %2$@. Click to turn it on.";
 /* Security Timeline: skipped content scans, coalesced rows (WS-B) */
 "not scanned — %@" = "not scanned — %@";
+"blocked, not sent — %@" = "blocked, not sent — %@";
 "%1$@ (%2$d times, last one shown)" = "%1$@ (%2$d times, last one shown)";
 
 "Security…" = "Security…";
@@ -3935,8 +3939,8 @@
 /* Kimi approvals setting */
 "Kimi approvals" = "Kimi approvals";
 "Never ask" = "Never ask";
-"Ask when needed" = "Ask when needed";
-"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume.";
+"Ask before sensitive actions" = "Ask before sensitive actions";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume.";
 
 /* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
 "Blocked by Bromure — prompt injection" = "Blocked by Bromure — prompt injection";
@@ -3953,3 +3957,30 @@
 "denied — no answer in time; the next request asks again" = "denied — no answer in time; the next request asks again";
 "denied — you said no a moment ago" = "denied — you said no a moment ago";
 "denied by you" = "denied by you";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again.";
+"Last refreshed %@" = "Last refreshed %@";
+"Not refreshed since sign-in" = "Not refreshed since sign-in";
+"access token expires %@" = "access token expires %@";
+"access token renews on next use" = "access token renews on next use";
+"(exit code %d)" = "(exit code %d)";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "Not delivered — the agent didn't take it in. Edit it or send it again.";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace).";
+"Closes the editor without saving changes" = "Closes the editor without saving changes";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok asks whether xAI may keep your coding data";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "Asking you something";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session.";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "No answer within %1$d s means “%2$@”.";
+"The workspace %@ will be shut down." = "The workspace %@ will be shut down.";
+"The workspaces %@ will be shut down." = "The workspaces %@ will be shut down.";
+"The workspace %@ will be suspended and resume where it left off." = "The workspace %@ will be suspended and resume where it left off.";
+"The workspaces %@ will be suspended and resume where they left off." = "The workspaces %@ will be suspended and resume where they left off.";

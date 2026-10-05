@@ -11,7 +11,7 @@ struct CodexStandInTests {
 
     private static func jwt(_ claims: [String: Any]) -> String {
         func seg(_ o: [String: Any]) -> String {
-            (try! JSONSerialization.data(withJSONObject: o)).base64EncodedString()
+            (try! JSONSerialization.data(withJSONObject: o, options: .sortedKeys)).base64EncodedString()
                 .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
                 .replacingOccurrences(of: "=", with: "")
         }

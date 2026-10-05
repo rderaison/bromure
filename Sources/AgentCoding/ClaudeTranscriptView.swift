@@ -170,7 +170,7 @@ enum BromureBlock: String, Equatable {
 
     static func of(_ message: String) -> BromureBlock? {
         let m = message.lowercased()
-        if m.contains("bromure blocked this request") {
+        if m.contains("bromure blocked this request") || m.contains("bromure blocked: possible") {
             return m.contains("rogue instructions") ? .rulesInjection : .promptInjection
         }
         if m.contains("bromure: outbound request blocked") { return .credentialLeak }
@@ -194,6 +194,19 @@ enum BromureBlock: String, Equatable {
             NSLocalizedString("Blocked by Bromure — client certificate", comment: "failure: Bromure's proxy blocked the request")
         case .unknown:
             NSLocalizedString("Blocked by Bromure", comment: "failure: Bromure's proxy blocked the request")
+        }
+    }
+
+    /// What the user can do next, when there's more to say than "send
+    /// again": a blocked tool output stays in the agent's conversation and is
+    /// resent every turn — Bromure now takes it out of later requests.
+    var recoveryHint: String? {
+        switch self {
+        case .promptInjection:
+            NSLocalizedString(
+                "Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session.",
+                comment: "failure hint: a prompt-injection block, and how to go on")
+        default: nil
         }
     }
 }
@@ -507,6 +520,102 @@ enum ClaudeTranscriptParser {
     }
 }
 
+// MARK: - Shared-folder paths
+
+/// A shared Mac folder is mounted in the guest at `/mnt/bromure-share-N` and
+/// linked as `~/<name>`. Agents that resolve symlinks (Grok) name the mount
+/// in every path they log; the chat shows the folder the user knows.
+enum GuestSharePaths {
+    /// Workspace → its share roots and how they read ("/mnt/bromure-share-1"
+    /// → "~/gk-demo"), set by the app that knows the workspaces (macOS).
+    @MainActor static var resolver: ((UUID) -> [String: String])?
+
+    @MainActor static func names(profileID: UUID) -> [String: String] {
+        resolver?(profileID) ?? [:]
+    }
+
+    /// `/mnt/bromure-share-<i+1>` → `~/<name>` for each share name in order.
+    static func names(mountNames: [String]) -> [String: String] {
+        var out: [String: String] = [:]
+        for (i, n) in mountNames.enumerated() where !n.isEmpty { out["/mnt/bromure-share-\(i + 1)"] = "~/" + n }
+        return out
+    }
+
+    /// `text` with each share root (a whole path component — "-1" never
+    /// matches "-10") read as its folder.
+    static func display(_ text: String, names: [String: String]) -> String {
+        // A tool call's detail is JSON that Foundation wrote with its
+        // slashes escaped ("\/mnt\/bromure-share-1"): the card's header
+        // reads its path from there, so that form is rewritten too.
+        let escaped = text.contains(#"\/mnt\/bromure-share-"#)
+        guard !names.isEmpty, text.contains("/mnt/bromure-share-") || escaped else { return text }
+        var out = text
+        // Longest first, so "-12" is replaced before "-1" could be tried.
+        for (root, shown) in names.sorted(by: { $0.key.count > $1.key.count }) {
+            // Never something that would break the JSON a detail holds.
+            guard !shown.contains("\""), !shown.contains("\\") else { continue }
+            let pattern = NSRegularExpression.escapedPattern(for: root) + "(?![0-9A-Za-z_-])"
+            out = out.replacingOccurrences(of: pattern, with: NSRegularExpression.escapedTemplate(for: shown),
+                                           options: .regularExpression)
+            if escaped {
+                let eRoot = root.replacingOccurrences(of: "/", with: #"\/"#)
+                let eShown = shown.replacingOccurrences(of: "/", with: #"\/"#)
+                out = out.replacingOccurrences(
+                    of: NSRegularExpression.escapedPattern(for: eRoot) + "(?![0-9A-Za-z_-])",
+                    with: NSRegularExpression.escapedTemplate(for: eShown), options: .regularExpression)
+            }
+        }
+        return out
+    }
+
+    /// The guest's home ("/home/ubuntu") as "~" — a whole leading path
+    /// component only ("/home/ubuntu2", "/x/home/ubuntu" stay).
+    static let guestHome = "/home/ubuntu"
+    static func homeDisplay(_ text: String) -> String {
+        var out = text
+        if out.contains(guestHome) {
+            out = out.replacingOccurrences(
+                of: #"(?<![0-9A-Za-z_.~/\-])/home/ubuntu(?![0-9A-Za-z_.-])"#, with: "~", options: .regularExpression)
+        }
+        // A detail's JSON, slashes escaped ("\/home\/ubuntu\/x").
+        if out.contains(#"\/home\/ubuntu"#) {
+            out = out.replacingOccurrences(
+                of: #"(?<![0-9A-Za-z_.~/-])\\/home\\/ubuntu(?![0-9A-Za-z_.-])"#, with: "~", options: .regularExpression)
+        }
+        return out
+    }
+
+    /// A tool whose summary is a command line.
+    static func isShellTool(_ name: String) -> Bool {
+        ["bash", "shell", "exec_command", "local_shell", "run_terminal_command", "terminal"].contains(name.lowercased())
+    }
+
+    /// The items with their share paths read as folders (tool calls,
+    /// results, the agent's prose — never what the user typed).
+    static func rewrite(_ items: [TranscriptItem], names: [String: String]) -> [TranscriptItem] {
+        func d(_ s: String) -> String { names.isEmpty ? s : display(s, names: names) }
+        return items.map { item in
+            var item = item
+            switch item.kind {
+            case .toolUse(let name, let summary, let detail):
+                // The card's header reads the guest home as "~" ("Read
+                // ~/inj.txt", not "/home/ubuntu/inj.txt"); a command line
+                // stays as it runs (it's copied from there), and so does
+                // the call's detail.
+                let shell = isShellTool(name)
+                item.kind = .toolUse(name: name, summary: shell ? d(summary) : homeDisplay(d(summary)),
+                                     detail: shell ? d(detail) : homeDisplay(d(detail)))
+            case .toolResult(let tool, let content, let isError):
+                item.kind = .toolResult(tool: tool, content: d(content), isError: isError)
+            case .assistantText(let t): item.kind = .assistantText(d(t))
+            case .thinking(let t): item.kind = .thinking(d(t))
+            default: break
+            }
+            return item
+        }
+    }
+}
+
 // MARK: - Multi-agent dispatch
 
 /// Entry point for every transcript render: picks the parser matching the
@@ -785,13 +894,30 @@ enum OmpTranscriptParser {
 /// only as a fallback for files that carry no response_item conversation
 /// (newer "paginated" history mode). Unknown types are skipped, not fatal.
 enum CodexTranscriptParser {
+    /// What the reader carries from line to line: tool names by call id,
+    /// and the calls a Codex code-mode script made (`exec` custom tool,
+    /// Codex ≥ 0.157) — its output arrives later as one list for the whole
+    /// script, or, for a script still running when its call returned,
+    /// through `wait` calls naming its cell.
+    struct State {
+        var toolNames: [String: String] = [:]
+        var scripts: [String: [CodexCodeMode.Call]] = [:]
+        /// call id → the cell a `wait` call polls.
+        var waits: [String: String] = [:]
+        /// cell id → the calls of a script still running.
+        var runningCells: [String: [CodexCodeMode.Call]] = [:]
+        /// Code-mode scripts that only looked at the tool list: neither the
+        /// script nor its output is something the user asked to see.
+        var hidden: Set<String> = []
+    }
+
     static func parse(_ data: Data) -> [TranscriptItem] {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         var primary: [TranscriptItem.Kind] = []
         var fallback: [TranscriptItem.Kind] = []
         var stamps: [Date?] = []
         var fallbackStamps: [Date?] = []
-        var toolNames: [String: String] = [:]
+        var state = State()
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
@@ -805,7 +931,7 @@ enum CodexTranscriptParser {
             switch obj["type"] as? String ?? "" {
             case "response_item":
                 guard let payload = obj["payload"] as? [String: Any] else { continue }
-                for kind in responseItemKinds(payload, toolNames: &toolNames) {
+                for kind in responseItemKinds(payload, state: &state) {
                     primary.append(kind)
                     stamps.append(stamp)
                 }
@@ -828,7 +954,7 @@ enum CodexTranscriptParser {
                  "web_search_call":
                 // Early-2025 rollouts: bare ResponseItems, no envelope.
                 guard obj["payload"] == nil else { continue }
-                for kind in responseItemKinds(obj, toolNames: &toolNames) {
+                for kind in responseItemKinds(obj, state: &state) {
                     primary.append(kind)
                     stamps.append(stamp)
                 }
@@ -848,25 +974,41 @@ enum CodexTranscriptParser {
         }
     }
 
+    /// The model Codex ran the conversation's latest turn on — its
+    /// `turn_context` records (a mid-session `/model` changes it), nil when
+    /// the rollout has none.
+    static func latestModel(_ data: Data) -> String? {
+        let text = String(decoding: data, as: UTF8.self)
+        var model: String?
+        for line in text.split(whereSeparator: \.isNewline) where line.contains("\"turn_context\"") {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  obj["type"] as? String == "turn_context",
+                  let p = obj["payload"] as? [String: Any] else { continue }
+            if let m = p["model"] as? String, !m.isEmpty { model = m }
+        }
+        return model
+    }
+
     private static func responseItemKinds(
         _ payload: [String: Any],
-        toolNames: inout [String: String]) -> [TranscriptItem.Kind] {
+        state: inout State) -> [TranscriptItem.Kind] {
         switch payload["type"] as? String ?? "" {
         case "message":
             let role = payload["role"] as? String ?? ""
             guard role == "user" || role == "assistant" else { return [] }
+            // Codex injects instructions (AGENTS.md) and an environment dump
+            // as synthetic user turns — plumbing, not conversation. Dropped
+            // per part: one message may carry both, or sit beside typed text.
             let text = (payload["content"] as? [[String: Any]] ?? [])
                 .compactMap { block -> String? in
                     guard ["input_text", "output_text", "text"]
                         .contains(block["type"] as? String ?? "") else { return nil }
-                    return block["text"] as? String
+                    guard let t = block["text"] as? String else { return nil }
+                    return role == "user" && Self.isInjectedContext(t) ? nil : t
                 }
                 .joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            // Codex injects instructions and an environment dump as
-            // synthetic user turns — plumbing, not conversation.
-            guard !text.isEmpty, !text.hasPrefix("<user_instructions>"),
-                  !text.hasPrefix("<environment_context>") else { return [] }
+            guard !text.isEmpty else { return [] }
             return [role == "user" ? .userText(text) : .assistantText(text)]
         case "reasoning":
             // Readable thinking is the summary; raw CoT is usually only an
@@ -881,30 +1023,66 @@ enum CodexTranscriptParser {
             return text.isEmpty ? [] : [.thinking(text)]
         case "function_call":
             let name = payload["name"] as? String ?? "tool"
-            if let id = payload["call_id"] as? String { toolNames[id] = name }
+            let callID = payload["call_id"] as? String
             let argsString = payload["arguments"] as? String ?? ""
             let args = (try? JSONSerialization.jsonObject(
                 with: Data(argsString.utf8))) as? [String: Any]
+            // Code mode's `wait`: polls a script that was still running when
+            // its call returned. Plumbing — its output is the script's.
+            if name == "wait", let callID, let cell = Self.cellID(args?["cell_id"]),
+               state.runningCells[cell] != nil {
+                state.waits[callID] = cell
+                return []
+            }
+            if let callID { state.toolNames[callID] = name }
             let summary = args.flatMap { shellSummary($0["command"]) }
                 ?? args.map { ClaudeTranscriptParser.toolSummary(name: name, input: $0) }
                 ?? String(argsString.prefix(200))
             let detail = args.map { ClaudeTranscriptParser.prettyJSON($0) } ?? argsString
             return [.toolUse(name: name, summary: summary, detail: detail)]
         case "local_shell_call":
-            if let id = payload["call_id"] as? String { toolNames[id] = "shell" }
+            if let id = payload["call_id"] as? String { state.toolNames[id] = "shell" }
             let action = payload["action"] as? [String: Any] ?? [:]
             return [.toolUse(name: "shell",
                              summary: shellSummary(action["command"]) ?? "",
                              detail: ClaudeTranscriptParser.prettyJSON(action))]
         case "custom_tool_call":
             let name = payload["name"] as? String ?? "tool"
-            if let id = payload["call_id"] as? String { toolNames[id] = name }
+            let callID = payload["call_id"] as? String
             let input = payload["input"] as? String ?? ""
+            // Code mode (Codex ≥ 0.157): one `exec` call runs a script that
+            // calls the real tools (`tools.exec_command({cmd})`,
+            // `tools.apply_patch("…")`, MCP tools) — each its own card.
+            if name == "exec" {
+                let calls = CodexCodeMode.calls(in: input)
+                if !calls.isEmpty {
+                    if let callID { state.scripts[callID] = calls }
+                    return calls.flatMap(\.kinds)
+                }
+                // A script that only reads the tool list.
+                if input.contains("ALL_TOOLS"), let callID {
+                    state.hidden.insert(callID)
+                    return []
+                }
+            }
+            if let callID { state.toolNames[callID] = name }
+            // The freeform apply_patch: its input IS the patch.
+            if name == "apply_patch" {
+                return CodexCodeMode.Call(name: name, args: input).kinds
+            }
             return [.toolUse(name: name, summary: String(input.prefix(200)),
                              detail: input)]
         case "function_call_output", "custom_tool_call_output":
-            let tool = (payload["call_id"] as? String)
-                .flatMap { toolNames[$0] } ?? "tool"
+            let callID = payload["call_id"] as? String
+            if let callID, state.hidden.contains(callID) { return [] }
+            if let callID, let cell = state.waits[callID] {
+                return scriptResults(payload["output"], calls: state.runningCells[cell] ?? [],
+                                     cell: cell, state: &state)
+            }
+            if let callID, let calls = state.scripts[callID] {
+                return scriptResults(payload["output"], calls: calls, cell: nil, state: &state)
+            }
+            let tool = callID.flatMap { state.toolNames[$0] } ?? "tool"
             let (content, isError) = outputText(payload["output"])
             return [.toolResult(tool: tool, content: content, isError: isError)]
         case "web_search_call":
@@ -915,6 +1093,67 @@ enum CodexTranscriptParser {
         default:
             return []
         }
+    }
+
+    /// A user-message part Codex wrote, not the user: the AGENTS.md block
+    /// (`# AGENTS.md instructions for …`, older `<user_instructions>`), the
+    /// `<environment_context>` dump, and similar tagged plumbing.
+    static func isInjectedContext(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("# AGENTS.md instructions for ")
+            || t.hasPrefix("<user_instructions>")
+            || t.hasPrefix("<environment_context>")
+            || t.hasPrefix("<INSTRUCTIONS>")
+    }
+
+    private static func cellID(_ v: Any?) -> String? {
+        if let s = v as? String, !s.isEmpty { return s }
+        if let n = v as? Int { return String(n) }
+        return nil
+    }
+
+    /// A code-mode script's output → one result per tool call it made. The
+    /// output is a list: a header ("Script completed" / "Script running
+    /// with cell ID N"), then what the script printed, one item per
+    /// `text(…)` — in practice each call's own result, in call order. Each
+    /// call takes the next result of its shape (a command's carries
+    /// exit_code, an MCP tool's a content list); prints of anything else
+    /// (the tool list) are left over and dropped.
+    private static func scriptResults(_ output: Any?, calls: [CodexCodeMode.Call], cell: String?,
+                                      state: inout State) -> [TranscriptItem.Kind] {
+        var texts: [String] = []
+        if let blocks = output as? [[String: Any]] {
+            texts = blocks.compactMap { $0["text"] as? String }
+        } else if let s = output as? String {
+            texts = [s]
+        }
+        let header = texts.first ?? ""
+        let printed = Array(texts.dropFirst())
+        if header.hasPrefix("Script running") {
+            // Still running: its results come through `wait`.
+            if let id = CodexCodeMode.runningCell(header) {
+                state.runningCells[id] = calls
+            }
+            return []
+        }
+        if let cell { state.runningCells[cell] = nil }
+        var out: [TranscriptItem.Kind] = []
+        var used = Set<Int>()
+        let results = printed.map(CodexCodeMode.Result.init)
+        for call in calls {
+            guard let i = results.indices.first(where: { !used.contains($0) && results[$0].fits(call) })
+                ?? results.indices.first(where: { !used.contains($0) && results[$0].fits(call, strict: false) })
+            else { continue }
+            used.insert(i)
+            if let r = results[i].kind(for: call) { out.append(r) }
+        }
+        // The script itself failed (a thrown error, a syntax error): say so
+        // on the call it was making.
+        if !header.hasPrefix("Script completed"), !header.isEmpty {
+            let body = texts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(.toolResult(tool: calls.last?.displayName ?? "exec", content: body, isError: true))
+        }
+        return out
     }
 
     /// `task_complete` (or a bare `error` event) carrying the turn's failure.
@@ -992,6 +1231,431 @@ enum CodexTranscriptParser {
     }
 }
 
+// MARK: - Codex code mode
+
+/// Codex ≥ 0.157 "code mode": the model calls ONE tool, `exec`, with a
+/// JavaScript snippet that calls the real tools —
+/// `text(await tools.exec_command({cmd:"ls"}))`,
+/// `tools.apply_patch("*** Begin Patch…")`, `tools.mcp__server__tool({…})`.
+/// The calls are recovered from the source (their arguments are literals in
+/// practice); anything that isn't a literal is kept as raw text.
+enum CodexCodeMode {
+    struct Call {
+        var name: String
+        /// The first argument, decoded (`[String: Any]`, `String`, …); nil
+        /// when it wasn't a literal.
+        var args: Any?
+        var raw: String = ""
+
+        /// The name the transcript shows: a command is a shell call.
+        var displayName: String {
+            switch name {
+            case "exec_command", "shell", "shell_command", "local_shell": return "shell"
+            default: return name
+            }
+        }
+
+        /// The command a shell call runs.
+        var command: String? {
+            if let s = args as? String, displayName == "shell" { return s }
+            guard let d = args as? [String: Any] else { return nil }
+            for k in ["cmd", "command"] {
+                if let s = d[k] as? String { return s }
+                if let a = d[k] as? [Any] {
+                    let argv = a.compactMap { $0 as? String }
+                    if argv.count >= 3, ["bash", "sh", "zsh"].contains(argv[0]),
+                       ["-lc", "-c"].contains(argv[1]) { return argv[2...].joined(separator: " ") }
+                    return argv.joined(separator: " ")
+                }
+            }
+            return nil
+        }
+
+        var patch: String? {
+            if let s = args as? String { return s }
+            let d = args as? [String: Any]
+            return d?["input"] as? String ?? d?["patch"] as? String
+        }
+
+        /// The call's cards: one, except a patch touching several files —
+        /// one diff card per file, each with only its own hunks.
+        var kinds: [TranscriptItem.Kind] {
+            guard name == "apply_patch", let patch else { return [kind] }
+            let sections = CodexCodeMode.patchSections(patch)
+            guard sections.count > 1 else { return [kind] }
+            return sections.map { Call(name: name, args: $0).kind }
+        }
+
+        var kind: TranscriptItem.Kind {
+            func clip(_ s: String) -> String { s.count > 200 ? String(s.prefix(200)) + "…" : s }
+            if displayName == "shell", let cmd = command {
+                var input: [String: Any] = (args as? [String: Any]) ?? [:]
+                input["cmd"] = nil
+                input["command"] = cmd
+                return .toolUse(name: "shell", summary: clip(cmd),
+                                detail: ClaudeTranscriptParser.prettyJSON(input))
+            }
+            if name == "apply_patch", let patch {
+                let files = CodexCodeMode.patchFiles(patch)
+                var input: [String: Any] = ["patch": patch]
+                if let f = files.first { input["path"] = f }
+                return .toolUse(name: "apply_patch", summary: clip(files.joined(separator: ", ")),
+                                detail: ClaudeTranscriptParser.prettyJSON(input))
+            }
+            if let d = args as? [String: Any] {
+                return .toolUse(name: name, summary: ClaudeTranscriptParser.toolSummary(name: name, input: d),
+                                detail: ClaudeTranscriptParser.prettyJSON(d))
+            }
+            if let s = args as? String {
+                return .toolUse(name: name, summary: clip(s), detail: s)
+            }
+            return .toolUse(name: name, summary: clip(raw), detail: raw)
+        }
+    }
+
+    /// The files a Codex patch touches ("*** Update File: path").
+    static func patchFiles(_ patch: String) -> [String] {
+        var files: [String] = []
+        for line in patch.split(separator: "\n") {
+            for p in ["*** Update File: ", "*** Add File: ", "*** Delete File: ", "*** Move to: "]
+            where line.hasPrefix(p) {
+                let f = line.dropFirst(p.count).trimmingCharacters(in: .whitespaces)
+                if !f.isEmpty, !files.contains(f) { files.append(f) }
+            }
+        }
+        return files
+    }
+
+    /// A multi-file Codex patch split per file: each `*** Update File:` /
+    /// `*** Add File:` / `*** Delete File:` section (with its `*** Move to:`
+    /// and hunks) re-wrapped as a patch of its own. A single-file patch comes
+    /// back as one section.
+    static func patchSections(_ patch: String) -> [String] {
+        let heads = ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+        var sections: [[Substring]] = []
+        for line in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+            let l = line.hasSuffix("\r") ? line.dropLast() : line
+            if l.hasPrefix("*** Begin Patch") || l.hasPrefix("*** End Patch") { continue }
+            if heads.contains(where: { l.hasPrefix($0) }) {
+                sections.append([l])
+            } else if !sections.isEmpty {
+                sections[sections.count - 1].append(l)
+            }
+        }
+        guard !sections.isEmpty else { return [patch] }
+        return sections.map { body in
+            var lines = body
+            while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+            return (["*** Begin Patch"] + lines.map(String.init) + ["*** End Patch"]).joined(separator: "\n")
+        }
+    }
+
+    /// "Script running with cell ID 10…" → "10".
+    static func runningCell(_ header: String) -> String? {
+        guard let r = header.range(of: "cell ID ") else { return nil }
+        let id = header[r.upperBound...].prefix(while: { !$0.isWhitespace })
+        return id.isEmpty ? nil : String(id)
+    }
+
+    /// One printed result of a script.
+    struct Result {
+        enum Shape { case command, mcp, empty, list, other }
+        let text: String
+        let value: Any?
+        let rejected: Bool
+        let shape: Shape
+
+        init(_ text: String) {
+            self.text = text
+            var v = (try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed]))
+            var rejected = false
+            // Promise.allSettled's {status, value | reason}.
+            if let d = v as? [String: Any], let st = d["status"] as? String,
+               st == "fulfilled" || st == "rejected", d.count <= 2 {
+                rejected = st == "rejected"
+                v = d["value"] ?? d["reason"]
+            }
+            self.value = v
+            self.rejected = rejected
+            if let d = v as? [String: Any] {
+                if d["exit_code"] != nil || d["chunk_id"] != nil
+                    || (d["session_id"] != nil && d["output"] != nil) { shape = .command }
+                else if d["content"] is [Any] { shape = .mcp }
+                else if d.isEmpty { shape = .empty }
+                else { shape = .other }
+            } else if v is [Any] {
+                shape = .list
+            } else {
+                shape = .other
+            }
+        }
+
+        /// `strict`: an MCP call only takes an MCP-shaped result (a second,
+        /// lenient pass lets it take any printed value).
+        func fits(_ call: Call, strict: Bool = true) -> Bool {
+            if rejected { return true }
+            switch call.displayName {
+            case "shell", "write_stdin": return shape == .command
+            default:
+                if call.name.hasPrefix("mcp__") { return shape == .mcp || (!strict && shape == .other) }
+                return shape == .empty || shape == .other
+            }
+        }
+
+        /// The call's result row; nil for an empty success (a patch applied
+        /// says nothing).
+        func kind(for call: Call) -> TranscriptItem.Kind? {
+            let tool = call.displayName
+            if rejected {
+                let msg = (value as? [String: Any])?["message"] as? String
+                    ?? (value as? String) ?? text
+                return .toolResult(tool: tool, content: msg, isError: true)
+            }
+            switch shape {
+            case .command:
+                let d = value as? [String: Any] ?? [:]
+                var out = d["output"] as? String ?? ""
+                let exit = (d["exit_code"] as? NSNumber)?.intValue
+                if let exit, exit != 0 {
+                    out += (out.isEmpty || out.hasSuffix("\n") ? "" : "\n")
+                        + String(format: NSLocalizedString("(exit code %d)", comment: "transcript: a command's nonzero exit status"), exit)
+                }
+                return .toolResult(tool: tool, content: out.trimmingCharacters(in: .newlines),
+                                   isError: (exit ?? 0) != 0)
+            case .mcp:
+                let d = value as? [String: Any] ?? [:]
+                let content = ClaudeTranscriptParser.resultText(d["content"])
+                return .toolResult(tool: tool, content: content, isError: d["isError"] as? Bool ?? false)
+            case .empty:
+                return nil
+            case .list, .other:
+                let s = (value as? String) ?? text
+                if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+                return .toolResult(tool: tool, content: s, isError: false)
+            }
+        }
+    }
+
+    // MARK: Source scanning
+
+    /// The `tools.<name>(…)` calls in a script, in source order. String
+    /// literals and comments are skipped, so a command that merely mentions
+    /// `tools.` isn't one.
+    static func calls(in script: String) -> [Call] {
+        let s = Array(script.unicodeScalars)
+        var out: [Call] = []
+        var i = 0
+        func isIdent(_ c: Unicode.Scalar) -> Bool {
+            CharacterSet.alphanumerics.contains(c) || c == "_" || c == "$"
+        }
+        let word = Array("tools.".unicodeScalars)
+        while i < s.count {
+            let c = s[i]
+            if c == "\"" || c == "'" || c == "`" { skipString(s, &i); continue }
+            if c == "/", i + 1 < s.count, s[i + 1] == "/" {
+                while i < s.count, s[i] != "\n" { i += 1 }
+                continue
+            }
+            if c == "/", i + 1 < s.count, s[i + 1] == "*" {
+                i += 2
+                while i + 1 < s.count, !(s[i] == "*" && s[i + 1] == "/") { i += 1 }
+                i += 2
+                continue
+            }
+            if c == "t", i + word.count < s.count, Array(s[i..<(i + word.count)]) == word,
+               i == 0 || (!isIdent(s[i - 1]) && s[i - 1] != ".") {
+                var j = i + word.count
+                let nameStart = j
+                while j < s.count, isIdent(s[j]) { j += 1 }
+                let name = String(String.UnicodeScalarView(s[nameStart..<j]))
+                var k = j
+                skipSpace(s, &k)
+                guard !name.isEmpty, k < s.count, s[k] == "(" else { i = j; continue }
+                k += 1
+                let argStart = k
+                skipSpace(s, &k)
+                var call = Call(name: name, args: nil)
+                if k < s.count, s[k] == ")" {
+                    call.args = [String: Any]()
+                    i = k + 1
+                } else {
+                    var m = k
+                    if let v = literal(s, &m) {
+                        var n = m
+                        skipSpace(s, &n)
+                        if n < s.count, s[n] == ")" || s[n] == "," {
+                            call.args = v
+                        }
+                    }
+                    // Raw text up to the matching parenthesis.
+                    var depth = 1, e = argStart
+                    while e < s.count, depth > 0 {
+                        let ch = s[e]
+                        if ch == "\"" || ch == "'" || ch == "`" { skipString(s, &e); continue }
+                        if ch == "(" || ch == "{" || ch == "[" { depth += 1 }
+                        if ch == ")" || ch == "}" || ch == "]" { depth -= 1 }
+                        e += 1
+                    }
+                    let end = max(argStart, min(s.count, e - 1))
+                    call.raw = String(String.UnicodeScalarView(s[argStart..<end]))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    i = call.args != nil ? m : argStart
+                }
+                out.append(call)
+                continue
+            }
+            i += 1
+        }
+        return out
+    }
+
+    private static func skipSpace(_ s: [Unicode.Scalar], _ i: inout Int) {
+        while i < s.count, CharacterSet.whitespacesAndNewlines.contains(s[i]) { i += 1 }
+    }
+
+    /// Past a string literal starting at `i` (its quote).
+    private static func skipString(_ s: [Unicode.Scalar], _ i: inout Int) {
+        let q = s[i]
+        i += 1
+        while i < s.count {
+            if s[i] == "\\" { i += 2; continue }
+            if s[i] == q { i += 1; return }
+            i += 1
+        }
+    }
+
+    /// A JavaScript literal at `i` — object, array, string, number,
+    /// true/false/null/undefined — as Foundation values (undefined/null →
+    /// NSNull). nil (and `i` unspecified) when it isn't one.
+    static func literal(_ s: [Unicode.Scalar], _ i: inout Int) -> Any? {
+        skipSpace(s, &i)
+        guard i < s.count else { return nil }
+        let c = s[i]
+        switch c {
+        case "{":
+            i += 1
+            var d: [String: Any] = [:]
+            while true {
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "}" { i += 1; return d }
+                let key: String
+                if s[i] == "\"" || s[i] == "'" {
+                    guard let k = string(s, &i) else { return nil }
+                    key = k
+                } else {
+                    let st = i
+                    while i < s.count, CharacterSet.alphanumerics.contains(s[i]) || s[i] == "_" || s[i] == "$" { i += 1 }
+                    guard i > st else { return nil }
+                    key = String(String.UnicodeScalarView(s[st..<i]))
+                }
+                skipSpace(s, &i)
+                guard i < s.count, s[i] == ":" else { return nil }
+                i += 1
+                guard let v = literal(s, &i) else { return nil }
+                d[key] = v
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "," { i += 1; continue }
+                if s[i] == "}" { i += 1; return d }
+                return nil
+            }
+        case "[":
+            i += 1
+            var a: [Any] = []
+            while true {
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "]" { i += 1; return a }
+                guard let v = literal(s, &i) else { return nil }
+                a.append(v)
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "," { i += 1; continue }
+                if s[i] == "]" { i += 1; return a }
+                return nil
+            }
+        case "\"", "'", "`":
+            return string(s, &i)
+        default:
+            let st = i
+            while i < s.count, CharacterSet.alphanumerics.contains(s[i]) || "+-.".unicodeScalars.contains(s[i]) { i += 1 }
+            let w = String(String.UnicodeScalarView(s[st..<i]))
+            switch w {
+            case "true": return true
+            case "false": return false
+            case "null", "undefined": return NSNull()
+            default:
+                if let n = Int(w) { return n }
+                if let d = Double(w) { return d }
+                return nil
+            }
+        }
+    }
+
+    /// A quoted string literal, escapes decoded. A template literal with a
+    /// `${…}` substitution isn't a literal (nil).
+    private static func string(_ s: [Unicode.Scalar], _ i: inout Int) -> String? {
+        let q = s[i]
+        i += 1
+        var out = String.UnicodeScalarView()
+        func hex(_ n: Int) -> Unicode.Scalar? {
+            guard i + n <= s.count,
+                  let v = UInt32(String(String.UnicodeScalarView(s[i..<(i + n)])), radix: 16) else { return nil }
+            i += n
+            return Unicode.Scalar(v)
+        }
+        while i < s.count {
+            let c = s[i]
+            if c == q { i += 1; return String(out) }
+            if q == "`", c == "$", i + 1 < s.count, s[i + 1] == "{" { return nil }
+            if c == "\\", i + 1 < s.count {
+                let e = s[i + 1]
+                i += 2
+                switch e {
+                case "n": out.append("\n")
+                case "t": out.append("\t")
+                case "r": out.append("\r")
+                case "b": out.append("\u{08}")
+                case "f": out.append("\u{0C}")
+                case "v": out.append("\u{0B}")
+                case "0": out.append("\u{00}")
+                case "\n": break                      // line continuation
+                case "x": guard let h = hex(2) else { return nil }; out.append(h)
+                case "u":
+                    if i < s.count, s[i] == "{" {
+                        i += 1
+                        let st = i
+                        while i < s.count, s[i] != "}" { i += 1 }
+                        guard i < s.count, let v = UInt32(String(String.UnicodeScalarView(s[st..<i])), radix: 16),
+                              let u = Unicode.Scalar(v) else { return nil }
+                        i += 1
+                        out.append(u)
+                    } else {
+                        guard i + 4 <= s.count,
+                              let v = UInt32(String(String.UnicodeScalarView(s[i..<(i + 4)])), radix: 16) else { return nil }
+                        i += 4
+                        // A surrogate pair: \uD83D\uDE00.
+                        if (0xD800...0xDBFF).contains(v), i + 6 <= s.count, s[i] == "\\", s[i + 1] == "u",
+                           let lo = UInt32(String(String.UnicodeScalarView(s[(i + 2)..<(i + 6)])), radix: 16),
+                           (0xDC00...0xDFFF).contains(lo) {
+                            i += 6
+                            if let u = Unicode.Scalar(0x10000 + ((v - 0xD800) << 10) + (lo - 0xDC00)) { out.append(u) }
+                        } else if let u = Unicode.Scalar(v) {
+                            out.append(u)
+                        }
+                    }
+                default: out.append(e)
+                }
+                continue
+            }
+            out.append(c)
+            i += 1
+        }
+        return nil
+    }
+}
+
 // MARK: - Grok parser
 
 /// Tolerant reader for Grok CLI session files
@@ -1004,6 +1668,10 @@ enum GrokTranscriptParser {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         var items: [TranscriptItem] = []
         var toolNames: [String: String] = [:]
+        // The previous record's sessionUpdate kind, and the promptIndex of
+        // the last user chunk (see the user_message_chunk case).
+        var recordKind = ""
+        var lastUserPromptIndex: Int?
 
         for line in text.split(whereSeparator: \.isNewline) {
             guard let obj = try? JSONSerialization.jsonObject(
@@ -1018,12 +1686,25 @@ enum GrokTranscriptParser {
                 items.append(TranscriptItem(id: items.count, kind: kind,
                                             timestamp: stamp))
             }
+            let prevRecordKind = recordKind
+            recordKind = kind
 
             switch kind {
             case "user_message_chunk", "agent_message_chunk", "agent_thought_chunk":
                 guard let chunk = chunkText(update["content"]), !chunk.isEmpty
                 else { continue }
-                if let last = items.last,
+                // A user message continues only in the very next record: a
+                // prompt that was cancelled before the agent said anything
+                // is followed by the next prompt with nothing but a
+                // hook_execution between them (even the same promptIndex,
+                // after a cancel-and-send) — two messages, never one
+                // "…in the chat.Create a file…" bubble.
+                let promptIndex = (update["_meta"] as? [String: Any])?["promptIndex"] as? Int
+                let newPrompt = kind == "user_message_chunk"
+                    && (prevRecordKind != "user_message_chunk"
+                        || (promptIndex != nil && lastUserPromptIndex != nil && promptIndex != lastUserPromptIndex))
+                if kind == "user_message_chunk" { lastUserPromptIndex = promptIndex }
+                if !newPrompt, let last = items.last,
                    let merged = mergedKind(last.kind, chunkKind: kind, text: chunk) {
                     items[items.count - 1].kind = merged
                 } else if kind == "user_message_chunk" {
@@ -1034,10 +1715,13 @@ enum GrokTranscriptParser {
                     add(.thinking(chunk))
                 }
             case "tool_call":
-                let name = update["title"] as? String
+                let raw = update["title"] as? String
                     ?? update["kind"] as? String ?? "tool"
+                let meta = (update["_meta"] as? [String: Any])?["x.ai/tool"] as? [String: Any]
+                let name = displayName(raw, kind: meta?["kind"] as? String,
+                                       builtIn: meta?["namespace"] as? String == "grok_build")
                 if let id = update["toolCallId"] as? String { toolNames[id] = name }
-                let input = update["rawInput"] as? [String: Any]
+                let input = (update["rawInput"] as? [String: Any]).map(canonicalInput)
                 add(.toolUse(
                     name: name,
                     summary: input.map {
@@ -1078,8 +1762,16 @@ enum GrokTranscriptParser {
                 // "retrying" is still in flight and says nothing yet.
                 let state = update["type"] as? String ?? ""
                 guard state == "failed" || state == "exhausted" else { continue }
-                let text = (update["message"] as? String ?? update["reason"] as? String ?? "")
+                var text = (update["message"] as? String ?? update["reason"] as? String ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
+                // A request Bromure's proxy blocked: Grok's message is the
+                // status line ("API error (status 451 …): Request failed …").
+                // Bromure's own words, wherever else the record carries them,
+                // say which engine and what next — the card Codex gets.
+                if BromureBlock.of(text) == nil,
+                   let bromure = Self.strings(in: update).first(where: { BromureBlock.of($0) != nil }) {
+                    text = bromure.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
                 add(.agentError(.grok(errorType: update["error_type"] as? String,
                                       rateLimited: update["is_rate_limited"] as? Bool ?? false,
                                       message: text)))
@@ -1088,6 +1780,54 @@ enum GrokTranscriptParser {
             }
         }
         return trimmedTextItems(items)
+    }
+
+    /// Every string in a JSON value, depth-first.
+    static func strings(in value: Any, depth: Int = 0) -> [String] {
+        guard depth < 8 else { return [] }
+        if let s = value as? String { return [s] }
+        if let a = value as? [Any] { return a.flatMap { strings(in: $0, depth: depth + 1) } }
+        if let d = value as? [String: Any] {
+            return d.keys.sorted().flatMap { strings(in: d[$0]!, depth: depth + 1) }
+        }
+        return []
+    }
+
+    /// Grok's built-in tools by the names the cards know (Claude's): a
+    /// shell card for `run_terminal_command`, a diff for `search_replace`…
+    /// Anything else (an MCP tool) keeps its own name.
+    static func displayName(_ name: String, kind: String? = nil, builtIn: Bool = false) -> String {
+        switch name {
+        case "run_terminal_command", "run_command", "terminal": return "Bash"
+        case "search_replace", "edit_file", "str_replace", "multi_edit": return "Edit"
+        case "write_file", "create_file", "write": return "Write"
+        case "read_file", "view_file", "read": return "Read"
+        case "list_dir", "list_directory", "ls": return "LS"
+        case "grep", "grep_search", "search_files": return "Grep"
+        case "glob", "find_files", "file_search": return "Glob"
+        case "web_fetch", "fetch_url": return "WebFetch"
+        case "web_search": return "WebSearch"
+        case "todo_write", "update_todos", "todo": return "TodoWrite"
+        default: break
+        }
+        guard builtIn else { return name }
+        switch kind {
+        case "execute": return "Bash"
+        case "fetch": return "WebFetch"
+        default: return name
+        }
+    }
+
+    /// Grok's input keys under the names the cards read (`target_file` →
+    /// `file_path`, `target_directory` → `path`).
+    static func canonicalInput(_ input: [String: Any]) -> [String: Any] {
+        var out = input
+        for (from, to) in [("target_file", "file_path"), ("target_directory", "path"),
+                           ("directory", "path"), ("relative_workspace_path", "path")]
+        where out[to] == nil {
+            if let v = out.removeValue(forKey: from) { out[to] = v }
+        }
+        return out
     }
 
     /// ACP message chunks wrap text as {"type":"text","text":…}.
@@ -2412,6 +3152,12 @@ struct TranscriptItemView: View {
         case .agentError(let e):
             CollapsibleRow(icon: "exclamationmark.triangle.fill", title: e.headline,
                            subtitle: firstLine(e.message), tint: .orange) {
+                if let hint = e.blockedBy?.recoveryHint {
+                    Text(hint)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if !e.message.isEmpty { clippedBlock(e.message, limit: TranscriptCopy.errorLimit) }
             }
         case .toolResult(let tool, let content, let isError):

@@ -148,7 +148,7 @@ final class TranscriptSearchIndex {
             .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
         return Entry(text: parts.joined(separator: "\n\n"),
                      lastReply: String(oneLine.prefix(160)),
-                     tokens: tokens(in: data), model: model(in: data),
+                     tokens: tokens(in: data), model: codexModel(data) ?? model(in: data),
                      turns: turns, timeline: SessionTimeline.build(items),
                      agentTitle: agentTitle(in: data), firstPrompt: firstPrompt, modified: modified)
     }
@@ -158,7 +158,14 @@ final class TranscriptSearchIndex {
     /// logs in the model slot (Claude's `<synthetic>`, Kimi's internal
     /// "agent-loop") are skipped.
     nonisolated static func model(in data: Data) -> String? {
-        let raw = String(decoding: data.suffix(2_000_000), as: UTF8.self)
+        if let m = model(inText: String(decoding: data.suffix(2_000_000), as: UTF8.self)) { return m }
+        // A long journal whose model is only named at its start (Kimi's
+        // `profile.bind`): its head.
+        guard data.count > 2_000_000 else { return nil }
+        return model(inText: String(decoding: data.prefix(512_000), as: UTF8.self))
+    }
+
+    nonisolated private static func model(inText raw: String) -> String? {
         func last(_ pattern: String) -> String? {
             guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
             let all = re.matches(in: raw, range: NSRange(raw.startIndex..., in: raw))
@@ -172,8 +179,19 @@ final class TranscriptSearchIndex {
         // An assistant message's own model first: a bare "model" key can
         // just as well sit in a tool's input or a file the agent read.
         return last(#""message"\s*:\s*\{\s*"model"\s*:\s*"([^"<]{2,80})""#)
+            // Grok: its turn's usage, keyed by model ("modelUsage":{"grok-4.7-build":…}).
+            ?? last(#""modelUsage"\s*:\s*\{\s*"([^"<]{2,80})"\s*:"#)
             ?? last(#""modelAlias"\s*:\s*"([^"<]{2,80})""#)
             ?? last(#""model"\s*:\s*"([^"<]{2,80})""#)
+    }
+
+    /// Codex: the model of its latest `turn_context` (a mid-session
+    /// `/model` starts a new one) — never a "model" key in a tool's input.
+    nonisolated static func codexModel(_ data: Data) -> String? {
+        let head = String(decoding: data.prefix(65_536), as: UTF8.self)
+        guard ["\"type\":\"session_meta\"", "\"type\":\"turn_context\"", "\"type\":\"response_item\""]
+            .contains(where: head.contains) else { return nil }
+        return CodexTranscriptParser.latestModel(data.suffix(4_000_000))
     }
 
     /// Values agents put in a model field that name no model.
@@ -195,6 +213,13 @@ final class TranscriptSearchIndex {
                 return s.prefix(1).uppercased() + s.dropFirst()
             }.joined(separator: " ")
         }
+        // "grok-4.7-build" → "Grok 4.7 Build".
+        if m.lowercased().hasPrefix("grok-") {
+            return m.split(separator: "-").map { w in
+                let s = String(w)
+                return s.first?.isLetter == true ? s.prefix(1).uppercased() + s.dropFirst() : s
+            }.joined(separator: " ")
+        }
         guard m.hasPrefix("claude-") else { return m }
         let parts = m.dropFirst("claude-".count).split(separator: "-").map(String.init)
             .filter { !($0.count == 8 && $0.allSatisfy(\.isNumber)) }
@@ -206,11 +231,27 @@ final class TranscriptSearchIndex {
 
     func model(_ id: UUID) -> String? { entries[id]?.model.map(Self.prettyModel) }
 
+    /// The model a live chat read off its own copy of the transcript, by
+    /// session: the header's source while the app's copy has no entry for
+    /// it (a restored Kimi session showed no model — nothing in the copy
+    /// named one yet, while the chat on screen did).
+    private(set) var liveModels: [UUID: String] = [:]
+
+    func noteLiveModel(_ id: UUID, _ raw: String) {
+        if liveModels[id] != raw { liveModels[id] = raw }
+    }
+
+    /// The model `data` (a chat's buffer) last names, as the index reads it.
+    nonisolated static func liveModel(in data: Data) -> String? {
+        codexModel(data) ?? model(in: data)
+    }
+
     /// The session's model; before its transcript names one (a session
     /// still starting), the one its agent last used on the same machine —
     /// so the header doesn't gain the model only once the agent is ready.
     func model(for s: AgentSession, among sessions: [AgentSession]) -> String? {
         if let m = model(s.id) { return m }
+        if let live = liveModels[s.id] { return Self.prettyModel(live) }
         return sessions
             .filter { $0.id != s.id && $0.profileID == s.profileID && $0.tool == s.tool }
             .compactMap { o in entries[o.id].flatMap { e in e.model.map { (e.modified, $0) } } }
@@ -242,6 +283,9 @@ final class TranscriptSearchIndex {
     ///   - Codex: `last_token_usage` (its `input_tokens` include the cached)
     ///   - Kimi: the last `usage` with `inputOther` / `inputCacheRead`
     ///   - omp (pi): the last `usage` with `cacheRead`
+    ///   - Grok: the last `turn_completed` usage (`inputTokens`, which
+    ///     include `cachedReadTokens`). It sums the turn's model calls, so
+    ///     it's divided by `modelCalls`: an estimate of one call's prompt.
     nonisolated static func tokens(in data: Data) -> TokenUsage {
         let raw = String(decoding: data.suffix(4_000_000), as: UTF8.self)
         func int(_ key: String, in s: Substring) -> Int {
@@ -273,6 +317,15 @@ final class TranscriptSearchIndex {
             return tail
         }
         for line in raw.split(whereSeparator: \.isNewline).reversed() {
+            if line.contains("\"turn_completed\""), line.contains("\"cachedReadTokens\""),
+               let u = object(after: "\"usage\"", in: line), u.contains("\"inputTokens\"") {
+                // Only the usage's own fields, not its per-model breakdown.
+                let own = u.range(of: "\"modelUsage\"").map { u[..<$0.lowerBound] } ?? u
+                let calls = max(1, int("modelCalls", in: own))
+                let input = int("inputTokens", in: own), cached = int("cachedReadTokens", in: own)
+                return TokenUsage(input: max(0, input - cached) / calls, cached: cached / calls,
+                                  output: int("outputTokens", in: own) / calls)
+            }
             if line.contains("\"last_token_usage\""),
                let u = object(after: "\"last_token_usage\"", in: line) {
                 let input = int("input_tokens", in: u), cached = int("cached_input_tokens", in: u)

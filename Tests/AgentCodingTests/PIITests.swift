@@ -521,3 +521,47 @@ struct PIIFalsePositiveTests {
         #expect(o.body == body)
     }
 }
+
+@Suite("PII name repair")
+struct PIINameRepairTests {
+    /// The repaired spans' text, for model spans given as (substring, label, score).
+    private func repaired(_ text: String, _ parts: [(String, PIILabel, Double)]) -> [String] {
+        let ns = text as NSString
+        let spans = parts.map { p -> PIISpan in
+            let r = ns.range(of: p.0)
+            return PIISpan(start: r.location, end: NSMaxRange(r), label: p.1, score: p.2, heuristic: false)
+        }
+        return PIIText.repair(text, PIIText.merge(spans), anchor: 0.5)
+            .map { ns.substring(with: NSRange(location: $0.start, length: $0.end - $0.start)) }
+    }
+
+    @Test("A middle initial with its period stays inside one name (QA: 'Jane Q. Example' came back 'Jane Q')")
+    func middleInitials() {
+        let jane = "Please remember this contact: Jane Q. Example, email jane@example.org."
+        // The model stopped at the initial and missed the surname.
+        #expect(repaired(jane, [("Jane Q", .givenName, 0.9)]) == ["Jane Q. Example"])
+        // Given name and surname found, the initial between them not.
+        #expect(repaired(jane, [("Jane", .givenName, 0.9), ("Example", .surname, 0.8)]) == ["Jane Q. Example"])
+        let jfk = "The memo was signed by John F. Kennedy in 1961."
+        #expect(repaired(jfk, [("John", .givenName, 0.95), ("Kennedy", .surname, 0.9)]) == ["John F. Kennedy"])
+        #expect(repaired(jfk, [("John F", .givenName, 0.95)]) == ["John F. Kennedy"])
+    }
+
+    @Test("Hyphens and apostrophes join a name's parts across given name and surname")
+    func hyphensAndApostrophes() {
+        let t = "The new customer is Mary-Ann O'Neil from Dublin."
+        #expect(repaired(t, [("Mary", .givenName, 0.9), ("Ann", .givenName, 0.7), ("O'Neil", .surname, 0.85)])
+                == ["Mary-Ann O'Neil"])
+        #expect(repaired(t, [("Mary-Ann", .givenName, 0.9), ("O", .surname, 0.6), ("Neil", .surname, 0.6)])
+                == ["Mary-Ann O'Neil"])
+    }
+
+    @Test("A name next to other data is not stretched over it")
+    func noOverreach() {
+        let t = "Please ask Alex. Then call 555-0100."
+        #expect(repaired(t, [("Alex", .givenName, 0.9)]) == ["Alex"])
+        // A city after a name is not part of it (different labels, not names).
+        let c = "Jane Example, Springfield"
+        #expect(repaired(c, [("Jane Example", .givenName, 0.9), ("Springfield", .city, 0.9)]) == ["Jane Example", "Springfield"])
+    }
+}

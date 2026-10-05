@@ -2012,6 +2012,10 @@ def _restore_worktrees(repo_root, repo_name):
 # with --yolo/--auto. An entry here would break every kimi automation.
 _YOLO_FLAGS = {
     "claude": "--dangerously-skip-permissions",
+    # Codex's "Update available" dialog is off via config.toml
+    # (_pretrust_codex writes check_for_update_on_startup = false) — never a
+    # `-c` override here: any `-c` makes Codex 0.157 run without its shared
+    # background server and show a permanent warning banner.
     "codex": "--dangerously-bypass-approvals-and-sandbox",
     # omp: --auto-approve skips every tool-approval prompt (verified accepted
     # alongside its positional message; also has --approval-mode yolo).
@@ -2097,6 +2101,12 @@ def _pretrust(tool, *dirs):
         for d in dirs:
             if d:
                 _pretrust_kimi(d)
+        return
+    if tool == "grok":
+        # Grok Build ≥ 1.0.46: "Do you trust the contents of this
+        # directory?" blocks the TUI before the first turn — a stalled task
+        # or session. Same reasoning as Kimi: the VM is the sandbox.
+        _pretrust_grok(*dirs)
         return
     if tool != "claude":
         return
@@ -2387,6 +2397,118 @@ def _pretrust_kimi(cwd):
         log("worktree", "kimi pretrust failed:", e)
 
 
+def _grok_trust_roots(d):
+    """The paths Grok Build keys a folder's trust on: the canonical path
+    (it canonicalizes — a ~/<share> symlink is recorded as its
+    /mnt/bromure-share-N target, and a non-canonical key is ignored) and,
+    inside a git checkout, the repository root (its "project root"; trust
+    is per exact path, not inherited from an ancestor). Grok refuses to
+    record $HOME or / itself, so neither is returned."""
+    out = []
+    try:
+        real = os.path.realpath(d)
+    except OSError:
+        return out
+    if not os.path.isdir(real):
+        return out
+    cands = [real]
+    try:
+        top = subprocess.run(["git", "-C", real, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5)
+        if top.returncode == 0 and top.stdout.strip():
+            cands.append(os.path.realpath(top.stdout.strip()))
+    except Exception:
+        pass
+    home = os.path.realpath(HOME)
+    for c in cands:
+        if c and c not in out and c not in ("/", home):
+            out.append(c)
+    return out
+
+
+def _grok_trust_block(path, now):
+    """One trusted_folders.toml entry — a TOML basic-string key."""
+    key = path.replace("\\", "\\\\").replace('"', '\\"')
+    return '[folders."%s"]\ntrusted = true\ndecided_at = %d\n' % (key, now)
+
+
+def _pretrust_grok(*dirs):
+    """Grok Build remembers folder trust in ~/.grok/trusted_folders.toml:
+        [folders."<canonical path>"]
+        trusted = true
+        decided_at = <unix seconds>
+    Format verified offline against the 1.0.46 binary (serde struct
+    FolderTrust {trusted, decided_at}; `grok inspect` reports the project
+    trusted for exactly this shape, an integer decided_at, and the
+    canonical path only — an RFC 3339 decided_at makes the store
+    unreadable). Seconds vs milliseconds is a guess (both parse).
+    Idempotent and non-clobbering: the file is parsed first; a folder
+    already decided — trusted or NOT, the user's call — is left alone, and
+    an unreadable file is never touched (Grok would refuse to save the
+    user's own answer next to a broken one)."""
+    try:
+        roots = []
+        for d in dirs:
+            if d:
+                for r in _grok_trust_roots(d):
+                    if r not in roots:
+                        roots.append(r)
+        if not roots:
+            return
+        gdir = os.path.join(HOME, ".grok")
+        path = os.path.join(gdir, "trusted_folders.toml")
+        text = ""
+        if os.path.exists(path):
+            with open(path) as f:
+                text = f.read()
+        try:
+            try:
+                import tomllib
+            except ImportError:  # Python < 3.11: a textual read of the keys
+                tomllib = None
+            if not text.strip():
+                folders = {}
+            elif tomllib is not None:
+                folders = tomllib.loads(text).get("folders", {})
+            else:
+                # No parser: a header that isn't one ("[folders" cut off)
+                # means the file is broken — leave it alone, as above.
+                for ln in text.splitlines():
+                    t = ln.strip()
+                    if t.startswith("[") and not re.match(
+                            r"""^\[\[?[^\[\]]+\]\]?\s*(#.*)?$""", t):
+                        raise ValueError("malformed table header: " + t[:60])
+                folders = {}
+                for m in re.finditer(
+                        r"""^\s*\[\s*folders\.(?:"((?:[^"\\]|\\.)*)"|'([^']*)')\s*\]""",
+                        text, re.M):
+                    k = m.group(1)
+                    k = k.replace('\\"', '"').replace("\\\\", "\\") \
+                        if k is not None else m.group(2)
+                    folders[k] = True
+        except Exception as e:
+            log("worktree", "grok pretrust: trust store unreadable, left alone:", e)
+            return
+        if not isinstance(folders, dict):
+            return
+        missing = [r for r in roots if r not in folders]
+        if not missing:
+            return
+        now = int(time.time())
+        add = "".join(_grok_trust_block(r, now) for r in missing)
+        sep = "" if not text or text.endswith("\n") else "\n"
+        if text and not text.endswith("\n\n"):
+            sep += "\n"
+        os.makedirs(gdir, exist_ok=True)
+        tmp = path + ".tmp.%d" % os.getpid()
+        with open(tmp, "w") as f:
+            f.write(text + sep + add)
+        os.replace(tmp, path)
+        log("worktree", "grok pretrust: " + ", ".join(missing))
+    except Exception as e:
+        log("worktree", "grok pretrust failed:", e)
+
+
 def _pretrust_codex(cwd):
     """Codex records folder trust in ~/.codex/config.toml as
     [projects."<abs path>"] trust_level = "trusted". Append the table when
@@ -2398,6 +2520,16 @@ def _pretrust_codex(cwd):
     if os.path.exists(path):
         with open(path) as f:
             text = f.read()
+    # No "Update available" dialog in a Bromure machine (Bromure updates
+    # the agents): a top-level key, so it goes ahead of every table. Kept
+    # when the user set it either way.
+    if not re.search(r"^\s*check_for_update_on_startup\s*=", text, re.M):
+        os.makedirs(cdir, exist_ok=True)
+        text = "check_for_update_on_startup = false\n" + text
+        tmp = path + ".tmp.%d" % os.getpid()
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
     key = '[projects."%s"]' % d
     if key in text:
         return
@@ -2502,10 +2634,11 @@ def _task_mcp_setup(branch, tool, workdir):
       - codex:  per-invocation `-c mcp_servers.…` TOML overrides — nothing
                 is written to ~/.codex, so concurrent tasks can't fight
                 over one config file.
-      - grok:   a project-scoped .grok/settings.json in the session's
-                directory (grok-cli reads mcpServers from there); the
-                .grok/ dir is added to the checkout's local git exclude so
-                it can never dirty the task's diff or get committed.
+      - grok:   a marker-guarded [mcp_servers.*] block in the project's
+                .grok/config.toml (where Grok Build reads MCP servers —
+                NOT .grok/settings.json, which it ignores); the .grok/ dir
+                is added to the checkout's local git exclude so it can
+                never dirty the task's diff or get committed.
       - kimi:   the same idea against .kimi-code/mcp.json, kimi's
                 project-scope MCP declaration file (identical mcpServers
                 shape), likewise git-excluded.
@@ -2674,11 +2807,13 @@ def _user_scope_mcp_has(tool, shim):
 def _project_mcp_remove(tool, workdir, name, shim):
     """Drop the project-scope entry `name` if it runs `shim` (one an older
     build wrote next to the user-scope one)."""
+    if tool == "grok":
+        _grok_project_mcp_remove(workdir, name, shim)
+        return
     if tool == "omp":
         path = os.path.join(workdir, ".mcp.json")
-    elif tool in ("grok", "kimi"):
-        path = os.path.join(workdir, *((".grok", "settings.json") if tool == "grok"
-                                       else (".kimi-code", "mcp.json")))
+    elif tool == "kimi":
+        path = os.path.join(workdir, ".kimi-code", "mcp.json")
     else:
         return
     try:
@@ -2726,11 +2861,13 @@ def _project_mcp_add(tool, workdir, name, shim, extra_args=None):
     `extra_args` follow the shim path (the board shim's branch)."""
     if tool not in ("grok", "kimi", "omp") or not os.path.exists(shim):
         return
+    if tool == "grok":
+        _grok_project_mcp_add(workdir, name, shim, extra_args)
+        return
     if tool == "omp":
         path, exclude = os.path.join(workdir, ".mcp.json"), ".mcp.json"
     else:
-        subdir, fname = ((".grok", "settings.json") if tool == "grok"
-                         else (".kimi-code", "mcp.json"))
+        subdir, fname = (".kimi-code", "mcp.json")
         path, exclude = os.path.join(workdir, subdir, fname), subdir + "/"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2749,6 +2886,164 @@ def _project_mcp_add(tool, workdir, name, shim, extra_args=None):
         _git_exclude(workdir, exclude)
     except OSError as e:
         log("worktree", "%s %s mcp setup failed: %s" % (tool, name, e))
+
+
+_GROK_MCP_BEGIN = "# >>> bromure-mcp (managed by Bromure; edits here are rewritten)"
+_GROK_MCP_END = "# <<< bromure-mcp"
+
+
+def _grok_mcp_split(text):
+    """(the user's part of a Grok config.toml, our block's servers as
+    {name: [command, args]}). Our block is the lines between the markers."""
+    lines = text.splitlines()
+    outside, block, inside = [], [], False
+    for line in lines:
+        if line.strip() == _GROK_MCP_BEGIN:
+            inside = True
+            continue
+        if inside and line.strip() == _GROK_MCP_END:
+            inside = False
+            continue
+        (block if inside else outside).append(line)
+    servers = {}
+    current = None
+    for line in block:
+        t = line.strip()
+        m = re.match(r"^\[mcp_servers\.([A-Za-z0-9_-]+)\]$", t)
+        if m:
+            current = m.group(1)
+            servers[current] = ["", []]
+            continue
+        if current is None or "=" not in t:
+            continue
+        key, _, val = t.partition("=")
+        try:
+            v = json.loads(val.strip())
+        except ValueError:
+            continue
+        if key.strip() == "command" and isinstance(v, str):
+            servers[current][0] = v
+        elif key.strip() == "args" and isinstance(v, list):
+            servers[current][1] = [a for a in v if isinstance(a, str)]
+    return "\n".join(outside), servers
+
+
+def _grok_mcp_render(outside, servers):
+    """The config with our block (re)written at its end — TOML tables only,
+    so it may follow whatever table the user's part ends in."""
+    body = outside.rstrip("\n")
+    if not servers:
+        return body + "\n" if body else ""
+    out = [body, ""] if body else []
+    out.append(_GROK_MCP_BEGIN)
+    for name in sorted(servers):
+        command, args = servers[name]
+        # json.dumps strings are valid TOML basic strings.
+        out += ["[mcp_servers.%s]" % name, "command = " + json.dumps(command),
+                "args = " + json.dumps(args), ""]
+    if out[-1] == "":
+        out.pop()
+    out.append(_GROK_MCP_END)
+    return "\n".join(out) + "\n"
+
+
+def _grok_user_declares(outside, name):
+    """Whether the user's own part of the config declares `name` (or holds
+    mcp_servers as an inline table, which our tables would collide with)."""
+    if re.search(r"(?m)^\s*mcp_servers\s*=", outside):
+        return True
+    return re.search(r"(?m)^\s*\[\s*mcp_servers\s*\.\s*[\"']?%s[\"']?\s*\]"
+                     % re.escape(name), outside) is not None
+
+
+def _grok_project_mcp_update(workdir, change):
+    """Read-modify-write the project's .grok/config.toml: `change(servers,
+    outside)` edits our servers in place. Atomic, git-excluded; never
+    touches the user's part of the file."""
+    path = os.path.join(workdir, ".grok", "config.toml")
+    text = ""
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError as e:
+            log("worktree", "grok config read failed: %s" % e)
+            return
+    outside, servers = _grok_mcp_split(text)
+    before = dict((k, (v[0], list(v[1]))) for k, v in servers.items())
+    change(servers, outside)
+    after = dict((k, (v[0], list(v[1]))) for k, v in servers.items())
+    if after == before and (text or not servers):
+        return
+    new = _grok_mcp_render(outside, servers)
+    if new == text:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w") as f:
+            f.write(new)
+        os.replace(tmp, path)
+        _git_exclude(workdir, ".grok/")
+    except OSError as e:
+        log("worktree", "grok mcp config write failed: %s" % e)
+
+
+def _grok_project_mcp_add(workdir, name, shim, extra_args=None):
+    """Declare one stdio MCP server for Grok in `workdir`'s
+    .grok/config.toml (`[mcp_servers.<name>]`), unless the user's own part
+    of the file already declares that name. Also drops what an older build
+    left for it in .grok/settings.json, which Grok Build never read."""
+    def change(servers, outside):
+        if _grok_user_declares(outside, name):
+            servers.pop(name, None)
+            return
+        servers[name] = ["python3", [shim] + list(extra_args or [])]
+    _grok_project_mcp_update(workdir, change)
+    _grok_legacy_settings_remove(workdir, name, shim)
+
+
+def _grok_project_mcp_remove(workdir, name, shim):
+    """Drop our `name` entry from the project's Grok config if it runs
+    `shim` (matched by file name: the meta share's mount point moved once)."""
+    base = os.path.basename(shim)
+
+    def change(servers, outside):
+        entry = servers.get(name)
+        if entry and any(a == shim or os.path.basename(a) == base for a in entry[1]):
+            del servers[name]
+    _grok_project_mcp_update(workdir, change)
+    _grok_legacy_settings_remove(workdir, name, shim)
+
+
+def _grok_legacy_settings_remove(workdir, name, shim):
+    """An older build declared Grok's project MCP servers in
+    .grok/settings.json: drop that entry (ours only — same name, same shim)."""
+    path = os.path.join(workdir, ".grok", "settings.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            existing = json.load(f)
+    except (OSError, ValueError):
+        return
+    servers = (existing or {}).get("mcpServers") or {}
+    entry = servers.get(name)
+    base = os.path.basename(shim)
+    if not isinstance(entry, dict) or not any(
+            isinstance(a, str) and (a == shim or os.path.basename(a) == base)
+            for a in (entry.get("args") or [])):
+        return
+    del servers[name]
+    existing["mcpServers"] = servers
+    try:
+        if not servers and set(existing) == {"mcpServers"}:
+            os.remove(path)
+        else:
+            with open(path, "w") as f:
+                json.dump(existing, f, indent=2)
+    except OSError as e:
+        log("worktree", "grok legacy settings cleanup failed: %s" % e)
 
 
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
@@ -2804,6 +3099,7 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     if add.returncode != 0:
         worktree_err("worktree add failed: " + (add.stderr or add.stdout))
         return
+    _worktree_lock(cwd, wt_dir)
     _worktree_include(main_root, wt_dir)
 
     _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
@@ -2826,7 +3122,7 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
         # onboarded like a session's own folder (`_agent_tab`).
         _pretrust(tool, wt_dir, main_root)
         _preonboard(tool, wt_dir)
-    elif tool == "kimi":
+    elif tool in ("kimi", "grok"):
         # Kimi has no YOLO flag, so the gate above never pre-trusted its
         # folder — and an untrusted folder makes Kimi skip EVERY
         # project-scope MCP server (board, delegation, display).
@@ -2922,7 +3218,7 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64,
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
         _preonboard(tool, wt_dir)
-    elif tool == "kimi":
+    elif tool in ("kimi", "grok"):
         _pretrust(tool, wt_dir, main_root)
     env.update(_interactive_task_env(tool))
     win = _new_window(command="bash -l", cwd=wt_dir, env=env)
@@ -2956,7 +3252,7 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
         _preonboard(tool, cwd)
-    elif tool == "kimi":
+    elif tool in ("kimi", "grok"):
         _pretrust(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
@@ -3079,7 +3375,7 @@ def _plan_tab(cwd, slug, display, tool, prompt_b64):
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
         _preonboard(tool, cwd)
-    elif tool == "kimi":
+    elif tool in ("kimi", "grok"):
         _pretrust(tool, cwd)
     # The interview is a back-and-forth: the agent must still be there to
     # read the user's answers.
@@ -3185,6 +3481,9 @@ def _plan_stream(cwd, slug, display, tool, prompt_b64):
         # _task_mcp_setup; the returned CLI flag is irrelevant here).
         _task_mcp_setup(branch, "claude", cwd)
     # codex/grok wire the board MCP themselves inside the driver.
+    if tool == "grok":
+        # Grok's folder trust also gates project-scope MCP servers.
+        _pretrust(tool, cwd)
     logf = None
     try:
         logf = open(os.path.join(OUTBOX, "plan-driver.log"), "a")
@@ -3552,11 +3851,32 @@ def _worktree_pr(branch, target, root, display, tool):
     _set_window_option(win, "@display", "PR → " + target)
 
 
+WORKTREE_LOCK_REASON = ("Bromure task checkout inside the workspace VM; "
+                        "unlocked and removed when the task ends")
+
+
+def _worktree_lock(repo, wt_dir):
+    """Lock a task's worktree. Its .git/worktrees entry records a guest
+    path: in a repository shared from the Mac, the host's git sees that path
+    missing and calls the worktree "prunable" — a `git worktree prune` (or a
+    gc) there would delete the entry from under the running task. A locked
+    worktree is never pruned. Best effort."""
+    r = subprocess.run(["git", "-C", repo, "worktree", "lock", "--reason",
+                        WORKTREE_LOCK_REASON, wt_dir],
+                       capture_output=True, text=True)
+    if r.returncode != 0 and "already locked" not in (r.stderr or ""):
+        log("worktree", "lock %s failed: %s" % (wt_dir, (r.stderr or r.stdout).strip()))
+
+
 def _worktree_remove(root, branch):
     if not root:
         return
     wdir = _worktree_dir_for_branch(root, branch)
     if wdir and wdir != root:
+        # Locked at creation (see _worktree_lock): a locked worktree
+        # refuses a single --force remove.
+        subprocess.run(["git", "-C", root, "worktree", "unlock", wdir],
+                       stdout=_DEVNULL, stderr=_DEVNULL)
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force",
                         wdir], stdout=_DEVNULL, stderr=_DEVNULL)
     subprocess.run(["git", "-C", root, "branch", "-D", branch],
@@ -5526,6 +5846,12 @@ def task_folder_shares():
                 log("session", "symlinked ~/%s → %s" % (name, src))
             except OSError:
                 log("session", "FAILED ln -s for ~/%s" % name)
+        if os.path.isdir(src) and (shutil.which("grok")
+                                   or os.path.isdir(os.path.join(home, ".grok"))):
+            # The share is a folder the user handed this workspace: no
+            # "Do you trust the contents of this directory?" from Grok when
+            # it's started there by hand (the symlink resolves to src).
+            _pretrust("grok", src)
 
 
 def task_reapply_binfmt():

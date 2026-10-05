@@ -2137,6 +2137,9 @@ final class CardAXView: NSView {
     var label = "" { didSet { setAccessibilityLabel(label) } }
     var hint = "" { didSet { setAccessibilityHelp(hint.isEmpty ? nil : hint) } }
     var onPress: () -> Void = {}
+    /// A disabled control: AXEnabled false, AXPress does nothing.
+    var enabled = true { didSet { setAccessibilityEnabled(enabled) } }
+    var axIdentifier: String? { didSet { setAccessibilityIdentifier(axIdentifier) } }
     var menuItems: [CardMenuItem] = []
     var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
@@ -2149,7 +2152,10 @@ final class CardAXView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func accessibilityPerformPress() -> Bool { onPress(); return true }
+    override func accessibilityPerformPress() -> Bool {
+        guard enabled else { return false }
+        onPress(); return true
+    }
     override func accessibilityPerformShowMenu() -> Bool {
         guard !menuItems.isEmpty else { return false }
         CardMenuPopper(items: menuItems, openURL: openURL).popUp(in: self)
@@ -2173,6 +2179,8 @@ struct CardAXElement: NSViewRepresentable {
     let onPress: () -> Void
     let menu: [CardMenuItem]
     let openURL: (URL) -> Void
+    var enabled = true
+    var identifier: String? = nil
 
     func makeNSView(context: Context) -> CardAXView { update(CardAXView()) }
     func updateNSView(_ v: CardAXView, context: Context) { _ = update(v) }
@@ -2180,9 +2188,34 @@ struct CardAXElement: NSViewRepresentable {
         v.label = label
         v.hint = hint
         v.onPress = onPress
+        if v.enabled != enabled { v.enabled = enabled }
+        if v.axIdentifier != identifier { v.axIdentifier = identifier }
         v.menuItems = menu
         v.openURL = openURL
         return v
+    }
+}
+#endif
+
+#if os(macOS)
+extension View {
+    /// This button as assistive tools that read PLAIN attributes see it — a
+    /// button whose AXDescription is `title` (System Events' "description",
+    /// what UI scripts match on). SwiftUI's own element for a Button, even
+    /// one labelled by a plain `Text`, carries the name only as
+    /// AXAttributedDescription out of process: System Events read the
+    /// editor's Save/Cancel as name "missing value", description "button"
+    /// (its role description). `.accessibilityLabel` and `Text(verbatim:)`
+    /// change only that attributed copy. The control itself is unchanged
+    /// (clicks, keyboard shortcut); an AppKit element laid over it
+    /// (`CardAXView`, no hit-testing) stands in for it.
+    func appKitAccessibleButton(_ title: String, hint: String = "", identifier: String? = nil,
+                                enabled: Bool = true, action: @escaping () -> Void) -> some View {
+        accessibilityHidden(true)
+            .overlay(CardAXElement(label: title, hint: hint, onPress: action, menu: [],
+                                   openURL: { NSWorkspace.shared.open($0) },
+                                   enabled: enabled, identifier: identifier)
+                        .allowsHitTesting(false))
     }
 }
 #endif

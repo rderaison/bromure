@@ -378,7 +378,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "結束 Bromure Agentic Coding？";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d 個執行中的 VM (%@) 將根據每個工作區的關閉動作而關閉。";
+"The workspace %@ is running. It will be closed according to its close action." = "工作區 %@ 正在執行，將根據其關閉動作關閉。";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d 個工作區正在執行（%2$@），每個都將根據其關閉動作關閉。";
+"The infrastructure machine %@ is running and will be suspended." = "基礎設施機器 %@ 正在執行，將被暫停。";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d 台基礎設施機器正在執行（%2$@），將被暫停。";
 "Quit" = "結束";
 
 /* Guardrails: new prompt-on-write mode */
@@ -3627,6 +3630,7 @@
 "%1$@ is off for %2$@. Click to turn it on." = "%2$@ 的%1$@已關閉。按一下可開啟。";
 /* Security Timeline: skipped content scans, coalesced rows (WS-B) */
 "not scanned — %@" = "未掃描 — %@";
+"blocked, not sent — %@" = "已攔截，未傳送 — %@";
 "%1$@ (%2$d times, last one shown)" = "%1$@（%2$d 次，顯示最近一次）";
 
 "Security…" = "安全性…";
@@ -3904,8 +3908,8 @@
 /* Kimi approvals setting */
 "Kimi approvals" = "Kimi 核准";
 "Never ask" = "永不詢問";
-"Ask when needed" = "必要時詢問";
-"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "永不詢問：Kimi Code 執行每個指令和工具時都不會停下來詢問——工作區的虛擬機器和 Bromure 的防護措施就是安全邊界。必要時詢問：例行編輯和指令自動執行；有風險的操作、提問和計畫仍會等待你確認。從下次啟動或恢復時生效。";
+"Ask before sensitive actions" = "敏感操作前詢問";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "永不詢問：Kimi Code 會不停頓地執行每個指令、每次編輯和每個工具，並自行決定自己的問題和計畫——工作區的虛擬機器和 Bromure 的防護措施就是安全邊界。敏感操作前詢問（Kimi 的「Ask When Needed」模式）：一般指令和編輯仍然無需詢問即可執行；Kimi 只會在接觸敏感檔案（如 .env 或 SSH 金鑰）、執行危險指令（如 rm -rf）或退出 Plan 模式之前停下，以及在有問題要問你時停下。從下次啟動或繼續時生效。";
 
 /* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
 "Blocked by Bromure — prompt injection" = "已被 Bromure 封鎖 — 提示注入";
@@ -3922,3 +3926,30 @@
 "denied — no answer in time; the next request asks again" = "已拒絕 — 未及時回應；下次請求時會再次詢問";
 "denied — you said no a moment ago" = "已拒絕 — 你剛才拒絕過";
 "denied by you" = "你已拒絕";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "登入儲存區無法讀取 — Bromure 不會覆寫它。在能夠再次讀取之前，其中儲存的登入無法使用。";
+"Last refreshed %@" = "上次重新整理 %@";
+"Not refreshed since sign-in" = "登入後尚未重新整理";
+"access token expires %@" = "存取權杖到期時間 %@";
+"access token renews on next use" = "存取權杖將在下次使用時續期";
+"(exit code %d)" = "（結束代碼 %d）";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "未送達 — 代理沒有接收。請編輯或再次傳送。";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "預設關閉：在下方勾選某個工作區（或開啟「每個工作區」）之前，這裡的代理無法存取其他工作區。";
+"Closes the editor without saving changes" = "關閉編輯器，不儲存變更";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok 詢問是否允許 xAI 保留你的程式設計資料";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "正在問你問題";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "沒有任何內容送達提供者。Bromure 會從此對話之後的請求中移除被封鎖的工具輸出，因此你可以傳送下一則訊息。如果代理仍然失敗，請將對話倒回該步驟之前，或開始新的工作階段。";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "%1$d 秒內未回應即視為「%2$@」。";
+"The workspace %@ will be shut down." = "工作區 %@ 將被關機。";
+"The workspaces %@ will be shut down." = "工作區 %@ 將被關機。";
+"The workspace %@ will be suspended and resume where it left off." = "工作區 %@ 將被暫停，下次從中斷處繼續。";
+"The workspaces %@ will be suspended and resume where they left off." = "工作區 %@ 將被暫停，下次從中斷處繼續。";

@@ -175,6 +175,12 @@ final class RemoteHostController {
         let registeredAt: Date
         /// Non-nil = the provider rejected this credential; re-register.
         let reauthRequiredAt: Date?
+        /// When the remote host last refreshed the real grant, and when its
+        /// access token expires (no token data crosses).
+        var lastRefreshedAt: Date? = nil
+        var accessExpiresAt: Date? = nil
+        /// The remote's login store exists but can't be read.
+        var storeUnreadable: Bool = false
     }
     private(set) var subscriptionStatus: [String: SubscriptionState] = [:] {
         // The editor's sign-in controls re-read on this notification (the
@@ -281,8 +287,11 @@ final class RemoteHostController {
             guard let d = raw as? [String: Any],
                   let ts = d["registeredAt"] as? Double else { continue }
             let reauth = (d["reauthRequiredAt"] as? Double).map(Date.init(timeIntervalSince1970:))
-            out[tool] = SubscriptionState(registeredAt: Date(timeIntervalSince1970: ts),
-                                          reauthRequiredAt: reauth)
+            out[tool] = SubscriptionState(
+                registeredAt: Date(timeIntervalSince1970: ts), reauthRequiredAt: reauth,
+                lastRefreshedAt: (d["lastRefreshedAt"] as? Double).map(Date.init(timeIntervalSince1970:)),
+                accessExpiresAt: (d["accessExpiresAt"] as? Double).map(Date.init(timeIntervalSince1970:)),
+                storeUnreadable: (d["storeUnreadable"] as? Bool) ?? false)
         }
         if subscriptionStatus != out { subscriptionStatus = out }
     }
@@ -2386,6 +2395,11 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
             return TranscriptPin(kimiSession: id)
         }
+        // Grok / Codex: the session's own conversation (see SessionPane).
+        if let s, s.tool == .grok || s.tool == .codex {
+            let pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
+            if pin != TranscriptPin() { return pin }
+        }
         var pin = TranscriptPin()
         pin.kimiExclude = controller.sessionStore.kimiSessionsClaimed(profileID: workspaceID, besides: s?.id)
         return pin
@@ -3535,7 +3549,8 @@ final class RemoteHostWindow: NSWindow {
                 onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
                 onForgetKimi: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "kimi", profileID: id) },
                 localModelsRemoteAny: modelBackend,
-                modelsPane: .workspace(global: remoteGlobalModels)))
+                modelsPane: .workspace(global: remoteGlobalModels))
+                .withSubscriptionHealth({ [weak c] provider in provider.subscriptionKey.flatMap { c?.subscriptionStatus[$0]?.loginHealth } }))
             win.makeKeyAndOrderFront(nil)
             self.settingsWindows[id] = win
         }
@@ -3742,7 +3757,8 @@ final class RemoteHostWindow: NSWindow {
             onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
             onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
             localModelsRemoteAny: remoteModelBackend(),
-            modelsPane: .workspace(global: remoteGlobalModels)))
+            modelsPane: .workspace(global: remoteGlobalModels))
+                .withSubscriptionHealth({ [weak controller] provider in provider.subscriptionKey.flatMap { controller?.subscriptionStatus[$0]?.loginHealth } }))
         win.makeKeyAndOrderFront(nil)
         newWorkspaceWindow = win
     }

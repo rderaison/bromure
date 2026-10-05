@@ -35,10 +35,23 @@ enum ConsentPrompt {
                        timeout: TimeInterval = ConsentPrompt.defaultTimeout) async -> Int? {
         switch RemoteConsent.route(for: profileID) {
         case .fatClient:
+            // On the fat client AND here: whoever answers first wins, the
+            // other surface is withdrawn. A local user is never left without
+            // a prompt because a mirror happens to be connected.
             let body = detailText.map { message + "\n\n" + String($0.prefix(1500)) } ?? message
-            return await RemoteConsent.chooseOnFatClient(
-                profileID: profileID, title: title, message: body,
-                choices: choices, denyIndex: denyIndex, timeoutSeconds: timeout)
+            let idx = await race(
+                remote: {
+                    await PendingPromptBroker.shared.answerAsync(
+                        profileID: profileID, title: title, message: body,
+                        buttons: choices, fallback: denyIndex, timeout: timeout)
+                },
+                local: { token in
+                    await ConsentPanelPresenter.shared.present(
+                        profileID: profileID, title: title, message: message, choices: choices,
+                        denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout,
+                        token: token)
+                }) ?? denyIndex
+            return idx == denyIndex ? nil : idx
         case .terminalPump:
             let body = detailText.map { message + "\n\n" + String($0.prefix(1500)) } ?? message
             let idx = await Task.detached {
@@ -51,6 +64,34 @@ enum ConsentPrompt {
                 profileID: profileID, title: title, message: message, choices: choices,
                 denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout)
             return idx == denyIndex ? nil : idx
+        }
+    }
+}
+
+extension ConsentPrompt {
+    /// The first answer of two surfaces. `remote` gives nil when nobody
+    /// answered there (no client, the client left, its timeout) — that
+    /// never ends the race: the local panel still stands. `local` always
+    /// answers (a dismissal or its deadline is its deny). The loser is
+    /// withdrawn: the remote task is cancelled (its prompt leaves `/state`),
+    /// the local panel closed (`withdraw(token:)`).
+    static func race(remote: @escaping @Sendable () async -> Int?,
+                     local: @escaping @Sendable (UUID) async -> Int?) async -> Int? {
+        let token = UUID()
+        return await withTaskGroup(of: (Bool, Int?).self) { group in
+            group.addTask { (true, await remote()) }
+            group.addTask { (false, await local(token)) }
+            var answer: Int?
+            var localDone = false
+            while let (isRemote, idx) = await group.next() {
+                if isRemote, idx == nil { continue }
+                answer = idx
+                localDone = !isRemote
+                break
+            }
+            group.cancelAll()
+            if !localDone { await ConsentPanelPresenter.shared.withdraw(token: token) }
+            return answer
         }
     }
 }
@@ -73,6 +114,8 @@ final class ConsentPanelPresenter {
         let timeout: TimeInterval
         /// A notice, not a question: no "counts as Don't allow" countdown.
         var isNotice = false
+        /// The caller's handle for `withdraw(token:)`.
+        var token: UUID? = nil
     }
 
     /// Builds and shows the UI for a request; calls `answer` (index, or nil
@@ -92,14 +135,41 @@ final class ConsentPanelPresenter {
 
     func present(profileID: UUID, title: String, message: String, choices: [String],
                  denyIndex: Int, style: NSAlert.Style, detailText: String?,
-                 timeout: TimeInterval, isNotice: Bool = false) async -> Int? {
+                 timeout: TimeInterval, isNotice: Bool = false, token: UUID? = nil) async -> Int? {
         var req = Request(profileID: profileID, title: title, message: message, choices: choices,
                           denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout)
         req.isNotice = isNotice
+        req.token = token
+        if let token, withdrawn.remove(token) != nil { return denyIndex }
         return await withCheckedContinuation { cont in
             queues[profileID, default: []].append((req, cont))
             pump(profileID)
         }
+    }
+
+    /// Tokens withdrawn before their request arrived (the race's other
+    /// surface answered first).
+    private var withdrawn: Set<UUID> = []
+
+    /// Take back the request presented with `token` — answered elsewhere
+    /// first: its panel closes (or it leaves the queue) and its caller gets
+    /// the deny index (ignored by a caller that already has its answer).
+    func withdraw(token: UUID) {
+        for (pid, a) in active where a.request.token == token {
+            resolve(pid, requestID: a.request.id, choice: nil)
+            return
+        }
+        for (pid, q) in queues {
+            if let i = q.firstIndex(where: { $0.0.token == token }) {
+                let (req, cont) = q[i]
+                var rest = q
+                rest.remove(at: i)
+                queues[pid] = rest.isEmpty ? nil : rest
+                cont.resume(returning: req.denyIndex)
+                return
+            }
+        }
+        withdrawn.insert(token)
     }
 
     /// Answer the prompt on screen for `profileID` (tests / automation).
@@ -162,8 +232,10 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
     private let answer: (Int?) -> Void
     private var answered = false
     private var timer: Timer?
+    private var activity: NSObjectProtocol?
     private let countdown = NSTextField(labelWithString: "")
     private let deadline: Date
+    private let req: Request
 
     /// Layout constants.
     static let inset: CGFloat = 16
@@ -180,6 +252,7 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
     init(request req: Request, answer: @escaping (Int?) -> Void,
          show: Bool = true, screenFrame: NSRect? = nil) {
         self.answer = answer
+        self.req = req
         self.deadline = Date().addingTimeInterval(req.timeout)
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -359,9 +432,22 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
         panel.setFrameOrigin(origin)
 
         guard show else { return }
-        if !req.isNotice { timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        } }
+        if !req.isNotice {
+            // In the common run-loop modes (a default-mode timer stops while
+            // a menu is open or the mouse tracks) and with no slack; and the
+            // app is held out of App Nap while the panel is up — a panel
+            // over a background app saw its seconds stretch (14 → 8 in
+            // ~20 s) and its deadline slip by minutes.
+            let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.tick() }
+            }
+            t.tolerance = 0.05
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                reason: "Bromure approval countdown")
+        }
         panel.orderFrontRegardless()
         panel.makeKey()
         NSApp.requestUserAttention(.criticalRequest)
@@ -412,12 +498,38 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
         return (scroll, ceil(frameH))
     }
 
-    private func tick() {
-        let left = max(0, Int(deadline.timeIntervalSinceNow.rounded(.up)))
-        countdown.stringValue = String(format: NSLocalizedString(
-            "No answer within %d s counts as Don't allow.",
-            comment: "Consent panel countdown: seconds left before the prompt auto-denies"), left)
+    /// Whole seconds left before `deadline`, from the wall clock (never a
+    /// count of ticks: a late tick can't stretch the countdown).
+    nonisolated static func secondsLeft(until deadline: Date, now: Date = Date()) -> Int {
+        max(0, Int(deadline.timeIntervalSince(now).rounded(.up)))
     }
+
+    /// The countdown line, refreshed each second; at zero the panel answers
+    /// "Don't allow" itself (the presenter's own deadline is the backstop).
+    func tick(now: Date = Date()) {
+        let left = Self.secondsLeft(until: deadline, now: now)
+        countdown.stringValue = Self.countdownLine(secondsLeft: left, request: req)
+        if left == 0, !req.isNotice { finish(nil) }
+    }
+
+    /// The countdown in the words of the button it stands for: "No answer
+    /// within 9 s means “Block this request”." — never a fixed "Don't
+    /// allow" next to buttons that say something else.
+    nonisolated static func countdownLine(secondsLeft left: Int, request req: ConsentPanelPresenter.Request) -> String {
+        let deny = req.choices.indices.contains(req.denyIndex) ? req.choices[req.denyIndex] : ""
+        guard !deny.isEmpty else {
+            return String(format: NSLocalizedString(
+                "No answer within %d s counts as Don't allow.",
+                comment: "Consent panel countdown: seconds left before the prompt auto-denies"), left)
+        }
+        return String(format: NSLocalizedString(
+            "No answer within %1$d s means “%2$@”.",
+            comment: "Consent panel countdown: seconds left, then the deny button's own label (e.g. “Block this request”) — what no answer amounts to"),
+                      left, deny)
+    }
+
+    /// The countdown line as shown (tests).
+    var countdownText: String { countdown.stringValue }
 
     @objc private func choose(_ sender: NSButton) {
         finish(sender.tag)
@@ -437,6 +549,7 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
         answered = true
         timer?.invalidate()
         timer = nil
+        if let a = activity { ProcessInfo.processInfo.endActivity(a); activity = nil }
         panel.delegate = nil
         panel.orderOut(nil)
         panel.close()

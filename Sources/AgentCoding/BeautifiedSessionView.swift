@@ -61,9 +61,13 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     /// known here (gone, roster not live). Drives delivery of the messages
     /// a chat holds while it's off screen.
     func isWorking(window: Int) -> Bool?
+    /// The workspace's shared-folder mounts and how they read
+    /// (`GuestSharePaths`). Empty: paths as logged.
+    var guestPathNames: [String: String] { get }
 }
 
 extension BeautifiedTranscriptProvider {
+    var guestPathNames: [String: String] { [:] }
     var historyCacheKey: String? { nil }
     var historyBytesHint: Int? { nil }
     func transcriptPin(window: Int) -> TranscriptPin { TranscriptPin() }
@@ -481,6 +485,10 @@ struct QueuedMessage: Identifiable, Equatable, Codable {
     /// until it lands as a turn. Optional so an older saved queue decodes.
     var delivered: Bool? = nil
     var isDelivered: Bool { delivered == true }
+    /// Times Bromure typed it in without the agent ever taking it (typed as
+    /// a dialog closed, into a screen still redrawing): put back on hold
+    /// once, then shown as not delivered — never silently dropped.
+    var redeliveries: Int? = nil
 }
 
 /// What each agent does with a message submitted while it's busy, measured
@@ -625,6 +633,14 @@ final class BeautifiedSessionModel: ObservableObject {
     private var queueDriverWindow: Int?
     /// Since when the agent has been idle (nil while working).
     private var idleSince: Date?
+    /// The dialog seen open at the last check, and when one last closed: a
+    /// held message waits for the agent's screen to settle after it (Codex
+    /// redraws its whole TUI after its update prompt; text typed in that
+    /// moment was lost, and the queue emptied with no turn).
+    private var dialogWasOpen = false
+    private var dialogClosedAt: Date?
+    /// How long after a dialog closes before a held message is typed.
+    static let settleAfterDialog: TimeInterval = 4
 
     /// Dropped image bytes keyed by their (deterministic) guest path, so the
     /// view can render a thumbnail wherever that path appears in the transcript
@@ -742,6 +758,17 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The tab shows (or stopped showing) a sign-in screen — the sidebar
     /// reflects it.
     var loginPromptChanged: ((Bool) -> Void)?
+    /// The tab shows (or stopped showing) a dialog waiting on the user — a
+    /// picker, a checklist, a trust question: the sidebar says so.
+    var dialogPromptChanged: ((Bool) -> Void)?
+
+    /// A prompt that waits on the user's answer (sign-in has its own state).
+    static func isDialog(_ p: TerminalPrompt?) -> Bool {
+        switch p?.kind {
+        case .picker?, .checklist?, .trust?: return true
+        default: return false
+        }
+    }
     /// The agent's transcript now ends on a refused turn (auth, quota…).
     /// Codex fires no hook for a failed turn — only the prompt's — so its
     /// tab would read "working" forever; the host turns this into "needs you".
@@ -1113,7 +1140,17 @@ final class BeautifiedSessionModel: ObservableObject {
     /// once the agent is idle.
     private func reconcileQueued() {
         let now = Date()
-        if working { idleSince = nil } else if idleSince == nil { idleSince = now }
+        // The opening message's echo holds the thinking cue up until the
+        // agent answers — but when that message is still HELD here (Kimi's
+        // is typed once its TUI is up), the agent hasn't got it: nothing is
+        // under way, and waiting for "idle" waited on the seed itself (a
+        // fresh Kimi sat on "Crafting…" with its message queued, its TUI
+        // saying "No session yet").
+        let busy = working && !(seededUntil != nil && !provider.isWorking() && !transcriptSaysWorking())
+        if busy { idleSince = nil } else if idleSince == nil { idleSince = now }
+        let open = dialogOpen
+        if dialogWasOpen, !open { dialogClosedAt = now }
+        dialogWasOpen = open
         // What was held for this session while it was paused (or in the
         // tab it had before) is this chat's to deliver now.
         bindSessionQueue()
@@ -1132,19 +1169,42 @@ final class BeautifiedSessionModel: ObservableObject {
             queueStore.setDriver(queueKey, queueDriver(window: w))
         }
         queueStore.update(queueKey) { queued in
+          var lost: Set<UUID> = []
           queued.removeAll { q in
             guard !q.held else { return false }
             // A TUI may merge several queued messages into one turn.
             if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
+            // One Bromure typed in that came out a little changed (a
+            // composer completion rewrote its end, the agent re-flowed it):
+            // the turn it became still resolves the row.
+            if q.isDelivered, turns.dropFirst(q.baseline).contains(where: { Self.typedBecame(q.text, turn: $0) }) {
+                return true
+            }
             // Or take it in as something other than a user turn (Claude's
             // mid-turn `queued_command`): any record written since it was
             // queued that carries the text — bar Claude's own queue log.
             if deliveredInRaw(q) { return true }
             // Idle a while and still not in the transcript: the agent never
-            // took it (cleared, interrupted) — stop showing it.
+            // took it (cleared, interrupted) — stop showing it. Unless
+            // Bromure typed it and the agent took NO turn since: then it
+            // was lost on the way in, and it goes back on hold.
             if let idle = idleSince, now.timeIntervalSince(idle) > 20,
-               now.timeIntervalSince(q.queuedAt) > 20 { return true }
+               now.timeIntervalSince(q.queuedAt) > 20 {
+                if q.isDelivered, turns.count <= q.baseline, !transcriptGrew(since: q) {
+                    lost.insert(q.id); return false
+                }
+                return true
+            }
             return false
+          }
+          for i in queued.indices where lost.contains(queued[i].id) {
+              queued[i].delivered = nil
+              queued[i].editable = true
+              queued[i].held = true
+              queued[i].redeliveries = (queued[i].redeliveries ?? 0) + 1
+              if (queued[i].redeliveries ?? 0) > 1 {
+                  queued[i].failure = Self.notTakenText
+              }
           }
         }
         // The dialog a message waited on is answered and the agent is back
@@ -1159,11 +1219,41 @@ final class BeautifiedSessionModel: ObservableObject {
         // Only the chat the store says delivers (two can show one session).
         // Never while the agent is asking something (the guest would hold
         // it anyway — that's the backstop, not the plan).
-        if let idle = idleSince, now.timeIntervalSince(idle) > 1.5, !sending, !dialogOpen,
+        if let idle = idleSince, now.timeIntervalSince(idle) > 1.5, !sending, !open,
+           dialogClosedAt.map({ now.timeIntervalSince($0) > Self.settleAfterDialog }) ?? true,
            queued.contains(where: { ChatQueueStore.deliverable($0) && mayDeliver($0) }),
            queueStore.isOwner(queueKey, self) {
             deliverHeld()
         }
+    }
+
+    /// Whether a recorded turn is a message Bromure typed, altered on the
+    /// way in: the two share most of their opening (whitespace aside).
+    nonisolated static func typedBecame(_ typed: String, turn: String) -> Bool {
+        let a = Array(typed.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        let b = Array(turn.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        guard a.count >= 16, !b.isEmpty else { return false }
+        var n = 0
+        while n < min(a.count, b.count), a[n] == b[n] { n += 1 }
+        return n >= 16 && Double(n) >= Double(a.count) * 0.6
+    }
+
+    /// A held message typed in twice without the agent taking it.
+    nonisolated static var notTakenText: String {
+        NSLocalizedString("Not delivered — the agent didn't take it in. Edit it or send it again.",
+                          comment: "queued message: typed into the session twice, never became a turn")
+    }
+
+    /// Whether the agent wrote anything after `q` was typed in (its
+    /// transcript grew past the offset recorded then). Unknown — another
+    /// file, no offset — counts as yes: a message is never typed twice on a
+    /// guess.
+    private func transcriptGrew(since q: QueuedMessage) -> Bool {
+        // Still no transcript at all (a fresh Kimi begins its journal only
+        // with its first prompt): nothing came of it.
+        guard let path = q.path else { return currentPath != nil }
+        guard path == currentPath, let buf = buffers[path] else { return true }
+        return buf.end > q.offset
     }
 
     private func deliveredInRaw(_ q: QueuedMessage) -> Bool {
@@ -1193,16 +1283,27 @@ final class BeautifiedSessionModel: ObservableObject {
     /// A refusal leaves them on the strip, saying why.
     private func deliverHeld() {
         guard let w = queueDriverWindow ?? provider.activeTabIndex(),
-              let text = ChatQueueStore.nextHeld(queued.filter { !ChatQueueStore.deliverable($0) || mayDeliver($0) })?.text
+              let next = ChatQueueStore.nextHeld(queued.filter { !ChatQueueStore.deliverable($0) || mayDeliver($0) })
         else { return }
+        let text = next.text
         sending = true
         Task { [weak self] in
             guard let self else { return }
+            // Where the transcript stands as it goes in: its arrival (or
+            // that nothing came of it) is judged from here.
+            let path = self.currentPath
+            let offset = path.flatMap { self.buffers[$0]?.end } ?? 0
             let outcome = await self.queueStore.deliverHeld(
                 self.queueKey, driver: self.queueDriver(window: w),
                 fallback: self.provider.paneTarget(window: w))
             self.sending = false
             guard outcome == .typed else { return }
+            self.queueStore.update(self.queueKey) { l in
+                for i in l.indices where l[i].id == next.id && l[i].isDelivered {
+                    l[i].path = path
+                    l[i].offset = offset
+                }
+            }
             self.gate.userSent()
             self.setWorking(true)
             // No echo bubble: the strip keeps the row ("Delivered") until
@@ -1359,8 +1460,9 @@ final class BeautifiedSessionModel: ObservableObject {
     private func showCopy(_ id: UUID) async {
         guard let data = await cachedTranscript?(id), !data.isEmpty, parsedItems.isEmpty else { return }
         let agent = agentKind ?? currentSession?()?.tool.rawValue
+        let names = provider.guestPathNames
         let parsed = await Task.detached(priority: .userInitiated) {
-            AgentTranscript.parse(data, agent: agent)
+            GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
         }.value
         guard !parsed.isEmpty, parsedItems.isEmpty else { return }
         applyParsed(parsed)
@@ -1562,7 +1664,10 @@ final class BeautifiedSessionModel: ObservableObject {
             input.append(0x0A)
         }
         let t0 = Date()
-        let items = await Task.detached(priority: .userInitiated) { AgentTranscript.parse(input) }.value
+        let names = provider.guestPathNames
+        let items = await Task.detached(priority: .userInitiated) {
+            GuestSharePaths.rewrite(AgentTranscript.parse(input), names: names)
+        }.value
         lastParseAt = Date()
         lastParseDuration = lastParseAt.timeIntervalSince(t0)
         return items
@@ -1572,6 +1677,7 @@ final class BeautifiedSessionModel: ObservableObject {
         guard parsed != parsedItems else { return }
         TranscriptMarkdownCache.prewarm(parsed)
         parsedItems = parsed
+        noteLiveModel()
         ensureDropImages()
         // Real transcript progress ⇒ any earlier terminal card is stale —
         // unless that progress IS the agent recording a refused turn, which
@@ -1590,8 +1696,10 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         if failure != nil || prompt != nil || recorded != nil {
             let wasLogin = prompt?.kind == .login
+            let wasDialog = Self.isDialog(prompt)
             withAnimation(.easeOut(duration: 0.2)) { failure = recorded; prompt = nil }
             if wasLogin { loginPromptChanged?(false) }
+            if wasDialog { dialogPromptChanged?(false) }
             hostSignInStatus = nil
         }
     }
@@ -1687,13 +1795,32 @@ final class BeautifiedSessionModel: ObservableObject {
         if newPrompt == nil, let recorded = recordedFailure(in: parsedItems) { newFailure = recorded }
         guard newPrompt != prompt || newFailure != failure else { return }
         let wasLogin = prompt?.kind == .login
+        let wasDialog = Self.isDialog(prompt)
         withAnimation(.easeOut(duration: 0.2)) {
             prompt = newPrompt
             failure = newFailure
         }
         let isLogin = newPrompt?.kind == .login
         if isLogin != wasLogin { loginPromptChanged?(isLogin) }
+        let isDialog = Self.isDialog(newPrompt)
+        if isDialog != wasDialog { dialogPromptChanged?(isDialog) }
     }
+
+    /// Tell the header which model this chat's transcript names (see
+    /// `TranscriptSearchIndex.liveModels`). Throttled; off the main actor.
+    private func noteLiveModel() {
+        let now = Date()
+        guard now.timeIntervalSince(lastModelScanAt) > 10, let sid = currentSession?()?.id,
+              let path = currentPath, let data = buffers[path]?.data, !data.isEmpty else { return }
+        lastModelScanAt = now
+        Task { @MainActor in
+            let m = await Task.detached(priority: .utility) {
+                TranscriptSearchIndex.liveModel(in: data)
+            }.value
+            if let m { TranscriptSearchIndex.shared.noteLiveModel(sid, m) }
+        }
+    }
+    private var lastModelScanAt = Date.distantPast
 
     /// `SessionFailure.recorded(in:)`, unless the user has moved past it.
     private func recordedFailure(in items: [TranscriptItem]) -> SessionFailure? {
@@ -2050,6 +2177,7 @@ final class BeautifiedSessionModel: ObservableObject {
         switch p.kind {
         case .picker, .checklist, .trust: return true
         case .login: return !p.loginMethods.isEmpty || p.awaitingCode
+        case .notice: return false
         }
     }
 
@@ -2113,6 +2241,14 @@ final class BeautifiedSessionModel: ObservableObject {
         var live: Bool
         /// The watch is over; what's here is what the command printed.
         var settled: Bool
+
+        /// The printed snapshot only repeats a dialog the choice card below
+        /// already offers (Codex's `/model` showed twice): hidden while
+        /// that card is up. The inline terminal (live) always shows.
+        func isRedundant(with prompt: TerminalPrompt?) -> Bool {
+            guard !live, let prompt else { return false }
+            return prompt.kind == .picker || prompt.kind == .checklist
+        }
     }
     @Published var commandOutput: CommandOutput?
     private var commandWatch: Task<Void, Never>?
@@ -2296,15 +2432,19 @@ final class BeautifiedSessionModel: ObservableObject {
         return AgentScreen.liveMenu(lines, after: -1) != nil
     }
 
-    /// Rewrite host file paths in `text` to guest paths, uploading each file.
-    /// Returns `text` unchanged (fast, no I/O) when it names no host files.
+    /// Rewrite host file paths in `text` to guest paths, uploading each file
+    /// — only files the user dropped or pasted as files (`offeredHostPaths`);
+    /// a typed path is text, never an upload. Returns `text` unchanged (fast,
+    /// no I/O) when it names no such file.
     private func translateHostFiles(in text: String) async -> String {
+        let offered = DroppedFile.offeredHostPaths()
+        guard !offered.isEmpty else { return text }
         var tokens = Set(text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init))
         tokens.insert(text)   // whole-string case: composer holds just the path
         var hits: [(token: String, file: DroppedFile)] = []
         let stamp = GuestDrop.stamp()
         for tok in tokens {
-            guard let url = Self.hostFileURL(tok),
+            guard let url = DroppedFile.hostFileURL(tok, offered: offered),
                   let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= DroppedFile.maxBytes else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             hits.append((tok, DroppedFile(name: "\(stamp)_\(url.lastPathComponent)", data: data, isImage: isImg)))
@@ -2321,18 +2461,6 @@ final class BeautifiedSessionModel: ObservableObject {
             }
         }
         return out
-    }
-
-    /// A readable host FILE for `token` (absolute path, `~`, or `file://`), or nil.
-    private static func hostFileURL(_ token: String) -> URL? {
-        var path = token
-        if path.hasPrefix("file://"), let u = URL(string: path) { path = u.path }
-        else if path.hasPrefix("~") { path = (path as NSString).expandingTildeInPath }
-        guard path.hasPrefix("/") else { return nil }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue
-        else { return nil }
-        return URL(fileURLWithPath: path)
     }
 }
 
@@ -2368,6 +2496,11 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
     func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
 
     func isWorking(window: Int) -> Bool? { pane?.chatIsWorking(window: window) }
+
+    var guestPathNames: [String: String] {
+        guard let pane else { return [:] }
+        return GuestSharePaths.names(mountNames: SessionDisk.sharedFolders(pane.profile.folderPaths).map(\.mountName))
+    }
 
     /// The Kimi session the engine pinned for the session in this tab (B72):
     /// its own journal, never the folder's newest.
@@ -3109,13 +3242,18 @@ struct BeautifiedSessionView: View {
                             // (consecutive rounds can reuse item indices).
                             .id("q:" + questions.map(\.question).joined(separator: "\u{1f}"))
                         }
-                        if let out = model.commandOutput {
+                        if let out = model.commandOutput, !out.isRedundant(with: model.prompt) {
                             CommandCard(output: out,
                                         terminal: out.live ? model.inlineTerminal?() : nil,
                                         canGoLive: model.inlineTerminal != nil,
                                         onToggleLive: { model.toggleLiveCommand() },
                                         onDismiss: { model.dismissCommandOutput() })
                                 .id("beautified-command")
+                                .transition(.opacity)
+                        }
+                        if let notice = model.prompt?.privacyNotice, model.prompt?.kind != .notice {
+                            PromptCard(prompt: TerminalPrompt.privacyCard(notice))
+                                .id("beautified-privacy")
                                 .transition(.opacity)
                         }
                         if let prompt = model.prompt {
@@ -3692,7 +3830,9 @@ func terminalTail(_ screen: String, _ n: Int = 45) -> [String] {
 /// Claude's trust dialog is likewise answerable inline (its arrow list puts
 /// "Yes, I trust this folder" one Down from the default "No, exit").
 struct TerminalPrompt: Equatable {
-    enum Kind: Equatable { case trust, login, picker, checklist }
+    /// `notice`: something the agent shows that isn't a dialog (Grok's
+    /// data-retention banner) — told, not answered here.
+    enum Kind: Equatable { case trust, login, picker, checklist, notice }
     let kind: Kind
     /// Trust: the folder path. (Login carries its state in the fields below.)
     var detail: String = ""
@@ -3719,6 +3859,9 @@ struct TerminalPrompt: Equatable {
     /// Checklist — a multi-select ("Select any you wish to enable."): its
     /// rows (`options`) and their check boxes as they stand on screen.
     var checklist: AgentScreen.Checklist? = nil
+    /// Grok's data-retention banner, up with (or without) a dialog: what it
+    /// says. Its own card, never mixed into a dialog's.
+    var privacyNotice: String? = nil
 
     var headline: String {
         switch kind {
@@ -3726,6 +3869,8 @@ struct TerminalPrompt: Equatable {
         case .login: return NSLocalizedString("Sign in to Claude", comment: "prompt")
         case .picker, .checklist:
             return title.isEmpty ? NSLocalizedString("The agent is asking", comment: "prompt") : title
+        case .notice:
+            return title
         }
     }
 
@@ -3738,6 +3883,36 @@ struct TerminalPrompt: Equatable {
         return Array(repeating: moves > 0 ? "Down" : "Up", count: abs(moves)) + ["Enter"]
     }
 
+    /// An option that approves more than this one action — Grok's "Yes, and
+    /// don't ask again for anything (always-approve mode)", "always allow…",
+    /// "approve for this session". The agent's own cursor often starts on
+    /// it; the card never pushes it.
+    static func isBlanketApproval(_ label: String) -> Bool {
+        let l = AgentPhrases.normalize(label)
+        return ["don't ask again", "always-approve", "always approve", "always allow",
+                "for this session", "for the rest of the session", "yolo"].contains { l.contains($0) }
+    }
+
+    /// The options in the order the card lists them: one-off answers first,
+    /// the blanket approvals last. Each keeps its own index (what the keys
+    /// pick on screen).
+    var cardOptions: [LoginOption] {
+        options.filter { !Self.isBlanketApproval($0.label) } + options.filter { Self.isBlanketApproval($0.label) }
+    }
+
+    /// The option the card marks as the default: the agent's cursor row,
+    /// unless that is a blanket approval — then the safest yes (allow once)
+    /// when there is one, else none (all rows look alike).
+    var cardHighlight: Int? {
+        let current = selectedOption ?? options.first?.index
+        guard let current, let row = options.first(where: { $0.index == current }) else { return nil }
+        guard Self.isBlanketApproval(row.label) else { return current }
+        return options.first(where: { o in
+            let l = AgentPhrases.normalize(o.label)
+            return !Self.isBlanketApproval(o.label) && (l.contains("once") || l.hasPrefix("yes"))
+        })?.index
+    }
+
     static func detect(inScreen screen: String, agent: String? = nil) -> TerminalPrompt? {
         detect(tail: terminalTail(screen), agent: agent)
     }
@@ -3747,6 +3922,24 @@ struct TerminalPrompt: Equatable {
     /// only to name what a shape is (a sign-in method list, a trust dialog
     /// we can answer in one click).
     static func detect(tail: [String], agent: String? = nil) -> TerminalPrompt? {
+        let lines = tail.map { String($0.reversed().drop(while: \.isWhitespace).reversed()) }
+        let notice = AgentScreen.dataRetentionNotice(lines)
+        guard var p = detectDialog(tail: tail, agent: agent) else {
+            return notice.map(privacyCard)
+        }
+        p.privacyNotice = notice
+        return p
+    }
+
+    /// The data-retention banner on its own.
+    static func privacyCard(_ text: String) -> TerminalPrompt {
+        TerminalPrompt(kind: .notice, detail: text,
+                       title: NSLocalizedString("Grok asks whether xAI may keep your coding data",
+                                                comment: "prompt: Grok data-retention banner"),
+                       privacyNotice: text)
+    }
+
+    private static func detectDialog(tail: [String], agent: String?) -> TerminalPrompt? {
         // Indentation kept (it aligns an unnumbered menu); trailing blanks off.
         let lines = tail.map { String($0.reversed().drop(while: \.isWhitespace).reversed()) }
         let screen = lines.joined(separator: "\n")
@@ -3789,8 +3982,12 @@ struct TerminalPrompt: Equatable {
                                       options: menu.options, selectedOption: menu.selected)
             }
             // Codex's older dialog defaults to "Yes, continue": Enter takes it.
+            // Grok's (1.0.46: "y  Yes, proceed / n  No, quit — Enter or y to
+            // trust") has letter-keyed rows, no cursor: Enter takes it too.
             return TerminalPrompt(kind: .trust, detail: folder,
-                                  canAnswerTrust: low.contains("yes, continue"), trustKeys: ["Enter"])
+                                  canAnswerTrust: low.contains("yes, continue")
+                                      || low.contains("enter or y to trust"),
+                                  trustKeys: ["Enter"])
         }
 
         // Any other dialog up right now — a permission prompt, auto mode's
@@ -4072,7 +4269,7 @@ private struct FailureCard: View {
                     .padding(.top, 3)
                 } else if failure.kind == .blocked {
                     // The provider was never reached: Bromure stopped it.
-                    Text(NSLocalizedString(
+                    Text((failure.blockedBy ?? .unknown).recoveryHint ?? NSLocalizedString(
                         "Nothing reached the provider. The Security Timeline has the details; send again once it's resolved.",
                         comment: "failure hint: Bromure's proxy blocked the agent's request"))
                         .font(.system(size: 11))
@@ -4184,6 +4381,7 @@ private struct PromptCard: View {
         case .trust: return "hand.raised.fill"
         case .picker: return "questionmark.circle.fill"
         case .checklist: return "checklist"
+        case .notice: return "hand.raised.circle.fill"
         }
     }
 
@@ -4199,6 +4397,7 @@ private struct PromptCard: View {
                 case .login: loginBody
                 case .picker: pickerBody
                 case .checklist: checklistBody
+                case .notice: noticeBody
                 }
             }
             Spacer(minLength: 0)
@@ -4289,6 +4488,20 @@ private struct PromptCard: View {
         .onAppear { if ticks.count != start.count { ticks = start } }
     }
 
+    /// A banner the agent shows (Grok's data-retention choice): what it
+    /// says, and where it's answered.
+    @ViewBuilder private var noticeBody: some View {
+        if !prompt.detail.isEmpty {
+            Text(prompt.detail)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        Text(NSLocalizedString("Open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+            .font(.system(size: 11)).foregroundStyle(.tertiary)
+    }
+
     @ViewBuilder private var pickerBody: some View {
         if !prompt.detail.isEmpty {
             // What's being asked about: the command, the blocked action.
@@ -4298,8 +4511,10 @@ private struct PromptCard: View {
                 .lineLimit(8).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        ForEach(prompt.options) { option in
-            let highlighted = option.index == (prompt.selectedOption ?? prompt.options.first?.index)
+        // One-off answers first, blanket approvals last; the default marked
+        // only when it isn't a blanket approval (see `cardHighlight`).
+        ForEach(prompt.cardOptions) { option in
+            let highlighted = option.index == prompt.cardHighlight
             Button(action: guarded { onPick(option.index) }) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text("\(option.index)").font(.system(size: 11, weight: .bold, design: .monospaced))

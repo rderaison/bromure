@@ -767,8 +767,18 @@ final class PIIResponseRestorer {
             if type == "response.output_text.delta" {
                 return [Delta(slot: "r\(item):\(o["content_index"] ?? 0)", path: ["delta"], json: false)]
             }
-            if type == "response.function_call_arguments.delta" {
+            if type == "response.function_call_arguments.delta"
+                || type == "response.mcp_call_arguments.delta" {
                 return [Delta(slot: "r\(item)", path: ["delta"], json: true)]
+            }
+            // Codex's freeform tools (code-mode `exec` script, `apply_patch`):
+            // the input streams as raw text, a stand-in may split across deltas.
+            if type == "response.custom_tool_call_input.delta" {
+                return [Delta(slot: "r\(item)", path: ["delta"], json: false)]
+            }
+            // Realtime API text / transcript streams (same family, per content part).
+            if type == "response.text.delta" || type == "response.audio_transcript.delta" {
+                return [Delta(slot: "r\(item):\(o["content_index"] ?? 0)", path: ["delta"], json: false)]
             }
             if type.contains("reasoning_summary_text") {
                 return [Delta(slot: "r\(item):s\(o["summary_index"] ?? 0)", path: ["delta"], json: false)]

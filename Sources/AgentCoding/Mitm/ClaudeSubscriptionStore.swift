@@ -96,15 +96,19 @@ public struct ClaudeSubscriptionRecord: Codable, Sendable, Equatable {
     /// sets it, because the refresh path renews that silently. Optional so
     /// records written before this existed still decode.
     public var reauthRequiredAt: Date?
+    /// When the HOST last refreshed this grant for real (nil: not since
+    /// sign-in). Shown in `/state` and Settings › Models — never a token.
+    public var lastRefreshedAt: Date?
 
     public init(accessToken: String, refreshToken: String,
                 expiresAt: Date, savedAt: Date,
-                reauthRequiredAt: Date? = nil) {
+                reauthRequiredAt: Date? = nil, lastRefreshedAt: Date? = nil) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresAt = expiresAt
         self.savedAt = savedAt
         self.reauthRequiredAt = reauthRequiredAt
+        self.lastRefreshedAt = lastRefreshedAt
     }
 }
 
@@ -120,11 +124,11 @@ private struct ClaudeSubscriptionFile: Codable {
 }
 
 public final class ClaudeSubscriptionStore: @unchecked Sendable {
-    private let fileURL: URL
     private let lock = NSLock()
-    /// In-memory mirror of the on-disk file; loaded lazily, authoritative for
-    /// this process (the singleton owner serves every session).
-    private var cache: ClaudeSubscriptionFile?
+    /// The encrypted file, shared safely with any other process using it
+    /// (reloaded when another process changes it, flock'd read-modify-write,
+    /// never overwritten while unreadable — see ``SubscriptionStoreFile``).
+    private let backing: SubscriptionStoreFile<ClaudeSubscriptionFile>
 
     /// Bogus `ANTHROPIC_API_KEY` values currently in use by subscription-mode
     /// sessions → the profile they belong to. The proxy fires its transform
@@ -138,31 +142,50 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
         let supportDir = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!.appendingPathComponent("BromureAC", isDirectory: true)
-        self.fileURL = fileURL ?? supportDir.appendingPathComponent("claude-subscription.enc")
+        backing = SubscriptionStoreFile(
+            fileURL: fileURL ?? supportDir.appendingPathComponent("claude-subscription.enc"),
+            tag: "claude-sub", empty: { ClaudeSubscriptionFile(shared: nil, perProfile: [:]) })
     }
 
     // MARK: - Records
 
-    private func loadLocked() -> ClaudeSubscriptionFile {
-        if let cache { return cache }
-        let empty = ClaudeSubscriptionFile(shared: nil, perProfile: [:])
-        guard let blob = try? Data(contentsOf: fileURL) else {
-            cache = empty          // no file yet: genuinely empty
-            return empty
-        }
-        guard let plain = try? SecretsVault.decrypt(blob),
-              let file = try? JSONDecoder().decode(ClaudeSubscriptionFile.self, from: plain)
-        else {
-            // The file exists but can't be read (a keychain hiccup handing
-            // back no/other vault key). Don't CACHE the emptiness — that
-            // would hide the login for the rest of the process and let the
-            // next write replace the real file. Retry on the next read.
-            FileHandle.standardError.write(Data(
-                "[claude-sub] couldn't decrypt \(fileURL.lastPathComponent); will retry\n".utf8))
-            return empty
-        }
-        cache = file
-        return file
+    /// The file's current contents (reloaded when another process changed it;
+    /// an unreadable file reads as the last good copy, never cached empty).
+    private func loadLocked() -> ClaudeSubscriptionFile { backing.read() }
+
+    @discardableResult
+    private func mutate(_ body: (inout ClaudeSubscriptionFile) throws -> Bool) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return try backing.mutate(body)
+    }
+
+    /// The file exists but can't be read: its logins are hidden and nothing
+    /// is written over it.
+    public var isUnreadable: Bool {
+        lock.lock(); defer { lock.unlock() }
+        _ = backing.read()
+        return backing.isUnreadable
+    }
+
+    /// The cross-process lock the refresher holds around read → refresh → write.
+    var refreshLockURL: URL { backing.refreshLockURL }
+
+    /// Test seam: make writes fail (a full / read-only disk).
+    var failWritesForTesting: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return backing.failWritesForTesting }
+        set { lock.lock(); backing.failWritesForTesting = newValue; lock.unlock() }
+    }
+
+    /// Refresh time, expiry and re-auth state of the login `profileID` reads —
+    /// no token data. nil when there's no login (and the store is readable).
+    public func health(for profileID: UUID?) -> SubscriptionLoginHealth? {
+        lock.lock(); defer { lock.unlock() }
+        let file = loadLocked()
+        let unreadable = backing.isUnreadable
+        let r = slotLocked(file, profileID)?.record
+        guard r != nil || unreadable else { return nil }
+        return SubscriptionLoginHealth(lastRefreshedAt: r?.lastRefreshedAt, accessExpiresAt: r?.expiresAt,
+                                       reauthRequiredAt: r?.reauthRequiredAt, storeUnreadable: unreadable)
     }
 
     /// The storage slot a profile's credential lives in — its own override
@@ -206,13 +229,13 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     /// base's override if it has one, else the shared login — WITHOUT copying
     /// the grant. `forget(for: profileID)` drops the alias again.
     public func alias(_ profileID: UUID, to base: UUID) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        let owner = file.aliases?[base.uuidString] ?? base.uuidString
-        var aliases = file.aliases ?? [:]
-        aliases[profileID.uuidString] = owner
-        file.aliases = aliases
-        try persistLocked(file)
+        try mutate { file in
+            let owner = file.aliases?[base.uuidString] ?? base.uuidString
+            var aliases = file.aliases ?? [:]
+            aliases[profileID.uuidString] = owner
+            file.aliases = aliases
+            return true
+        }
     }
 
     // MARK: - Re-auth state
@@ -245,42 +268,28 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     }
 
     private func setReauth(_ flagged: Bool, expected: String?,
-                           resolve: (ClaudeSubscriptionFile) -> (key: String, record: ClaudeSubscriptionRecord)?) {
-        lock.lock()
-        var file = loadLocked()
-        let stamp = flagged ? Date() : nil
-        var changed = false
-        if let (key, r0) = resolve(file),
-           expected == nil || r0.refreshToken == expected {
-            var r = r0
-            if !(r.reauthRequiredAt == stamp || (flagged && r.reauthRequiredAt != nil)) {
-                r.reauthRequiredAt = stamp
-                writeSlot(&file, key, r)
-                changed = true
+                           resolve: @escaping (ClaudeSubscriptionFile) -> (key: String, record: ClaudeSubscriptionRecord)?) {
+        let changed: Bool
+        do {
+            changed = try mutate { file in
+                guard let (key, r0) = resolve(file),
+                      expected == nil || r0.refreshToken == expected,
+                      (r0.reauthRequiredAt != nil) != flagged else { return false }
+                var r = r0
+                r.reauthRequiredAt = flagged ? Date() : nil
+                self.writeSlot(&file, key, r)
+                return true
             }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[claude-sub] couldn't \(flagged ? "flag" : "clear") the sign-in state: \(error)\n".utf8))
+            return
         }
-        if changed { try? persistLocked(file) }
-        lock.unlock()
         if changed {
             NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
         }
     }
 
-    private func persistLocked(_ file: ClaudeSubscriptionFile) throws {
-        cache = file
-        let plain = try JSONEncoder().encode(file)
-        let blob = try SecretsVault.encrypt(plain)
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        try blob.write(to: fileURL, options: .atomic)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: NSNumber(value: 0o600)],
-            ofItemAtPath: fileURL.path)
-    }
-
-    /// The credential to use for `profileID`: its per-profile override if one
-    /// exists, otherwise the shared default. `nil` profileID → shared only.
     /// True when THIS profile has its own per-profile record (as opposed to
     /// only inheriting the shared one). Lets a per-workspace log-out clear
     /// the right scope.
@@ -289,6 +298,8 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
         return loadLocked().perProfile[profileID.uuidString] != nil
     }
 
+    /// The credential to use for `profileID`: its per-profile override if one
+    /// exists, otherwise the shared default. `nil` profileID → shared only.
     public func record(for profileID: UUID?) -> ClaudeSubscriptionRecord? {
         slot(for: profileID)?.record
     }
@@ -300,60 +311,53 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     }
 
     public func setShared(_ record: ClaudeSubscriptionRecord) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        file.shared = record
-        try persistLocked(file)
+        try mutate { $0.shared = record; return true }
     }
 
     public func setOverride(_ record: ClaudeSubscriptionRecord, for profileID: UUID) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        file.perProfile[profileID.uuidString] = record
-        try persistLocked(file)
+        try mutate { $0.perProfile[profileID.uuidString] = record; return true }
     }
 
     /// Replace whichever record backs `profileID` (override if present, else
-    /// shared) — used by the refresher to persist rotated tokens in place.
+    /// shared).
     public func update(_ record: ClaudeSubscriptionRecord, for profileID: UUID?) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        writeSlot(&file, slotLocked(file, profileID)?.key ?? "shared", record)
-        try persistLocked(file)
+        try mutate { file in
+            self.writeSlot(&file, self.slotLocked(file, profileID)?.key ?? "shared", record)
+            return true
+        }
     }
 
     /// Persist a refresh's rotated tokens into `slotKey` — but only while that
     /// slot still holds `sentRefresh`, the refresh token the grant was spent
-    /// with. If the user re-registered (or signed out) meanwhile, the slot
-    /// holds a different grant that must not be clobbered: returns false.
-    /// The in-memory cache takes the tokens even when the disk write fails, so
-    /// this process keeps using the live grant (the spent one is dead).
+    /// with (checked against the file as it is NOW, under the cross-process
+    /// lock). If the user re-registered, signed out, or another process
+    /// refreshed meanwhile, returns false. Throws when the write fails: the
+    /// rotated token is never kept only in memory.
     public func commitRefresh(_ record: ClaudeSubscriptionRecord, slotKey: String,
-                              replacing sentRefresh: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        let current = slotKey == "shared" ? file.shared : file.perProfile[slotKey]
-        guard current?.refreshToken == sentRefresh else { return false }
-        writeSlot(&file, slotKey, record)
-        do { try persistLocked(file) } catch {
-            FileHandle.standardError.write(Data(
-                "[claude-sub] couldn't persist the rotated token (kept in memory): \(error)\n".utf8))
+                              replacing sentRefresh: String) throws -> Bool {
+        try mutate { file in
+            let current = slotKey == "shared" ? file.shared : file.perProfile[slotKey]
+            guard let held = current, held.refreshToken == sentRefresh else { return false }
+            // Same grant, rotated: it was registered when it was, not now.
+            var record = record
+            record.savedAt = held.savedAt
+            self.writeSlot(&file, slotKey, record)
+            return true
         }
-        return true
     }
 
     /// Forget the per-profile override (and, when `profileID == nil`, the
     /// shared default). Used by the "Forget" UI action.
     public func forget(for profileID: UUID?) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        if let pid = profileID {
-            file.perProfile[pid.uuidString] = nil
-            file.aliases?[pid.uuidString] = nil
-        } else {
-            file.shared = nil
+        try mutate { file in
+            if let pid = profileID {
+                file.perProfile[pid.uuidString] = nil
+                file.aliases?[pid.uuidString] = nil
+            } else {
+                file.shared = nil
+            }
+            return true
         }
-        try persistLocked(file)
     }
 
     // MARK: - Bogus-key registry
@@ -461,16 +465,19 @@ public actor ClaudeSubscriptionRefresher {
               record.accessToken == stale else { return }
         if let last = lastRefreshAt[slot],
            Date().timeIntervalSince(last) < Self.forcedRefreshFloor { return }
-        _ = try? await refresh(slot: slot, force: true)
+        _ = try? await refresh(slot: slot, force: true, unlessAccessIsNot: stale)
     }
 
-    /// Join the slot's in-flight refresh, or start it.
-    private func refresh(slot: String, force: Bool) async throws -> String {
+    /// Join the slot's in-flight refresh, or start it. `unlessAccessIsNot`:
+    /// a forced refresh is skipped when, once the cross-process lock is held,
+    /// the slot no longer holds that access token (another process already
+    /// refreshed it).
+    private func refresh(slot: String, force: Bool, unlessAccessIsNot seen: String? = nil) async throws -> String {
         if let running = inflight[slot] { return try await running.value }
         // Unstructured on purpose: a caller giving up (its guest connection
         // dropped) must not cancel a refresh that already spent the old
         // refresh token — its result has to be stored.
-        let task = Task { try await self.performRefresh(slot: slot, force: force) }
+        let task = Task { try await self.performRefresh(slot: slot, force: force, seen: seen) }
         inflight[slot] = task
         defer { inflight[slot] = nil }
         return try await task.value
@@ -478,11 +485,21 @@ public actor ClaudeSubscriptionRefresher {
 
     /// POST the refresh_token grant to platform.claude.com, persist the rotated
     /// tokens, return the new access token. Goes direct (not via the MITM).
-    private func performRefresh(slot: String, force: Bool) async throws -> String {
+    private func performRefresh(slot: String, force: Bool, seen: String?) async throws -> String {
+        // Another process (the CLI, a fat client, a second instance) may
+        // refresh this same grant: hold the store's refresh lock across
+        // read → refresh → write, and re-read under it.
+        let held = try await SubscriptionRefreshLock.acquire(store.refreshLockURL)
+        defer { SubscriptionRefreshLock.release(held) }
         guard let record = store.slot(forKey: slot) else {
             throw ClaudeSubscriptionError.noCredential
         }
         if !force, record.expiresAt.timeIntervalSinceNow > Self.refreshMargin {
+            return record.accessToken
+        }
+        if force, let seen, record.accessToken != seen {
+            FileHandle.standardError.write(Data(
+                "[claude-sub] refresh (\(slot)) already done elsewhere; reused\n".utf8))
             return record.accessToken
         }
         let sent = record.refreshToken
@@ -549,8 +566,18 @@ public actor ClaudeSubscriptionRefresher {
             accessToken: newAccess,
             refreshToken: newRefresh,
             expiresAt: Date().addingTimeInterval(expiresIn),
-            savedAt: Date())
-        guard store.commitRefresh(updated, slotKey: slot, replacing: sent) else {
+            savedAt: record.savedAt, lastRefreshedAt: Date())
+        let committed: Bool
+        do {
+            committed = try store.commitRefresh(updated, slotKey: slot, replacing: sent)
+        } catch {
+            // The grant was spent but the rotated pair couldn't be written:
+            // never keep it only in memory — say so loudly and fail.
+            FileHandle.standardError.write(Data(
+                "[claude-sub] refresh (\(slot)) succeeded but the rotated token couldn't be saved: \(error)\n".utf8))
+            throw error
+        }
+        guard committed else {
             // The slot changed under us (re-registered / signed out): serve
             // whatever it holds now rather than resurrect the old grant.
             FileHandle.standardError.write(Data(

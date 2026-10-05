@@ -583,9 +583,19 @@ public final class SecurityTimeline {
             let engine = names.first ?? pi
             // Both engines missed it: one row, the other named in the condition.
             let cond = names.count > 1 ? "\(host) (\(names.joined(separator: " + ")))" : host
-            return row(engine, cond,
-                       String(format: NSLocalizedString("not scanned — %@", comment: "Security Timeline decision: content scans skipped; %@ = reason"), reason),
-                       .info)
+            // Fail closed: a body the proxy couldn't decode was refused, not sent.
+            let blocked = str(d, "action")?.lowercased() == "blocked"
+            var e = blocked
+                ? row(engine, cond,
+                      String(format: NSLocalizedString("blocked, not sent — %@", comment: "Security Timeline decision: request refused because the content scans couldn't read it; %@ = reason"), reason),
+                      .blocked)
+                : row(engine, cond,
+                      String(format: NSLocalizedString("not scanned — %@", comment: "Security Timeline decision: content scans skipped; %@ = reason"), reason),
+                      .info)
+            // Every occurrence is emitted; repeats fold into one row with a
+            // count so a per-request miss reads "×N", not a single quiet row.
+            e.coalesceKey = "content_scan|\(blocked ? "blocked" : "skipped")|\(host.lowercased())|\(reason)|\(ids.joined(separator: ","))"
+            return e
 
         case "prompt_injection.detection":
             let action = (str(d, "action") ?? "detected").lowercased()

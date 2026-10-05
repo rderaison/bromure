@@ -719,6 +719,26 @@ struct TranscriptPin: Equatable, Sendable {
     /// Kimi sessions other sessions on the machine own: never this tab's,
     /// however recently written (two Kimi tabs in one folder).
     var kimiExclude: [String] = []
+    /// Grok's session (its folder `~/.grok/sessions/<cwd>/<uuid>/`) or
+    /// Codex's conversation (`rollout-…-<uuid>.jsonl`): that file only —
+    /// never the folder's newest, which after a relaunch was an archived
+    /// session's (Grok), or a second session's live rollout (Codex).
+    var grokSession: String? = nil
+    var codexSession: String? = nil
+
+    /// The pin a session's own conversation id gives (`agentTranscriptID`),
+    /// for the agents that key their store by folder or date.
+    static func conversation(tool: String, id: String?) -> TranscriptPin {
+        var p = TranscriptPin()
+        guard let id else { return p }
+        switch tool {
+        case "kimi" where AgentSessionLocator.isKimiSessionID(id): p.kimiSession = id
+        case "grok" where AgentSessionLocator.isConversationUUID(id): p.grokSession = id
+        case "codex" where AgentSessionLocator.isConversationUUID(id): p.codexSession = id
+        default: break
+        }
+        return p
+    }
 
     /// A Kimi tab whose session isn't pinned yet: the session its process
     /// names on its command line (`-S session_…`) when it does; else only
@@ -949,6 +969,25 @@ enum AgentSessionLocator {
     /// session's transcript.
     nonisolated static func isKimiSessionID(_ s: String) -> Bool {
         s.hasPrefix("session_") && s.count == 44 && UUID(uuidString: String(s.dropFirst(8))) != nil
+    }
+
+    /// A conversation id as Grok and Codex name their files: a UUID, in
+    /// its canonical 36-character form (safe to splice into a glob).
+    nonisolated static func isConversationUUID(_ s: String) -> Bool {
+        s.count == 36 && UUID(uuidString: s) != nil
+    }
+
+    /// `$varName` = Grok session `id`'s transcript, whatever folder it's under.
+    nonisolated static func grokPinnedFragment(id: String, into varName: String) -> String {
+        guard isConversationUUID(id) else { return "" }
+        return "\(varName)=$(ls -t \"$HOME\"/.grok/sessions/*/\(id)/updates.jsonl 2>/dev/null | head -1); "
+    }
+
+    /// `$varName` = Codex conversation `id`'s rollout, whatever day it began.
+    nonisolated static func codexPinnedFragment(id: String, into varName: String) -> String {
+        guard isConversationUUID(id) else { return "" }
+        return "\(varName)=$(find \"$HOME/.codex/sessions\" -name 'rollout-*\(id).jsonl' 2>/dev/null "
+            + "| xargs -r ls -t 2>/dev/null | head -1); "
     }
 
     /// The Kimi session id in a journal's path, nil when it isn't one.
@@ -1419,6 +1458,23 @@ enum PaneTypeGuard {
             + "|| { tmux delete-buffer -b \"$_bb\" 2>/dev/null; false; }; }"
     }
 
+    /// `text` with a space after it when it ends in a token an agent's
+    /// composer completes — a path or a slash command ("… && ls /tmp"), an
+    /// @-mention, a $skill. Grok fuzzy-matched the pasted "/tmp" against its
+    /// slash commands and the submitting Enter took the popup's pick: the
+    /// message went out as "ls /timestamps". After a space the token is
+    /// finished and no popup stays open; agents trim the space. A message
+    /// that IS one slash command ("/model") keeps its popup (Enter there
+    /// runs that command). Idempotent.
+    nonisolated static func completionSafe(_ text: String) -> String {
+        let t = normalizedText(text)
+        guard let end = t.last, !end.isWhitespace else { return text }
+        let tokens = t.split(whereSeparator: \.isWhitespace)
+        guard tokens.count >= 2, let last = tokens.last, let first = last.first else { return text }
+        guard "/@$".contains(first) || last.contains("/") else { return text }
+        return text + " "
+    }
+
     /// Text longer than this (bytes) is staged in pieces before it's typed:
     /// one guest command line is one argv string, capped at 128 KB.
     nonisolated static let inlineLimit = 24 * 1024
@@ -1482,7 +1538,7 @@ enum PaneTypeGuard {
     /// `typedMarker` is printed once it all went in. `staged`: the text was
     /// written to that file first (`stageCommands`); removed at the end.
     nonisolated static func typeCommand(target: PaneTarget, text: String, staged: String? = nil) -> String {
-        let send = literalSend(text, staged: staged)
+        let send = literalSend(target.foreground == .agent ? completionSafe(text) : text, staged: staged)
         let enter = "tmux send-keys -t \"$_bt\" Enter && echo \(typedMarker)"
         var cmd: String
         switch target.foreground {
@@ -1511,6 +1567,7 @@ enum PaneTypeGuard {
     nonisolated static func runType(target: PaneTarget, text: String,
                                     exec: (String) async -> String?) async -> String? {
         guard needsStaging(text) else { return await exec(typeCommand(target: target, text: text)) }
+        let text = target.foreground == .agent ? completionSafe(text) : text
         let path = newStagePath()
         for step in stageCommands(text, path: path) {
             guard await exec(step) != nil else {
@@ -2985,6 +3042,10 @@ final class CodingTaskEngine {
     /// (the checkout was removed but the work is safe on the branch). The
     /// original directory when the task remembers one, else the guest's
     /// worktrees layout. nil on failure.
+    /// Why a task's worktree is locked (`git worktree list` shows it on the
+    /// Mac for a shared repository). Same words as agentd's.
+    static let worktreeLockReason = "Bromure task checkout inside the workspace VM; unlocked and removed when the task ends"
+
     private func recreateWorktree(profileID: UUID, root: String, branch: String,
                                   preferredDir: String?) async -> String? {
         guard let delegate, Self.isSafeBranch(branch) else { return nil }
@@ -2998,6 +3059,9 @@ final class CodingTaskEngine {
         let qr = Self.shellQuote(root), qd = Self.shellQuote(dir)
         let cmd = "git -C \(qr) worktree prune 2>/dev/null; mkdir -p \"$(dirname \(qd))\" && "
             + "git -C \(qr) worktree add \(qd) '\(branch)' 2>&1 | tail -3 >&2; "
+            // Locked like agentd's own (`_worktree_lock`): a host-side
+            // prune in a shared repo would otherwise drop it.
+            + "git -C \(qr) worktree lock --reason \(Self.shellQuote(Self.worktreeLockReason)) \(qd) 2>/dev/null; "
             + "[ -d \(qd) ]"
         guard (try? await delegate.guestExec(profileID: profileID, command: cmd, timeout: 60)) != nil
         else { return nil }
@@ -3225,6 +3289,12 @@ final class CodingTaskEngine {
         // by the engine once this launch's journal appeared) names its file.
         if agent == "kimi", let id = pin.kimiSession, AgentSessionLocator.isKimiSessionID(id) {
             cmd += AgentSessionLocator.kimiPinnedFragment(id: id, into: "f")
+        } else if agent == "grok", let id = pin.grokSession, AgentSessionLocator.isConversationUUID(id) {
+            // The session's own conversation, or nothing yet (`pe`): never
+            // the folder's newest, which may be another session's.
+            cmd += AgentSessionLocator.grokPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "codex", let id = pin.codexSession, AgentSessionLocator.isConversationUUID(id) {
+            cmd += AgentSessionLocator.codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
         } else if let w = pinnedWindow {
             // The transcript the tab's agent itself named (its hook records the
             // path per window — see agent-status.sh) wins over "the newest file

@@ -252,6 +252,13 @@ final class DelegationEngine {
         return only.contains(to)
     }
 
+    /// What a reach refusal tells the agent to pass on: where the user
+    /// opens it. New workspaces reach no other one until the user does.
+    nonisolated static func howToReach(_ target: String, from mine: String) -> String {
+        "Ask the user to open “\(mine)” settings › General › Reach and tick “\(target)” "
+            + "(or turn on “Every workspace”), then try again."
+    }
+
     func workspaceName(_ id: UUID) -> String {
         if let h = sessions.host(for: id) { return h.hostName }
         return profiles().first { $0.id == id }?.name ?? ""
@@ -320,7 +327,8 @@ final class DelegationEngine {
         if let nick, let other = sessions.sessions.first(where: { $0.nickname?.lowercased() == nick && !$0.isDeleted }) {
             if other.id == me.id { throw DelegationRefusal("@\(other.nickname ?? nick) is you.") }
             if other.isArchived { throw DelegationRefusal("@\(other.nickname ?? nick) is archived — the user has to bring it back first.") }
-            throw DelegationRefusal("@\(other.nickname ?? nick) is in workspace “\(workspaceName(other.profileID))”, which this workspace's settings don't let you reach.")
+            throw DelegationRefusal("@\(other.nickname ?? nick) is in workspace “\(workspaceName(other.profileID))”, which isn't reachable from this workspace. "
+                + Self.howToReach(workspaceName(other.profileID), from: workspaceName(me.profileID)))
         }
         throw DelegationRefusal("No session named “\(raw)” — list_peers shows who you can reach.")
     }
@@ -337,7 +345,8 @@ final class DelegationEngine {
             }()
         guard let hit else { throw DelegationRefusal("No workspace named “\(key)” — list_peers names the ones you can reach.") }
         guard canReach(from: me.profileID, to: hit.id) else {
-            throw DelegationRefusal("Workspace “\(hit.name)” isn't reachable from this one — its settings say which workspaces agents here may reach.")
+            throw DelegationRefusal("Workspace “\(hit.name)” isn't reachable from this workspace. "
+                + Self.howToReach(hit.name, from: workspaceName(me.profileID)))
         }
         return hit
     }
@@ -396,7 +405,7 @@ final class DelegationEngine {
             }
             if let nick, !remotePeersAllowed(from: me),
                let far = remoteLinks().first(where: { l in l.remoteSessions.sessions.contains { $0.nickname?.lowercased() == nick && !$0.isDeleted } }) {
-                throw DelegationRefusal("@\(nick) is on “\(far.hostName)” — this workspace's settings keep its agents to the workspaces they name, so other hosts are out of reach.")
+                throw DelegationRefusal("@\(nick) is on “\(far.hostName)” — this workspace's settings keep its agents to the workspaces they name, so other hosts are out of reach. Tell the user: in the settings of workspace “\(workspaceName(me.profileID))”, General › Reach, turning on “Every workspace” lets its agents reach other hosts too.")
             }
             throw local
         }

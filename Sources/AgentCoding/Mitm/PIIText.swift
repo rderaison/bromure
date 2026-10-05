@@ -525,7 +525,10 @@ enum PIIText {
     }
 
     private static func canBridge(_ ns: NSString, _ a: PIISpan, _ b: PIISpan) -> Bool {
-        guard a.label == b.label else { return false }
+        // A given name and a surname side by side are one person's name
+        // ("Jane Q." + "Example", "Mary-Ann" + "O'Neil"): one span, one
+        // stand-in — not "<stand-in>. Example" or three names counted.
+        guard a.label == b.label || (a.label.isName && b.label.isName) else { return false }
         let (l, r) = a.start <= b.start ? (a, b) : (b, a)
         guard r.start >= l.end else { return false }
         guard r.start - l.end <= 8 else { return false }
@@ -577,6 +580,23 @@ enum PIIText {
                 s.end = span.end + m.range.length
             }
         }
+        // A name that ends on a middle initial ("Jane Q", "John F") goes on
+        // past the initial's period to the surname the model missed:
+        // "Jane Q. Example", "John F. Kennedy", "Ann B. O'Neil-Smith".
+        if s.end == span.end, span.end - span.start >= 3, isInitial(ns, span.end - 1),
+           ns.substring(with: NSRange(location: span.start, length: span.end - 1 - span.start))
+               .contains(where: { $0 == " " || $0 == "\u{00a0}" }) {
+            let rTo2 = min(ns.length, span.end + 40)
+            let tail = ns.substring(with: NSRange(location: span.end, length: rTo2 - span.end))
+            if let m = initialTail.firstMatch(in: tail, range: NSRange(location: 0, length: (tail as NSString).length)),
+               span.end + m.range.length <= rightBound {
+                s.end = span.end + m.range.length
+            }
+        }
         return s
     }
+
+    /// After a middle initial: its period, a space, then a capitalized word
+    /// (apostrophes and hyphens inside it: "O'Neil", "Smith-Jones").
+    private static let initialTail = regex(#"^\.[ \x{00a0}]{1,2}[\p{Lu}][\p{L}\p{M}]*(?:['\x{2019}\-][\p{L}][\p{L}\p{M}]*)*"#)
 }

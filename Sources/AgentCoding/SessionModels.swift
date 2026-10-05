@@ -150,8 +150,11 @@ enum AgentStatus: String, Sendable {
     case working, done, needsInput
 
     /// Parse a guest-hook signal ("working"/"done"/"needsInput"/"needs-input").
+    /// Only its first line: the reporter adds the hook's session id on a
+    /// second one (`AgentStatusReport`).
     init?(signal: String) {
-        switch signal.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        let first = signal.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        switch first.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "working": self = .working
         case "done": self = .done
         case "needsinput", "needs-input", "needs_input": self = .needsInput

@@ -376,7 +376,10 @@ final class ChatQueueStore: ObservableObject {
             if case .refused? = outcome { return }
             if outcome == .failed { return }
             // Typed: the next batch (if any came in) waits for the next idle.
-            if outcome == .typed { idleSince = nil }
+            // Held (a dialog is up): it waits for a fresh idle stretch too —
+            // the agent redraws once the dialog closes, and text typed into
+            // that moment is lost.
+            if outcome == .typed || outcome == .held { idleSince = nil }
         }
     }
 

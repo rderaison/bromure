@@ -443,17 +443,68 @@ struct TurnChanges: Equatable {
     static func of(_ items: [TranscriptItem]) -> TurnChanges? {
         var c = TurnChanges()
         c.since = items.compactMap(\.timestamp).min()
-        for item in items {
+        for (i, item) in items.enumerated() {
             guard case .toolUse(let name, _, let detail) = item.kind,
-                  ActivitySummary.category(name) == .edit else { continue }
+                  ActivitySummary.category(name) == .edit,
+                  !isUnsettledEdit(at: i, in: items) else { continue }
             c.add(detail)
         }
         return c.files.isEmpty && c.added == 0 && c.removed == 0 ? nil : c
     }
 
+    /// An edit that hasn't happened (yet): nothing after it so far — the
+    /// agent is waiting for its approval, or still applying it — or its
+    /// result says it failed (refused).
+    static func isUnsettledEdit(at i: Int, in items: [TranscriptItem]) -> Bool {
+        guard case .toolUse(let name, _, _) = items[i].kind else { return false }
+        let after = items[(i + 1)...].filter {
+            if case .thinking = $0.kind { return false }
+            return true
+        }
+        guard !after.isEmpty else { return true }
+        for item in after {
+            if case .toolResult(let tool, _, let isError) = item.kind, tool == name { return isError }
+        }
+        return false
+    }
+
     private static func lines(_ s: String) -> Int {
         let t = s.hasSuffix("\n") ? String(s.dropLast()) : s
         return t.isEmpty ? 0 : t.split(separator: "\n", omittingEmptySubsequences: false).count
+    }
+
+    /// An edit's old → new text counted as the review's diff counts it:
+    /// lines kept on both sides are no change. (Counting every line of each
+    /// side made "+12 −3" of an edit the review showed as "+9 −0".)
+    private mutating func count(_ old: String, _ new: String) {
+        let d = Self.lineDiff(old, new)
+        added += d.added; removed += d.removed
+    }
+
+    /// Lines added and removed between `old` and `new` (a longest common
+    /// subsequence of lines; past a size cap, every differing line between
+    /// the common head and tail).
+    static func lineDiff(_ old: String, _ new: String) -> (added: Int, removed: Int) {
+        func split(_ s: String) -> [Substring] {
+            let t = s.hasSuffix("\n") ? Substring(s.dropLast()) : Substring(s)
+            return t.isEmpty ? [] : t.split(separator: "\n", omittingEmptySubsequences: false)
+        }
+        var a = split(old)[...], b = split(new)[...]
+        while let x = a.first, let y = b.first, x == y { a = a.dropFirst(); b = b.dropFirst() }
+        while let x = a.last, let y = b.last, x == y { a = a.dropLast(); b = b.dropLast() }
+        let n = a.count, m = b.count
+        guard n > 0, m > 0 else { return (m, n) }
+        guard n * m <= 1_000_000 else { return (m, n) }
+        let aa = Array(a), bb = Array(b)
+        var prev = [Int](repeating: 0, count: m + 1), cur = prev
+        for i in 1...n {
+            for j in 1...m {
+                cur[j] = aa[i - 1] == bb[j - 1] ? prev[j - 1] + 1 : max(prev[j], cur[j - 1])
+            }
+            swap(&prev, &cur)
+        }
+        let common = prev[m]
+        return (m - common, n - common)
     }
 
     private mutating func touch(_ path: String?) {
@@ -469,12 +520,12 @@ struct TurnChanges: Equatable {
         let path = ["file_path", "path", "notebook_path", "filePath"].lazy
             .compactMap { input[$0] as? String }.first
         if let old = input["old_string"] as? String, let new = input["new_string"] as? String {
-            touch(path); removed += Self.lines(old); added += Self.lines(new)
+            touch(path); count(old, new)
         } else if let edits = input["edits"] as? [[String: Any]] {
             touch(path)
             for e in edits {
-                removed += Self.lines(e["old_string"] as? String ?? e["oldText"] as? String ?? "")
-                added += Self.lines(e["new_string"] as? String ?? e["newText"] as? String ?? "")
+                count(e["old_string"] as? String ?? e["oldText"] as? String ?? "",
+                      e["new_string"] as? String ?? e["newText"] as? String ?? "")
             }
         } else if let content = input["content"] as? String {
             touch(path); added += Self.lines(content)
@@ -716,6 +767,18 @@ enum ActivitySummary {
         var failures: Int
     }
 
+    /// The texts of a run made only of thinking (consecutive repeats — an
+    /// agent journaling the same thought twice — once), else nil.
+    static func thoughtsOnly(_ items: [TranscriptItem]) -> [String]? {
+        var out: [String] = []
+        for item in items {
+            guard case .thinking(let t) = item.kind else { return nil }
+            let text = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty, out.last != text { out.append(text) }
+        }
+        return items.isEmpty ? nil : out
+    }
+
     static func line(_ items: [TranscriptItem]) -> Line {
         var counts: [Category: Int] = [:]
         var order: [Category] = []
@@ -850,7 +913,20 @@ struct ActivityGroupView: View {
                        : NSLocalizedString("Show what the agent did", comment: "activity line"))
             if open {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(items) { TranscriptItemView(item: $0) }
+                    if let thoughts = ActivitySummary.thoughtsOnly(items) {
+                        // A run that is only thinking: the line already says
+                        // "Thought" — its text, not a second "Thinking" row.
+                        ForEach(Array(thoughts.enumerated()), id: \.offset) { _, text in
+                            Text(text)
+                                .font(.system(size: 11.5))
+                                .italic()
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        ForEach(items) { TranscriptItemView(item: $0) }
+                    }
                 }
                 .padding(.leading, 14)
                 .overlay(alignment: .leading) {

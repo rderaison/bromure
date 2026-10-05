@@ -378,7 +378,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Bromure Agentic Coding beenden?";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d laufende VM(s) (%@) werden gemäß der Schließaktion jedes Arbeitsbereichs geschlossen.";
+"The workspace %@ is running. It will be closed according to its close action." = "Der Arbeitsbereich %@ läuft. Er wird gemäß seiner Schließaktion geschlossen.";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d Arbeitsbereiche laufen (%2$@). Jeder wird gemäß seiner Schließaktion geschlossen.";
+"The infrastructure machine %@ is running and will be suspended." = "Die Infrastrukturmaschine %@ läuft und wird angehalten.";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d Infrastrukturmaschinen laufen (%2$@) und werden angehalten.";
 "Quit" = "Beenden";
 
 /* Guardrails: new prompt-on-write mode */
@@ -3624,6 +3627,7 @@
 "%1$@ is off for %2$@. Click to turn it on." = "%1$@ ist für %2$@ ausgeschaltet. Klicken Sie, um es einzuschalten.";
 /* Security Timeline: skipped content scans, coalesced rows (WS-B) */
 "not scanned — %@" = "nicht geprüft — %@";
+"blocked, not sent — %@" = "blockiert, nicht gesendet — %@";
 "%1$@ (%2$d times, last one shown)" = "%1$@ (%2$d-mal, das letzte wird angezeigt)";
 
 "Security…" = "Sicherheit…";
@@ -3901,8 +3905,8 @@
 /* Kimi approvals setting */
 "Kimi approvals" = "Kimi-Freigaben";
 "Never ask" = "Nie fragen";
-"Ask when needed" = "Bei Bedarf fragen";
-"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "Nie fragen: Kimi Code führt jeden Befehl und jedes Werkzeug aus, ohne nachzufragen – die VM des Arbeitsbereichs und die Schutzmechanismen von Bromure bilden die Sicherheitsgrenze. Bei Bedarf fragen: Routinemäßige Änderungen und Befehle laufen von selbst; riskante Aktionen, Fragen und Pläne warten weiterhin auf Sie. Gilt ab dem nächsten Start oder Fortsetzen.";
+"Ask before sensitive actions" = "Vor sensiblen Aktionen fragen";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "Nie fragen: Kimi Code führt jeden Befehl, jede Änderung und jedes Werkzeug aus, ohne anzuhalten, und entscheidet eigene Rückfragen und Pläne selbst – die VM des Arbeitsbereichs und die Schutzmechanismen von Bromure bilden die Sicherheitsgrenze. Vor sensiblen Aktionen fragen (Kimis Modus „Ask When Needed“): Gewöhnliche Befehle und Änderungen laufen weiterhin ohne Nachfrage; Kimi hält nur an, bevor es sensible Dateien (etwa .env oder SSH-Schlüssel) anfasst, gefährliche Befehle (etwa rm -rf) ausführt oder den Plan-Modus verlässt, und wenn es eine Frage an Sie hat. Gilt ab dem nächsten Start oder Fortsetzen.";
 
 /* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
 "Blocked by Bromure — prompt injection" = "Von Bromure blockiert — Prompt-Injection";
@@ -3919,3 +3923,30 @@
 "denied — no answer in time; the next request asks again" = "abgelehnt — keine Antwort rechtzeitig; die nächste Anfrage fragt erneut";
 "denied — you said no a moment ago" = "abgelehnt — Sie haben gerade Nein gesagt";
 "denied by you" = "von Ihnen abgelehnt";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "Anmeldespeicher nicht lesbar — Bromure überschreibt ihn nicht. Die darin gespeicherten Anmeldungen sind nicht verfügbar, bis er wieder gelesen werden kann.";
+"Last refreshed %@" = "Zuletzt erneuert %@";
+"Not refreshed since sign-in" = "Seit der Anmeldung nicht erneuert";
+"access token expires %@" = "Zugriffstoken läuft ab %@";
+"access token renews on next use" = "Zugriffstoken wird bei der nächsten Nutzung erneuert";
+"(exit code %d)" = "(Exit-Code %d)";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "Nicht zugestellt — der Agent hat die Nachricht nicht angenommen. Bearbeiten Sie sie oder senden Sie sie erneut.";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Standardmäßig aus: Agenten hier erreichen keinen anderen Arbeitsbereich, bis Sie unten einen ankreuzen (oder „Jeder Arbeitsbereich“ einschalten).";
+"Closes the editor without saving changes" = "Schließt den Editor, ohne die Änderungen zu sichern";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok fragt, ob xAI Ihre Programmierdaten behalten darf";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "Fragt dich etwas";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "Beim Anbieter ist nichts angekommen. Bromure entfernt die blockierte Tool-Ausgabe aus den weiteren Anfragen dieser Unterhaltung, du kannst also deine nächste Nachricht senden. Scheitert der Agent weiterhin, spule die Unterhaltung vor diesen Schritt zurück oder starte eine neue Sitzung.";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "Ohne Antwort innerhalb von %1$d s gilt „%2$@“.";
+"The workspace %@ will be shut down." = "Der Arbeitsbereich %@ wird heruntergefahren.";
+"The workspaces %@ will be shut down." = "Die Arbeitsbereiche %@ werden heruntergefahren.";
+"The workspace %@ will be suspended and resume where it left off." = "Der Arbeitsbereich %@ wird angehalten und macht später genau dort weiter.";
+"The workspaces %@ will be suspended and resume where they left off." = "Die Arbeitsbereiche %@ werden angehalten und machen später genau dort weiter.";
