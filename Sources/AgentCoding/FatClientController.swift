@@ -2467,7 +2467,7 @@ struct RemoteToolbarBar: View {
                             running: false)
             }
             // A room spans machines: nothing machine-specific in its bar.
-            if model.selectedRoomID != nil, let entry {
+            if model.selectedRoomID != nil, entry != nil {
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
@@ -4633,7 +4633,8 @@ final class RemoteHostWindow: NSWindow {
             else { return nil }
             let tid = t.id
             return BoardTaskLink(title: t.title, brief: t.details,
-                                 restart: t.stage == .inProgress ? { [weak c] in c?.taskCommand(tid, "resume") } : nil)
+                                 restart: t.stage == .inProgress ? { [weak c] in c?.taskCommand(tid, "resume") } : nil,
+                                 lastError: t.lastError)
         }
         return a
     }
@@ -6963,7 +6964,8 @@ final class RemoteHostWindow: NSWindow {
             else { return nil }
             let tid = t.id
             return BoardTaskLink(title: t.title, brief: t.details,
-                                 restart: t.stage == .inProgress ? { [weak c] in c?.taskCommand(tid, "resume") } : nil)
+                                 restart: t.stage == .inProgress ? { [weak c] in c?.taskCommand(tid, "resume") } : nil,
+                                 lastError: t.lastError)
         }
         m.workspaceName = { [weak controller] pid in controller?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak controller] in

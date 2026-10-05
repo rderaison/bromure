@@ -8,7 +8,8 @@ import AppKit
 /// credential's `requireApproval` flag is off, the call site short-
 /// circuits without ever reaching the broker. When the flag is on, the
 /// broker checks for a live grant; if there isn't one, it pops a
-/// modal NSAlert offering Don't allow / 5 min / 1 hr / Rest of session.
+/// non-modal prompt (`ConsentPrompt`, auto-deny on timeout) offering
+/// Don't allow / 5 min / 1 hr / Rest of session.
 ///
 /// Concurrent calls for the same `(profileID, credentialID)` key
 /// coalesce onto the same dialog — a chatty agent firing a dozen
@@ -135,7 +136,7 @@ public actor ConsentBroker {
                         credentialDisplayName: String,
                         scopeHint: String) async -> Bool {
         let key = Self.storeKey(profileID: profileID, credentialID: credentialID)
-        let now = Date()
+        let checkedAt = Date()
 
         FileHandle.standardError.write(Data(
             "[consent] check \(credentialID) for profile \(profileID.uuidString.prefix(8))\n".utf8))
@@ -145,15 +146,17 @@ public actor ConsentBroker {
         // honoring an older allow grant (in practice they shouldn't
         // both be live, but defensive ordering matters when the
         // ordering question ever comes up).
-        if let mem = denies[key], mem.expiration > now {
+        if let mem = denies[key], mem.expiration > checkedAt {
             FileHandle.standardError.write(Data(
                 "[consent] live deny for \(credentialID) — auto-deny\n".utf8))
+            Self.recordDecision(profileID: profileID, credentialID: credentialID,
+                                credential: credentialDisplayName, scope: scopeHint, outcome: .rememberedDeny)
             return false
         } else if denies[key] != nil {
             denies.removeValue(forKey: key)
         }
 
-        if let g = grants[key], g.expiration > now {
+        if let g = grants[key], g.expiration > checkedAt {
             FileHandle.standardError.write(Data(
                 "[consent] live grant for \(credentialID) — auto-allow\n".utf8))
             return true
@@ -171,48 +174,43 @@ public actor ConsentBroker {
         pending[key] = []
 
         let profileName = profileNames[profileID] ?? "(unknown workspace)"
+        // Non-modal, with a deadline (no answer → deny); routed to a fat
+        // client or attached terminal when one is watching. This actor waits
+        // on a continuation — the main thread and the control socket don't.
+        let title = String(format: NSLocalizedString("Allow “%@” to use %@?",
+            comment: "Consent prompt: profile name + credential display name"),
+            profileName, credentialDisplayName)
+        let choices = [NSLocalizedString("Allow for 1 hour", comment: ""),
+                       NSLocalizedString("Allow for 5 minutes", comment: ""),
+                       NSLocalizedString("Allow for the rest of the session", comment: ""),
+                       NSLocalizedString("Don't allow", comment: "")]
+        let timeout = ConsentPrompt.defaultTimeout
+        let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: scopeHint,
+                                             choices: choices, denyIndex: choices.count - 1,
+                                             timeout: timeout)
         let decision: Decision
-        let route = RemoteConsent.route(for: profileID)
-        if route == .localAlert {
-            decision = await Self.askUser(profileName: profileName,
-                                          credentialDisplayName: credentialDisplayName,
-                                          scopeHint: scopeHint)
-        } else {
-            // Remote: a fat client renders a native NSAlert on its own Mac (over
-            // the tunnel); a plain SSH/CLI attach gets the tmux popup. Same
-            // choices and index mapping either way; nil (deny/timeout) → deny.
-            let title = String(format: NSLocalizedString("Allow “%@” to use %@?",
-                comment: "Consent prompt: profile name + credential display name"),
-                profileName, credentialDisplayName)
-            let choices = [NSLocalizedString("Allow for 1 hour", comment: ""),
-                           NSLocalizedString("Allow for 5 minutes", comment: ""),
-                           NSLocalizedString("Allow for the rest of the session", comment: ""),
-                           NSLocalizedString("Don't allow", comment: "")]
-            let idx: Int?
-            if route == .fatClient {
-                idx = await RemoteConsent.chooseOnFatClient(
-                    profileID: profileID, title: title, message: scopeHint,
-                    choices: choices, denyIndex: choices.count - 1)
-            } else {
-                idx = await Task.detached {
-                    RemoteConsent.choose(profileID: profileID, title: title,
-                                         message: scopeHint, choices: choices)
-                }.value
-            }
-            switch idx {
-            case 0:  decision = .allow1hr
-            case 1:  decision = .allow5min
-            case 2:  decision = .allowSession
-            default: decision = .deny   // "Don't allow" or timeout/failure
-            }
+        switch idx {
+        case 0:  decision = .allow1hr
+        case 1:  decision = .allow5min
+        case 2:  decision = .allowSession
+        default: decision = .deny   // "Don't allow", timeout, dismissed
         }
+        // A grant's lifetime starts at the answer, not when the prompt
+        // opened (the user may have taken minutes to answer).
+        let now = Date()
+        // No answer before the deadline: nobody said no. It denies this
+        // request only — remembered, a missed prompt silently refused every
+        // retry for five minutes (S3-6); the next request asks again.
+        let timedOut = idx == nil && Self.isTimeout(askedAt: checkedAt, answeredAt: now, timeout: timeout)
 
         let allow: Bool
         switch decision {
         case .deny:
-            denies[key] = DenyMemory(
-                expiration: now.addingTimeInterval(Self.denyTTL),
-                credentialDisplayName: credentialDisplayName)
+            if !timedOut {
+                denies[key] = DenyMemory(
+                    expiration: now.addingTimeInterval(Self.denyTTL),
+                    credentialDisplayName: credentialDisplayName)
+            }
             allow = false
         case .allow5min:
             grants[key] = Grant(expiration: now.addingTimeInterval(5 * 60),
@@ -231,10 +229,47 @@ public actor ConsentBroker {
             allow = true
         }
 
+        Self.recordDecision(profileID: profileID, credentialID: credentialID,
+                            credential: credentialDisplayName, scope: scopeHint,
+                            outcome: timedOut ? .timedOut : Outcome(decision))
+
         let waiters = pending[key] ?? []
         pending.removeValue(forKey: key)
         for w in waiters { w.resume(returning: allow) }
         return allow
+    }
+
+    /// What became of one consent request, as the Security Timeline says it.
+    enum Outcome: String, Sendable {
+        case allow1hr = "allow_1h", allow5min = "allow_5m", allowSession = "allow_session"
+        case deny, timedOut = "timeout", rememberedDeny = "deny_remembered"
+
+        init(_ d: Decision) {
+            switch d {
+            case .deny: self = .deny
+            case .allow5min: self = .allow5min
+            case .allow1hr: self = .allow1hr
+            case .allowSession: self = .allowSession
+            }
+        }
+    }
+
+    /// A deny that came at (or past) the deadline is the prompt timing out,
+    /// not the user's answer (every channel resolves a timeout as deny).
+    nonisolated static func isTimeout(askedAt: Date, answeredAt: Date, timeout: TimeInterval) -> Bool {
+        answeredAt.timeIntervalSince(askedAt) >= max(1, timeout) - 1
+    }
+
+    /// One Security Timeline row (and cloud event) per consent decision:
+    /// a grant, a deny, a timeout, a remembered deny (coalesced there).
+    nonisolated static func recordDecision(profileID: UUID, credentialID: CredentialID, credential: String,
+                                           scope: String, outcome: Outcome) {
+        BACEventEmitter.shared.emitDetached(
+            profileID: profileID, eventType: "credential.consent",
+            eventData: ["credential": .string(SecretFingerprint.redactLegacy(credential)),
+                        "credential_id": .string(SecretFingerprint.redactLegacy(credentialID)),
+                        "scope": .string(SecretFingerprint.redactLegacy(scope)),
+                        "decision": .string(outcome.rawValue)])
     }
 
     /// Snapshot of all live (unexpired) decisions — both allow grants
@@ -285,36 +320,6 @@ public actor ConsentBroker {
     public func revokeEverything() {
         grants.removeAll()
         denies.removeAll()
-    }
-
-    // MARK: - Modal prompt
-
-    @MainActor
-    private static func askUser(profileName: String,
-                                credentialDisplayName: String,
-                                scopeHint: String) -> Decision {
-        let alert = NSAlert()
-        alert.messageText = String(
-            format: NSLocalizedString(
-                "Allow “%@” to use %@?",
-                comment: "Consent prompt: profile name + credential display name"),
-            profileName, credentialDisplayName)
-        alert.informativeText = scopeHint
-        alert.alertStyle = .informational
-        // Order: most-likely choice first (becomes the default action).
-        alert.addButton(withTitle: NSLocalizedString("Allow for 1 hour", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Allow for 5 minutes", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Allow for the rest of the session", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Don't allow", comment: ""))
-        // Activate the app so the modal grabs focus even when the VM
-        // window is the user's foreground context.
-        NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:  return .allow1hr
-        case .alertSecondButtonReturn: return .allow5min
-        case .alertThirdButtonReturn:  return .allowSession
-        default:                        return .deny
-        }
     }
 }
 

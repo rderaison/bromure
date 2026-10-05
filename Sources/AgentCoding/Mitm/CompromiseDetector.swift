@@ -99,9 +99,8 @@ public final class AhoCorasick: @unchecked Sendable {
 
 /// One matched fake token leaving the VM bound for the wrong host.
 public struct CompromiseLeak: Sendable {
-    /// First 4 + last 4 chars of the fake token, with an ellipsis
-    /// between. Same convention as `SwapRecord.fakePreview` — full
-    /// values never leave the host.
+    /// The fake token's kind + keyed fingerprint (`SecretFingerprint`).
+    /// Same convention as `SwapRecord.fakePreview` — no token characters.
     public let fakeTokenPreview: String
     /// Display name of the credential the fake stands in for. Pulled
     /// from `TokenMap.Entry.consentDisplayName` when set; otherwise a

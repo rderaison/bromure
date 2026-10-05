@@ -26,37 +26,20 @@ public actor PromptInjectionConsentBroker {
         pending[key] = []
         let name = profileNames[profileID]
             ?? NSLocalizedString("this workspace", comment: "Prompt-injection consent: unnamed workspace")
-        let allow: Bool
-        let route = RemoteConsent.route(for: profileID)
-        if route == .localAlert {
-            allow = await Self.ask(profileName: name, detectorName: detectorName,
-                                   source: source, flaggedText: flaggedText)
-        } else {
-            // Remote: a fat client renders a native NSAlert on its own Mac (over
-            // the tunnel); a plain SSH/CLI attach gets the tmux popup. The
-            // flagged text rides in the body. Block (index 0) is the safe
-            // default; only an explicit "Allow" lets it through.
-            let title = String(format: NSLocalizedString("Possible %@ in “%@”",
-                comment: "Prompt-injection consent title"), detectorName, name)
-            let message = String(format: NSLocalizedString(
-                "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@",
-                comment: "Prompt-injection consent body (remote)"),
-                source, String(flaggedText.prefix(1500)))
-            let choices = [NSLocalizedString("Block this request", comment: ""),
-                           NSLocalizedString("Allow this request", comment: "")]
-            let idx: Int?
-            if route == .fatClient {
-                idx = await RemoteConsent.chooseOnFatClient(
-                    profileID: profileID, title: title, message: message,
-                    choices: choices, denyIndex: 0)
-            } else {
-                idx = await Task.detached {
-                    RemoteConsent.choose(profileID: profileID, title: title, message: message,
-                                         choices: choices)
-                }.value
-            }
-            allow = (idx == 1)   // only an explicit "Allow" lets it through
-        }
+        // Non-modal, deadline → block; fat client / terminal when attached.
+        // Block (index 0) is the safe default; only an explicit "Allow"
+        // lets it through.
+        let title = String(format: NSLocalizedString("Possible %@ in “%@”",
+            comment: "Prompt-injection consent title"), detectorName, name)
+        let message = String(format: NSLocalizedString(
+            "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?",
+            comment: "Prompt-injection consent body"), source)
+        let choices = [NSLocalizedString("Block this request", comment: ""),
+                       NSLocalizedString("Allow this request", comment: "")]
+        let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: message,
+                                             choices: choices, denyIndex: 0, style: .critical,
+                                             detailText: flaggedText)
+        let allow = (idx == 1)
         decisions[key] = allow
         let waiters = pending.removeValue(forKey: key) ?? []
         for w in waiters { w.resume(returning: allow) }
@@ -66,34 +49,5 @@ public actor PromptInjectionConsentBroker {
     public func reset(profileID: UUID) {
         let prefix = profileID.uuidString + "|"
         for k in decisions.keys where k.hasPrefix(prefix) { decisions.removeValue(forKey: k) }
-    }
-
-    @MainActor
-    private static func ask(profileName: String, detectorName: String,
-                            source: String, flaggedText: String) -> Bool {
-        let alert = NSAlert()
-        alert.alertStyle = .critical
-        alert.messageText = String(format: NSLocalizedString(
-            "Possible %@ in “%@”", comment: "Prompt-injection consent title"),
-            detectorName, profileName)
-        alert.informativeText = String(format: NSLocalizedString(
-            "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?",
-            comment: "Prompt-injection consent body"), source)
-
-        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 460, height: 170))
-        tv.string = flaggedText
-        tv.isEditable = false
-        tv.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 170))
-        scroll.documentView = tv
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        alert.accessoryView = scroll
-
-        alert.addButton(withTitle: NSLocalizedString("Block this request", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Allow this request", comment: ""))
-        NSApp.activate(ignoringOtherApps: true)
-        // First button = Block.
-        return alert.runModal() != .alertFirstButtonReturn
     }
 }

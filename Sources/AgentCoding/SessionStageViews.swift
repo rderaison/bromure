@@ -3004,6 +3004,10 @@ struct BoardTaskLink {
     var brief: String
     /// The board's Restart Session for it; nil when it doesn't apply.
     var restart: (() -> Void)?
+    /// Why its agent couldn't start, as the board recorded it ("Kimi Code
+    /// exited right after it started (status 137)…") — the failure card's
+    /// body, over whatever the terminal scrape found.
+    var lastError: String? = nil
 }
 
 /// A board task's opening brief, at the top of its chat.

@@ -323,36 +323,159 @@ actor PromptInjectionClassifier {
 
     /// Returns the max injection probability across all windows of the
     /// span, or nil on a hard inference failure.
+    ///
+    /// Two passes. Coarse windows (1.5K chars over the first 16K) catch an injection that IS the text. But one planted
+    /// sentence in an otherwise ordinary page is diluted by the prose
+    /// around it inside a 1.5K window and scores benign — so the fine pass
+    /// splits the WHOLE span (up to `maxFineScanChars`) into sentence-sized
+    /// windows, keeps the ones carrying instruction-like cues (talking to
+    /// the AI, overriding instructions, commands, exfiltration, secrecy),
+    /// and scores the most suspicious of them on their own. A fine window
+    /// must clear a higher bar (`fineThreshold`): short benign text with a
+    /// cue ("run the tests") shouldn't trip it.
     private func classify(_ text: String, loaded: Loaded) -> Verdict? {
-        let scoped = text.count > Self.maxScanChars
-            ? String(text.prefix(Self.maxScanChars)) : text
-        let chars = Array(scoped)
+        let plan = Self.windowPlan(text)
         var best = 0.0
         var bestWindow: String?
+        var flagged = false
         var ran = false
-        var start = 0
-        var windows = 0
-        while start < chars.count, windows < Self.maxWindows {
-            let end = min(start + Self.windowChars, chars.count)
-            let window = String(chars[start..<end])
-            // encode adds the model's special tokens ([CLS] … [SEP]).
+        func consider(_ window: String, bar: Double) {
             var ids = loaded.tokenizer.encode(text: window)
-            if ids.count > loaded.maxLength {
-                ids = Array(ids.prefix(loaded.maxLength))
+            if ids.count > loaded.maxLength { ids = Array(ids.prefix(loaded.maxLength)) }
+            guard !ids.isEmpty, let p = runWindow(ids: ids, loaded: loaded) else { return }
+            ran = true
+            let hit = p >= bar
+            // The flagged window wins over a higher-scoring one that didn't
+            // clear its own bar; among equals, the higher score.
+            if (hit && !flagged) || (hit == flagged && p > best) || bestWindow == nil {
+                best = p; bestWindow = window
             }
-            if !ids.isEmpty, let p = runWindow(ids: ids, loaded: loaded) {
-                ran = true
-                // Track the window that carries the max score so callers can
-                // show only that section, not the whole span.
-                if bestWindow == nil || p > best { best = p; bestWindow = window }
+            if hit { flagged = true }
+        }
+        for w in plan.coarse { consider(w, bar: loaded.threshold) }
+        let fineBar = max(loaded.threshold, Self.fineThreshold)
+        for w in plan.fine where !flagged {
+            if Self.isHeuristicInjection(w) {
+                ran = true; flagged = true; best = max(best, fineBar); bestWindow = w
+                break
             }
-            start = end
-            windows += 1
+            consider(w, bar: fineBar)
         }
         guard ran else { return nil }
-        let injection = best >= loaded.threshold
-        return Verdict(injectionScore: best, isInjection: injection,
-                       flaggedText: injection ? bestWindow : nil)
+        return Verdict(injectionScore: best, isInjection: flagged,
+                       flaggedText: flagged ? bestWindow : nil)
+    }
+
+    /// The bar a sentence-sized window must clear.
+    static let fineThreshold = 0.8
+    /// The fine pass reads this much of a span (regex-cheap); the model
+    /// scores at most `maxFineWindows` of its windows.
+    static let maxFineScanChars = 256 * 1024
+    static let maxFineWindows = 12
+    static let fineWindowChars = 360
+
+    /// The windows `classify` scores: coarse (overlapping, prefix of the
+    /// span) and fine (sentence-sized, cue-bearing, most suspicious first).
+    static func windowPlan(_ text: String) -> (coarse: [String], fine: [String]) {
+        var coarse: [String] = []
+        let scoped = Array(text.prefix(maxScanChars))
+        var start = 0
+        while start < scoped.count, coarse.count < maxWindows {
+            let end = min(start + windowChars, scoped.count)
+            coarse.append(String(scoped[start..<end]))
+            start = end
+        }
+        // Short text is one coarse window already: its fine pass is just the
+        // cue check on the whole of it.
+        guard text.count > fineWindowChars else {
+            return (coarse, isHeuristicInjection(text) ? [text] : [])
+        }
+
+        // Sentences (and lines), then windows of up to ~2 sentences / 360 chars.
+        let body = String(text.prefix(maxFineScanChars))
+        var sentences: [String] = []
+        body.enumerateSubstrings(in: body.startIndex..<body.endIndex, options: [.bySentences, .substringNotRequired]) { _, r, _, _ in
+            for line in body[r].split(whereSeparator: \.isNewline) {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                if !t.isEmpty { sentences.append(t) }
+            }
+        }
+        var windows: [(text: String, cues: Int, order: Int)] = []
+        for (i, s) in sentences.enumerated() {
+            let cues = injectionCues(s)
+            guard cues > 0 else { continue }
+            // The cue sentence with its neighbour after (an instruction often
+            // runs over two sentences), capped.
+            var w = s
+            if i + 1 < sentences.count, w.count + sentences[i + 1].count < fineWindowChars {
+                w += " " + sentences[i + 1]
+            }
+            if w.count > fineWindowChars * 2 { w = String(w.prefix(fineWindowChars * 2)) }
+            windows.append((w, cues + (i + 1 < sentences.count ? injectionCues(sentences[i + 1]) : 0), i))
+        }
+        let picked = windows.sorted { $0.cues != $1.cues ? $0.cues > $1.cues : $0.order < $1.order }
+            .prefix(maxFineWindows).map(\.text)
+        return (coarse, Array(picked))
+    }
+
+    /// Instruction-like cues, by kind. One sentence of ordinary docs hits at
+    /// most one or two kinds ("run `curl` to check health"); a planted
+    /// instruction stacks them: it talks to the AI, gives it a trigger or a
+    /// command, and asks it to keep quiet.
+    enum Cue: CaseIterable { case override, addressesAI, trigger, secrecy, command, exfiltration, roleMarker }
+
+    private static let cueSources: [(Cue, String)] = [
+        (.override, #"\b(ignore|disregard|forget|override|bypass)\b.{0,40}\b(instruction|instructions|rules?|prompt|guidelines?|previous|above|prior|system)\b"#),
+        (.override, #"\b(new|updated|real|actual|hidden|secret)\s+(instructions?|task|directive|orders?)\b"#),
+        (.addressesAI, #"\b(ai|llm|assistant|agent|model|chatbot|claude|codex|kimi|gpt|copilot)s?\b.{0,30}\b(must|shall|is required|are required|needs? to)\b"#),
+        (.addressesAI, #"\b(note|message|attention|instructions?|reminder|notice)\s+(to|for)\s+(the\s+|any\s+|all\s+)?(ai|llm|assistant|agent|model|chatbot|claude|codex|kimi|gpt|copilot)s?\b"#),
+        (.addressesAI, #"\b(dear|hey|hi|hello|attention)\s*,?\s+(ai|llm|assistant|agent|model|claude|codex|kimi|gpt|copilot)\b"#),
+        (.addressesAI, #"\b(ai|llm|language model)\s+(assistant|agent|model)s?\s+(reading|processing|summari[sz]ing|reviewing|analy[sz]ing)\b"#),
+        (.addressesAI, #"\b(you|assistant|agent)\s+(must|shall|are to|need to|have to)\s+(now|immediately|first|always|instead)\b"#),
+        (.addressesAI, #"\b(system|admin|developer)\s*(notice|message|prompt|override|instruction)\b"#),
+        (.trigger, #"\b(when|before|after|while|once)\s+(you\s+)?(summariz|read|process|review|answer|respond|analyz|open|finish)\w*"#),
+        (.secrecy, #"\b(do\s*n[o']?t|never|without)\s+(tell|telling|inform|informing|mention|mentioning|reveal|revealing|notify|notifying|alert|alerting|asking)\b.{0,40}\b(user|human|anyone|them|operator|owner)\b"#),
+        (.secrecy, #"\b(quietly|silently|secretly|covertly|discreetly)\b"#),
+        (.command, #"(\|\s*(ba|z)?sh\b|bash\s+-c|sh\s+-c|eval\s*\(|powershell\s+-|rm\s+-rf\s+[~/]|chmod\s+\+x|nc\s+-e|base64\s+-d\s*\|)"#),
+        (.command, #"\b(run|execute|exec)\b.{0,20}`?(curl|wget)\b"#),
+        (.exfiltration, #"\b(send|upload|post|exfiltrat\w*|transmit|forward|copy|leak|paste)\b.{0,60}(\.ssh|id_rsa|id_ed25519|\.env\b|credentials?|passwords?|\.aws|\.git-credentials|private key|keychain)"#),
+        (.roleMarker, #"(<\|im_start\|>|\[INST\]|<\/?system>|###\s*(system|instruction))"#),
+    ]
+    private static let cuePatterns: [(Cue, NSRegularExpression)] = cueSources.map {
+        ($0.0, try! NSRegularExpression(pattern: $0.1, options: [.caseInsensitive]))
+    }
+
+    /// The distinct cue kinds one piece of text carries.
+    static func cueKinds(_ s: String) -> Set<Cue> {
+        let r = NSRange(location: 0, length: (s as NSString).length)
+        return Set(cuePatterns.compactMap { $0.1.firstMatch(in: s, range: r) != nil ? $0.0 : nil })
+    }
+
+    /// How many kinds of instruction-like cue one sentence carries.
+    static func injectionCues(_ s: String) -> Int { cueKinds(s).count }
+
+    /// A window stacking three or more cue kinds reads as a planted
+    /// instruction even when the model (trained on blunt "ignore previous
+    /// instructions") scores it benign.
+    static let heuristicCueKinds = 3
+    static func isHeuristicInjection(_ window: String) -> Bool {
+        cueKinds(window).count >= heuristicCueKinds
+    }
+
+    /// Test hook: the injection probability of each window (nil without a model).
+    func scores(_ windows: [String]) async -> [Double]? {
+        guard let loaded = await loaded() else { return nil }
+        return windows.map { w in
+            var ids = loaded.tokenizer.encode(text: w)
+            if ids.count > loaded.maxLength { ids = Array(ids.prefix(loaded.maxLength)) }
+            return runWindow(ids: ids, loaded: loaded) ?? -1
+        }
+    }
+
+    /// Test hook: the full verdict for one span (nil without a model).
+    func verdict(_ text: String) async -> Verdict? {
+        guard let loaded = await loaded() else { return nil }
+        return classify(text, loaded: loaded)
     }
 
     private func runWindow(ids: [Int], loaded: Loaded) -> Double? {

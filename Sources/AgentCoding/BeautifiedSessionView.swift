@@ -571,7 +571,13 @@ final class BeautifiedSessionModel: ObservableObject {
     /// terminal but writes no turn for, leaving the view stuck on "Thinking…".
     /// When set it replaces the cue with a failure card and forces `working`
     /// false; cleared when the transcript makes progress or the user sends again.
-    @Published var failure: SessionFailure?
+    @Published var failure: SessionFailure? {
+        didSet { if failure != oldValue { failureChanged?(failure) } }
+    }
+    /// The failure card came up (or went away): the session's status
+    /// follows it — an agent retrying under an error card (omp on a 502)
+    /// read "Working" in the header and the sidebar for minutes.
+    var failureChanged: ((SessionFailure?) -> Void)?
     /// A blocking TUI prompt the agent is showing in its terminal that the
     /// beautified view otherwise hides — a folder-trust dialog or a `/login`
     /// flow. Surfaced so the user isn't left staring at a silent view while the
@@ -986,10 +992,18 @@ final class BeautifiedSessionModel: ObservableObject {
         let key = queueKey
         // Still keyed by the tab (the session isn't known yet): what an
         // earlier session left there is never shown as this one's.
+        // One written in the session that holds the tab now (held while a
+        // card was up, before the chat's first poll bound it) is this
+        // chat's: hiding it left the strip empty under an approval card.
         let screen = boundSession == nil && currentSession != nil
         let since = chatSince
+        let current = currentSession
         queueSub = queueStore.$queues
-            .map { ($0[key] ?? []).filter { q in !screen || (q.sessionID == nil && q.queuedAt >= since) } }
+            .map { ($0[key] ?? []).filter { q in
+                guard screen else { return true }
+                if q.sessionID == nil { return q.queuedAt >= since }
+                return q.sessionID == current?()?.id
+            } }
             .removeDuplicates()
             .sink { [weak self] list in
                 guard let self, self.queued != list else { return }
@@ -1262,15 +1276,28 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Whether a recorded user turn is the echo sent from the composer —
     /// the agent may wrap a paste (`<pasted_content>`), turn CRLF into LF,
     /// or trim the ends; none of that makes it another message.
+    /// A very large paste may be recorded cut short (omp kept 500,000 of
+    /// 778,131 characters) or re-flowed: past `echoProbe` characters, the
+    /// two are the same message when one's opening text (whitespace aside)
+    /// is the other's.
     nonisolated static func echoMatches(_ echo: String, recorded: String) -> Bool {
+        if echo == recorded { return true }
         func norm(_ s: String) -> String {
             ClaudeTranscriptParser.unwrapPasted(s)
                 .replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return echo == recorded || norm(echo) == norm(recorded)
+        let a = norm(echo), b = norm(recorded)
+        if a == b { return true }
+        guard min(a.utf8.count, b.utf8.count) >= echoProbe else { return false }
+        func head(_ s: String) -> Substring {
+            Substring(s.prefix(echoProbe * 4).filter { !$0.isWhitespace }.prefix(echoProbe))
+        }
+        let ha = head(a), hb = head(b)
+        return ha.count >= echoProbe / 2 && ha == hb
     }
+    nonisolated static let echoProbe = 4096
 
     /// Begin polling the live transcript: brisk while the agent is working
     /// (its turn streams into the file as it goes, and a lagging chat is
@@ -1948,6 +1975,7 @@ final class BeautifiedSessionModel: ObservableObject {
                                           baseline: self.userTurnCount,
                                           path: queuedPath, offset: queuedOffset, target: target)
                 entry.sessionID = self.currentSession?()?.id
+                self.bindSessionQueue()
                 let key = self.queueKey
                 self.queueStore.update(key) { $0.append(entry) }
                 let outcome: ChatQueueStore.Outcome = native ? await self.provider.send(text) : .typed
@@ -2059,6 +2087,8 @@ final class BeautifiedSessionModel: ObservableObject {
                              failure: String? = nil) async {
         var target: PaneTarget?
         if let w = window { target = await provider.pinnedTarget(window: w) }
+        // Keyed by the session once it's known, so the strip shows it now.
+        bindSessionQueue()
         var q = QueuedMessage(text: text, held: true, editable: true, baseline: userTurnCount,
                               path: currentPath, offset: currentPath.flatMap { buffers[$0]?.end } ?? 0,
                               target: target, failure: failure, awaitingAnswer: awaitingAnswer ? true : nil)
@@ -3115,7 +3145,8 @@ struct BeautifiedSessionView: View {
                                         onSignIn: model.hostSignIn != nil && model.signInProvider != nil
                                             ? { model.startHostSignIn() } : nil,
                                         agentName: model.agentDisplayName,
-                                        onRestart: model.boardTask?()?.restart)
+                                        onRestart: model.boardTask?()?.restart,
+                                        taskError: model.boardTask?()?.lastError ?? model.currentSession?()?.lastError)
                                 .id("beautified-failure")
                                 .transition(.opacity)
                         } else if model.working, model.commandOutput == nil,
@@ -3504,17 +3535,21 @@ private struct ThinkingRow: View {
 /// otherwise leaves the beautified view stuck on "Thinking…". Detected by
 /// sniffing the tail of the tab's terminal for high-signal error banners.
 struct SessionFailure: Equatable {
-    enum Kind: Equatable { case auth, quota, generic }
+    /// `blocked`: Bromure's own proxy refused the request (`BromureBlock`).
+    enum Kind: Equatable { case auth, quota, generic, blocked }
     let kind: Kind
     /// A short human line lifted verbatim from the terminal (what the agent
     /// actually said), shown under the headline.
     let detail: String
+    /// Which engine, when `kind == .blocked`.
+    var blockedBy: BromureBlock? = nil
 
     var headline: String {
         switch kind {
         case .auth:    return NSLocalizedString("The agent couldn't authenticate", comment: "failure")
         case .quota:   return NSLocalizedString("The agent hit a usage limit", comment: "failure")
         case .generic: return NSLocalizedString("The agent stopped with an error", comment: "failure")
+        case .blocked: return (blockedBy ?? .unknown).headline
         }
     }
 
@@ -3540,6 +3575,7 @@ struct SessionFailure: Equatable {
         case .auth: kind = .auth
         case .quota, .rateLimit: kind = .quota
         case .overloaded, .other: kind = .generic
+        case .blocked: kind = .blocked; blockedBy = error.blockedBy ?? .unknown
         }
         let line = error.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         detail = line.isEmpty ? (error.status.map { "HTTP \($0)" } ?? "") : Self.clean(line)
@@ -3588,6 +3624,14 @@ struct SessionFailure: Equatable {
             }
             return nil
         }
+        // Bromure's own block, as the agent printed it (its body names us).
+        for raw in tail.reversed() {
+            if let b = BromureBlock.of(raw) {
+                var f = SessionFailure(kind: .blocked, detail: clean(raw))
+                f.blockedBy = b
+                return f
+            }
+        }
         if let d = match(.quota) { return SessionFailure(kind: .quota, detail: d) }
         if let d = match(.auth)  { return SessionFailure(kind: .auth,  detail: d) }
         // The launcher's "<tool> exited with status N": what the agent said
@@ -3602,13 +3646,32 @@ struct SessionFailure: Equatable {
         return nil
     }
 
-    /// Strip a TUI box/bullet gutter and clamp length so the line reads cleanly.
+    /// Strip a TUI box/bullet gutter (either end) and clamp length so the
+    /// line reads cleanly. A line that is nothing but box art (a frame's
+    /// "╰────╯" scraped off the screen) is no reason at all: "".
     static func clean(_ line: String) -> String {
-        let gutter = Set("│┃|>•*✗✘⎿⏺●─╮╯ ")
-        let stripped = String(line.drop(while: { gutter.contains($0) }))
-            .trimmingCharacters(in: .whitespaces)
-        let s = stripped.isEmpty ? line : stripped
-        return s.count > 160 ? String(s.prefix(160)) + "…" : s
+        let gutter = Set("│┃|>•*✗✘⎿⏺●─╮╯╭╰ ")
+        func isArt(_ c: Character) -> Bool {
+            gutter.contains(c) || c.unicodeScalars.allSatisfy {
+                (0x2500...0x259F).contains($0.value) || $0.properties.isWhitespace
+            }
+        }
+        var s = Substring(line)
+        while let f = s.first, isArt(f) { s.removeFirst() }
+        while let l = s.last, isArt(l) { s.removeLast() }
+        let out = s.trimmingCharacters(in: .whitespaces)
+        guard out.contains(where: { $0.isLetter || $0.isNumber }) else { return "" }
+        return out.count > 160 ? String(out.prefix(160)) + "…" : out
+    }
+
+    /// What the card says under its headline: a board task's recorded
+    /// reason (`CodingTask.lastError`) wins — it names the exit status —
+    /// over the terminal scrape (a sign-in or usage-limit card keeps the
+    /// agent's own words); "" when neither says anything.
+    static func body(_ f: SessionFailure, taskError: String?) -> String {
+        if f.kind == .generic, let e = taskError?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !e.isEmpty { return e }
+        return clean(f.detail)
     }
 }
 
@@ -3982,6 +4045,8 @@ private struct FailureCard: View {
     /// A board task's session: the board's Restart Session, same words.
     var agentName: String = ""
     var onRestart: (() -> Void)? = nil
+    /// The board's recorded reason the task's agent couldn't start.
+    var taskError: String? = nil
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -3990,11 +4055,14 @@ private struct FailureCard: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(failure.headline)
                     .font(.system(size: 12.5, weight: .semibold))
-                Text(failure.detail)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                let bodyText = SessionFailure.body(failure, taskError: taskError)
+                if !bodyText.isEmpty {
+                    Text(bodyText)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if failure.kind == .auth, let onSignIn {
                     Button(action: onSignIn) {
                         Label(String(format: NSLocalizedString("Sign in to %@…", comment: "login"), providerName),
@@ -4002,6 +4070,15 @@ private struct FailureCard: View {
                     }
                     .controlSize(.small).buttonStyle(.borderedProminent).tint(.red)
                     .padding(.top, 3)
+                } else if failure.kind == .blocked {
+                    // The provider was never reached: Bromure stopped it.
+                    Text(NSLocalizedString(
+                        "Nothing reached the provider. The Security Timeline has the details; send again once it's resolved.",
+                        comment: "failure hint: Bromure's proxy blocked the agent's request"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 1)
                 } else if let onRestart {
                     Text(String(format: NSLocalizedString(
                         "Restart Session relaunches %@ on this task's worktree.",

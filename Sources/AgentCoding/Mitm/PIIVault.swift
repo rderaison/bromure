@@ -81,6 +81,7 @@ final class PIIVault: @unchecked Sendable {
     private var version = 0
     private var forwardRegex: (version: Int, ci: NSRegularExpression?, cs: NSRegularExpression?)?
     private var restoreRegex: (version: Int, ci: NSRegularExpression?, cs: NSRegularExpression?)?
+    private var restoreJSONRegex: (version: Int, ci: NSRegularExpression?, cs: NSRegularExpression?)?
     private var sortedSurrogates: [String] = []         // lowercased, sorted
     private(set) var maxSurrogateLength = 0
 
@@ -102,6 +103,15 @@ final class PIIVault: @unchecked Sendable {
     func learn(_ real: String, label: PIILabel) -> Entry {
         lock.lock(); defer { lock.unlock() }
         return learnLocked(real, kind: Kind(label))
+    }
+
+    /// Is `s` one of this vault's stand-ins? A stand-in the agent wrote back
+    /// to disk (or quoted) must never be learned as a *real* value: it would
+    /// get a stand-in of its own, the model would see two different values
+    /// for one person, and the reply would restore to the stand-in.
+    func isSurrogate(_ s: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return usedSurrogates.contains(s.lowercased())
     }
 
     private func learnLocked(_ real: String, kind: Kind) -> Entry {
@@ -146,7 +156,10 @@ final class PIIVault: @unchecked Sendable {
         var hits: [(range: NSRange, entry: Entry)] = []
         for sp in spans {
             let r = NSRange(location: sp.start, length: sp.length)
-            hits.append((r, learnLocked(ns.substring(with: r), kind: Kind(sp.label))))
+            let value = ns.substring(with: r)
+            // Already a stand-in: leave it, it maps back on the way in.
+            if usedSurrogates.contains(value.lowercased()) { continue }
+            hits.append((r, learnLocked(value, kind: Kind(sp.label))))
         }
         let (ci, cs) = forwardRegexes()
         let all = NSRange(location: 0, length: ns.length)
@@ -201,7 +214,7 @@ final class PIIVault: @unchecked Sendable {
     func restore(_ text: String, jsonFragment: Bool = false) -> String {
         lock.lock(); defer { lock.unlock() }
         guard !bySurrogate.isEmpty else { return text }
-        let (ci, cs) = restoreRegexes()
+        let (ci, cs) = restoreRegexes(json: jsonFragment)
         let ns = text as NSString
         let all = NSRange(location: 0, length: ns.length)
         var hits: [(NSRange, String)] = []
@@ -235,15 +248,19 @@ final class PIIVault: @unchecked Sendable {
     /// Where to cut a streamed `text` so a stand-in split across chunks is
     /// held back until it's whole: the start of a trailing partial (or
     /// complete-but-maybe-longer) stand-in, else the end. UTF-16 offset.
-    func holdback(_ text: String) -> Int {
+    func holdback(_ text: String, jsonFragment: Bool = false) -> Int {
         lock.lock(); defer { lock.unlock() }
         let ns = text as NSString
         let len = ns.length
         guard !sortedSurrogates.isEmpty, len > 0 else { return len }
+        // Raw JSON may end in a lone backslash (the first half of an escape
+        // like `\n` split across chunks): hold it, whatever follows.
+        if jsonFragment, ns.character(at: len - 1) == 0x5C { return len - 1 }
         let from = max(0, len - maxSurrogateLength)
         let lower = ns.lowercased as NSString
         for p in from..<len {
-            if p > 0, Self.isWordUnit(ns.character(at: p - 1)) { continue }
+            if p > 0, Self.isWordUnit(ns.character(at: p - 1)),
+               !(jsonFragment && Self.followsEscape(ns, p)) { continue }
             let suffix = lower.substring(from: p)
             // First surrogate ≥ suffix: a prefix match sorts right there.
             var lo = 0, hi = sortedSurrogates.count
@@ -256,13 +273,22 @@ final class PIIVault: @unchecked Sendable {
         return len
     }
 
-    private func restoreRegexes() -> (NSRegularExpression?, NSRegularExpression?) {
-        if let r = restoreRegex, r.version == version { return (r.ci, r.cs) }
+    private func restoreRegexes(json: Bool) -> (NSRegularExpression?, NSRegularExpression?) {
+        if !json, let r = restoreRegex, r.version == version { return (r.ci, r.cs) }
+        if json, let r = restoreJSONRegex, r.version == version { return (r.ci, r.cs) }
         let entries = Array(bySurrogate.values)
-        let ci = Self.alternation(entries.filter { $0.kind.caseInsensitive }.map(\.surrogate), caseInsensitive: true)
-        let cs = Self.alternation(entries.filter { !$0.kind.caseInsensitive }.map(\.surrogate), caseInsensitive: false)
-        restoreRegex = (version, ci, cs)
+        let ci = Self.alternation(entries.filter { $0.kind.caseInsensitive }.map(\.surrogate), caseInsensitive: true, json: json)
+        let cs = Self.alternation(entries.filter { !$0.kind.caseInsensitive }.map(\.surrogate), caseInsensitive: false, json: json)
+        if json { restoreJSONRegex = (version, ci, cs) } else { restoreRegex = (version, ci, cs) }
         return (ci, cs)
+    }
+
+    /// Does position `p` of raw JSON text follow a one-letter escape (`\n`,
+    /// `\t`…)? Its letter isn't part of the next word.
+    private static func followsEscape(_ ns: NSString, _ p: Int) -> Bool {
+        guard p >= 2, ns.character(at: p - 2) == 0x5C else { return false }
+        if p >= 3, ns.character(at: p - 3) == 0x5C { return false }   // an escaped backslash
+        return "nrtbf".utf16.contains(ns.character(at: p - 1))
     }
 
     // MARK: Helpers
@@ -274,11 +300,14 @@ final class PIIVault: @unchecked Sendable {
 
     /// One regex matching any of `values` as a whole token (not inside a
     /// longer word or number), longest first.
-    private static func alternation(_ values: [String], caseInsensitive: Bool) -> NSRegularExpression? {
+    /// With `json`, the text is raw JSON: a value right after an escape
+    /// (`\n`, `\t`…) also starts a token — "line one\nAlex" names Alex.
+    private static func alternation(_ values: [String], caseInsensitive: Bool, json: Bool = false) -> NSRegularExpression? {
         guard !values.isEmpty else { return nil }
         let body = values.sorted { ($0 as NSString).length > ($1 as NSString).length }
             .map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
-        return try? NSRegularExpression(pattern: "(?<![\\p{L}\\p{N}])(?:\(body))(?![\\p{L}\\p{N}])",
+        let lead = json ? "(?:(?<![\\p{L}\\p{N}])|(?<=(?<!\\\\)\\\\[nrtbf]))" : "(?<![\\p{L}\\p{N}])"
+        return try? NSRegularExpression(pattern: "\(lead)(?:\(body))(?![\\p{L}\\p{N}])",
                                         options: caseInsensitive ? [.caseInsensitive] : [])
     }
 

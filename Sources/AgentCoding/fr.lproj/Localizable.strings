@@ -3889,3 +3889,33 @@
 "Delivered — queued by %@" = "Remis — en file d’attente chez %@";
 "1 delegation call" = "1 appel de délégation";
 "%d delegation calls" = "%d appels de délégation";
+"downloaded — install scripts could not be checked" = "téléchargé — les scripts d’installation n’ont pas pu être vérifiés";
+"Bromure — approval needed" = "Bromure — approbation requise";
+"No answer within %d s counts as Don't allow." = "Sans réponse dans %d s, la demande est refusée.";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "L’agent veut exécuter :\n\n%@\n\nL’approbation ne couvre que cette requête précise — toute autre écriture redemandera.";
+"Allow this request for 15 minutes" = "Autoriser cette requête pendant 15 minutes";
+"Allow this request for the rest of the session" = "Autoriser cette requête pour le reste de la session";
+"Provider unreachable" = "Fournisseur injoignable";
+"Usage limit reached" = "Limite d’utilisation atteinte";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Approbations Kimi";
+"Never ask" = "Ne jamais demander";
+"Ask when needed" = "Demander si nécessaire";
+"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "Ne jamais demander : Kimi Code exécute chaque commande et chaque outil sans s’arrêter pour demander — la VM de l’espace de travail et les garde-fous de Bromure servent de limite de sécurité. Demander si nécessaire : les modifications et commandes courantes s’exécutent seules ; les actions risquées, les questions et les plans attendent toujours votre accord. S’applique au prochain démarrage ou à la prochaine reprise.";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "Bloqué par Bromure — injection de prompt";
+"Blocked by Bromure — rogue instructions" = "Bloqué par Bromure — instructions malveillantes";
+"Blocked by Bromure — credential leak" = "Bloqué par Bromure — fuite d’identifiants";
+"Blocked by Bromure — supply chain" = "Bloqué par Bromure — chaîne d’approvisionnement";
+"Blocked by Bromure — client certificate" = "Bloqué par Bromure — certificat client";
+"Blocked by Bromure" = "Bloqué par Bromure";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "Rien n’a atteint le fournisseur. La Chronologie de sécurité donne les détails ; renvoyez le message une fois le problème réglé.";
+"Credential approval" = "Approbation d’identifiants";
+"allowed for 1 hour" = "autorisé pendant 1 heure";
+"allowed for 5 minutes" = "autorisé pendant 5 minutes";
+"allowed for the rest of the session" = "autorisé pour le reste de la session";
+"denied — no answer in time; the next request asks again" = "refusé — pas de réponse à temps ; la prochaine requête redemandera";
+"denied — you said no a moment ago" = "refusé — vous venez de dire non";
+"denied by you" = "refusé par vous";

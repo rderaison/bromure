@@ -638,7 +638,8 @@ final class SessionPane {
             let engine = d.codingTaskEngine
             let id = t.id
             return BoardTaskLink(title: t.title, brief: t.details,
-                                 restart: t.stage == .inProgress ? { engine.resumeSession(id) } : nil)
+                                 restart: t.stage == .inProgress ? { engine.resumeSession(id) } : nil,
+                                 lastError: t.lastError)
         }
         m.workspaceName = { [weak self] pid in self?.acDelegate?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak self] in
@@ -697,6 +698,16 @@ final class SessionPane {
             else { return }
             delegate.setTabAgentStatus(self.profile.id, index: windowIndex, .needsInput)
         }
+        m.failureChanged = { [weak self] failure in
+            guard let self, let delegate = self.acDelegate,
+                  let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return }
+            delegate.agentSessionStore.setProviderError(s.id, failure.map { AgentSession.providerErrorKind($0) })
+        }
+        // A fresh chat has no card yet: an error kept from an earlier one
+        // (the agent may have recovered since) waits for this chat's own
+        // verdict, a scan away.
+        m.failureChanged?(nil)
         m.openProviderSettings = { [weak self] in
             guard let self else { return }
             self.acDelegate?.sidebarEditProfile(self.profile.id)

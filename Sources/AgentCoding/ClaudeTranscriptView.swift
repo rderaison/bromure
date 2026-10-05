@@ -36,18 +36,39 @@ struct TranscriptItem: Identifiable, Equatable {
 /// which is English today, changes between versions, and on some agents
 /// is the provider's message passed through in any language.
 struct AgentAPIError: Equatable {
-    enum Kind: String, Equatable { case auth, quota, rateLimit, overloaded, other }
+    /// `blocked`: Bromure's own proxy refused the request (its 451) — not
+    /// the provider, which was never reached.
+    enum Kind: String, Equatable { case auth, quota, rateLimit, overloaded, other, blocked }
     let kind: Kind
     let status: Int?
     /// What the agent showed for it, for the card's detail line.
     let message: String
+
+    init(kind: Kind, status: Int?, message: String) {
+        self.kind = Self.isBromureBlock(status: status, message: message) ? .blocked : kind
+        self.status = status
+        self.message = message
+    }
+
+    /// Which of Bromure's engines blocked it, when `kind == .blocked`.
+    var blockedBy: BromureBlock? { kind == .blocked ? (BromureBlock.of(message) ?? .unknown) : nil }
 
     var headline: String {
         switch kind {
         case .auth: NSLocalizedString("The agent couldn't authenticate", comment: "failure")
         case .quota, .rateLimit: NSLocalizedString("The agent hit a usage limit", comment: "failure")
         case .overloaded, .other: NSLocalizedString("The agent stopped with an error", comment: "failure")
+        case .blocked: (blockedBy ?? .unknown).headline
         }
+    }
+
+    /// Bromure's proxy answers a request it blocks with a 451 and a body
+    /// naming itself ("Bromure blocked this request: possible prompt
+    /// injection…"): the agent then reports an API error that is NOT the
+    /// provider's — it read as "Provider unreachable" (S3-4).
+    static func isBromureBlock(status: Int?, message: String) -> Bool {
+        status == 451 || BromureBlock.of(message) != nil
+            || (Self.status(in: message) == 451)
     }
 
     /// When the agent's own enum says nothing more specific: the HTTP status.
@@ -68,7 +89,7 @@ struct AgentAPIError: Equatable {
     /// Many Requests)", "Unauthorized (401) from …". Numbers only, so it
     /// reads the same whatever language the rest is in.
     static func status(in message: String) -> Int? {
-        let pattern = #"(?<![\d.])(40[0-9]|42[0-9]|5[0-9]{2})(?![\d.])"#
+        let pattern = #"(?<![\d.])(40[0-9]|42[0-9]|451|5[0-9]{2})(?![\d.])"#
         guard let r = message.range(of: pattern, options: .regularExpression) else { return nil }
         return Int(message[r])
     }
@@ -140,6 +161,40 @@ struct AgentAPIError: Equatable {
         else if id & 0x80000 != 0 { kind = .quota }                              // UsageLimit
         else { kind = Self.kind(forStatus: status ?? Self.status(in: message)) }
         return AgentAPIError(kind: kind, status: status ?? Self.status(in: message), message: message)
+    }
+}
+
+/// Which Bromure engine blocked a request, from the body it answered with.
+enum BromureBlock: String, Equatable {
+    case promptInjection, rulesInjection, credentialLeak, supplyChain, clientCertificate, unknown
+
+    static func of(_ message: String) -> BromureBlock? {
+        let m = message.lowercased()
+        if m.contains("bromure blocked this request") {
+            return m.contains("rogue instructions") ? .rulesInjection : .promptInjection
+        }
+        if m.contains("bromure: outbound request blocked") { return .credentialLeak }
+        if m.contains("bromure supply-chain security blocked") { return .supplyChain }
+        if m.contains("bromure: client-certificate use denied") { return .clientCertificate }
+        return nil
+    }
+
+    /// The card's headline.
+    var headline: String {
+        switch self {
+        case .promptInjection:
+            NSLocalizedString("Blocked by Bromure — prompt injection", comment: "failure: Bromure's proxy blocked the request")
+        case .rulesInjection:
+            NSLocalizedString("Blocked by Bromure — rogue instructions", comment: "failure: Bromure's proxy blocked the request")
+        case .credentialLeak:
+            NSLocalizedString("Blocked by Bromure — credential leak", comment: "failure: Bromure's proxy blocked the request")
+        case .supplyChain:
+            NSLocalizedString("Blocked by Bromure — supply chain", comment: "failure: Bromure's proxy blocked the request")
+        case .clientCertificate:
+            NSLocalizedString("Blocked by Bromure — client certificate", comment: "failure: Bromure's proxy blocked the request")
+        case .unknown:
+            NSLocalizedString("Blocked by Bromure", comment: "failure: Bromure's proxy blocked the request")
+        }
     }
 }
 
@@ -380,17 +435,36 @@ enum ClaudeTranscriptParser {
     /// `<pasted_content id="…">the text</pasted_content>` inside the user's
     /// turn. The user wrote the text, not the wrapper: the bubble shows
     /// (and counts) the text alone. Only well-formed pairs are unwrapped.
+    /// The closing tag may repeat the id (`</pasted_content id="11de">`,
+    /// seen live) or be bare; both close the paste.
     static func unwrapPasted(_ text: String) -> String {
         guard text.contains("<pasted_content") else { return text }
+        /// The end of a tag that starts at `start` (after its name): the
+        /// `>` on the same line, with no other tag opening before it.
+        func tagEnd(_ s: Substring, from start: Substring.Index) -> Substring.Index? {
+            guard let end = s[start...].firstIndex(of: ">"),
+                  s[start..<end].allSatisfy({ $0 != "<" && $0 != "\n" }) else { return nil }
+            // Right after the name: either the end or an attribute.
+            if let first = s[start..<end].first, first != " " { return nil }
+            return end
+        }
         var out = ""
         var rest = Substring(text)
         while let open = rest.range(of: "<pasted_content") {
-            guard let openEnd = rest[open.upperBound...].firstIndex(of: ">"),
-                  rest[open.upperBound..<openEnd].allSatisfy({ $0 != "<" && $0 != "\n" }),
-                  let close = rest[rest.index(after: openEnd)...].range(of: "</pasted_content>")
-            else { break }
+            guard let openEnd = tagEnd(rest, from: open.upperBound) else { break }
+            let bodyStart = rest.index(after: openEnd)
+            var search = bodyStart
+            var closeRange: Range<Substring.Index>?
+            while let c = rest[search...].range(of: "</pasted_content") {
+                if let cEnd = tagEnd(rest, from: c.upperBound) {
+                    closeRange = c.lowerBound..<rest.index(after: cEnd)
+                    break
+                }
+                search = c.upperBound
+            }
+            guard let close = closeRange else { break }
             out += rest[..<open.lowerBound]
-            out += rest[rest.index(after: openEnd)..<close.lowerBound]
+            out += rest[bodyStart..<close.lowerBound]
             rest = rest[close.upperBound...]
         }
         out += rest
@@ -1954,7 +2028,302 @@ enum TranscriptMarkdownCache {
         }
         guard !texts.isEmpty else { return }
         Task.detached(priority: .utility) {
-            for t in texts { _ = content(t) }
+            for t in texts {
+                for case .markdown(let m) in TranscriptTables.segments(t) { _ = content(m) }
+            }
+        }
+    }
+}
+
+// MARK: - Tables in assistant prose
+
+/// A GFM pipe table lifted out of a reply, drawn by `TranscriptTableView`
+/// instead of MarkdownUI. MarkdownUI draws a table's borders and row tints
+/// from cell bounds collected through anchor preferences and read back by
+/// GeometryReaders over the grid (`tableDecoration`); inside the chat's
+/// lazy, tail-following stack, while a reply with a table streamed in, that
+/// geometry → preference → redraw cycle kept the main thread in SwiftUI
+/// updates for minutes (S3-1). Here every tint and rule belongs to the
+/// cell or row it decorates: no geometry is read back, nothing is measured
+/// twice.
+struct TranscriptTable: Equatable {
+    enum Align: Equatable { case leading, center, trailing }
+    var alignments: [Align]
+    /// Row 0 is the header; every row has `alignments.count` cells.
+    var rows: [[String]]
+    /// `rows`, parsed as inline markdown (bold, code, links).
+    var cells: [[AttributedString]]
+
+    init(alignments: [Align], rows: [[String]]) {
+        self.alignments = alignments
+        self.rows = rows
+        self.cells = rows.map { $0.map(Self.inline) }
+    }
+
+    static func inline(_ s: String) -> AttributedString {
+        (try? AttributedString(markdown: s, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+}
+
+enum TranscriptProseSegment: Equatable {
+    case markdown(String)
+    case table(TranscriptTable)
+}
+
+enum TranscriptTables {
+    private final class Box {
+        let segments: [TranscriptProseSegment]
+        init(_ s: [TranscriptProseSegment]) { segments = s }
+    }
+    nonisolated(unsafe) private static let cache: NSCache<NSString, Box> = {
+        let c = NSCache<NSString, Box>()
+        c.countLimit = 2000
+        return c
+    }()
+
+    /// `text` cut into markdown runs and the top-level pipe tables between
+    /// them (not those inside a code fence, an indented block, a quote or a
+    /// list — those stay MarkdownUI's). Text without a table is one run.
+    static func segments(_ text: String) -> [TranscriptProseSegment] {
+        guard text.contains("|"), text.contains("-") else { return [.markdown(text)] }
+        let key = text as NSString
+        if let hit = cache.object(forKey: key) { return hit.segments }
+        let parsed = parse(text)
+        cache.setObject(Box(parsed), forKey: key)
+        return parsed
+    }
+
+    static func parse(_ text: String) -> [TranscriptProseSegment] {
+        let lines = text.components(separatedBy: "\n")
+        var out: [TranscriptProseSegment] = []
+        var buf: [String] = []
+        var fence: String?
+        func flush() {
+            let s = buf.joined(separator: "\n")
+            if !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(.markdown(s)) }
+            buf = []
+        }
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if let f = fence {
+                buf.append(line)
+                if t.hasPrefix(f) { fence = nil }
+                i += 1
+                continue
+            }
+            if t.hasPrefix("```") || t.hasPrefix("~~~") {
+                fence = String(t.prefix(3))
+                buf.append(line)
+                i += 1
+                continue
+            }
+            if i + 1 < lines.count, isTopLevel(line), t.contains("|"),
+               let aligns = delimiter(lines[i + 1].trimmingCharacters(in: .whitespaces)),
+               cells(t).count == aligns.count {
+                var rows = [cells(t)]
+                var j = i + 2
+                while j < lines.count {
+                    let r = lines[j].trimmingCharacters(in: .whitespaces)
+                    guard !r.isEmpty, r.contains("|"), isTopLevel(lines[j]),
+                          !r.hasPrefix("```"), !r.hasPrefix("~~~") else { break }
+                    var row = cells(r)
+                    if row.count < aligns.count { row += Array(repeating: "", count: aligns.count - row.count) }
+                    rows.append(Array(row.prefix(aligns.count)))
+                    j += 1
+                }
+                flush()
+                out.append(.table(TranscriptTable(alignments: aligns, rows: rows)))
+                i = j
+                continue
+            }
+            buf.append(line)
+            i += 1
+        }
+        flush()
+        return out.isEmpty ? [.markdown(text)] : out
+    }
+
+    /// Not indented code, a quote or a list item.
+    private static func isTopLevel(_ line: String) -> Bool {
+        if line.hasPrefix("    ") || line.hasPrefix("\t") { return false }
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return !t.hasPrefix(">") && !MarkdownHardBreaks.isListItem(t)
+    }
+
+    /// The column alignments of a delimiter row (`|---|:--:|--:|`), or nil.
+    static func delimiter(_ t: String) -> [TranscriptTable.Align]? {
+        guard t.contains("|") || t.contains(":"), t.contains("-") else { return nil }
+        let parts = cells(t)
+        guard !parts.isEmpty else { return nil }
+        var out: [TranscriptTable.Align] = []
+        for p in parts {
+            let c = p.trimmingCharacters(in: .whitespaces)
+            let core = c.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            guard !core.isEmpty, core.allSatisfy({ $0 == "-" }) else { return nil }
+            let left = c.hasPrefix(":"), right = c.hasSuffix(":")
+            out.append(left && right ? .center : right ? .trailing : .leading)
+        }
+        return out
+    }
+
+    /// The cells of one row: split at unescaped pipes (outer pipes
+    /// dropped, `\|` kept as a pipe), each trimmed.
+    static func cells(_ t: String) -> [String] {
+        var s = Substring(t.trimmingCharacters(in: .whitespaces))
+        if s.hasPrefix("|") { s = s.dropFirst() }
+        if s.hasSuffix("|"), !s.hasSuffix("\\|") { s = s.dropLast() }
+        var out: [String] = []
+        var cur = ""
+        var escaped = false
+        for ch in s {
+            if escaped {
+                if ch != "|" { cur.append("\\") }
+                cur.append(ch)
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "|" {
+                out.append(cur.trimmingCharacters(in: .whitespaces))
+                cur = ""
+            } else {
+                cur.append(ch)
+            }
+        }
+        if escaped { cur.append("\\") }
+        out.append(cur.trimmingCharacters(in: .whitespaces))
+        return out
+    }
+}
+
+/// A reply's table: a card, not a spreadsheet — rows parted by hairlines,
+/// the header set off by a tint, cells with room around the words, one
+/// rounded border around the whole. In a column narrower than `narrow`
+/// (a room cell) it keeps its natural width — each cell at most `cap`
+/// wide — and scrolls sideways rather than squeeze into a table many
+/// screens tall. The choice is `ViewThatFits`'s, from the width offered,
+/// and the cells are placed by `TranscriptTableLayout` from their own
+/// sizes: no measured state and no geometry read back, so nothing the
+/// table draws can change how it is laid out.
+struct TranscriptTableView: View {
+    static var narrow: CGFloat { 480 }
+    static var cap: CGFloat { 240 }
+    let table: TranscriptTable
+    let bodySize: CGFloat
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            grid(cap: nil)
+                .frame(minWidth: 0, idealWidth: Self.narrow, maxWidth: .infinity, alignment: .leading)
+            ScrollView(.horizontal, showsIndicators: false) {
+                grid(cap: Self.cap)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var columns: Int { max(1, table.alignments.count) }
+
+    private func grid(cap: CGFloat?) -> some View {
+        TranscriptTableLayout(columns: columns, cap: cap) {
+            ForEach(0..<(table.cells.count * columns), id: \.self) { i in
+                cell(i / columns, i % columns)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.14)))
+    }
+
+    private func cell(_ r: Int, _ c: Int) -> some View {
+        let align = c < table.alignments.count ? table.alignments[c] : .leading
+        let value = r < table.cells.count && c < table.cells[r].count ? table.cells[r][c] : AttributedString()
+        return Text(value)
+            .font(.system(size: bodySize * 0.95, weight: r == 0 ? .semibold : .regular))
+            .lineSpacing(bodySize * 0.2)
+            .multilineTextAlignment(align == .center ? .center : align == .trailing ? .trailing : .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: align == .center ? .top : align == .trailing ? .topTrailing : .topLeading)
+            .background(r == 0 ? Color.primary.opacity(0.06)
+                        : r % 2 == 0 ? Color.primary.opacity(0.025) : Color.clear)
+            .overlay(alignment: .top) {
+                if r > 0 { Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1) }
+            }
+    }
+}
+
+/// Table cells, row-major, `columns` to a row: each column as wide as its
+/// widest cell (at most `cap`), shrunk fairly when the row doesn't fit the
+/// width offered (the narrowest columns keep their width, the rest share
+/// what is left); each row as tall as its tallest cell at those widths.
+/// Every cell is proposed exactly its column × row box, so its tint and
+/// hairline fill it. A pure function of the cells' sizes.
+struct TranscriptTableLayout: Layout {
+    let columns: Int
+    let cap: CGFloat?
+
+    struct Cache { var ideal: [CGFloat] }
+
+    func makeCache(subviews: Subviews) -> Cache { Cache(ideal: idealWidths(subviews)) }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) { cache.ideal = idealWidths(subviews) }
+
+    private func idealWidths(_ subviews: Subviews) -> [CGFloat] {
+        var w = Array(repeating: CGFloat(0), count: max(1, columns))
+        for (i, s) in subviews.enumerated() {
+            var x = s.sizeThatFits(.unspecified).width
+            if let cap { x = min(x, cap) }
+            if x.isFinite { w[i % w.count] = max(w[i % w.count], x.rounded(.up)) }
+        }
+        return w
+    }
+
+    static func widths(available: CGFloat?, ideal: [CGFloat]) -> [CGFloat] {
+        guard let available, available.isFinite, ideal.reduce(0, +) > available else { return ideal }
+        var out = ideal
+        var remaining = max(0, available)
+        var left = ideal.count
+        for c in ideal.indices.sorted(by: { ideal[$0] < ideal[$1] }) {
+            let w = min(ideal[c], (remaining / CGFloat(left)).rounded(.down))
+            out[c] = w
+            remaining -= w
+            left -= 1
+        }
+        return out
+    }
+
+    private func heights(_ widths: [CGFloat], _ subviews: Subviews) -> [CGFloat] {
+        let cols = max(1, columns)
+        var h = Array(repeating: CGFloat(0), count: (subviews.count + cols - 1) / cols)
+        for (i, s) in subviews.enumerated() {
+            let y = s.sizeThatFits(ProposedViewSize(width: widths[i % cols], height: nil)).height
+            if y.isFinite { h[i / cols] = max(h[i / cols], y.rounded(.up)) }
+        }
+        return h
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let w = Self.widths(available: proposal.width, ideal: cache.ideal)
+        return CGSize(width: w.reduce(0, +), height: heights(w, subviews).reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let cols = max(1, columns)
+        let w = Self.widths(available: bounds.width, ideal: cache.ideal)
+        let h = heights(w, subviews)
+        var xs: [CGFloat] = [bounds.minX]
+        for x in w { xs.append(xs[xs.count - 1] + x) }
+        var y = bounds.minY
+        for (i, s) in subviews.enumerated() {
+            let r = i / cols, c = i % cols
+            if c == 0, r > 0 { y += h[r - 1] }
+            s.place(at: CGPoint(x: xs[c], y: y), anchor: .topLeading,
+                    proposal: ProposedViewSize(width: w[c], height: h[r]))
         }
     }
 }
@@ -2072,10 +2441,30 @@ struct TranscriptItemView: View {
         let bodySize: CGFloat = 14     // a dense dev tool on the Mac
         let serif = false
         #endif
+        let segments = TranscriptTables.segments(text)
+        if segments.count == 1, case .markdown(let only) = segments[0] {
+            markdown(only, bodySize: bodySize, serif: serif)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            // Tables drawn by `TranscriptTableView` (see `TranscriptTable`).
+            VStack(alignment: .leading, spacing: bodySize * 0.85) {
+                ForEach(segments.indices, id: \.self) { k in
+                    switch segments[k] {
+                    case .markdown(let m): markdown(m, bodySize: bodySize, serif: serif)
+                    case .table(let t): TranscriptTableView(table: t, bodySize: bodySize)
+                    }
+                }
+            }
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func markdown(_ text: String, bodySize: CGFloat, serif: Bool) -> some View {
         Markdown(TranscriptMarkdownCache.content(text))
             .markdownTheme(.claudeReader(bodySize: bodySize, serif: serif))
             .markdownCodeSyntaxHighlighter(TranscriptCodeHighlighter(dark: colorScheme == .dark))
-            .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 

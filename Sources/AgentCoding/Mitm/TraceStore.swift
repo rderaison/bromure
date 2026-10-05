@@ -68,6 +68,64 @@ public final class TraceStore {
         }
         try? FileManager.default.createDirectory(at: self.rootDir,
                                                  withIntermediateDirectories: true)
+        // Once per launch, off the main thread: records from before
+        // fingerprints still hold "sk-a…bQAA" previews of real secrets on
+        // disk. Rewrite them (idempotent; files without one are untouched).
+        let root = self.rootDir
+        queue.async { Self.redactLegacyPreviews(root: root) }
+    }
+
+    /// Rewrite every trace JSONL under `root` so no legacy secret preview
+    /// (swap fake/real previews, leak value previews) stays on disk. Only
+    /// the preview fields are touched; lines that aren't records are kept
+    /// as written; a file is rewritten (atomically) only if it changed.
+    /// Returns how many previews were redacted.
+    @discardableResult
+    nonisolated static func redactLegacyPreviews(root: URL) -> Int {
+        let fm = FileManager.default
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: nil) else { return 0 }
+        var total = 0
+        for case let url as URL in walker where url.pathExtension == "jsonl" {
+            guard let data = try? Data(contentsOf: url),
+                  data.range(of: Data("…".utf8)) != nil
+                    || data.range(of: Data("\\u2026".utf8)) != nil else { continue }
+            var out = Data()
+            var changed = 0
+            for raw in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+                let line = Data(raw)
+                guard var obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+                    out.append(line); out.append(0x0A); continue
+                }
+                var n = 0
+                func scrub(_ list: Any?, _ keys: [String]) -> [[String: Any]]? {
+                    guard let list = list as? [[String: Any]] else { return nil }
+                    return list.map { entry in
+                        var e = entry
+                        for k in keys {
+                            if let v = entry[k] as? String {
+                                let r = SecretFingerprint.redactLegacy(v)
+                                if r != v { e[k] = r; n += 1 }
+                            }
+                        }
+                        return e
+                    }
+                }
+                if let s = scrub(obj["swaps"], ["fakePreview", "realPreview"]) { obj["swaps"] = s }
+                if let l = scrub(obj["leaks"], ["valuePreview"]) { obj["leaks"] = l }
+                if n > 0, let enc = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) {
+                    out.append(enc)
+                    changed += n
+                } else {
+                    out.append(line)
+                }
+                out.append(0x0A)
+            }
+            if changed > 0 {
+                try? out.write(to: url, options: .atomic)
+                total += changed
+            }
+        }
+        return total
     }
 
     // MARK: - Recording (called from the proxy)

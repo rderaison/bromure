@@ -1845,12 +1845,14 @@ final class ScheduledAutomationEngine {
     }
 
     /// A filesystem/branch-safe slug from the automation name, timestamped so
-    /// repeated fires don't collide on the branch name.
+    /// repeated fires don't collide on the branch name. ASCII only (accents
+    /// folded): the worktree folder is named after it, and agents' stores
+    /// mangle other scripts (`AgentSession.worktreeSlug`).
     nonisolated static func branchSlug(for name: String, at date: Date) -> String {
         var out = ""
         var lastDash = false
-        for ch in name.lowercased() {
-            if ch.isLetter || ch.isNumber {
+        for ch in AgentSession.asciiFolded(name).lowercased() {
+            if ch.isASCII && (ch.isLetter || ch.isNumber) {
                 out.append(ch); lastDash = false
             } else if !lastDash {
                 out.append("-"); lastDash = true

@@ -126,7 +126,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     /// What else the sidebar search finds it by.
     var keywords: String {
         switch self {
-        case .general:         return "name color close login notes defaults task approved merge pull request"
+        case .general:         return "name color close login notes defaults task approved merge pull request kimi approvals never ask auto yolo"
         case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
         case .fusion:          return "mount mac folders fusion"
         case .folders:         return "shared folder mount directory"
@@ -1328,6 +1328,8 @@ struct ProfileEditorView: View {
 
             taskFinishPicker
 
+            kimiApprovalsPicker
+
             // One machine's own: not a default for new ones.
             if draft.id != ProfileStore.templateID {
                 Toggle(NSLocalizedString("Start this VM at login", comment: ""),
@@ -1367,6 +1369,9 @@ struct ProfileEditorView: View {
             }
             LabeledContent(NSLocalizedString("When a task is approved", comment: "task finish preference")) {
                 taskFinishPicker.labelsHidden()
+            }
+            LabeledContent(NSLocalizedString("Kimi approvals", comment: "Kimi approvals setting")) {
+                kimiApprovalsPicker.labelsHidden()
             }
             if draft.id != ProfileStore.templateID {
                 Toggle(NSLocalizedString("Start this VM at login", comment: ""),
@@ -1409,6 +1414,18 @@ struct ProfileEditorView: View {
             .pickerStyle(.menu)
             .help(NSLocalizedString("What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise.", comment: "task finish preference"))
         }
+    }
+
+    /// How much Kimi Code asks before acting in this workspace. Never Ask
+    /// by default: the VM and the host-side guardrails are the boundary.
+    @ViewBuilder
+    private var kimiApprovalsPicker: some View {
+        Picker(NSLocalizedString("Kimi approvals", comment: "Kimi approvals setting"),
+               selection: $draft.kimiApprovals) {
+            ForEach(KimiApprovals.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.menu)
+        .help(NSLocalizedString("Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume.", comment: "Kimi approvals setting"))
     }
 
     @ViewBuilder
@@ -3644,7 +3661,6 @@ struct ProfileEditorView: View {
         }
     }
 
-    @ViewBuilder
     /// The home image's size now, GiB — nil before it exists.
     private var homeCapacityGB: Int? {
         if let r = storageContext?.remoteSizes {

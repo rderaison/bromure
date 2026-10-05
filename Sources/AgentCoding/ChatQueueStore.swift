@@ -239,6 +239,16 @@ final class ChatQueueStore: ObservableObject {
         drivers[key] = driver
     }
 
+    /// A way to the agent for `key` from outside a chat (the session
+    /// engine holding a message for a session no chat has shown yet) —
+    /// kept only while no chat has given its own, which knows more.
+    func provideDriver(_ key: String, _ driver: Driver) {
+        if drivers[key] == nil { drivers[key] = driver }
+    }
+
+    /// Whether the store has a way to `key`'s agent (tests).
+    func hasDriver(_ key: String) -> Bool { drivers[key] != nil }
+
     /// The chat is gone (switched away, closed): another one showing the key
     /// takes over, else the store delivers in the background.
     func detach(_ key: String, owner: AnyObject) {

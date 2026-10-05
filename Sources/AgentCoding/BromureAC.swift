@@ -10590,10 +10590,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // (the guest still calls `bromure.llm`), so re-registering the repair
         // proxy is all that's needed — no restage. Done unconditionally (before
         // the guard) since these fields don't trip the credential/env diff below.
+        // A workspace override carries its own local server / model: editing
+        // it (e.g. :8888 → :8899) must re-register the engine too, not only
+        // restage the guest files.
         if old.activeModelID != new.activeModelID
             || old.modelRouting != new.modelRouting
             || old.localEngineBaseURL != new.localEngineBaseURL
-            || old.localEngineAPIKey != new.localEngineAPIKey {
+            || old.localEngineAPIKey != new.localEngineAPIKey
+            || old.modelOverride != new.modelOverride {
             if let engine = mitmEngine { applyRouting(engine, for: new) }
             startLocalEngineIfNeeded(for: new)
         }
@@ -12884,20 +12888,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: Worktree dialogs
 
     /// A filesystem/branch-safe slug from a free-form task name.
-    private func worktreeSlug(_ name: String) -> String {
-        let lowered = name.lowercased()
-        var out = ""
-        var lastDash = false
-        for ch in lowered {
-            if ch.isLetter || ch.isNumber {
-                out.append(ch); lastDash = false
-            } else if !lastDash {
-                out.append("-"); lastDash = true
-            }
-        }
-        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return String(trimmed.prefix(40)).isEmpty ? "worktree" : String(trimmed.prefix(40))
-    }
+    private func worktreeSlug(_ name: String) -> String { AgentSession.worktreeSlug(name) }
 
     /// "New worktree…" dialog: task name, tool, and an optional initial prompt.
     @MainActor

@@ -3889,3 +3889,33 @@
 "Delivered — queued by %@" = "已送达 — 在 %@ 的队列中";
 "1 delegation call" = "1 次委派调用";
 "%d delegation calls" = "%d 次委派调用";
+"downloaded — install scripts could not be checked" = "已下载 — 无法检查安装脚本";
+"Bromure — approval needed" = "Bromure — 需要批准";
+"No answer within %d s counts as Don't allow." = "%d 秒内未回应即视为不允许。";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "代理想要执行：\n\n%@\n\n批准仅适用于这一请求——其他任何写入都会再次询问。";
+"Allow this request for 15 minutes" = "允许此请求 15 分钟";
+"Allow this request for the rest of the session" = "在本次会话剩余时间内允许此请求";
+"Provider unreachable" = "无法连接服务商";
+"Usage limit reached" = "已达使用上限";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi 审批";
+"Never ask" = "从不询问";
+"Ask when needed" = "必要时询问";
+"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "从不询问：Kimi Code 运行每条命令和每个工具时都不会停下来询问——工作区的虚拟机和 Bromure 的防护措施就是安全边界。必要时询问：常规编辑和命令自动运行；有风险的操作、提问和计划仍会等待你确认。从下次启动或恢复时生效。";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "已被 Bromure 拦截 — 提示注入";
+"Blocked by Bromure — rogue instructions" = "已被 Bromure 拦截 — 恶意指令";
+"Blocked by Bromure — credential leak" = "已被 Bromure 拦截 — 凭据泄露";
+"Blocked by Bromure — supply chain" = "已被 Bromure 拦截 — 供应链";
+"Blocked by Bromure — client certificate" = "已被 Bromure 拦截 — 客户端证书";
+"Blocked by Bromure" = "已被 Bromure 拦截";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "请求没有到达提供商。详情见安全时间线；问题解决后请重新发送。";
+"Credential approval" = "凭据审批";
+"allowed for 1 hour" = "已允许 1 小时";
+"allowed for 5 minutes" = "已允许 5 分钟";
+"allowed for the rest of the session" = "已允许至本次会话结束";
+"denied — no answer in time; the next request asks again" = "已拒绝 — 未及时回应；下次请求时会再次询问";
+"denied — you said no a moment ago" = "已拒绝 — 你刚才拒绝过";
+"denied by you" = "你已拒绝";

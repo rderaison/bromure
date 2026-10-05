@@ -44,14 +44,19 @@ enum GuestCommand {
         var encoded: [String]
         switch action {
         case "create":
-            guard args.count >= 4 else { return nil }   // cwd, slug, display, tool[, prompt[, background[, base]]]
+            guard args.count >= 4 else { return nil }   // cwd, slug, display, tool[, prompt[, background[, base[, flags]]]]
             name = "worktree-create"
             // Optional 6th, raw: "background" — the tab opens behind the
             // current one (a delegate's; the user is looking at its delegator).
-            // Optional 7th: the branch to start from.
+            // Optional 7th: the branch to start from. Optional 8th: the
+            // host's launch flags (the agent's role/autonomy flags — the same
+            // a session in a plain folder gets).
+            let base = args.count >= 7 ? args[6] : ""
+            let flags = args.count >= 8 ? args[7] : ""
             encoded = args.prefix(4).map(arg) + [arg(args.count >= 5 ? args[4] : "")]
                 + [args.count >= 6 && args[5] == "background" ? "background" : emptyPlaceholder]
-                + (args.count >= 7 && !args[6].isEmpty ? [arg(args[6])] : [])
+                + (!base.isEmpty || !flags.isEmpty ? [arg(base)] : [])
+                + (!flags.isEmpty ? [arg(flags)] : [])
         case "run":
             // Automation fire: same layout as "create", but the guest falls
             // back to a plain agent tab when cwd isn't a git repo. Optional
@@ -75,7 +80,8 @@ enum GuestCommand {
             if args.count >= 7, args[6] == "continue" { encoded.append("continue") }
         case "agent-tab":
             // Home-screen session: an interactive agent tab in a folder (no
-            // worktree, no yolo). cwd, display, tool, prompt[, flags[, background]].
+            // worktree; the host's flags carry resume + autonomy).
+            // cwd, display, tool, prompt[, flags[, background]].
             guard args.count >= 4 else { return nil }
             name = "agent-tab"
             let background = args.count >= 6 && args[5] == "background"

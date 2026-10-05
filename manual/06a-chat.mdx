@@ -132,7 +132,7 @@ Where Bromure can't sign in for the agent, the card drives the agent's own sign-
 
 ***agent* needs a model provider.** Oh My Pi has no account to sign in to: "*agent* has no model provider on this machine yet. Add an API key or a local model in the machine's settings, then start the session again." **Machine settings…** opens the machine's settings.
 
-**Other dialogs.** Any other menu the agent puts up is shown with its title and its options as buttons (the one Return would pick is highlighted), plus **Dismiss** (Esc) — "Or open Linux (⌥⌘U) to answer in the terminal."
+**Other dialogs.** Any other menu the agent puts up is shown with its title and its options as buttons (the one Return would pick is highlighted), plus **Dismiss** (Esc) — "Or open Linux (⌥⌘U) to answer in the terminal." Approval panels and Kimi Code's multiple-choice questions appear this way. Kimi Code puts up neither in its default **Never ask** mode — it asks in plain text instead — only when the machine's **Kimi approvals** setting is **Ask when needed** (see [General](07-settings/general.mdx#kimi-approvals)).
 
 **Failures.** When the agent stops on an error, a red card says which kind — "The agent couldn't authenticate", "The agent hit a usage limit" or "The agent stopped with an error" — with the agent's own error line under it. An authentication failure offers **Sign in to *provider*…** when Bromure can sign in for the agent; otherwise the card reads "Switch to the terminal to resolve it, then send again."
 

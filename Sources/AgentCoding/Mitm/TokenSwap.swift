@@ -493,9 +493,10 @@ public final class TokenSwapper: @unchecked Sendable {
         return false
     }
 
+    /// How a token is named in logs, traces and the Security Timeline: its
+    /// kind and a keyed fingerprint — never any of its characters.
     static func preview(_ s: String) -> String {
-        guard s.count > 8 else { return "***" }
-        return String(s.prefix(4)) + "…" + String(s.suffix(4))
+        SecretFingerprint.label(s)
     }
 
     /// Cookie-style domain match: `host` belongs to `scope` if it equals

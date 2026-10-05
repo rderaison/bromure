@@ -57,6 +57,19 @@ enum LiveModelRefresh {
         }
         return out
     }
+
+    /// Whether the host-side engine registration (where the repair proxy
+    /// forwards a workspace's local turns, and the routing the MITM applies)
+    /// differs between two overlaid profiles. Independent of agent restarts:
+    /// moving a workspace's local server from :8888 to :8899 changes no
+    /// agent's staging, but every turn must go to the new server at once.
+    static func engineRegistrationChanged(from old: Profile, to new: Profile) -> Bool {
+        old.localEngineBaseURL != new.localEngineBaseURL
+            || old.localEngineAPIKey != new.localEngineAPIKey
+            || old.activeModelID != new.activeModelID
+            || old.modelRouting != new.modelRouting
+            || old.distinctLocalModelIDs != new.distinctLocalModelIDs
+    }
 }
 
 extension ACAppDelegate {
@@ -107,7 +120,16 @@ extension ACAppDelegate {
                 continue
             }
             let tools = LiveModelRefresh.agentsNeedingRestart(from: prior, to: fresh)
-            guard !tools.isEmpty else { continue }
+            if tools.isEmpty {
+                // No agent to restart, but the engine may still have moved.
+                if LiveModelRefresh.engineRegistrationChanged(from: prior, to: fresh) {
+                    BACDebug.log("models", "\(stored.name): re-registering the local engine")
+                    if let engine = mitmEngine { applyRouting(engine, for: stored) }
+                    startLocalEngineIfNeeded(for: stored)
+                    lastStagedProfiles[pid] = fresh
+                }
+                continue
+            }
             BACDebug.log("models", "\(stored.name): restaging for \(tools.map(\.rawValue).sorted().joined(separator: ", "))")
             // Swap map, env, config files, home seed — and `lastStagedProfiles`.
             pushLiveCredentials(for: stored, terminalDefaults: terminalDefaults, sandbox: session.sandbox)
@@ -179,7 +201,7 @@ extension AgentSessionEngine {
         guard let current = store.session(s.id), current.windowIndex == w else { return }
         let words: [String] = [s.tool.rawValue,
                                Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)),
-                               Self.roleFlags(for: s)]
+                               roleFlags(for: s)]
         let resume = words.filter { !$0.isEmpty }.joined(separator: " ")
         let cmd = "source ~/.bashrc >/dev/null 2>&1; clear; " + resume
         // The session's own window, and only once its shell is in front.

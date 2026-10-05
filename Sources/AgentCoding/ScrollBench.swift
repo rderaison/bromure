@@ -18,9 +18,20 @@ private struct BenchChrome: ViewModifier {
 
 enum ScrollBench {
     static func run(_ args: [String]) {
-        guard let path = args.first(where: { !$0.hasPrefix("--") }),
-              let data = FileManager.default.contents(atPath: path) else {
-            print("usage: __bench-scroll <transcript.jsonl> [--lazy] [--flat]"); return
+        // `@table[:rows]` — a built-in fixture: a Kimi reply carrying a
+        // markdown table, streamed in small parts (S3-1: the app hung while
+        // one grew). Run with `--chat --grow --grow-step 6 --width W`.
+        let fixture = args.first(where: { $0.hasPrefix("@table") }).map { spec -> Data in
+            let rows = Int(spec.split(separator: ":").dropFirst().first ?? "") ?? 40
+            return tableReplyFixture(rows: rows)
+        }
+        let valueFlags: Set<String> = ["--width", "--seconds", "--height", "--grow-step", "--shot"]
+        let positional = args.enumerated().first(where: { i, a in
+            !a.hasPrefix("--") && !(i > 0 && valueFlags.contains(args[i - 1]))
+        })?.element
+        guard let path = positional,
+              let data = fixture ?? FileManager.default.contents(atPath: path) else {
+            print("usage: __bench-scroll <transcript.jsonl | @table[:rows]> [--lazy] [--flat]"); return
         }
         if args.contains("--chat") { ChatLayoutCheck.run(path: path, data: data, args: args); return }
         let lazy = args.contains("--lazy"), flat = args.contains("--flat")
@@ -161,7 +172,7 @@ enum ChatLayoutCheck {
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)
             let provider: BeautifiedTranscriptProvider = grow
-                ? GrowingTranscriptProvider(transcript: data)
+                ? GrowingTranscriptProvider(transcript: data, step: Int(value("--grow-step") ?? 2))
                 : FixtureTranscriptProvider(accent: .blue, transcript: data, working: working)
             let model = BeautifiedSessionModel(provider: provider)
             model.start()
@@ -243,6 +254,7 @@ enum ChatLayoutCheck {
                 phase += 1
             }
             let g = model.debugGeometry
+            print("items \(model.items.count), \(model.items.map(\.approximateLength).reduce(0, +)) chars shown")
             print(String(format: "OK: %.0f s at %.0f pt — viewport %.0f content %.0f tailY %.0f watchdog %.0f",
                          seconds, narrow, g["viewport"] ?? -1, g["content"] ?? -1, g["tailY"] ?? -2,
                          g["watchdog"] ?? 0))
@@ -256,6 +268,43 @@ enum ChatLayoutCheck {
     }
 }
 
+extension ScrollBench {
+    /// A Kimi wire journal: a question, then a reply holding a `rows`-row
+    /// table (inline code, bold, a long unbreakable word per row) and a
+    /// second small table, as ~30-character content parts of one step —
+    /// the reply grows in place, poll after poll, the way a live one does.
+    static func tableReplyFixture(rows: Int, part: Int = 30) -> Data {
+        var reply = "Here is a comparison of the options you asked about.\n\n"
+        reply += "| # | Option | Strengths | Weaknesses | Verdict |\n|---|:------|:---------:|-----------|--------:|\n"
+        for i in 0..<max(1, rows) {
+            reply += "| \(i) | **Option \(i)** with `code_\(i)` | Fast, simple, well documented and widely used "
+                + "| Edge cases around very_long_unbreakable_identifier_\(i)_xxxxxxxxxxxxxxxx | \(i % 2 == 0 ? "Fair" : "Good") |\n"
+        }
+        reply += "\nIn short, pick the one that matches your constraints.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+        let t0 = 1_759_600_000_000.0
+        var lines: [[String: Any]] = [
+            ["type": "metadata", "protocol_version": "1", "time": t0],
+            ["type": "context.append_message", "time": t0 + 1,
+             "message": ["role": "user", "content": [["type": "text", "text": "Compare the options in a table."]]]],
+        ]
+        let chars = Array(reply)
+        var k = 0
+        while k < chars.count {
+            let piece = String(chars[k..<min(chars.count, k + part)])
+            lines.append(["type": "context.append_loop_event", "time": t0 + 10 + Double(k),
+                          "event": ["type": "content.part", "stepUuid": "step-1",
+                                    "part": ["type": "text", "text": piece]]])
+            k += part
+        }
+        lines.append(["type": "turn.ended", "time": t0 + 1_000_000, "reason": "done"])
+        var out = Data()
+        for l in lines {
+            if let d = try? JSONSerialization.data(withJSONObject: l) { out += d + Data([0x0a]) }
+        }
+        return out
+    }
+}
+
 /// Serves a transcript as if the agent were writing it: a few more lines
 /// at every poll, "working" until the file is whole.
 @MainActor
@@ -263,10 +312,13 @@ final class GrowingTranscriptProvider: BeautifiedTranscriptProvider {
     let accent: Color = .blue
     private let lines: [Data]
     private var shown = 0
+    /// Lines added at every poll.
+    private let step: Int
     private static let path = "/home/ubuntu/.claude/projects/-home-ubuntu-demo/grow.jsonl"
 
-    init(transcript: Data) {
+    init(transcript: Data, step: Int = 2) {
         lines = transcript.split(separator: UInt8(ascii: "\n")).map { Data($0) + Data([0x0a]) }
+        self.step = max(1, step)
         shown = min(lines.count, 3)
     }
 
@@ -285,7 +337,7 @@ final class GrowingTranscriptProvider: BeautifiedTranscriptProvider {
             if parts.count >= 6 { known = String(parts[3]).trimmingCharacters(in: CharacterSet(charactersIn: "'")); off = Int(parts[4]) ?? -1 }
         }
         let body = lines.prefix(shown).reduce(Data(), +)
-        shown = min(lines.count, shown + 2)
+        shown = min(lines.count, shown + step)
         let size = body.count
         let start = (known == Self.path && off >= 0 && off <= size) ? off : 0
         return "\(Self.path)\n\n\(size)\n\(start)\n\(size)\n" + String(decoding: body[start...], as: UTF8.self)

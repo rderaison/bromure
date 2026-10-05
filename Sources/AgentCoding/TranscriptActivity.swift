@@ -102,23 +102,43 @@ enum TranscriptRow: Identifiable {
             current += line
             size += line.utf16.count
         }
+        // The header + delimiter rows of the pipe table we're in: a table
+        // cut mid-way repeats them atop the next piece, which otherwise
+        // shows its rows as lines of pipes.
+        var tableHead: (Substring, Substring)?
+        var previous: Substring?
         for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
             let isFence = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+            defer { previous = raw }
+            if fence == nil {
+                if tableHead != nil, trimmed.isEmpty || !trimmed.contains("|") || isFence {
+                    tableHead = nil
+                } else if tableHead == nil, let head = previous, head.contains("|"),
+                          let aligns = TranscriptTables.delimiter(trimmed),
+                          TranscriptTables.cells(head.trimmingCharacters(in: .whitespaces)).count == aligns.count {
+                    tableHead = (head, raw)
+                }
+            }
             // A break is a blank line outside a fence, once the piece is big enough.
             if fence == nil, trimmed.isEmpty, size >= limit {
                 push()
                 continue
             }
             // Way past a screen with no break in sight: cut at this line
-            // (never at the line that closes a fence — it ends the piece).
-            if size >= cap, !(isFence && fence != nil) {
+            // (never at the line that closes a fence — it ends the piece,
+            // nor at a table's delimiter row — it belongs to its header).
+            if size >= cap, !(isFence && fence != nil), !(tableHead.map { $0.1 == raw } ?? false) {
                 if let open = fence {
                     current += "\n" + close
                     push()
                     add(Substring(open))
                 } else {
                     push()
+                    if let (head, delimiter) = tableHead {
+                        add(head)
+                        add(delimiter)
+                    }
                 }
             }
             if isFence {

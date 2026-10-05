@@ -1141,6 +1141,14 @@ public final class SessionDisk {
             try toml.write(to: tmp.appendingPathComponent("kimi.toml"),
                            atomically: true, encoding: .utf8)
         }
+        // Kimi's approval mode flag (`--auto` / `--yolo`), read by the .bashrc
+        // tab launcher for the launches the guest builds itself (board tasks,
+        // plans, branch sessions). Host-typed launches carry it inline
+        // (AgentSessionEngine.roleFlags). Rewritten on a live refresh, so a
+        // changed setting reaches the next launch without a reboot.
+        try (profile.kimiApprovals.launchFlag + "\n")
+            .write(to: tmp.appendingPathComponent(Self.kimiApprovalsMetaFile),
+                   atomically: true, encoding: .utf8)
 
         // omp: stage the resolved `--model` (bashrc reads it at launch) and,
         // for a `.custom` OpenAI-compatible provider or local mode, a
@@ -1329,6 +1337,8 @@ public final class SessionDisk {
     public static let browserMCPVsockPort: UInt32 = 5830
     /// Guest path of the stdio shim, staged into the (read-only) meta share.
     static let browserMCPShimGuestPath = "/mnt/bromure-meta/bromure-browser-mcp.py"
+    /// Meta-share file holding Kimi's approval-mode flag (see KimiApprovals).
+    public static let kimiApprovalsMetaFile = "kimi-approvals"
     /// Host vsock port for the coding-board MCP (TaskBoardMCPServer): the
     /// task tools coding-task agents get (set plan, create subtasks, hand to
     /// review). Sibling of the browser MCP, one port over.
@@ -1813,7 +1823,12 @@ public final class SessionDisk {
     command = "/home/ubuntu/.bromure/agent-status.sh done"
 
     # Agent-to-agent traffic (our own delegation MCP to the host) never
-    # waits on an approval. A bare server name matches nothing; the glob does.
+    # waits on an approval. Kimi matches a rule's pattern (picomatch) against
+    # the tool's qualified name, mcp__<server>__<tool>: a bare server name
+    # matches nothing; the glob does. NOTE: Kimi Code 2.1.1 (and 0.43.x)
+    # parses and validates these rules but never loads them into its
+    # permission gate (nothing calls its rules service's addRules), so they
+    # take effect only on a Kimi that wires them up.
     [[permission.rules]]
     decision = "allow"
     pattern = "mcp__delegation__*"

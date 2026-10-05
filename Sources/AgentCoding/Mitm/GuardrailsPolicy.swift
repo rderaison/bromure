@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 // The iOS fat client compiles this file without SandboxEngine (macOS-only) —
 // PlatformStubs.swift supplies the EgressPolicy stand-in there.
 #if canImport(SandboxEngine)
@@ -694,19 +695,45 @@ public struct GuardrailsConfig: Sendable {
         // we have it (ClickHouse), otherwise compose verb + path. The
         // reason string from `deny()` already encodes verb + resource
         // for REST protocols.
-        let operation: String
-        if let q = dbQuery, !q.isEmpty {
-            operation = q
-        } else {
-            operation = "\(method.uppercased()) \(path)"
-        }
+        let operation = Self.operationDescription(method: method, path: path, amzTarget: amzTarget,
+                                                  formAction: formAction, dbQuery: dbQuery)
+        // The grant covers EXACTLY this operation (the prompt says so):
+        // approving `DELETE /v2/droplets/1` must not wave through
+        // `DELETE /v2/droplets/2`.
         let allowed = await broker.consent(profileID: profileID,
-                                            scope: route.scopeKey,
-                                            scopeDisplayName: route.scopeLabel,
+                                            scope: Self.exactScope(route.scopeKey, method: method, path: path,
+                                                                   amzTarget: amzTarget, formAction: formAction,
+                                                                   dbQuery: dbQuery),
+                                            scopeDisplayName: "\(route.scopeLabel): \(operation.count > 120 ? String(operation.prefix(120)) + "…" : operation)",
                                             operation: operation)
         return allowed ? nil : denial
     }
 #endif
+
+    /// What the user is asked about: the SQL itself, or verb + path (+ the
+    /// AWS action, which lives in a header or the form body).
+    static func operationDescription(method: String, path: String, amzTarget: String?,
+                                     formAction: String?, dbQuery: String?) -> String {
+        if let q = dbQuery, !q.isEmpty { return q }
+        var op = "\(method.uppercased()) \(path)"
+        if let a = amzTarget ?? formAction, !a.isEmpty { op += " (\(a))" }
+        return op
+    }
+
+    /// The consent scope of one exact operation: the protocol scope plus the
+    /// verb, the full path (query included) and the AWS action; for SQL a
+    /// hash of the statement with its whitespace normalized.
+    static func exactScope(_ base: String, method: String, path: String, amzTarget: String?,
+                           formAction: String?, dbQuery: String?) -> String {
+        if let q = dbQuery, !q.isEmpty {
+            let norm = q.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            let digest = SHA256.hash(data: Data(norm.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
+            return "\(base)|sql:\(digest)"
+        }
+        var key = "\(base)|\(method.uppercased()) \(path)"
+        if let a = amzTarget ?? formAction, !a.isEmpty { key += "|\(a)" }
+        return key
+    }
 
     /// Single host-side decision for every guardrailed protocol. Returns a
     /// `Denial` (the caller sends a 403) or nil to forward. `amzTarget` /

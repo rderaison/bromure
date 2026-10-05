@@ -1487,7 +1487,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 if ecosystem == .npm,
                    policy.stripInstallScripts,
                    !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg) {
-                    var didStripFlag = false
+                    var stripResult: NPMRegistryTransforms.TarballStrip = .notApplicable
                     let relay = try await relayUpstreamBuffered(
                         rawRequest: toForward, host: upstreamHost, port: upstreamPort,
                         session: session, tls: tls, scheme: upstreamScheme,
@@ -1498,12 +1498,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     profileID: self.profileID, path: reqPath) {
                                 return substitute
                             }
-                            let (out, didStrip) = NPMRegistryTransforms
-                                .stripScriptsFromTarball(rawResponse: raw)
-                            if didStrip {
-                                didStripFlag = true
+                            let (out, result) = NPMRegistryTransforms.inspectTarball(rawResponse: raw)
+                            stripResult = result
+                            switch result {
+                            case .stripped:
                                 SupplyChainLog.shared.record(
                                     "[supply-chain] stripped install scripts from \(pkg)@\(version)")
+                            case .noScripts:
+                                SupplyChainLog.shared.record(
+                                    "[supply-chain] \(pkg)@\(version): no install scripts")
+                            case .failed(let why):
+                                // Never silent: the tarball went through as-is.
+                                SupplyChainLog.shared.record(
+                                    "[supply-chain] could NOT inspect \(pkg)@\(version) (\(why)) — install scripts NOT removed")
+                            case .notApplicable:
+                                break
                             }
                             return out
                         })
@@ -1516,9 +1525,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     swaps: swap.swaps,
                                     leaks: leaks,
                                     latencyMs: elapsed)
-                    if didStripFlag {
+                    switch stripResult {
+                    case .stripped:
                         scOutcome = "stripped"
                         scReasonKind = "scripts_stripped"
+                    case .failed(let why):
+                        scOutcome = "unchecked"
+                        scReasonKind = "scripts_unchecked"
+                        scReason = why
+                    case .noScripts, .notApplicable:
+                        break
                     }
                     return
                 }

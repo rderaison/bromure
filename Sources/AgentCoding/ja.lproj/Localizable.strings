@@ -3889,3 +3889,33 @@
 "Delivered — queued by %@" = "送信済み — %@ のキューで待機中";
 "1 delegation call" = "委任の呼び出し 1 件";
 "%d delegation calls" = "委任の呼び出し %d 件";
+"downloaded — install scripts could not be checked" = "ダウンロード済み — インストールスクリプトを確認できませんでした";
+"Bromure — approval needed" = "Bromure — 承認が必要です";
+"No answer within %d s counts as Don't allow." = "%d 秒以内に応答がない場合は「許可しない」になります。";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "エージェントが次を実行しようとしています:\n\n%@\n\n承認はこのリクエストのみに適用されます — 他の書き込みでは再度確認します。";
+"Allow this request for 15 minutes" = "このリクエストを15分間許可";
+"Allow this request for the rest of the session" = "このリクエストをセッション終了まで許可";
+"Provider unreachable" = "プロバイダーに接続できません";
+"Usage limit reached" = "使用上限に達しました";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi の承認";
+"Never ask" = "確認しない";
+"Ask when needed" = "必要なときに確認";
+"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "確認しない：Kimi Code はすべてのコマンドとツールを確認なしで実行します。ワークスペースの VM と Bromure のガードレールが安全の境界になります。必要なときに確認：日常的な編集やコマンドは自動で実行され、危険な操作・質問・計画は引き続きあなたの確認を待ちます。次回の起動または再開から適用されます。";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "Bromure がブロック — プロンプトインジェクション";
+"Blocked by Bromure — rogue instructions" = "Bromure がブロック — 不正な指示";
+"Blocked by Bromure — credential leak" = "Bromure がブロック — 資格情報の漏えい";
+"Blocked by Bromure — supply chain" = "Bromure がブロック — サプライチェーン";
+"Blocked by Bromure — client certificate" = "Bromure がブロック — クライアント証明書";
+"Blocked by Bromure" = "Bromure がブロック";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "プロバイダには何も届いていません。詳細はセキュリティ タイムラインで確認できます。解決したらもう一度送信してください。";
+"Credential approval" = "資格情報の承認";
+"allowed for 1 hour" = "1 時間許可";
+"allowed for 5 minutes" = "5 分間許可";
+"allowed for the rest of the session" = "セッション終了まで許可";
+"denied — no answer in time; the next request asks again" = "拒否 — 時間内に応答がありませんでした。次のリクエストで再度確認します";
+"denied — you said no a moment ago" = "拒否 — 先ほど拒否されました";
+"denied by you" = "ユーザーが拒否";

@@ -242,8 +242,10 @@ struct SecurityTimelineView: View {
         let iso = ISO8601DateFormatter()
         var out = "time,machine,workspace,engine,condition,decision,outcome\n"
         for e in (tab == .timeline ? rows.reversed() : timeline.allEvents) {
+            // Never export secret characters, whatever an older row carries.
             out += [iso.string(from: e.time), e.machine ?? "This Mac", e.workspace ?? "", e.engine,
-                    e.condition, e.decision, e.kind.wire].map(field).joined(separator: ",") + "\n"
+                    SecretFingerprint.redactLegacy(e.condition), SecretFingerprint.redactLegacy(e.decision),
+                    e.kind.wire].map(field).joined(separator: ",") + "\n"
         }
         try? out.write(to: url, atomically: true, encoding: .utf8)
     }

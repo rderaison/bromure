@@ -3923,3 +3923,33 @@
 "Delivered — queued by %@" = "Delivered — queued by %@";
 "1 delegation call" = "1 delegation call";
 "%d delegation calls" = "%d delegation calls";
+"downloaded — install scripts could not be checked" = "downloaded — install scripts could not be checked";
+"Bromure — approval needed" = "Bromure — approval needed";
+"No answer within %d s counts as Don't allow." = "No answer within %d s counts as Don't allow.";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again.";
+"Allow this request for 15 minutes" = "Allow this request for 15 minutes";
+"Allow this request for the rest of the session" = "Allow this request for the rest of the session";
+"Provider unreachable" = "Provider unreachable";
+"Usage limit reached" = "Usage limit reached";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi approvals";
+"Never ask" = "Never ask";
+"Ask when needed" = "Ask when needed";
+"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume.";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "Blocked by Bromure — prompt injection";
+"Blocked by Bromure — rogue instructions" = "Blocked by Bromure — rogue instructions";
+"Blocked by Bromure — credential leak" = "Blocked by Bromure — credential leak";
+"Blocked by Bromure — supply chain" = "Blocked by Bromure — supply chain";
+"Blocked by Bromure — client certificate" = "Blocked by Bromure — client certificate";
+"Blocked by Bromure" = "Blocked by Bromure";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "Nothing reached the provider. The Security Timeline has the details; send again once it's resolved.";
+"Credential approval" = "Credential approval";
+"allowed for 1 hour" = "allowed for 1 hour";
+"allowed for 5 minutes" = "allowed for 5 minutes";
+"allowed for the rest of the session" = "allowed for the rest of the session";
+"denied — no answer in time; the next request asks again" = "denied — no answer in time; the next request asks again";
+"denied — you said no a moment ago" = "denied — you said no a moment ago";
+"denied by you" = "denied by you";

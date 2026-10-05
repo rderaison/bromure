@@ -240,10 +240,16 @@ enum AgentScreen {
             cursor = true
             body = body.dropFirst().drop(while: { $0 == " " || $0 == "\u{00a0}" })
         }
+        // Kimi's question dialog brackets its numbers: "→ [1] Option".
+        let bracketed = body.first == "["
+        if bracketed { body = body.dropFirst() }
         let digits = body.prefix(while: \.isNumber)
         guard let n = Int(digits), (1...9).contains(n) else { return nil }
         var rest = body.dropFirst(digits.count)
-        if rest.first == "." || rest.first == ")" {
+        if bracketed {
+            guard rest.first == "]" else { return nil }
+            rest = rest.dropFirst()
+        } else if rest.first == "." || rest.first == ")" {
             rest = rest.dropFirst()
         } else if rest.hasPrefix(" (●)") || rest.hasPrefix(" (◉)") {
             cursor = true; rest = rest.dropFirst(4)

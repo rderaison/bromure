@@ -73,6 +73,28 @@ import threading
 import time
 import traceback
 
+
+
+def _ensure_utf8_locale():
+    """tmux sanitizes what it prints for a client whose locale isn't UTF-8
+    (the first of LC_ALL, LC_CTYPE, LANG that is set): a folder named in
+    another script came back as "________-1004-2143" in the roster, and
+    every transcript lookup keyed by that path missed. Every tmux and shell
+    this daemon runs inherits a UTF-8 character type."""
+    for k in ("LC_ALL", "LC_CTYPE", "LANG"):
+        v = os.environ.get(k)
+        if v:
+            if "utf-8" in v.lower() or "utf8" in v.lower():
+                return
+            if k == "LC_ALL":
+                os.environ["LC_ALL"] = "C.UTF-8"
+                return
+            break
+    os.environ["LC_CTYPE"] = "C.UTF-8"
+
+
+_ensure_utf8_locale()
+
 HOST_CID = 2  # well-known CID for the macOS host under VZ
 
 # vsock ports (unchanged from the absorbed agents)
@@ -2600,6 +2622,34 @@ def _delegation_mcp_setup(tool, workdir):
             _project_mcp_add(tool, workdir, name, shim)
 
 
+def _sweep_stale_project_mcp(max_depth=3):
+    """Once at start: every Kimi project file under the home that still
+    declares the delegation shim as "bromure-delegation" next to the
+    user-scope "delegation" loses that entry — a folder an older build set
+    up (~/qa/.kimi-code/mcp.json) otherwise listed every delegation tool
+    twice, and the duplicates asked for approval even in a new session
+    (in-place resumes and terminal launches never pass `_agent_tab`)."""
+    if not _user_scope_mcp_has("kimi", _DELEGATION_MCP_SHIM):
+        return
+    root_depth = HOME.rstrip(os.sep).count(os.sep)
+    for dirpath, dirnames, filenames in os.walk(HOME):
+        depth = dirpath.rstrip(os.sep).count(os.sep) - root_depth
+        if os.path.basename(dirpath) == ".kimi-code":
+            if depth > 1 and "mcp.json" in filenames:
+                _project_mcp_remove("kimi", os.path.dirname(dirpath),
+                                    "bromure-delegation", _DELEGATION_MCP_SHIM)
+            dirnames[:] = []
+            continue
+        if depth >= max_depth:
+            dirnames[:] = []
+            continue
+        # Hidden trees and dependency folders hold no project of the user's
+        # (bar the .kimi-code directory itself).
+        dirnames[:] = [d for d in dirnames
+                       if d == ".kimi-code" or not (d.startswith(".") or d in
+                                                     ("node_modules", "venv", "__pycache__"))]
+
+
 def _user_scope_mcp_file(tool):
     """The user-scope MCP file grok, kimi or omp reads (written at login
     from the host's list), or None."""
@@ -2638,7 +2688,12 @@ def _project_mcp_remove(tool, workdir, name, shim):
         return
     servers = existing.get("mcpServers", {}) or {}
     entry = servers.get(name)
-    if not isinstance(entry, dict) or shim not in (entry.get("args") or []):
+    # The same shim wherever an older build pointed at it (matched by its
+    # file name: the meta share's mount point moved once).
+    base = os.path.basename(shim)
+    if not isinstance(entry, dict) or not any(
+            isinstance(a, str) and (a == shim or os.path.basename(a) == base)
+            for a in (entry.get("args") or [])):
         return
     del servers[name]
     existing["mcpServers"] = servers
@@ -2697,7 +2752,7 @@ def _project_mcp_add(tool, workdir, name, shim, extra_args=None):
 
 
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
-                     task=False, background=False, base=""):
+                     task=False, background=False, base="", host_flags=""):
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -2753,6 +2808,10 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
 
     _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
     flags = _YOLO_FLAGS.get(tool, "") if yolo else ""
+    # A session's branch (the host launched it): the agent's own launch
+    # flags, as in a plain folder — Codex's bypass, Kimi's approval mode.
+    if not yolo and host_flags:
+        flags = host_flags.strip()
     if task:
         flags += _task_mcp_setup(branch, tool, wt_dir)
     _delegation_mcp_setup(tool, wt_dir)
@@ -2760,6 +2819,11 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
         _env["BROMURE_AC_WT_FLAGS"] = flags
     if yolo and _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
+        _pretrust(tool, wt_dir, main_root)
+        _preonboard(tool, wt_dir)
+    elif host_flags:
+        # The user's session, in a checkout they asked for: trusted and
+        # onboarded like a session's own folder (`_agent_tab`).
         _pretrust(tool, wt_dir, main_root)
         _preonboard(tool, wt_dir)
     elif tool == "kimi":
@@ -2806,7 +2870,8 @@ def _interactive_task_env(tool):
     one-shot mode that exits when the turn ends — leaving a bare shell in
     the task's tab, so review feedback typed there later ran as bash
     commands. With BROMURE_AC_WT_INTERACTIVE the tab launcher starts Kimi
-    interactively (`--auto`, its unattended mode) and types the opening
+    interactively (in the workspace's approval mode, the meta share's
+    kimi-approvals: `--auto` = Never Ask by default) and types the opening
     message in once the TUI is up. Automations keep the one-shot run: their
     result is the branch, and the exit is their finish signal."""
     return {"BROMURE_AC_WT_INTERACTIVE": "1"} if tool == "kimi" else {}
@@ -2906,9 +2971,10 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
 def _agent_tab(cwd, display, tool, prompt_b64, flags="", background=False):
     """Session-first home: an INTERACTIVE agent tab in a folder the user
     chose — the launch env of a worktree tab (tool, optional opening
-    message) without a worktree and without yolo flags, so the agent asks
-    its permission questions like it would in a terminal. `flags` carries
-    a resume flag when the host reopens a conversation. Folder trust is
+    message) without a worktree. `flags` is all the host's: a resume flag
+    when it reopens a conversation, and the agent's autonomy flag (Codex's
+    bypass, Kimi's approval mode from the workspace setting — Claude's
+    comes from its settings.json auto mode). Folder trust is
     pre-seeded: the user picked the folder. `background`: the tab opens
     behind the current one (a delegate another agent started — the user
     is looking at the delegator)."""
@@ -4160,10 +4226,12 @@ def _dispatch_command(action, arg):
         # one (a delegate's tab — the user is looking at the delegator).
         # Optional 7th, base64: the branch to start from (default: the
         # folder's current commit). A placeholder "-" fills the 6th then.
-        f = _fields(arg, 7)
+        # Optional 8th, base64: the host's launch flags for the agent (its
+        # role/autonomy flags — what a session in a plain folder gets).
+        f = _fields(arg, 8)
         _bg(_worktree_create, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
             _b64d(f[3]), f[4], False, False, f[5] == "background",
-            _b64d(f[6]) if f[6] else "")
+            _b64d(f[6]) if f[6] else "", _b64d(f[7]) if f[7] else "")
     elif action == "automation-run":
         # Same field layout as worktree-create; falls back to a plain agent
         # tab when the path isn't a git repo. Optional 6th field: run mode
@@ -5583,6 +5651,15 @@ def main():
     # One-shot background jobs (fire-and-forget, not supervised).
     threading.Thread(target=task_reapply_binfmt, daemon=True).start()
     threading.Thread(target=task_fstrim, daemon=True).start()
+    # Stale duplicate delegation entries in old Kimi project files — once
+    # the login has written the user-scope MCP list.
+    def _sweep_later():
+        time.sleep(60)
+        try:
+            _sweep_stale_project_mcp()
+        except Exception as e:
+            log("agentd", "stale mcp sweep failed:", e)
+    threading.Thread(target=_sweep_later, daemon=True).start()
 
     # 3. Supervised services — each isolated so one crash never kills the process.
     services = [

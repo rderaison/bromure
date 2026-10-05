@@ -130,7 +130,7 @@ public final class SecurityTimeline {
         let clearedAt = UserDefaults.standard.double(forKey: Self.clearedAtKey)
         events = Self.load(from: directory, limit: Self.cap, after: clearedAt)
         let dir = directory
-        io.async { Self.prune(dir) }
+        io.async { Self.prune(dir); Self.redactLegacyPreviews(in: dir) }
     }
 
     /// The app's timeline: persisted in the support folder, except in a test
@@ -200,12 +200,46 @@ public final class SecurityTimeline {
         guard let d = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               let t = d["t"] as? Double, let engine = d["e"] as? String,
               let condition = d["c"] as? String, let decision = d["d"] as? String else { return nil }
-        var e = Event(time: Date(timeIntervalSince1970: t), engine: engine, condition: condition,
-                      decision: decision, kind: Decision(wire: d["k"] as? String ?? ""),
+        // Rows written before fingerprints carry "sk-a…kUyU" previews of real
+        // secrets: never show (or re-export) those characters.
+        var e = Event(time: Date(timeIntervalSince1970: t), engine: engine,
+                      condition: SecretFingerprint.redactLegacy(condition),
+                      decision: SecretFingerprint.redactLegacy(decision),
+                      kind: Decision(wire: d["k"] as? String ?? ""),
                       profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
                       workspace: d["w"] as? String, count: d["n"] as? Int)
-        e.coalesceKey = d["ck"] as? String
+        e.coalesceKey = (d["ck"] as? String).map(SecretFingerprint.redactLegacy)
         return e
+    }
+
+    /// Rewrite the daily logs so no legacy secret preview stays on disk.
+    /// Idempotent; only files that change are rewritten (atomically).
+    nonisolated static func redactLegacyPreviews(in directory: URL) {
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        where name.hasSuffix(".jsonl") {
+            let url = directory.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8), text.contains("…") else { continue }
+            var changed = false
+            var out = Data()
+            for raw in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+                let lineData = Data(raw)
+                if let d = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                    var m = d
+                    for k in ["c", "d", "ck"] {
+                        if let s = d[k] as? String {
+                            let r = SecretFingerprint.redactLegacy(s)
+                            if r != s { m[k] = r; changed = true }
+                        }
+                    }
+                    if let enc = try? JSONSerialization.data(withJSONObject: m) { out.append(enc) } else { out.append(lineData) }
+                } else {
+                    out.append(lineData)
+                }
+                out.append(0x0A)
+            }
+            if changed { try? out.write(to: url, options: .atomic) }
+        }
     }
 
     private func persist(_ e: Event) {
@@ -288,8 +322,9 @@ public final class SecurityTimeline {
                   let decision = r["decision"] as? String else { return nil }
             let t = (r["t"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
             let pid = (r["profileID"] as? String).flatMap(UUID.init) ?? UUID()
-            var e = Event(time: t, engine: engine, condition: condition,
-                          decision: decision, kind: Decision(wire: r["kind"] as? String ?? ""),
+            var e = Event(time: t, engine: engine, condition: SecretFingerprint.redactLegacy(condition),
+                          decision: SecretFingerprint.redactLegacy(decision),
+                          kind: Decision(wire: r["kind"] as? String ?? ""),
                           profileID: pid, workspace: r["workspace"] as? String, machine: host,
                           count: r["count"] as? Int)
             e.coalesceKey = r["ck"] as? String
@@ -395,6 +430,11 @@ public final class SecurityTimeline {
             case "stripped":
                 decision = NSLocalizedString("install scripts stripped", comment: "Security Timeline decision")
                 kind = .info
+            case "unchecked":
+                // The strip couldn't read the tarball: it went through as-is.
+                decision = NSLocalizedString("downloaded — install scripts could not be checked",
+                                             comment: "Security Timeline decision: npm tarball passed through unread")
+                kind = .blocked
             default:
                 decision = reason.map { "\(outcome) — \($0)" } ?? outcome
                 kind = .blocked
@@ -415,6 +455,32 @@ public final class SecurityTimeline {
             let port = int(d, "port").map { ":\($0)" } ?? ""
             let proto = str(d, "proto").map { " \($0)" } ?? ""
             return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), "\(host)\(port)\(proto)", action, kind)
+
+        case "credential.consent":
+            // The user's answer to a credential-approval prompt (or its
+            // absence): every grant, deny and timeout is a row.
+            let cred = SecretFingerprint.redactLegacy(str(d, "credential") ?? "credential")
+            let scope = SecretFingerprint.redactLegacy(str(d, "scope") ?? "")
+            let cond = scope.isEmpty ? cred : "\(cred) — \(scope)"
+            let engine = NSLocalizedString("Credential approval", comment: "Security Timeline engine")
+            switch str(d, "decision") ?? "" {
+            case "allow_1h":
+                return row(engine, cond, NSLocalizedString("allowed for 1 hour", comment: "Security Timeline decision"), .allowed)
+            case "allow_5m":
+                return row(engine, cond, NSLocalizedString("allowed for 5 minutes", comment: "Security Timeline decision"), .allowed)
+            case "allow_session":
+                return row(engine, cond, NSLocalizedString("allowed for the rest of the session", comment: "Security Timeline decision"), .allowed)
+            case "timeout":
+                return row(engine, cond, NSLocalizedString("denied — no answer in time; the next request asks again",
+                                                           comment: "Security Timeline decision: consent prompt timed out"), .blocked)
+            case "deny_remembered":
+                var e = row(engine, cond, NSLocalizedString("denied — you said no a moment ago",
+                                                            comment: "Security Timeline decision: a remembered Don't allow"), .blocked)
+                e.coalesceKey = "consent_deny|\(profileID.uuidString)|\(str(d, "credential_id") ?? cred)"
+                return e
+            default:
+                return row(engine, cond, NSLocalizedString("denied by you", comment: "Security Timeline decision"), .blocked)
+            }
 
         case "credential.ssh_sign":
             let label = str(d, "key_label").flatMap { $0.isEmpty ? nil : $0 } ?? "SSH key"

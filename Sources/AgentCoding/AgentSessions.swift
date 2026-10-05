@@ -214,8 +214,22 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// tmux window index of the live tab; nil once the tab is gone.
     /// Rebinding (or unbinding) forgets the window id stamped for the old one.
     var windowIndex: Int? {
-        didSet { if oldValue != windowIndex { windowID = nil } }
+        didSet {
+            if oldValue != windowIndex {
+                windowID = nil; agentProcessStart = nil
+                if windowIndex != nil { releasedWindowIndex = nil }
+            }
+        }
     }
+    /// When the agent process in the bound tab started (guest epoch
+    /// seconds), as the liveness probe first saw it. Another process there
+    /// later, after this one's agent had exited and with no launch or
+    /// resume of ours, is somebody's new run: a new session (see
+    /// `AgentSessionStore.checkAgentProcess`).
+    var agentProcessStart: Int?
+    /// The tab index the session let go of because a new agent run started
+    /// in it: never the session that run binds back to (it is a new one).
+    var releasedWindowIndex: Int?
     /// The tmux window id ("@12") of the bound tab, as the liveness probe
     /// first saw it at `windowIndex`. Unlike the index it is never reused
     /// while the tmux server lives: a different id at the index means the
@@ -242,6 +256,11 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// records turn boundaries; its hooks alone left "Ready" up while it
     /// worked). nil: not known / not read for this agent.
     var transcriptWorking: Bool?
+    /// The chat shows an error card for the agent's last turn (the
+    /// provider refused it, or could not be reached) and nothing has been
+    /// answered since: "auth", "quota" or "generic". The session needs the
+    /// user, whatever the agent's retries tell its hooks.
+    var providerError: String?
     /// When the session was last resumed — restarts the starting grace.
     var resumedAt: Date?
     /// The opening message has been echoed into the live chat once.
@@ -358,11 +377,15 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// A filesystem/branch-safe slug from a free-form name — the same rule
     /// the kanban's worktrees use ("Login fix" → "login-fix", branch
     /// `wt/login-fix`).
+    /// ASCII only: a folder named in another script ("请用…") is one the
+    /// agents' own stores mangle (Kimi drops the characters from its
+    /// session bucket, so the transcript was never found) — accents fold
+    /// ("café" → "cafe"), the rest is a separator.
     static func worktreeSlug(_ name: String) -> String {
         var out = ""
         var lastDash = false
-        for ch in name.lowercased() {
-            if ch.isLetter || ch.isNumber {
+        for ch in asciiFolded(name).lowercased() {
+            if ch.isASCII && (ch.isLetter || ch.isNumber) {
                 out.append(ch); lastDash = false
             } else if !lastDash {
                 out.append("-"); lastDash = true
@@ -372,6 +395,24 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return trimmed.isEmpty ? "worktree" : trimmed
     }
+
+    /// Accents and other marks off Latin letters ("Café" → "Cafe"); other
+    /// scripts are left as they are (the callers keep ASCII only).
+    static func asciiFolded(_ s: String) -> String {
+        s.applyingTransform(.stripDiacritics, reverse: false) ?? s
+    }
+
+    #if os(macOS)
+    /// `providerError`'s value for a failure card.
+    static func providerErrorKind(_ f: SessionFailure) -> String {
+        switch f.kind {
+        case .auth: return "auth"
+        case .quota: return "quota"
+        case .generic: return "generic"
+        case .blocked: return "blocked"
+        }
+    }
+    #endif
 
     /// "Fix the login redirect loop" from a multi-line opening message: the
     /// first line, its first sentence when that's a real one, polite
@@ -576,9 +617,25 @@ final class AgentSessionStore {
             guard AgentSession.isPlaceholderTitle(s.title, of: s, firstPrompt: found.firstPrompt) else { continue }
             let better = found.agentTitle
                 ?? found.firstPrompt.map { AgentSession.title(fromMessage: $0) }
-            guard let better, !better.isEmpty, better != s.title else { continue }
+            guard let better, !better.isEmpty, better != s.title,
+                  !Self.isPredecessorTitle(better, of: id, successorOf: successorOf, in: sessions) else { continue }
             mutate(id) { $0.title = better }
         }
+    }
+
+    /// Sessions that took over a tab another let go of to a new agent run
+    /// (new → old), this app run.
+    private(set) var successorOf: [UUID: UUID] = [:]
+
+    /// Whether `title` is the session `id` took its tab over from's — what
+    /// the tab's (or the folder's) previous conversation says, never this
+    /// session's own.
+    nonisolated static func isPredecessorTitle(_ title: String, of id: UUID, successorOf: [UUID: UUID],
+                                               in sessions: [AgentSession]) -> Bool {
+        guard let old = successorOf[id], let p = sessions.first(where: { $0.id == old }) else { return false }
+        if p.title == title { return true }
+        if let m = p.openingMessage, !m.isEmpty, AgentSession.title(fromMessage: m) == title { return true }
+        return false
     }
 
     func mutate(_ id: UUID, _ change: (inout AgentSession) -> Void) {
@@ -603,7 +660,24 @@ final class AgentSessionStore {
         guard let i = sessions.firstIndex(where: { $0.id == id }),
               sessions[i].isArchived != archived else { return }
         sessions[i].archivedAt = archived ? now : nil
+        // Put away = ended: no liveness verdict survives it (an archived
+        // session read "agent alive" with its machine off — S3-5).
+        if archived { sessions[i].agentAlive = nil; deadSince[id] = nil }
         save()
+    }
+
+    /// Sessions on machines that aren't attached (off, suspended): no
+    /// verdict about their agents holds any more — the next probe, once the
+    /// machine is back, decides again.
+    func clearLiveness(outside attached: Set<UUID>) {
+        var changed = false
+        for i in sessions.indices where sessions[i].agentAlive != nil
+            && !attached.contains(sessions[i].profileID) {
+            sessions[i].agentAlive = nil
+            deadSince[sessions[i].id] = nil
+            changed = true
+        }
+        if changed { save() }
     }
 
     /// Give a session the name agents and the composer reach it by
@@ -759,6 +833,68 @@ final class AgentSessionStore {
         return false
     }
 
+    /// The liveness probe read when the agent process in the session's tab
+    /// started. The first one seen is stamped. A different one is the
+    /// session's own when we started it (a launch, a resume or a restart in
+    /// place); otherwise, once the session's agent had exited, it is the
+    /// user starting the agent again in that tab — a NEW conversation:
+    /// the session lets go of the tab (keeping its title, folder,
+    /// transcript and held messages) and the roster adopts the tab as a
+    /// session of its own. False when the session no longer holds the tab.
+    @discardableResult
+    func checkAgentProcess(_ id: UUID, start: Int, now: Date = Date()) -> Bool {
+        guard start > 0, let i = sessions.firstIndex(where: { $0.id == id }),
+              let w = sessions[i].windowIndex else { return false }
+        let s = sessions[i]
+        guard let known = s.agentProcessStart else {
+            sessions[i].agentProcessStart = start
+            save()
+            return true
+        }
+        if abs(known - start) <= 2 { return true }
+        guard Self.isNewAgentRun(s, start: start, now: now) else {
+            sessions[i].agentProcessStart = start
+            save()
+            return true
+        }
+        sessions[i].windowIndex = nil          // forgets the window id and start
+        sessions[i].releasedWindowIndex = w
+        if sessions[i].endedAt == nil { sessions[i].endedAt = now }
+        sessions[i].agentAlive = nil
+        deadSince[id] = nil
+        save()
+        succeededAt[entryKey(s.profileID, w)] = id
+        return false
+    }
+
+    /// A different agent process in `s`'s tab (started at `start`, guest
+    /// epoch seconds) is a new run, not the session's: nothing of ours
+    /// (re)started it — no launch under way, no resume or in-place restart
+    /// (both stamp `resumedAt`) lately or around then. Whether the old
+    /// agent had been SEEN gone doesn't matter: quitting and starting it
+    /// again between two probes (or while the app was closed) is a new
+    /// conversation all the same. "Lately" is on the host's clock, so a
+    /// guest clock that drifted can't turn our own restart into a stranger.
+    nonisolated static func isNewAgentRun(_ s: AgentSession, start: Int, now: Date = Date()) -> Bool {
+        if s.isLaunching { return false }
+        // A launch's first moments: a launcher may run the agent's binary
+        // briefly before the real one.
+        if now.timeIntervalSince(s.createdAt) < 120 { return false }
+        if let r = s.resumedAt {
+            if now.timeIntervalSince(r) < 120 { return false }
+            if abs(r.timeIntervalSince1970 - TimeInterval(start)) <= 90 { return false }
+        }
+        return true
+    }
+
+    /// Tabs a session let go of to a new agent run, until the roster adopts
+    /// that run (`onSucceeded` then tells the window to follow).
+    private var succeededAt: [String: UUID] = [:]
+    private func entryKey(_ profileID: UUID, _ index: Int) -> String { "\(profileID.uuidString)#\(index)" }
+    /// A session let go of its tab to a new agent run, now a session of its
+    /// own: (old, new). The window showing the old one follows.
+    var onSucceeded: ((UUID, UUID) -> Void)?
+
     /// Let go of the session's tab (it is being closed, or it is another's).
     func unbind(_ id: UUID, now: Date = Date()) {
         guard let i = sessions.firstIndex(where: { $0.id == id }),
@@ -865,9 +1001,14 @@ final class AgentSessionStore {
                         s.lastSeenAt = now
                         if let tab = tabs.first(where: { $0.index == w }) {
                             if Self.agentRunning(s, in: tab) { s.agentSeenAt = now }
-                            if s.userTitled != true, let raw = Self.agentTitle(from: tab),
+                            // Not while its agent is known gone: a title in
+                            // the tab then is a new run's (`checkAgentProcess`
+                            // hands that tab to a session of its own).
+                            if s.userTitled != true, s.agentAlive != false,
+                               let raw = Self.agentTitle(from: tab),
                                let better = AgentSession.title(fromAgent: raw, of: s),
-                               better != s.title {
+                               better != s.title,
+                               !Self.isPredecessorTitle(better, of: s.id, successorOf: successorOf, in: sessions) {
                                 s.title = better   // the agent named its session
                             }
                         }
@@ -879,6 +1020,7 @@ final class AgentSessionStore {
                         if now.timeIntervalSince(first) >= Self.missingGrace {
                             missingSince[s.id] = nil
                             s.windowIndex = nil
+                            s.agentAlive = nil
                             if !s.isLaunching { s.endedAt = now }   // a resume under way
                         }
                     }
@@ -961,7 +1103,9 @@ final class AgentSessionStore {
                     // ended as "archived … is back" seconds after it opened.
                     guard cand.profileID == entry.id, cand.windowIndex == nil,
                           cand.launchingSince == nil, cand.tool == tool,
-                          !cand.isArchived, !cand.isDeleted else { return false }
+                          !cand.isArchived, !cand.isDeleted,
+                          // It gave this tab up to a new agent run.
+                          cand.releasedWindowIndex != tab.index else { return false }
                     // The tab still carries the name we opened it under…
                     if let d = tab.display, !d.isEmpty, d == cand.launchDisplay { return true }
                     // …or it reads exactly like the session, in the same folder.
@@ -975,12 +1119,24 @@ final class AgentSessionStore {
                     changed = true
                     continue
                 }
-                var s = AgentSession(profileID: entry.id, tool: tool, title: title,
+                let old = succeededAt.removeValue(forKey: entryKey(entry.id, tab.index))
+                // A new run in a tab another session let go of: the tab's
+                // label may still carry that session's name — never this
+                // one's (a relaunch read as a new session was titled after
+                // the old one's first message).
+                let predecessor = old.flatMap { o in sessions.first { $0.id == o } }
+                var s = AgentSession(profileID: entry.id, tool: tool,
+                                     title: named == nil && predecessor?.title == title
+                                         ? AgentSession.defaultTitle(tool: tool, cwd: cwd) : title,
                                      cwd: cwd, windowIndex: tab.index)
                 if named != nil { s.userTitled = true; s.launchDisplay = tab.display }
                 s.lastSeenAt = now
                 sessions.append(s)
                 changed = true
+                if let old {
+                    successorOf[s.id] = old
+                    onSucceeded?(old, s.id)
+                }
             }
         }
         if dedupeTwins(now: now) { changed = true }
@@ -1086,8 +1242,15 @@ final class AgentSessionStore {
         return title.isEmpty ? nil : title
     }
 
-    /// The agent named its session (its terminal title, read by the
-    /// liveness probe): take it unless the user named the session by hand.
+    /// The chat's error card came up (`kind`) or went away (nil): a new
+    /// answer from the model, a message from the user, a resume.
+    func setProviderError(_ id: UUID, _ kind: String?) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }),
+              sessions[i].providerError != kind else { return }
+        sessions[i].providerError = kind
+        save()
+    }
+
     /// The beautified view's verdict on whether the tab shows a sign-in
     /// screen. Persisted only on change, like liveness.
     func setNeedsSignIn(_ id: UUID, _ needs: Bool) {
@@ -1097,6 +1260,8 @@ final class AgentSessionStore {
         save()
     }
 
+    /// The agent named its session (its terminal title, read by the
+    /// liveness probe): take it unless the user named the session by hand.
     func setAgentTitle(_ id: UUID, _ title: String) {
         guard let i = sessions.firstIndex(where: { $0.id == id }),
               sessions[i].userTitled != true, sessions[i].title != title else { return }
@@ -1439,6 +1604,9 @@ enum SessionHome {
         // label flickers between the shell and the agent while it loads,
         // and reading Ready/Working off it flapped (Ready → Working → Ready).
         if isStartingUp(s) { return .working }
+        // An error card is up: the user has to look — the agent may be
+        // retrying (its hooks say "working") but nothing gets answered.
+        if s.providerError != nil { return .needsYou }
         switch tab.agentStatus {
         case .needsInput: return .needsYou
         case .working:    return .working
@@ -1501,9 +1669,14 @@ enum SessionHome {
         // Short, so it fits beside the machine's name in a narrow sidebar.
         switch bucket(for: s, in: model) {
         case .needsYou:
-            return s.needsSignIn == true
-                ? NSLocalizedString("Sign in needed", comment: "session status")
-                : NSLocalizedString("Needs you", comment: "session status")
+            if s.needsSignIn == true { return NSLocalizedString("Sign in needed", comment: "session status") }
+            switch s.providerError {
+            case "generic"?: return NSLocalizedString("Provider unreachable", comment: "session status")
+            case "blocked"?: return NSLocalizedString("Blocked by Bromure", comment: "session status: Bromure's proxy blocked the agent's request")
+            case "quota"?:   return NSLocalizedString("Usage limit reached", comment: "session status")
+            case "auth"?:    return NSLocalizedString("Sign in needed", comment: "session status")
+            default:         return NSLocalizedString("Needs you", comment: "session status")
+            }
         case .working:
             if let tab = liveTab(for: s, in: model), !agentRunning(s, in: tab) || isStartingUp(s) {
                 return NSLocalizedString("Starting…", comment: "session status")
@@ -1961,7 +2134,8 @@ final class SessionTranscriptCache: @unchecked Sendable {
 
     func load(_ id: UUID) -> Data? {
         let u = url(id)
-        return Self.queue.sync { try? Data(contentsOf: u) }
+        guard let data = Self.queue.sync(execute: { try? Data(contentsOf: u) }) else { return nil }
+        return Self.parentOrdered(data)
     }
 
     /// The app's copy of `id`, read off the main thread (a chat's seed).
@@ -2045,7 +2219,7 @@ final class SessionTranscriptCache: @unchecked Sendable {
         let new = records(incoming)
         guard !new.isEmpty else { return nil }
         let old = records(history)
-        if old.isEmpty { return join(new) }
+        if old.isEmpty { return join(parentOrdered(new)) }
         // Another Kimi journal — a start record the copy doesn't hold — is
         // a different conversation, whatever it shares with the copy (its
         // tool-discovery lines carry no time and repeat byte for byte in
@@ -2109,7 +2283,77 @@ final class SessionTranscriptCache: @unchecked Sendable {
             if let a = after[i] { out += a }
         }
         out += tailAppend
-        return join(out)
+        return join(parentOrdered(out))
+    }
+
+    /// Claude's records name the one they follow (`parentUuid`). A record
+    /// placed before its parent — two windows of one file merged with the
+    /// reply ahead of its prompt — goes right after that parent; everything
+    /// else keeps its place. (An archived session read "paste, READY, the
+    /// prompt, the reply" while the live file had it right — S3-5.)
+    static func parentOrdered(_ rs: [Data]) -> [Data] {
+        guard rs.count > 1 else { return rs }
+        var uuids: [String?] = []
+        var parents: [String?] = []
+        var pos: [String: Int] = [:]
+        uuids.reserveCapacity(rs.count)
+        parents.reserveCapacity(rs.count)
+        for (i, r) in rs.enumerated() {
+            let p = parentUUID(r)
+            let u: String? = p == nil && r.range(of: parentKeyMarker) == nil ? nil : {
+                if case .uuid(let u) = key(r) { return u }
+                return nil
+            }()
+            uuids.append(u)
+            parents.append(p)
+            if let u, pos[u] == nil { pos[u] = i }
+        }
+        guard rs.indices.contains(where: { i in
+            parents[i].flatMap { pos[$0] }.map { $0 > i } ?? false
+        }) else { return rs }
+        var emitted = [Bool](repeating: false, count: rs.count)
+        var waiting: [String: [Int]] = [:]
+        var out: [Data] = []
+        out.reserveCapacity(rs.count)
+        func emit(_ i: Int) {
+            var stack = [i]
+            while let j = stack.popLast() {
+                guard !emitted[j] else { continue }
+                emitted[j] = true
+                out.append(rs[j])
+                if let u = uuids[j], let kids = waiting.removeValue(forKey: u) {
+                    stack.append(contentsOf: kids.reversed())
+                }
+            }
+        }
+        for i in rs.indices where !emitted[i] {
+            if let p = parents[i], let pi = pos[p], pi != i, !emitted[pi] {
+                waiting[p, default: []].append(i)
+                continue
+            }
+            emit(i)
+        }
+        for i in rs.indices where !emitted[i] { emit(i) }   // a cycle: as they were
+        return out
+    }
+
+    /// `parentOrdered` over a whole file (an older copy merged out of order
+    /// reads back right); the bytes as they are when nothing moves.
+    static func parentOrdered(_ data: Data) -> Data {
+        guard data.range(of: parentKeyMarker) != nil else { return data }
+        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true).map { Data($0) }
+        let ordered = parentOrdered(lines)
+        guard ordered != lines else { return data }
+        return join(ordered)
+    }
+
+    private static let parentMarker = Data("\"parentUuid\":\"".utf8)
+    /// Any Claude record (the first one's parent is null).
+    private static let parentKeyMarker = Data("\"parentUuid\":".utf8)
+    private static func parentUUID(_ r: Data) -> String? {
+        guard let m = r.range(of: parentMarker), let end = r[m.upperBound...].firstIndex(of: 0x22),
+              end > m.upperBound, end - m.upperBound <= 64 else { return nil }
+        return String(decoding: r[m.upperBound..<end], as: UTF8.self)
     }
 
     /// Records are told apart by Claude's `uuid` when they carry one, else

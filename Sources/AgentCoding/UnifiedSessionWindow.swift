@@ -1596,7 +1596,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             let engine = d.codingTaskEngine
             let tid = t.id
             return BoardTaskLink(title: t.title, brief: t.details,
-                                 restart: t.stage == .inProgress ? { engine.resumeSession(tid) } : nil)
+                                 restart: t.stage == .inProgress ? { engine.resumeSession(tid) } : nil,
+                                 lastError: t.lastError)
         }
         return a
     }

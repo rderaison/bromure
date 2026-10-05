@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CryptoKit
 
 // MARK: - Model
 
@@ -743,12 +744,19 @@ struct TranscriptPin: Equatable, Sendable {
 enum AgentSessionLocator {
     /// The cwd as it may be spliced between single quotes in a shell line:
     /// trailing slashes stripped, nil when it has characters we won't quote.
+    /// Letters of any script pass (a folder named "请用…-1004-2143" read no
+    /// transcript at all when this was ASCII-only); in ASCII only the safe
+    /// set does, and no control or line-separator character anywhere —
+    /// the path is spliced between single and double quotes alike.
     nonisolated static func sanitized(guestCwd: String) -> String? {
         var path = guestCwd
         while path.count > 1 && path.hasSuffix("/") { path = String(path.dropLast()) }
-        let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            + "0123456789-_./+ "
-        guard !path.isEmpty, path.allSatisfy({ allowed.contains($0) }) else { return nil }
+        let allowed = Set<Character>("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            + "0123456789-_./+ ")
+        let unsafe = CharacterSet.controlCharacters.union(.newlines).union(.illegalCharacters)
+        guard !path.isEmpty, path.unicodeScalars.allSatisfy({ u in
+            u.isASCII ? allowed.contains(Character(u)) : !unsafe.contains(u)
+        }) else { return nil }
         return path
     }
 
@@ -882,10 +890,44 @@ enum AgentSessionLocator {
         return " | grep -v -F " + safe.map { "-e '/\($0)/'" }.joined(separator: " ")
     }
 
-    /// `$kb`/`$kh`/`$kr`: the workspace bucket's slug and hashes for `$d`/`$r`.
-    private nonisolated static let kimiBucketVars =
-        "kb=$(basename \"$d\" | tr 'A-Z' 'a-z' "
-            + "| sed -E 's/[^a-z0-9._-]+/-/g;s/^-+//;s/-+$//' "
+    /// Kimi Code 2.1's `slugifyWorkDirName` (workdir-slug.ts), exactly:
+    /// lowercased, every run of characters outside `[a-z0-9._-]` one "-"
+    /// (letters of other scripts and accented ones included — "café" is
+    /// "caf", "请用中文回答-1004-2143" is "1004-2143"), dashes trimmed, cut
+    /// to 40, trimmed again; nothing left (or "." / "..") is "workspace".
+    nonisolated static func kimiWorkDirSlug(_ name: String) -> String {
+        var out = ""
+        var inRun = false
+        for u in name.lowercased().unicodeScalars {
+            let keep = (u.value >= 0x61 && u.value <= 0x7A) || (u.value >= 0x30 && u.value <= 0x39)
+                || u == "." || u == "_" || u == "-"
+            if keep { out.unicodeScalars.append(u); inRun = false }
+            else if !inRun { out.append("-"); inRun = true }
+        }
+        func trimDashes(_ s: String) -> String {
+            String(s.drop(while: { $0 == "-" }).reversed().drop(while: { $0 == "-" }).reversed())
+        }
+        let slug = trimDashes(String(trimDashes(out).prefix(40)))
+        return slug.isEmpty || slug == "." || slug == ".." ? "workspace" : slug
+    }
+
+    /// Kimi's session bucket for a working directory (`encodeWorkDirKey`):
+    /// `wd_<slug of the basename>_<first 12 hex of SHA-256 of the path>`,
+    /// trailing slashes dropped.
+    nonisolated static func kimiWorkDirKey(_ path: String) -> String {
+        var p = path.replacingOccurrences(of: "\\", with: "/")
+        while p.hasSuffix("/") { p.removeLast() }
+        let base = p.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? p
+        let hex = SHA256.hash(data: Data(p.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "wd_\(kimiWorkDirSlug(base))_\(hex.prefix(12))"
+    }
+
+    /// `$kb`/`$kh`/`$kr`: the workspace bucket's slug and hashes for `$d`/`$r`
+    /// (`kimiWorkDirKey`, byte-wise in the C locale: each run of non-ASCII
+    /// bytes is one "-", as each run of such characters is in Kimi's rule).
+    nonisolated static let kimiBucketVars =
+        "kb=$(basename \"$d\" | LC_ALL=C tr 'A-Z' 'a-z' "
+            + "| LC_ALL=C sed -E 's/[^a-z0-9._-]+/-/g;s/^-+//;s/-+$//' "
             + "| cut -c1-40 | sed -E 's/-+$//'); "
             + "case \"$kb\" in ''|.|..) kb=workspace;; esac; "
             + "kh=$(printf %s \"$d\" | sha256sum | cut -c1-12); "
@@ -970,7 +1012,7 @@ enum AgentSessionLocator {
     /// desktop chat and the mobile room cells.
     nonisolated static func floorProbeCommand(window: Int) -> String {
         "i=\(window); "
-        + "cwd=$(tmux display-message -p -t bromure:$i '#{pane_current_path}' 2>/dev/null); "
+        + "cwd=$(tmux -u display-message -p -t bromure:$i '#{pane_current_path}' 2>/dev/null); "
         + "tty=$(tmux display-message -p -t bromure:$i '#{pane_tty}' 2>/dev/null); "
         // The foreground process — but never the tab's SHELL: an agent
         // launched by the managed .bashrc shares bash's foreground group,
@@ -3302,7 +3344,7 @@ final class CodingTaskEngine {
         // where nothing is named after the slug). Only works while the
         // tab still exists.
         let markerCwd =
-            "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
+            "cwd=$(tmux -u list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
         let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" "
             + "| iconv -f UTF-8 -t UTF-8 -c; fi"
@@ -3334,8 +3376,8 @@ final class CodingTaskEngine {
                 + "if [ -z \"$d\" ]; then "
                 + markerCwd
                 + "if [ -n \"$cwd\" ]; then "
-                + "kb=$(basename \"$cwd\" | tr 'A-Z' 'a-z' "
-                + "| sed -E 's/[^a-z0-9._-]+/-/g;s/^-+//;s/-+$//' "
+                + "kb=$(basename \"$cwd\" | LC_ALL=C tr 'A-Z' 'a-z' "
+                + "| LC_ALL=C sed -E 's/[^a-z0-9._-]+/-/g;s/^-+//;s/-+$//' "
                 + "| cut -c1-40 | sed -E 's/-+$//'); "
                 + "case \"$kb\" in ''|.|..) kb=workspace;; esac; "
                 + "kh=$(printf %s \"$cwd\" | sha256sum | cut -c1-12); "
@@ -3398,13 +3440,11 @@ final class CodingTaskEngine {
         }
     }
 
-    /// A worktree slug as Kimi names its workspace bucket: the folder's
-    /// basename cut to 40 characters, trailing dashes dropped (a long task
-    /// title's slug is cut — the full-slug glob never matched it).
+    /// A worktree slug as Kimi names its workspace bucket
+    /// (`AgentSessionLocator.kimiWorkDirSlug`: a long task title's slug is
+    /// cut to 40 — the full-slug glob never matched it).
     nonisolated static func kimiSlug(_ slug: String) -> String {
-        var s = String(slug.prefix(40))
-        while s.hasSuffix("-") { s.removeLast() }
-        return s.isEmpty ? slug : s
+        AgentSessionLocator.kimiWorkDirSlug(slug)
     }
 
     /// The guest command that prints the age (seconds) of the newest write
@@ -3427,7 +3467,7 @@ final class CodingTaskEngine {
             + "~/.kimi-code/sessions/wd_\(kimiSlug(slug))_* "
             + "~/.kimi-code/sessions/wd_\(slug)-[0-9]*_* 2>/dev/null | head -1); "
             + "if [ -z \"$d\" ]; then "
-            + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
+            + "cwd=$(tmux -u list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
             + "if [ -n \"$cwd\" ]; then "
             + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "

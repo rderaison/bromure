@@ -931,6 +931,36 @@ public enum TaskFinish: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// How much Kimi Code asks before acting in a workspace. The VM is the
+/// sandbox and Bromure's host-side guardrails watch its traffic, so the
+/// default is Kimi's "Never Ask" mode (`--auto`): no tool approvals at all,
+/// Bromure's own MCP tools included. "Ask When Needed" (`--yolo`) runs
+/// routine edits and commands but still asks before risky actions, questions
+/// and plans. Kimi has no working per-tool allow list (it ignores
+/// `[[permission.rules]]`), so the mode is the only lever — passed on every
+/// interactive launch and resume (a resume without it falls back to Kimi's
+/// "Always Ask").
+public enum KimiApprovals: String, Codable, CaseIterable, Sendable {
+    case neverAsk
+    case askWhenNeeded
+
+    /// The Kimi Code flag for an interactive launch. Never combined with
+    /// `--prompt` (Kimi refuses it; a one-shot run never asks anyway).
+    public var launchFlag: String {
+        switch self {
+        case .neverAsk: return "--auto"
+        case .askWhenNeeded: return "--yolo"
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .neverAsk: return NSLocalizedString("Never ask", comment: "Kimi approvals setting")
+        case .askWhenNeeded: return NSLocalizedString("Ask when needed", comment: "Kimi approvals setting")
+        }
+    }
+}
+
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public enum Tool: String, Codable, CaseIterable, Sendable {
         case claude
@@ -1760,6 +1790,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// value — see `TaskFinish.appDefault`).
     public var taskFinish: TaskFinish? = nil
 
+    /// How much Kimi Code asks before acting here (see `KimiApprovals`).
+    public var kimiApprovals: KimiApprovals = .neverAsk
+
     public enum NetworkMode: String, Codable, CaseIterable, Sendable {
         case nat
         case bridged
@@ -2114,6 +2147,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case closeAction
         case bootAtStartup
         case taskFinish
+        case kimiApprovals
         case mcpServers
         case homeModel
         case homeImageGB
@@ -2241,6 +2275,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .ask
         bootAtStartup = try c.decodeIfPresent(Bool.self, forKey: .bootAtStartup) ?? false
         taskFinish = try c.decodeIfPresent(TaskFinish.self, forKey: .taskFinish)
+        // An unknown value (a newer build's) falls back to the default.
+        kimiApprovals = (try? c.decodeIfPresent(KimiApprovals.self, forKey: .kimiApprovals)) ?? .neverAsk
         mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
         // Pre-upgrade profiles have no homeModel key → they stay on the
         // legacy virtiofs home until the user accepts the migration.
@@ -2423,6 +2459,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(closeAction, forKey: .closeAction)
         if bootAtStartup { try c.encode(bootAtStartup, forKey: .bootAtStartup) }
         try c.encodeIfPresent(taskFinish, forKey: .taskFinish)
+        if kimiApprovals != .neverAsk { try c.encode(kimiApprovals, forKey: .kimiApprovals) }
         // Encode homeModel unconditionally: its ABSENCE is what marks a
         // pre-upgrade profile (decoder defaults to .virtiofs), so a new
         // ext4 profile must always carry the key explicitly.
@@ -4984,7 +5021,7 @@ public final class ProfileStore {
         return h == "gitlab.com" || h.hasPrefix("gitlab.") || h.contains(".gitlab.")
     }
 
-    private static let bashrcContent = """
+    static let bashrcContent = """
     # ─── Managed by Bromure Agentic Coding — REWRITTEN ON EVERY LAUNCH ───
     # Add your own customizations to ~/.bashrc.local instead. That file is
     # sourced at the end and is never touched.
@@ -5511,6 +5548,15 @@ public final class ProfileStore {
             done
         }
         _wt_interactive="${BROMURE_AC_WT_INTERACTIVE:-}"; unset BROMURE_AC_WT_INTERACTIVE
+        # Kimi's approval mode for an interactive launch: the workspace's
+        # setting, staged by the host (Never Ask = --auto, the default; Ask
+        # When Needed = --yolo). Without one Kimi starts in "Always Ask" and
+        # prompts for every command and MCP tool. A launch whose flags already
+        # carry a mode (the host's own session launches) keeps it — Kimi
+        # refuses --auto and --yolo together.
+        _kimi_mode=--auto
+        case "$(cat /mnt/bromure-meta/kimi-approvals 2>/dev/null)" in --yolo) _kimi_mode=--yolo ;; esac
+        case " $_wt_flags " in *" --auto "*|*" --yolo "*) _kimi_mode= ;; esac
         if command -v "$_wt_tool" >/dev/null 2>&1; then
             printf '\\033[2m[bromure-ac] starting %s in worktree…\\033[0m\\n' "$_wt_tool"
             if [ "$_wt_tool" = "kimi" ] && [ -n "$_wt_interactive" ]; then
@@ -5518,8 +5564,9 @@ public final class ProfileStore {
                 # Kimi must stay in its TUI so review feedback and the
                 # landing brief reach the SAME conversation — the one-shot
                 # --prompt run exits and leaves a bare shell, where typed
-                # feedback ran as bash commands. --auto is Kimi's unattended
-                # mode (refused with --prompt, fine here). The host types the
+                # feedback ran as bash commands. $_kimi_mode is the
+                # workspace's approval mode (refused with --prompt, fine
+                # here). The host types the
                 # opening message in once the TUI is up; a prompt handed over
                 # here anyway is typed by the fallback above. -c (a
                 # resume) stays in $_wt_flags.
@@ -5528,7 +5575,7 @@ public final class ProfileStore {
                     unset BROMURE_AC_WT_PROMPT
                     ( _bromure_type_when_up "$_wt_prompt" </dev/null >/dev/null 2>&1 & )
                 fi
-                "$_wt_tool" $_wt_flags --auto
+                "$_wt_tool" $_wt_flags $_kimi_mode
                 _wt_rc=$?
             elif [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
                 _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
@@ -5578,6 +5625,12 @@ public final class ProfileStore {
                     "$_wt_tool" $_wt_flags -- "$_wt_prompt"
                     _wt_rc=$?
                 fi
+            elif [ "$_wt_tool" = "kimi" ]; then
+                # An interactive Kimi with no opening message on its command
+                # line (a branch session: the host types it once the TUI is
+                # up) — in the workspace's approval mode too.
+                "$_wt_tool" $_wt_flags $_kimi_mode
+                _wt_rc=$?
             else
                 "$_wt_tool" $_wt_flags
                 _wt_rc=$?
@@ -5602,7 +5655,7 @@ public final class ProfileStore {
             printf '\\033[31m[bromure-ac] %s exited with status 127 (command not found)\\033[0m\\n' "$_wt_tool"
             sh "$HOME/.bromure/agent-status.sh" needsInput 2>/dev/null || true
         fi
-        unset _wt_tool _wt_prompt _wt_flags _wt_dir _wt_interactive
+        unset _wt_tool _wt_prompt _wt_flags _wt_dir _wt_interactive _kimi_mode
     fi
 
     if [ "$BROMURE_AC_REGISTER" = "1" ] \\

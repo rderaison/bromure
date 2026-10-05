@@ -3889,3 +3889,33 @@
 "Delivered — queued by %@" = "Zugestellt – von %@ eingereiht";
 "1 delegation call" = "1 Delegationsaufruf";
 "%d delegation calls" = "%d Delegationsaufrufe";
+"downloaded — install scripts could not be checked" = "heruntergeladen — Installationsskripte konnten nicht geprüft werden";
+"Bromure — approval needed" = "Bromure — Freigabe erforderlich";
+"No answer within %d s counts as Don't allow." = "Ohne Antwort innerhalb von %d s gilt: Nicht erlauben.";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "Der Agent möchte Folgendes ausführen:\n\n%@\n\nDie Freigabe gilt nur für genau diese Anfrage — jeder andere Schreibzugriff fragt erneut.";
+"Allow this request for 15 minutes" = "Diese Anfrage 15 Minuten lang erlauben";
+"Allow this request for the rest of the session" = "Diese Anfrage für den Rest der Sitzung erlauben";
+"Provider unreachable" = "Anbieter nicht erreichbar";
+"Usage limit reached" = "Nutzungslimit erreicht";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi-Freigaben";
+"Never ask" = "Nie fragen";
+"Ask when needed" = "Bei Bedarf fragen";
+"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "Nie fragen: Kimi Code führt jeden Befehl und jedes Werkzeug aus, ohne nachzufragen – die VM des Arbeitsbereichs und die Schutzmechanismen von Bromure bilden die Sicherheitsgrenze. Bei Bedarf fragen: Routinemäßige Änderungen und Befehle laufen von selbst; riskante Aktionen, Fragen und Pläne warten weiterhin auf Sie. Gilt ab dem nächsten Start oder Fortsetzen.";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "Von Bromure blockiert — Prompt-Injection";
+"Blocked by Bromure — rogue instructions" = "Von Bromure blockiert — schädliche Anweisungen";
+"Blocked by Bromure — credential leak" = "Von Bromure blockiert — Anmeldedaten-Leck";
+"Blocked by Bromure — supply chain" = "Von Bromure blockiert — Lieferkette";
+"Blocked by Bromure — client certificate" = "Von Bromure blockiert — Client-Zertifikat";
+"Blocked by Bromure" = "Von Bromure blockiert";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "Beim Anbieter ist nichts angekommen. Details finden Sie in der Sicherheits-Zeitleiste; senden Sie erneut, sobald es behoben ist.";
+"Credential approval" = "Freigabe von Anmeldedaten";
+"allowed for 1 hour" = "1 Stunde lang erlaubt";
+"allowed for 5 minutes" = "5 Minuten lang erlaubt";
+"allowed for the rest of the session" = "für den Rest der Sitzung erlaubt";
+"denied — no answer in time; the next request asks again" = "abgelehnt — keine Antwort rechtzeitig; die nächste Anfrage fragt erneut";
+"denied — you said no a moment ago" = "abgelehnt — Sie haben gerade Nein gesagt";
+"denied by you" = "von Ihnen abgelehnt";

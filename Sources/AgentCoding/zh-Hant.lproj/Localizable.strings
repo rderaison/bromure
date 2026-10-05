@@ -3892,3 +3892,33 @@
 "Delivered — queued by %@" = "已送達 — 在 %@ 的佇列中";
 "1 delegation call" = "1 次委派呼叫";
 "%d delegation calls" = "%d 次委派呼叫";
+"downloaded — install scripts could not be checked" = "已下載 — 無法檢查安裝指令碼";
+"Bromure — approval needed" = "Bromure — 需要核准";
+"No answer within %d s counts as Don't allow." = "%d 秒內未回應即視為不允許。";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "代理程式想要執行：\n\n%@\n\n核准僅適用於這一個請求——其他任何寫入都會再次詢問。";
+"Allow this request for 15 minutes" = "允許此請求 15 分鐘";
+"Allow this request for the rest of the session" = "在本次工作階段剩餘時間內允許此請求";
+"Provider unreachable" = "無法連線服務商";
+"Usage limit reached" = "已達使用上限";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi 核准";
+"Never ask" = "永不詢問";
+"Ask when needed" = "必要時詢問";
+"Never ask: Kimi Code runs every command and tool without stopping to ask — the workspace's VM and Bromure's guardrails are the safety boundary. Ask when needed: routine edits and commands run on their own; risky actions, questions and plans still wait for you. Applies from the next start or resume." = "永不詢問：Kimi Code 執行每個指令和工具時都不會停下來詢問——工作區的虛擬機器和 Bromure 的防護措施就是安全邊界。必要時詢問：例行編輯和指令自動執行；有風險的操作、提問和計畫仍會等待你確認。從下次啟動或恢復時生效。";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "已被 Bromure 封鎖 — 提示注入";
+"Blocked by Bromure — rogue instructions" = "已被 Bromure 封鎖 — 惡意指令";
+"Blocked by Bromure — credential leak" = "已被 Bromure 封鎖 — 憑證外洩";
+"Blocked by Bromure — supply chain" = "已被 Bromure 封鎖 — 供應鏈";
+"Blocked by Bromure — client certificate" = "已被 Bromure 封鎖 — 用戶端憑證";
+"Blocked by Bromure" = "已被 Bromure 封鎖";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "請求沒有到達提供者。詳情請見安全性時間軸；問題解決後請重新傳送。";
+"Credential approval" = "憑證核准";
+"allowed for 1 hour" = "已允許 1 小時";
+"allowed for 5 minutes" = "已允許 5 分鐘";
+"allowed for the rest of the session" = "已允許至本次工作階段結束";
+"denied — no answer in time; the next request asks again" = "已拒絕 — 未及時回應；下次請求時會再次詢問";
+"denied — you said no a moment ago" = "已拒絕 — 你剛才拒絕過";
+"denied by you" = "你已拒絕";
