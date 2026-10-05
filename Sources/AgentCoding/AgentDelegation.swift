@@ -302,6 +302,13 @@ final class DelegationStore {
         stamp(ids, now) { $0.readAt == nil ? { $0.readAt = now } : nil }
     }
 
+    /// Back to unread: the call that took them never got its answer to the
+    /// agent (cancelled by its client's timeout, or the connection was
+    /// gone) — the next read_inbox or wait returns them again.
+    func markUnread(_ ids: [UUID], now: Date = Date()) {
+        stamp(ids, now) { $0.readAt != nil ? { $0.readAt = nil } : nil }
+    }
+
     /// A notice is typed again for a message still unread this long after
     /// the last one — a notice the agent read past, or that landed in a
     /// dialog, was otherwise the end of the road for the message.

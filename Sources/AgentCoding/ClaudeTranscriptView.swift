@@ -283,7 +283,7 @@ enum ClaudeTranscriptParser {
                     continue
                 }
                 if !trimmed.isEmpty {
-                    add(type == "user" ? .userText(trimmed) : .assistantText(trimmed))
+                    add(type == "user" ? .userText(unwrapPasted(trimmed)) : .assistantText(trimmed))
                 }
                 continue
             }
@@ -298,7 +298,7 @@ enum ClaudeTranscriptParser {
                         if isClearCommand(s) { items.removeAll() }
                         continue
                     }
-                    add(type == "user" ? .userText(s) : .assistantText(s))
+                    add(type == "user" ? .userText(unwrapPasted(s)) : .assistantText(s))
                 case "thinking":
                     let s = (block["thinking"] as? String ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -374,6 +374,27 @@ enum ClaudeTranscriptParser {
     ]
     static func isLocalRecord(_ text: String) -> Bool {
         localTags.contains { text.hasPrefix($0) }
+    }
+
+    /// Claude Code (2.1.28x) records a paste as
+    /// `<pasted_content id="…">the text</pasted_content>` inside the user's
+    /// turn. The user wrote the text, not the wrapper: the bubble shows
+    /// (and counts) the text alone. Only well-formed pairs are unwrapped.
+    static func unwrapPasted(_ text: String) -> String {
+        guard text.contains("<pasted_content") else { return text }
+        var out = ""
+        var rest = Substring(text)
+        while let open = rest.range(of: "<pasted_content") {
+            guard let openEnd = rest[open.upperBound...].firstIndex(of: ">"),
+                  rest[open.upperBound..<openEnd].allSatisfy({ $0 != "<" && $0 != "\n" }),
+                  let close = rest[rest.index(after: openEnd)...].range(of: "</pasted_content>")
+            else { break }
+            out += rest[..<open.lowerBound]
+            out += rest[rest.index(after: openEnd)..<close.lowerBound]
+            rest = rest[close.upperBound...]
+        }
+        out += rest
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The `/clear` record — the point where the conversation on screen
@@ -1821,6 +1842,86 @@ extension TranscriptItem {
     }
 }
 
+/// An agent's reply is laid out line by line in its terminal; Markdown
+/// folds lines separated by a single newline into one paragraph (a soft
+/// break), so a reply written as separate lines read as one run-on
+/// paragraph in the chat. This makes those single newlines hard breaks
+/// (a trailing backslash) — only between two plain paragraph lines: code
+/// (fenced or indented), lists and their continuation lines, tables,
+/// headings, setext underlines and HTML keep their Markdown meaning.
+enum MarkdownHardBreaks {
+    static func apply(_ text: String) -> String {
+        guard text.contains("\n") else { return text }
+        let lines = text.components(separatedBy: "\n")
+        var out = lines
+        var fence: String?          // the open fence's marker
+        var inList = false          // a list block, until a blank line
+        var inTable = false
+        for i in lines.indices {
+            let line = lines[i]
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if let f = fence {
+                if t.hasPrefix(f) { fence = nil }
+                continue
+            }
+            if t.hasPrefix("```") || t.hasPrefix("~~~") {
+                fence = String(t.prefix(3))
+                continue
+            }
+            if t.isEmpty { inList = false; inTable = false; continue }
+            if isListItem(t) { inList = true }
+            if isTableRow(t) { inTable = true }
+            guard !inList, !inTable, isParagraphLine(line, trimmed: t),
+                  i + 1 < lines.count else { continue }
+            let next = lines[i + 1]
+            let nt = next.trimmingCharacters(in: .whitespaces)
+            guard !nt.isEmpty, isParagraphLine(next, trimmed: nt), !isListItem(nt),
+                  !isTableRow(nt), !isSetextUnderline(nt),
+                  !nt.hasPrefix("```"), !nt.hasPrefix("~~~") else { continue }
+            if line.hasSuffix("\\") || line.hasSuffix("  ") { continue }
+            out[i] = line + "\\"
+        }
+        return out.joined(separator: "\n")
+    }
+
+    private static func isParagraphLine(_ line: String, trimmed t: String) -> Bool {
+        if line.hasPrefix("    ") || line.hasPrefix("\t") { return false }   // indented code
+        if t.hasPrefix("#") || t.hasPrefix("<") { return false }            // heading, HTML
+        if isThematicBreak(t) { return false }
+        return true
+    }
+
+    static func isListItem(_ t: String) -> Bool {
+        if let c = t.first, "-*+".contains(c) {
+            let rest = t.dropFirst()
+            return rest.isEmpty || rest.first == " " || rest.first == "\t"
+        }
+        let digits = t.prefix { $0.isASCII && $0.isNumber }
+        guard !digits.isEmpty, digits.count <= 9 else { return false }
+        let rest = t.dropFirst(digits.count)
+        guard let m = rest.first, m == "." || m == ")" else { return false }
+        let after = rest.dropFirst()
+        return after.isEmpty || after.first == " " || after.first == "\t"
+    }
+
+    /// A row with a leading pipe, or a delimiter row (`---|:--:`) — whose
+    /// header line above it has none.
+    private static func isTableRow(_ t: String) -> Bool {
+        if t.hasPrefix("|") { return true }
+        return t.contains("|") && t.contains("-") && t.allSatisfy { "|-: \t".contains($0) }
+    }
+
+    private static func isSetextUnderline(_ t: String) -> Bool {
+        !t.isEmpty && (t.allSatisfy { $0 == "=" } || t.allSatisfy { $0 == "-" })
+    }
+
+    private static func isThematicBreak(_ t: String) -> Bool {
+        let chars = t.filter { $0 != " " }
+        guard chars.count >= 3, let c = chars.first, "-*_".contains(c) else { return false }
+        return chars.allSatisfy { $0 == c }
+    }
+}
+
 /// Parsed markdown by text. A transcript row is rebuilt often (a poll, a
 /// mirror push, a resize, a layout switch) and `Markdown(String)` parses
 /// again each time; the parse is kept here instead, and new messages are
@@ -1839,7 +1940,7 @@ enum TranscriptMarkdownCache {
     static func content(_ text: String) -> MarkdownContent {
         let key = text as NSString
         if let hit = cache.object(forKey: key) { return hit.content }
-        let parsed = MarkdownContent(text)
+        let parsed = MarkdownContent(MarkdownHardBreaks.apply(text))
         cache.setObject(Box(parsed), forKey: key)
         return parsed
     }

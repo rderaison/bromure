@@ -476,6 +476,11 @@ struct QueuedMessage: Identifiable, Equatable, Codable {
     /// it, and the chat the session comes back in (maybe another tab)
     /// takes it over.
     var sessionID: UUID? = nil
+    /// A held one Bromure typed in: the agent has it (maybe in its own
+    /// queue — Kimi's "ctrl-s to steer"), the transcript doesn't yet. Shown
+    /// until it lands as a turn. Optional so an older saved queue decodes.
+    var delivered: Bool? = nil
+    var isDelivered: Bool { delivered == true }
 }
 
 /// What each agent does with a message submitted while it's busy, measured
@@ -541,13 +546,9 @@ final class BeautifiedSessionModel: ObservableObject {
     var draftKey: String? {
         didSet {
             guard draftKey != oldValue else { return }
-            // The queue follows the same key (`ChatQueueStore`).
-            if queueAttached {
-                queueStore.detach(oldValue ?? anonymousQueueKey, owner: self)
-                queueAttached = false
-                attachQueue()
-            }
-            bindQueue()
+            // The queue follows the same key until the session is known
+            // (`ChatQueueStore`; then it's keyed by the session).
+            rekeyQueue()
             guard let draftKey else { return }
             let d = ComposerDrafts[draftKey]
             composerText = d.text
@@ -590,13 +591,26 @@ final class BeautifiedSessionModel: ObservableObject {
     var queueStore: ChatQueueStore = .shared {
         didSet {
             guard queueStore !== oldValue else { return }
-            if queueAttached { oldValue.detach(queueKey, owner: self); queueAttached = false; attachQueue() }
+            if queueAttached, let k = attachedQueueKey {
+                oldValue.detach(k, owner: self); queueAttached = false; attachQueue()
+            }
             bindQueue()
         }
     }
     /// A chat with no draft key (demo, bench) still queues, in memory only.
     private let anonymousQueueKey = ChatQueueStore.ephemeralPrefix + UUID().uuidString
-    var queueKey: String { draftKey ?? anonymousQueueKey }
+    /// Keyed by the session once it's known (a new session reusing the
+    /// tab must never see — let alone get — the last one's held messages),
+    /// by the tab until then.
+    var queueKey: String { boundSession.map(ChatQueueStore.sessionKey) ?? draftKey ?? anonymousQueueKey }
+    /// The session this chat's queue is keyed by (`queueKey`).
+    private(set) var boundSession: UUID? {
+        didSet { if boundSession != oldValue { rekeyQueue() } }
+    }
+    /// The key the chat is registered under with the store.
+    private var attachedQueueKey: String?
+    /// When this chat opened: an unattributed message queued since is its.
+    private let chatSince = Date()
     private var queueSub: AnyCancellable?
     /// Registered with the store as a chat showing `queueKey` (between
     /// `start` and `stop`).
@@ -620,7 +634,7 @@ final class BeautifiedSessionModel: ObservableObject {
     var sessionStore: AgentSessionStore?
     /// The session this chat is, as of now (a tab binds to its record a
     /// beat after launch).
-    var currentSession: (() -> AgentSession?)?
+    var currentSession: (() -> AgentSession?)? { didSet { bindQueue() } }
     /// The session's conversation as last copied to this Mac (the engine's
     /// `SessionTranscriptCache`, a mirror's last download): shown the moment
     /// the chat mounts, until its first read of the live file lands.
@@ -725,6 +739,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The agent's transcript now ends on a refused turn (auth, quota…).
     /// Codex fires no hook for a failed turn — only the prompt's — so its
     /// tab would read "working" forever; the host turns this into "needs you".
+    /// Fired for every new one (an agent may retry and fail again).
     var recordedFailureAppeared: (() -> Void)?
     /// What the host sign-in is doing right now, for the card. nil = idle.
     @Published var hostSignInStatus: String?
@@ -823,6 +838,8 @@ final class BeautifiedSessionModel: ObservableObject {
     /// signed in again — so it stops being the state while the transcript
     /// still ends on it (a slash command or a restart writes no new turn).
     private var settledFailureID: Int?
+    /// The refused turn last reported to the host (`recordedFailureAppeared`).
+    private var reportedFailureID: Int?
     /// Consecutive polls that parsed to EMPTY while we already had a transcript.
     /// A populated transcript that suddenly reads empty is almost always a
     /// transient fetch glitch — the session-floor probe momentarily resolving a
@@ -967,8 +984,12 @@ final class BeautifiedSessionModel: ObservableObject {
 
     private func bindQueue() {
         let key = queueKey
+        // Still keyed by the tab (the session isn't known yet): what an
+        // earlier session left there is never shown as this one's.
+        let screen = boundSession == nil && currentSession != nil
+        let since = chatSince
         queueSub = queueStore.$queues
-            .map { $0[key] ?? [] }
+            .map { ($0[key] ?? []).filter { q in !screen || (q.sessionID == nil && q.queuedAt >= since) } }
             .removeDuplicates()
             .sink { [weak self] list in
                 guard let self, self.queued != list else { return }
@@ -983,11 +1004,13 @@ final class BeautifiedSessionModel: ObservableObject {
         let p = provider
         return ChatQueueStore.Driver(
             isWorking: { p.isWorking(window: window) },
-            deliver: { text, target in await p.deliverQueued(text, target: target) })
+            deliver: { text, target in await p.deliverQueued(text, target: target) },
+            accepts: { [current = currentSession] q in Self.mayDeliver(q, current: current) })
     }
 
     private func attachQueue() {
         queueDriverWindow = provider.activeTabIndex()
+        attachedQueueKey = queueKey
         queueStore.attach(queueKey, owner: self, driver: queueDriverWindow.map { queueDriver(window: $0) })
         queueAttached = true
     }
@@ -995,7 +1018,42 @@ final class BeautifiedSessionModel: ObservableObject {
     private func detachQueue() {
         guard queueAttached else { return }
         queueAttached = false
-        queueStore.detach(queueKey, owner: self)
+        queueStore.detach(attachedQueueKey ?? queueKey, owner: self)
+        attachedQueueKey = nil
+    }
+
+    /// The key changed (the tab, or the session became known): register
+    /// under the new one and mirror its list.
+    private func rekeyQueue() {
+        if queueAttached, attachedQueueKey != queueKey {
+            detachQueue()
+            attachQueue()
+        }
+        bindQueue()
+    }
+
+    /// Whether a held message may be typed into this chat's tab: only one
+    /// written in the session that holds the tab right now (asked live —
+    /// the store delivers with the chat gone, and the tab may hold a new
+    /// session by then). A chat with no session records takes its own.
+    private func mayDeliver(_ q: QueuedMessage) -> Bool { Self.mayDeliver(q, current: currentSession) }
+    private static func mayDeliver(_ q: QueuedMessage, current: (() -> AgentSession?)?) -> Bool {
+        guard let current else { return true }
+        guard let sid = current()?.id else { return false }
+        return q.sessionID == sid
+    }
+
+    /// The session holding the tab is known: key the queue by it, and sort
+    /// what the tab key still holds (`ChatQueueStore.claim`).
+    private func bindSessionQueue() {
+        guard let sid = currentSession?()?.id else { return }
+        if boundSession != sid { boundSession = sid }
+        if let tab = draftKey {
+            queueStore.claim(tabKey: tab, session: sid,
+                             agentStarted: agentStartedAt > 0
+                                ? Date(timeIntervalSince1970: TimeInterval(agentStartedAt)) : nil,
+                             chatSince: chatSince)
+        }
     }
 
     private func rebuild() {
@@ -1044,6 +1102,7 @@ final class BeautifiedSessionModel: ObservableObject {
         if working { idleSince = nil } else if idleSince == nil { idleSince = now }
         // What was held for this session while it was paused (or in the
         // tab it had before) is this chat's to deliver now.
+        bindSessionQueue()
         if let sid = currentSession?()?.id, let w = provider.activeTabIndex() {
             queueStore.adopt(session: sid, into: queueKey, target: provider.paneTarget(window: w))
         }
@@ -1087,7 +1146,7 @@ final class BeautifiedSessionModel: ObservableObject {
         // Never while the agent is asking something (the guest would hold
         // it anyway — that's the backstop, not the plan).
         if let idle = idleSince, now.timeIntervalSince(idle) > 1.5, !sending, !dialogOpen,
-           queued.contains(where: ChatQueueStore.deliverable),
+           queued.contains(where: { ChatQueueStore.deliverable($0) && mayDeliver($0) }),
            queueStore.isOwner(queueKey, self) {
             deliverHeld()
         }
@@ -1120,7 +1179,8 @@ final class BeautifiedSessionModel: ObservableObject {
     /// A refusal leaves them on the strip, saying why.
     private func deliverHeld() {
         guard let w = queueDriverWindow ?? provider.activeTabIndex(),
-              let text = ChatQueueStore.nextHeld(queued)?.text else { return }
+              let text = ChatQueueStore.nextHeld(queued.filter { !ChatQueueStore.deliverable($0) || mayDeliver($0) })?.text
+        else { return }
         sending = true
         Task { [weak self] in
             guard let self else { return }
@@ -1131,7 +1191,9 @@ final class BeautifiedSessionModel: ObservableObject {
             guard outcome == .typed else { return }
             self.gate.userSent()
             self.setWorking(true)
-            self.appendOptimistic(.userText(text))
+            // No echo bubble: the strip keeps the row ("Delivered") until
+            // the transcript carries the turn — an echo too showed it twice.
+            _ = text
             await self.poll()
         }
     }
@@ -1147,7 +1209,7 @@ final class BeautifiedSessionModel: ObservableObject {
             // The TUI hands back its whole queue: take all of ours with it,
             // then empty the input box (one line per C-u, and the recall
             // joins them with blank lines).
-            back = queued.filter { !$0.held }
+            back = queued.filter { !$0.held && !$0.isDelivered }
             let lines = back.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
             let keys = [[recall]] + Array(repeating: ["C-u"], count: lines + 1)
             Task { [weak self] in await self?.runKeys(keys) }
@@ -1191,10 +1253,23 @@ final class BeautifiedSessionModel: ObservableObject {
             if Date().timeIntervalSince(p.added) > p.ttl { return true }
             guard case .userText(let t) = p.item.kind else { return true }
             return parsedItems.contains {
-                if case .userText(let rt) = $0.kind { return rt == t }
+                if case .userText(let rt) = $0.kind { return Self.echoMatches(t, recorded: rt) }
                 return false
             }
         }
+    }
+
+    /// Whether a recorded user turn is the echo sent from the composer —
+    /// the agent may wrap a paste (`<pasted_content>`), turn CRLF into LF,
+    /// or trim the ends; none of that makes it another message.
+    nonisolated static func echoMatches(_ echo: String, recorded: String) -> Bool {
+        func norm(_ s: String) -> String {
+            ClaudeTranscriptParser.unwrapPasted(s)
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return echo == recorded || norm(echo) == norm(recorded)
     }
 
     /// Begin polling the live transcript: brisk while the agent is working
@@ -1468,7 +1543,6 @@ final class BeautifiedSessionModel: ObservableObject {
 
     private func applyParsed(_ parsed: [TranscriptItem]) {
         guard parsed != parsedItems else { return }
-        let hadRecorded = recordedFailure(in: parsedItems) != nil
         TranscriptMarkdownCache.prewarm(parsed)
         parsedItems = parsed
         ensureDropImages()
@@ -1476,7 +1550,17 @@ final class BeautifiedSessionModel: ObservableObject {
         // unless that progress IS the agent recording a refused turn, which
         // is the failure, typed, in no particular language.
         let recorded = recordedFailure(in: parsed)
-        if recorded != nil, !hadRecorded { recordedFailureAppeared?() }
+        // Each NEW refused turn — not only the first of a streak: an agent
+        // that retries on its own (omp on a 502) went back to "working" on
+        // the host after the first one, and the session read "Working"
+        // under four error cards.
+        if recorded != nil {
+            let lastError = parsed.last(where: { if case .agentError = $0.kind { true } else { false } })?.id
+            if lastError != reportedFailureID {
+                reportedFailureID = lastError
+                recordedFailureAppeared?()
+            }
+        }
         if failure != nil || prompt != nil || recorded != nil {
             let wasLogin = prompt?.kind == .login
             withAnimation(.easeOut(duration: 0.2)) { failure = recorded; prompt = nil }
@@ -1864,14 +1948,15 @@ final class BeautifiedSessionModel: ObservableObject {
                                           baseline: self.userTurnCount,
                                           path: queuedPath, offset: queuedOffset, target: target)
                 entry.sessionID = self.currentSession?()?.id
-                self.queueStore.update(self.queueKey) { $0.append(entry) }
+                let key = self.queueKey
+                self.queueStore.update(key) { $0.append(entry) }
                 let outcome: ChatQueueStore.Outcome = native ? await self.provider.send(text) : .typed
                 if outcome != .typed {
                     // Never typed (a dialog came up, or typing failed):
                     // Bromure holds it, saying why when it can't retry.
                     var pinned: PaneTarget?
                     if let w = queuedWindow { pinned = await self.provider.pinnedTarget(window: w) }
-                    self.queueStore.update(self.queueKey) { l in
+                    self.queueStore.update(key) { l in
                         guard let i = l.firstIndex(where: { $0.id == entry.id }) else { return }
                         l[i].held = true
                         l[i].editable = true
@@ -3418,14 +3503,6 @@ private struct ThinkingRow: View {
 /// transcript — most importantly an invalid subscription / auth error, which
 /// otherwise leaves the beautified view stuck on "Thinking…". Detected by
 /// sniffing the tail of the tab's terminal for high-signal error banners.
-/// What a chat knows of the board task its session runs.
-struct BoardTaskLink {
-    var title: String
-    var brief: String
-    /// The board's Restart Session for it; nil when it doesn't apply.
-    var restart: (() -> Void)?
-}
-
 struct SessionFailure: Equatable {
     enum Kind: Equatable { case auth, quota, generic }
     let kind: Kind
@@ -3894,38 +3971,6 @@ enum MachineSignIn {
             _ = await call("signin-cancel", nil)
             events(.finished(success: false, message: NSLocalizedString("The sign-in timed out.", comment: "sign-in")))
         }
-    }
-}
-
-/// A board task's opening brief at the top of its session's chat.
-private struct TaskBriefCard: View {
-    let link: BoardTaskLink
-    let accent: Color
-    @State private var expanded = false
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label(NSLocalizedString("Task brief", comment: "chat: a board task's opening brief"),
-                  systemImage: "list.bullet.rectangle")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(accent)
-            Text(link.title).font(.system(size: 12.5, weight: .semibold))
-            if !link.brief.isEmpty {
-                Text(link.brief)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(expanded ? nil : 6)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                if link.brief.count > 400 || link.brief.split(whereSeparator: \.isNewline).count > 6 {
-                    Button(expanded ? NSLocalizedString("Show less", comment: "task brief")
-                                    : NSLocalizedString("Show more", comment: "task brief")) { expanded.toggle() }
-                        .buttonStyle(.link).font(.system(size: 11))
-                }
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(accent.opacity(0.06)))
     }
 }
 
@@ -4884,6 +4929,7 @@ struct QueuedMessagesStrip: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: q.failure != nil ? "exclamationmark.triangle"
                           : q.waitingOnDialog ? "hand.raised"
+                          : q.isDelivered ? "checkmark.circle"
                           : q.held ? "clock" : "text.line.last.and.arrowtriangle.forward")
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(q.failure != nil ? Color.red : accent)
@@ -4904,6 +4950,12 @@ struct QueuedMessagesStrip: View {
                                                                     comment: "queued message held while the agent shows a dialog"), agent))
                                 .font(.system(size: 10.5))
                                 .foregroundStyle(.orange)
+                        } else if q.isDelivered {
+                            Text(agent.isEmpty
+                                 ? NSLocalizedString("Delivered — queued by the agent", comment: "queued message typed in, not yet a turn in the transcript")
+                                 : String(format: NSLocalizedString("Delivered — queued by %@", comment: "queued message typed in, not yet a turn in the transcript"), agent))
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
                         } else {
                         Text(q.held
                              ? (agent.isEmpty

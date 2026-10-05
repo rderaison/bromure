@@ -208,7 +208,7 @@ struct TranscriptActivityTests {
             item(4, .toolUse(name: "Read", summary: "b", detail: "")),
             item(5, .toolUse(name: "mcp__delegation__request", summary: "", detail: "")),
         ])
-        #expect(many.text == "1 command · 2 files read · 1 subagent")
+        #expect(many.text == "1 command · 2 files read · 1 delegation call")   // S1-5: not a subagent
         #expect(many.failures == 1)
         let one = ActivitySummary.line([item(1, .thinking("…")), item(2, .toolUse(name: "Bash", summary: "npm test", detail: ""))])
         #expect(one.text == "Thought · Bash npm test")

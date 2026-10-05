@@ -16,6 +16,13 @@ import Foundation
 @MainActor
 protocol MCPLineHandler: AnyObject {
     func handle(line: String, branch: String?) async -> String?
+    /// The answer to `line` couldn't be written (the connection is gone):
+    /// whatever answering it took must not count as seen.
+    @MainActor func responseNotWritten(to line: String, branch: String?)
+}
+
+extension MCPLineHandler {
+    @MainActor func responseNotWritten(to line: String, branch: String?) {}
 }
 
 @MainActor
@@ -524,25 +531,29 @@ final class TaskMCPVsockBridge: NSObject {
                         if BACDebug.enabled, line.contains("\"tools/call\"") {
                             BACDebug.log("mcp", "tools/call dispatched after \(BACDebug.ms(arrived))")
                         }
-                        if let resp = await self.server.handle(line: line, branch: bound) {
-                            self.writeLine(resp)
+                        if let resp = await self.server.handle(line: line, branch: bound),
+                           !self.writeLine(resp) {
+                            self.server.responseNotWritten(to: line, branch: bound)
                         }
                     }
                 }
             }
         }
 
-        private func writeLine(_ s: String) {
-            guard fd >= 0 else { return }
+        /// Whether all of it was written (false: the connection is gone).
+        @discardableResult
+        private func writeLine(_ s: String) -> Bool {
+            guard fd >= 0, readSource != nil else { return false }
             var data = Data(s.utf8); data.append(0x0A)
-            data.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
+            return data.withUnsafeBytes { raw -> Bool in
+                guard let base = raw.baseAddress else { return false }
                 var off = 0, rem = raw.count
                 while rem > 0 {
                     let w = Darwin.write(fd, base.advanced(by: off), rem)
-                    if w <= 0 { break }
+                    if w <= 0 { return false }
                     off += w; rem -= w
                 }
+                return true
             }
         }
     }

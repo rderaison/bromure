@@ -3886,3 +3886,9 @@
 "Copy message" = "拷貝訊息";
 "%@ characters" = "%@ 個字元";
 "Showing the start of %@ characters" = "正在顯示 %@ 個字元的開頭";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "已送達 — 在代理程式的佇列中";
+"Delivered — queued by %@" = "已送達 — 在 %@ 的佇列中";
+"1 delegation call" = "1 次委派呼叫";
+"%d delegation calls" = "%d 次委派呼叫";

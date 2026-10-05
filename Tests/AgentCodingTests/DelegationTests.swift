@@ -95,6 +95,64 @@ struct DelegationTests {
         return (d, d.childSessionID)
     }
 
+    // MARK: S1-4 — a reply taken by a call the client gave up on is not lost
+
+    @Test("S1-4: blocking calls return before a 60 s client timeout")
+    func waitBelowClientTimeouts() {
+        #expect(DelegationEngine.waitCap <= 50)
+        #expect(DelegationEngine.defaultWait <= DelegationEngine.waitCap)
+    }
+
+    @Test("S1-4: a wait the client cancelled takes nothing; read_inbox still has the reply")
+    func cancelledWaitLeavesReply() async {
+        let f = fixture()
+        let (_, _) = await delegated(f)
+        let waiting = Task { await f.server.handle(line: rpc("tools/call", params: ["name": "wait", "arguments": ["timeout_seconds": 30]], id: 9), branch: "w3") }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        // Kimi's client gives up at 60 s: it cancels the call…
+        let cancel = try! JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": 9]])
+        _ = await f.server.handle(line: String(data: cancel, encoding: .utf8)!, branch: "w3")
+        // …and the abandoned call gets no answer.
+        let answer = await waiting.value
+        #expect(answer == nil)
+        // The child delivers afterwards: the parent's next look has it.
+        _ = await f.server.handle(line: call("deliver", ["summary": "42"]), branch: "w7")
+        let inbox = await f.server.handle(line: call("read_inbox"), branch: "w3")
+        #expect(text(parse(inbox)).contains("42"))
+    }
+
+    @Test("S1-4: a cancel that crosses the answer puts the taken reply back")
+    func lateCancelPutsBack() async {
+        let f = fixture()
+        _ = await delegated(f)
+        _ = await f.server.handle(line: call("deliver", ["summary": "42"]), branch: "w7")
+        let got = await f.server.handle(line: rpc("tools/call", params: ["name": "wait", "arguments": ["timeout_seconds": 5]], id: 11), branch: "w3")
+        #expect(text(parse(got)).contains("42"))
+        // The client had already given up: its cancel arrives just after.
+        let cancel = try! JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": 11]])
+        _ = await f.server.handle(line: String(data: cancel, encoding: .utf8)!, branch: "w3")
+        let inbox = await f.server.handle(line: call("read_inbox"), branch: "w3")
+        #expect(text(parse(inbox)).contains("42"))
+        // Seen now: not repeated.
+        let again = await f.server.handle(line: call("read_inbox"), branch: "w3")
+        #expect(text(parse(again)).contains("Nothing waiting"))
+    }
+
+    @Test("S1-4: an answer that couldn't be written leaves its messages unread")
+    func unwrittenAnswerPutsBack() async {
+        let f = fixture()
+        _ = await delegated(f)
+        _ = await f.server.handle(line: call("deliver", ["summary": "42"]), branch: "w7")
+        let line = rpc("tools/call", params: ["name": "read_inbox", "arguments": [:]], id: 12)
+        let got = await f.server.handle(line: line, branch: "w3")
+        #expect(text(parse(got)).contains("42"))
+        f.server.responseNotWritten(to: line, branch: "w3")
+        let inbox = await f.server.handle(line: call("read_inbox"), branch: "w3")
+        #expect(text(parse(inbox)).contains("42"))
+    }
+
     @Test("initialize names the server; tools/list has the whole protocol")
     func handshake() async {
         let f = fixture()

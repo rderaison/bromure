@@ -1818,10 +1818,21 @@ public final class SessionDisk {
     decision = "allow"
     pattern = "mcp__delegation__*"
 
+    # The same server where a folder declares it under its project name.
+    [[permission.rules]]
+    decision = "allow"
+    pattern = "mcp__bromure-delegation__*"
+
     # Showing the user a picture or a chart needs no approval either.
     [[permission.rules]]
     decision = "allow"
     pattern = "mcp__display__*"
+
+    # A Switchboard's own tools (only its tab has the server) — Claude's
+    # Switchboard runs them unprompted (--allowedTools mcp__switchboard).
+    [[permission.rules]]
+    decision = "allow"
+    pattern = "mcp__switchboard__*"
 
     """
 

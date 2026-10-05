@@ -3312,6 +3312,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         ModelSettingsStore.shared.seedIfEmpty(from: profiles + [store.loadTemplate()])
         migrateBedrockWorkspaces()
         migrateLegacyOmpWorkspaces()
+        migrateLegacyLocalEngineWorkspaces()
         installLiveModelRefresh()
         // B46: release the ONNX classifiers no running workspace needs.
         ClassifierLifecycle.start(running: { [weak self] in
@@ -9307,6 +9308,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             } catch {
                 FileHandle.standardError.write(Data(
                     "[models] couldn't save the Bedrock override for \(p.name): \(error)\n".utf8))
+            }
+        }
+        if changed { profiles = store.loadAll() }
+    }
+
+    /// A workspace that names its own local engine on its record (engine
+    /// URL + model, routed local) keeps it: written as its model override,
+    /// where the Models pane shows it — the global default no longer
+    /// replaces it at launch. Idempotent (the old fields are cleared).
+    @MainActor
+    private func migrateLegacyLocalEngineWorkspaces() {
+        let global = ModelSettingsStore.shared.settings
+        var changed = false
+        for p in profiles {
+            guard let moved = p.migratedLegacyLocalEngine(global: global) else { continue }
+            do {
+                try store.save(moved)
+                changed = true
+                InferenceLog.shared.record(
+                    "[models] \(p.name): kept its own local engine via a workspace override")
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[models] couldn't save the local-engine override for \(p.name): \(error)\n".utf8))
             }
         }
         if changed { profiles = store.loadAll() }

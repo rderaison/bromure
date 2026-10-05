@@ -3883,3 +3883,9 @@
 "Copy message" = "Nachricht kopieren";
 "%@ characters" = "%@ Zeichen";
 "Showing the start of %@ characters" = "Anfang von %@ Zeichen";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "Zugestellt – vom Agenten eingereiht";
+"Delivered — queued by %@" = "Zugestellt – von %@ eingereiht";
+"1 delegation call" = "1 Delegationsaufruf";
+"%d delegation calls" = "%d Delegationsaufrufe";

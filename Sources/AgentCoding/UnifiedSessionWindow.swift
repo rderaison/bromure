@@ -1587,6 +1587,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     private var sessionStageActions: SessionStageActions {
+        var a = baseSessionStageActions
+        // A board task's session: its brief, and the board's Restart Session.
+        a.boardTask = { [weak self] id in
+            guard let d = self?.acDelegate, let s = d.agentSessionStore.session(id),
+                  let t = d.codingTaskEngine.task(profileID: s.profileID, sessionID: id, branch: nil)
+            else { return nil }
+            let engine = d.codingTaskEngine
+            let tid = t.id
+            return BoardTaskLink(title: t.title, brief: t.details,
+                                 restart: t.stage == .inProgress ? { engine.resumeSession(tid) } : nil)
+        }
+        return a
+    }
+
+    private var baseSessionStageActions: SessionStageActions {
         SessionStageActions(
             resume: { [weak self] id in
                 if self?.routeToMachine(id, "resume") == true { return }

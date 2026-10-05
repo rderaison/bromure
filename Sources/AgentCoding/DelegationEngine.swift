@@ -195,7 +195,11 @@ final class DelegationEngine {
     /// Open delegations one session may have at once.
     static let maxOpenChildren = 8
     static let defaultWait: TimeInterval = 50
-    static let waitCap: TimeInterval = 600
+    /// A blocking call (wait, request, ask) returns by this, empty-handed
+    /// if nothing came, for the agent to call again: MCP clients give up
+    /// on a call at 60 s (Kimi, Codex) — a message a given-up call took
+    /// was marked read and never seen.
+    static let waitCap: TimeInterval = 50
     /// Files a message may carry between machines: this many, this big
     /// all together. They stream through the host a chunk at a time, so the
     /// cap is about disk and patience, not memory: a 2 GB video travels.
@@ -1182,7 +1186,9 @@ final class DelegationEngine {
     /// or any of its), at most `timeout`; what arrived, taken. Empty on a
     /// timeout.
     func wait(for sessionID: UUID, in delegationID: UUID? = nil,
-              timeout: TimeInterval) async -> [(Delegation, DelegationMessage)] {
+              timeout: TimeInterval,
+              stillWanted: @MainActor () -> Bool = { true }) async -> [(Delegation, DelegationMessage)] {
+        guard stillWanted() else { return [] }
         let now = inbox(for: sessionID, in: delegationID)
         if !now.isEmpty { return now }
         let t = min(max(timeout, 1), Self.waitCap)
@@ -1203,9 +1209,25 @@ final class DelegationEngine {
             await waiter.wait()
             timer.cancel()
             waiters[sessionID]?.removeAll { $0 === waiter }
+            // Its client gave up on the call: take nothing for it.
+            guard stillWanted() else { return [] }
             let got = inbox(for: sessionID, in: delegationID)
             if !got.isEmpty || Date() >= deadline { return got }
         }
+    }
+
+    /// Messages a call took that never reached the agent (its client gave
+    /// up on the call, or the connection was gone): unread again, for the
+    /// next read_inbox or wait. Only this host's records — a remote host's
+    /// copy was already told.
+    /// Wake the session's blocked waits (one was abandoned: it ends now,
+    /// taking nothing).
+    func interruptWaits(for sessionID: UUID) { wake(sessionID) }
+
+    func untake(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        store.markUnread(ids)
+        BACDebug.log("delegation", "\(ids.count) message(s) back to unread: their call was abandoned")
     }
 
     private func wake(_ sessionID: UUID) {

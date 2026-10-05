@@ -3917,3 +3917,9 @@
 "Copy message" = "Copy message";
 "%@ characters" = "%@ characters";
 "Showing the start of %@ characters" = "Showing the start of %@ characters";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "Delivered — queued by the agent";
+"Delivered — queued by %@" = "Delivered — queued by %@";
+"1 delegation call" = "1 delegation call";
+"%d delegation calls" = "%d delegation calls";

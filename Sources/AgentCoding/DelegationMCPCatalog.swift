@@ -89,7 +89,7 @@ enum DelegationMCPCatalog {
                 "to": ["type": "string", "description": "The peer: \"@nick\", or a session id from list_peers."],
                 "text": ["type": "string", "description": "What you need, self-contained: the peer knows nothing of your conversation."],
                 "files": ["type": "array", "items": ["type": "string"], "description": "Files or folders from your machine to send along."],
-                "timeout_seconds": ["type": "integer", "description": "How long to wait for the reply (default 50, up to 600)."],
+                "timeout_seconds": ["type": "integer", "description": "How long to wait for the reply (default and at most 50 — returns by then; call again to keep waiting)."],
             ], "required": ["to", "text"]],
         ],
         [
@@ -114,7 +114,7 @@ enum DelegationMCPCatalog {
             "description": "Block until a message arrives for you (an ask, a report, a delivery or reply; an answer or steering if you are a delegate; a request from a peer), then return it. Empty on timeout — call again. Use it instead of polling.",
             "inputSchema": ["type": "object", "properties": [
                 "delegation_id": ["type": "string", "description": "Only wait on this delegation or request."],
-                "timeout_seconds": ["type": "integer", "description": "How long to wait (default 50, up to 600)."],
+                "timeout_seconds": ["type": "integer", "description": "How long to wait (default and at most 50 — returns by then; call again to keep waiting)."],
             ]],
         ],
         [
@@ -123,7 +123,7 @@ enum DelegationMCPCatalog {
             "inputSchema": ["type": "object", "properties": [
                 "question": ["type": "string"],
                 "delegation_id": ["type": "string", "description": "Which delegation or request this is about (needed when you have more than one open)."],
-                "timeout_seconds": ["type": "integer", "description": "How long to wait for the answer (default 50, up to 600)."],
+                "timeout_seconds": ["type": "integer", "description": "How long to wait for the answer (default and at most 50 — returns by then; call again to keep waiting)."],
             ], "required": ["question"]],
         ],
         [

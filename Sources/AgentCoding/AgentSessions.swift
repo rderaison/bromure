@@ -414,12 +414,37 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
 
     /// Whether `title` is just the start of `prompt`, cut short — what Kimi
     /// shows as its terminal title ("Count slowly from 1 to 30: for e").
+    /// Whitespace compared as a terminal title shows it: Kimi titles a
+    /// session with its first message as written, newlines included, and
+    /// the terminal title shows them as spaces (or drops them) — a
+    /// multi-line first message never matched its own title.
     static func isCutPrompt(_ title: String, of prompt: String) -> Bool {
-        var t = title.trimmingCharacters(in: .whitespaces)
+        var t = foldedWhitespace(title)
+        // A split emoji at the cut shows as a replacement character.
+        while t.hasSuffix("\u{FFFD}") { t = String(t.dropLast()) }
         for mark in ["…", "..."] where t.hasSuffix(mark) { t = String(t.dropLast(mark.count)) }
-        let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.count >= 8 && t.count < p.count
-            && p.lowercased().hasPrefix(t.lowercased().trimmingCharacters(in: .whitespaces))
+        t = t.trimmingCharacters(in: .whitespaces).lowercased()
+        guard t.count >= 8 else { return false }
+        let spaced = foldedWhitespace(prompt).lowercased()
+        let joined = foldedWhitespace(prompt.components(separatedBy: .newlines).joined()).lowercased()
+        return [spaced, joined].contains { p in t.count < p.count && p.hasPrefix(t) }
+    }
+
+    /// Runs of whitespace (newlines included) as one space, ends trimmed.
+    static func foldedWhitespace(_ s: String) -> String {
+        s.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
+    }
+
+    /// Whether `t` is Kimi's session title as its terminal title shows it:
+    /// cut at `kimiTitleCut` UTF-16 code units (JavaScript's
+    /// `slice(0, 32)`), so a CJK title is 32 characters but one with an
+    /// emoji fewer — and one whose last emoji was split lost that half
+    /// (31 units, or 32 with a replacement character).
+    static func isKimiTitleCut(_ t: String) -> Bool {
+        let units = t.utf16.count
+        if units == kimiTitleCut { return true }
+        let hasAstral = t.unicodeScalars.contains { $0.value > 0xFFFF }
+        return units == kimiTitleCut - 1 && (hasAstral || t.hasSuffix("\u{FFFD}"))
     }
 
     /// The session's name from the title its agent shows (its terminal
@@ -436,15 +461,18 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         // mid-word ("…exactly SECOND" of "…exactly SECOND-SESSION, no
         // tools"): never a name of its own. The fuller name the session
         // already has wins; else it ends on a whole word.
-        if s.tool == .kimi, t.count == kimiTitleCut {
+        if s.tool == .kimi, isKimiTitleCut(t) {
+            var cut = t
+            while cut.hasSuffix("\u{FFFD}") { cut = String(cut.dropLast()) }
             let have = s.title.trimmingCharacters(in: .whitespaces)
-            if have.count > t.count, have.lowercased().hasPrefix(t.lowercased()) { return have }
-            return SessionHome.wordCut(t, limit: t.count, cutPartialWord: true)
+            if have.count > cut.count, have.lowercased().hasPrefix(cut.lowercased()) { return have }
+            return SessionHome.wordCut(cut, limit: cut.count, cutPartialWord: true)
         }
         return t
     }
 
-    /// Where Kimi cuts the session title it puts in the terminal's title.
+    /// Where Kimi cuts the session title it puts in the terminal's title,
+    /// in UTF-16 code units (`sessionTitle.trim().slice(0, 32)`).
     static let kimiTitleCut = 32
 
     /// "Claude Code in clock" — for sessions nobody named.

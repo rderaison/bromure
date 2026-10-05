@@ -46,7 +46,12 @@ final class DelegationMCPServer: MCPLineHandler {
                 "capabilities": ["tools": ["listChanged": false]],
                 "instructions": Self.serverInstructions,
             ])
-        case "notifications/initialized", "notifications/cancelled":
+        case "notifications/cancelled":
+            // The client gave up on a call (its own timeout): what that
+            // call took must not count as seen.
+            cancelled(requestID: params["requestId"], branch: branch)
+            return nil
+        case "notifications/initialized":
             return nil
         case "ping":
             return respond(id: id, result: [:])
@@ -55,11 +60,77 @@ final class DelegationMCPServer: MCPLineHandler {
         case "tools/call":
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
-            return respond(id: id, result: await callTool(name: name, args: args, hello: branch))
+            let key = Self.callKey(id, branch: branch)
+            inFlight.insert(key)
+            let result = await callTool(name: name, args: args, hello: branch, callKey: key)
+            inFlight.remove(key)
+            let took = taken.removeValue(forKey: key) ?? []
+            if abandoned.remove(key) != nil {
+                // Cancelled while it ran: no answer (the client dropped
+                // the call), and what it took is unread again.
+                engine()?.untake(took)
+                return nil
+            }
+            if !took.isEmpty { answered[key] = (took, Date()) }
+            pruneAnswered()
+            return respond(id: id, result: result)
         default:
             guard id != nil else { return nil }
             return respondError(id: id, code: -32601, message: "Method not found: \(method)")
         }
+    }
+
+    // MARK: Calls that took messages
+
+    /// What each running call took from the inbox (marked read), by call.
+    private var taken: [String: [UUID]] = [:]
+    private var inFlight: Set<String> = []
+    /// Running calls the client cancelled.
+    private var abandoned: Set<String> = []
+    /// Calls answered lately with messages they took: a cancel (or a failed
+    /// write) that crosses the answer still puts them back.
+    private var answered: [String: (ids: [UUID], at: Date)] = [:]
+    static let lateCancelWindow: TimeInterval = 30
+
+    /// One call: its JSON-RPC id on the tab's connection (ids are per
+    /// client; the hello tells the tabs apart).
+    nonisolated static func callKey(_ id: Any?, branch: String?) -> String {
+        let idText: String
+        switch id {
+        case let n as NSNumber: idText = n.stringValue
+        case let s as String: idText = "s:" + s
+        default: idText = "-"
+        }
+        return (branch ?? "") + "|" + idText
+    }
+
+    private func record(_ items: [(Delegation, DelegationMessage)], for key: String?) {
+        guard let key, !items.isEmpty else { return }
+        taken[key, default: []] += items.map(\.1.id)
+    }
+
+    private func cancelled(requestID: Any?, branch: String?) {
+        let key = Self.callKey(requestID, branch: branch)
+        if inFlight.contains(key) {
+            abandoned.insert(key)
+            if let me = me(branch) { engine()?.interruptWaits(for: me.id) }
+        } else if let a = answered.removeValue(forKey: key),
+                  Date().timeIntervalSince(a.at) <= Self.lateCancelWindow {
+            engine()?.untake(a.ids)
+        }
+    }
+
+    func responseNotWritten(to line: String, branch: String?) {
+        guard let data = line.data(using: .utf8),
+              let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let a = answered.removeValue(forKey: Self.callKey(msg["id"], branch: branch)) {
+            engine()?.untake(a.ids)
+        }
+    }
+
+    private func pruneAnswered() {
+        let now = Date()
+        answered = answered.filter { now.timeIntervalSince($0.value.at) <= Self.lateCancelWindow }
     }
 
     // MARK: Identity
@@ -81,9 +152,10 @@ final class DelegationMCPServer: MCPLineHandler {
     static var serverInstructions: String { DelegationMCPCatalog.instructions }
     static var toolDefinitions: [[String: Any]] { DelegationMCPCatalog.tools }
 
-    private func callTool(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
+    private func callTool(name: String, args: [String: Any], hello: String?,
+                          callKey: String? = nil) async -> [String: Any] {
         let t0 = Date()
-        let result = await callToolTimed(name: name, args: args, hello: hello)
+        let result = await callToolTimed(name: name, args: args, hello: hello, callKey: callKey)
         BACDebug.log("delegation", "tool \(name) took=\(BACDebug.ms(t0))")
         return onCallersMachine(result, hello: hello)
     }
@@ -113,12 +185,18 @@ final class DelegationMCPServer: MCPLineHandler {
             .replacingOccurrences(of: "\\/home\\/ubuntu\\/", with: dir.replacingOccurrences(of: "/", with: "\\/"))
     }
 
-    private func callToolTimed(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
+    private func callToolTimed(name: String, args: [String: Any], hello: String?,
+                               callKey: String? = nil) async -> [String: Any] {
         guard let engine = engine() else { return errorResult("Delegations aren't available on this host.") }
         guard let me = me(hello) else {
             return errorResult("This agent isn't running in a Bromure session tab, so it has no identity here — the delegation tools need one.")
         }
         let iso = ISO8601DateFormatter()
+        /// Whether the client still waits for this call (not cancelled).
+        let wanted: @MainActor () -> Bool = { [weak self] in
+            guard let self, let callKey else { return true }
+            return !self.abandoned.contains(callKey)
+        }
         func timeout(_ v: Any?) -> TimeInterval {
             if let n = v as? Int { return TimeInterval(n) }
             if let n = v as? Double { return n }
@@ -179,9 +257,16 @@ final class DelegationMCPServer: MCPLineHandler {
                         found: (DelegationMessage) -> [String: Any]) async -> [String: Any] {
             let deadline = Date().addingTimeInterval(min(max(t, 1), DelegationEngine.waitCap))
             while Date() < deadline {
-                let got = await engine.wait(for: me.id, in: d.id, timeout: max(1, deadline.timeIntervalSinceNow))
+                let got = await engine.wait(for: me.id, in: d.id, timeout: max(1, deadline.timeIntervalSinceNow),
+                                            stillWanted: wanted)
+                record(got, for: callKey)
+                if !wanted() { break }
                 if let hit = got.first(where: { $0.1.kind == kind && (answering == nil || $0.1.answers == answering) }) {
-                    return textResult(jsonString(found(hit.1).merging([idKey: idValue]) { a, _ in a }))
+                    var out = found(hit.1).merging([idKey: idValue]) { a, _ in a }
+                    // Whatever else came with it was taken too: shown, not lost.
+                    let others = got.filter { $0.1.id != hit.1.id }
+                    if !others.isEmpty { out["also"] = others.map { item($0.0, $0.1) } }
+                    return textResult(jsonString(out))
                 }
                 if !got.isEmpty {
                     return textResult(jsonString([
@@ -437,11 +522,15 @@ final class DelegationMCPServer: MCPLineHandler {
 
             case "read_inbox":
                 let only = try scopedID(args["delegation_id"], engine: engine, me: me)
-                return messages(engine.inbox(for: me.id, in: only), empty: "Nothing waiting.")
+                let items = engine.inbox(for: me.id, in: only)
+                record(items, for: callKey)
+                return messages(items, empty: "Nothing waiting.")
 
             case "wait":
                 let only = try scopedID(args["delegation_id"], engine: engine, me: me)
-                let items = await engine.wait(for: me.id, in: only, timeout: timeout(args["timeout_seconds"]))
+                let items = await engine.wait(for: me.id, in: only, timeout: timeout(args["timeout_seconds"]),
+                                              stillWanted: wanted)
+                record(items, for: callKey)
                 return messages(items, empty: "Nothing arrived in time — call wait again, or carry on and check read_inbox later.")
 
             case "ask":

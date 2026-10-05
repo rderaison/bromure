@@ -124,7 +124,10 @@ final class DelegationRelayClient: @unchecked Sendable {
                     sem.wait()   // MCP is serial per connection: keep answers ordered
                     if let response = out.withLock({ $0 }) {
                         var bytes = Data(response.utf8); bytes.append(0x0A)
-                        guard Self.writeAll(fd, bytes) else { return true }
+                        guard Self.writeAll(fd, bytes) else {
+                            Task { @MainActor in server.responseNotWritten(to: line, branch: hello) }
+                            return true
+                        }
                     }
                 }
                 if pending.count > 16 << 20 { return true }

@@ -3883,3 +3883,9 @@
 "Copy message" = "メッセージをコピー";
 "%@ characters" = "%@文字";
 "Showing the start of %@ characters" = "%@文字のうち冒頭を表示中";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "送信済み — エージェントのキューで待機中";
+"Delivered — queued by %@" = "送信済み — %@ のキューで待機中";
+"1 delegation call" = "委任の呼び出し 1 件";
+"%d delegation calls" = "委任の呼び出し %d 件";

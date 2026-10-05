@@ -2586,9 +2586,67 @@ def _delegation_mcp_setup(tool, workdir):
     those get the entry MERGED into the same files the board MCP uses
     (after it, so a task tab keeps both), git-excluded. Nothing to
     announce: the shim reads its own tmux window."""
-    _project_mcp_add(tool, workdir, "bromure-delegation", _DELEGATION_MCP_SHIM)
-    # And the display MCP (show the user a picture or a chart), same reason.
-    _project_mcp_add(tool, workdir, "display", "/mnt/bromure-meta/bromure-display-mcp.py")
+    # The user-scope file (merged from the host's MCP list at login) may
+    # already declare the same shim — Kimi then listed the delegation tools
+    # twice ("delegation" and "bromure-delegation"), each asking for its
+    # own approval. One declaration per shim: the project entry only when
+    # the user scope lacks it, and a stale one dropped when it has it.
+    for name, shim in (("bromure-delegation", _DELEGATION_MCP_SHIM),
+                       # The display MCP (show the user a picture or a chart).
+                       ("display", "/mnt/bromure-meta/bromure-display-mcp.py")):
+        if _user_scope_mcp_has(tool, shim):
+            _project_mcp_remove(tool, workdir, name, shim)
+        else:
+            _project_mcp_add(tool, workdir, name, shim)
+
+
+def _user_scope_mcp_file(tool):
+    """The user-scope MCP file grok, kimi or omp reads (written at login
+    from the host's list), or None."""
+    return {"kimi": os.path.join(HOME, ".kimi-code", "mcp.json"),
+            "grok": os.path.join(HOME, ".grok", "user-settings.json"),
+            "omp": os.path.join(HOME, ".omp", "agent", "mcp.json")}.get(tool)
+
+
+def _user_scope_mcp_has(tool, shim):
+    """Whether the agent's user-scope MCP file already runs `shim`."""
+    path = _user_scope_mcp_file(tool)
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        with open(path) as f:
+            servers = (json.load(f) or {}).get("mcpServers", {}) or {}
+    except (OSError, ValueError):
+        return False
+    return any(shim in (v.get("args") or []) for v in servers.values() if isinstance(v, dict))
+
+
+def _project_mcp_remove(tool, workdir, name, shim):
+    """Drop the project-scope entry `name` if it runs `shim` (one an older
+    build wrote next to the user-scope one)."""
+    if tool == "omp":
+        path = os.path.join(workdir, ".mcp.json")
+    elif tool in ("grok", "kimi"):
+        path = os.path.join(workdir, *((".grok", "settings.json") if tool == "grok"
+                                       else (".kimi-code", "mcp.json")))
+    else:
+        return
+    try:
+        with open(path) as f:
+            existing = json.load(f)
+    except (OSError, ValueError):
+        return
+    servers = existing.get("mcpServers", {}) or {}
+    entry = servers.get(name)
+    if not isinstance(entry, dict) or shim not in (entry.get("args") or []):
+        return
+    del servers[name]
+    existing["mcpServers"] = servers
+    try:
+        with open(path, "w") as f:
+            json.dump(existing, f, indent=2)
+    except OSError as e:
+        log("worktree", "%s %s mcp cleanup failed: %s" % (tool, name, e))
 
 
 _SWITCHBOARD_MCP_SHIM = "/mnt/bromure-meta/bromure-switchboard-mcp.py"

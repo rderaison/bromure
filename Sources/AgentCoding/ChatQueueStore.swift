@@ -53,6 +53,21 @@ final class ChatQueueStore: ObservableObject {
         var isWorking: @MainActor () -> Bool?
         /// Type `text` into `target`, guarded.
         var deliver: @MainActor (_ text: String, _ target: PaneTarget) async -> Outcome
+        /// Whether this message may be typed into the driver's tab now —
+        /// false for one written in a session that no longer holds the tab
+        /// (a new session reused it): it must never reach another agent.
+        var accepts: @MainActor (QueuedMessage) -> Bool = { _ in true }
+    }
+
+    /// The key a session's chat queues under: the session itself, not the
+    /// tab it happens to be in (a new session reusing the tab used to show
+    /// — and could deliver — the old one's held messages).
+    nonisolated static func sessionKey(_ id: UUID) -> String { "session:" + id.uuidString }
+
+    /// The session a key is for (nil: a tab key, or an ephemeral one).
+    nonisolated static func session(ofKey key: String) -> UUID? {
+        guard key.hasPrefix("session:") else { return nil }
+        return UUID(uuidString: String(key.dropFirst("session:".count)))
     }
 
     static let shared = ChatQueueStore(fileURL: ChatQueueStore.defaultFileURL())
@@ -129,6 +144,47 @@ final class ChatQueueStore: ObservableObject {
     func messages(session id: UUID) -> [(key: String, message: QueuedMessage)] {
         queues.keys.sorted().flatMap { key in
             (queues[key] ?? []).filter { $0.sessionID == id }.map { (key, $0) }
+        }
+    }
+
+    /// The chat for session `sid` shows the tab keyed `tabKey` (a machine
+    /// and window index — how queues were keyed before they were keyed by
+    /// session, and what a chat uses until its session is known). What is
+    /// kept there goes where it belongs:
+    /// - written in `sid`: to the session's key;
+    /// - written in another session: to THAT session's key (its own chat or
+    ///   paused view shows it; never this one, never typed here);
+    /// - written in no known session (saved before sessions were recorded,
+    ///   or queued before the tab bound): this session's when it was queued
+    ///   while this tab's agent ran (`agentStarted`) or since this chat
+    ///   opened (`chatSince`); dropped when the agent started after it — an
+    ///   earlier session's, which can't be told apart any more; left alone
+    ///   while the agent's start isn't known yet.
+    func claim(tabKey: String, session sid: UUID, agentStarted: Date?, chatSince: Date) {
+        guard Self.session(ofKey: tabKey) == nil, tabKey != Self.sessionKey(sid) else { return }
+        let list = messages(tabKey).filter { !$0.sending }
+        guard !list.isEmpty else { return }
+        var moves: [UUID: [QueuedMessage]] = [:]
+        var dropped = Set<UUID>()
+        for var q in list {
+            if let owner = q.sessionID {
+                moves[owner, default: []].append(q)
+            } else if q.queuedAt >= chatSince || agentStarted.map({ q.queuedAt >= $0 }) == true {
+                q.sessionID = sid
+                moves[sid, default: []].append(q)
+            } else if agentStarted != nil {
+                dropped.insert(q.id)
+            }
+        }
+        let gone = Set(moves.values.flatMap { $0.map(\.id) }).union(dropped)
+        guard !gone.isEmpty else { return }
+        update(tabKey) { $0.removeAll { gone.contains($0.id) } }
+        for (owner, qs) in moves {
+            update(Self.sessionKey(owner)) { l in
+                let have = Set(l.map(\.id))
+                l += qs.filter { !have.contains($0.id) }
+                l.sort { $0.queuedAt < $1.queuedAt }
+            }
         }
     }
 
@@ -209,7 +265,13 @@ final class ChatQueueStore: ObservableObject {
     /// unreachable: it stays for the next try. nil: nothing to deliver.
     @discardableResult
     func deliverHeld(_ key: String, driver: Driver, fallback: PaneTarget?) async -> Outcome? {
-        let batch = Self.nextHeld(messages(key)).map { [$0] } ?? []
+        // Never one that isn't this key's session's, nor one the driver's
+        // tab may no longer take (another session holds it now).
+        let keySession = Self.session(ofKey: key)
+        let eligible = messages(key).filter { q in
+            (keySession == nil || q.sessionID == keySession) && (!Self.deliverable(q) || driver.accepts(q))
+        }
+        let batch = Self.nextHeld(eligible).map { [$0] } ?? []
         guard let target = batch.first?.target ?? fallback else { return nil }
         let ids = Set(batch.map(\.id))
         update(key) { l in for i in l.indices where ids.contains(l[i].id) { l[i].sending = true } }
@@ -217,7 +279,17 @@ final class ChatQueueStore: ObservableObject {
         update(key) { l in
             switch outcome {
             case .typed:
-                l.removeAll { ids.contains($0.id) }
+                // In the agent's hands now — but not necessarily a turn yet
+                // (Kimi queues a message typed while it still works, "ctrl-s
+                // to steer"): kept on the strip, "Delivered", until the
+                // transcript carries it (the chat's reconcile drops it then).
+                for i in l.indices where ids.contains(l[i].id) {
+                    l[i].sending = false
+                    l[i].held = false
+                    l[i].editable = false
+                    l[i].awaitingAnswer = nil
+                    l[i].delivered = true
+                }
             case .held:
                 // A menu or dialog is up in the tab: it waits for the user
                 // to answer it (said on its row).
@@ -257,8 +329,8 @@ final class ChatQueueStore: ObservableObject {
     }
 
     private func considerDrain(_ key: String) {
-        guard liveOwners(key).isEmpty, drains[key] == nil, drivers[key] != nil,
-              messages(key).contains(where: Self.deliverable) else { return }
+        guard liveOwners(key).isEmpty, drains[key] == nil, let driver = drivers[key],
+              messages(key).contains(where: { Self.deliverable($0) && driver.accepts($0) }) else { return }
         let token = UUID()
         let task = Task { [weak self] in
             await self?.drain(key)
@@ -277,7 +349,8 @@ final class ChatQueueStore: ObservableObject {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: UInt64(max(0.01, pollInterval) * 1_000_000_000))
             if Task.isCancelled || !liveOwners(key).isEmpty { return }
-            guard messages(key).contains(where: Self.deliverable), let driver = drivers[key] else { return }
+            guard let driver = drivers[key],
+                  messages(key).contains(where: { Self.deliverable($0) && driver.accepts($0) }) else { return }
             let now = Date()
             guard let working = driver.isWorking() else {
                 idleSince = nil

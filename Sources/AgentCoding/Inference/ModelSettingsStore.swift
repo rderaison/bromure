@@ -126,7 +126,16 @@ public final class ModelSettingsStore: ObservableObject {
     /// its override resolved over them — layered (its own providers, keys,
     /// subscriptions and model choices on top of the global ones, exclusions
     /// applied) or standalone (its own complete configuration).
+    /// A workspace that still names its own local engine on its record
+    /// (`Profile.legacyLocalEngineOverride`) runs on it: the workspace's
+    /// choice wins over the global default.
     public func effective(for profile: Profile) -> ModelSettings {
-        profile.modelOverride?.resolved(over: settings) ?? settings
+        Self.effective(for: profile, global: settings)
+    }
+
+    nonisolated static func effective(for profile: Profile, global: ModelSettings) -> ModelSettings {
+        if let own = profile.modelOverride { return own.resolved(over: global) }
+        if let legacy = profile.legacyLocalEngineOverride(global: global) { return legacy.resolved(over: global) }
+        return global
     }
 }

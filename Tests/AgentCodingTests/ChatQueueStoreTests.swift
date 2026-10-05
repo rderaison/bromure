@@ -63,8 +63,9 @@ struct ChatQueueStoreTests {
         #expect(store.messages("local:ws:3").count == 1)
         // The turn ends: typed into the window it was queued for, guarded.
         p.working = false
-        await waitUntil { store.messages("local:ws:3").isEmpty }
-        #expect(store.messages("local:ws:3").isEmpty)
+        await waitUntil { store.messages("local:ws:3").allSatisfy(\.isDelivered) }
+        // Typed: kept, "Delivered", until the transcript carries the turn.
+        #expect(store.messages("local:ws:3").map(\.isDelivered) == [true])
         #expect(p.typed.count == 1)
         let cmd = p.typed.first ?? ""
         #expect(cmd.contains("'@41'"))                           // the window's own id
@@ -189,10 +190,10 @@ struct ChatQueueStoreTests {
         store.update("k") { $0 += [held("3"), held("4")] }
         _ = await store.deliverHeld("k", driver: driver, fallback: nil)
         #expect(got == ["3"])
-        #expect(store.messages("k").map(\.text) == ["4"])
+        #expect(store.messages("k").filter { !$0.isDelivered }.map(\.text) == ["4"])
         _ = await store.deliverHeld("k", driver: driver, fallback: nil)
         #expect(got == ["3", "4"])
-        #expect(store.messages("k").isEmpty)
+        #expect(store.messages("k").allSatisfy { $0.isDelivered })
     }
 
     @Test("the next held message waits while an earlier one is being typed")
@@ -220,7 +221,7 @@ struct ChatQueueStoreTests {
         }))
         store.attach("k", owner: p, driver: nil)
         store.detach("k", owner: p)
-        await waitUntil { store.messages("k").isEmpty }
+        await waitUntil { store.messages("k").allSatisfy(\.isDelivered) }
         #expect(got == ["3", "4"])
     }
 
@@ -246,6 +247,100 @@ struct ChatQueueStoreTests {
         oldHeld.queuedAt = now.addingTimeInterval(-8 * 86_400)
         let r = ChatQueueStore.restored(["k": [oldNative, oldHeld, held("fresh")]], now: now)
         #expect(r["k"]?.map(\.text) == ["fresh"])
+    }
+    @Test("S1-6: a typed held message stays on the strip, Delivered, until it is a turn")
+    func deliveredStaysUntilTurn() async {
+        let store = fastStore()
+        let driver = ChatQueueStore.Driver(isWorking: { false }, deliver: { _, _ in .typed })
+        store.update("k") { $0.append(held("steer me")) }
+        _ = await store.deliverHeld("k", driver: driver, fallback: nil)
+        let q = store.messages("k").first
+        #expect(q?.isDelivered == true)
+        #expect(q?.held == false)
+        let again = q.map { ChatQueueStore.deliverable($0) } ?? true
+        #expect(!again)   // never typed twice
+        #expect(ChatQueueStore.nextHeld(store.messages("k")) == nil)
+        // An older saved queue (no flag) still decodes.
+        let json = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","text":"x","queuedAt":0,"held":true,"editable":true,"baseline":0,"offset":0,"sending":false}"#
+        let old = try? JSONDecoder().decode(QueuedMessage.self, from: Data(json.utf8))
+        #expect(old?.isDelivered == false)
+    }
+
+    // MARK: S1-1 — a new session reusing the tab never gets the old one's messages
+
+    @Test("S1-1: a tab key's messages go to the session they were written in")
+    func claimSortsByOwner() {
+        let store = fastStore()
+        let old = UUID(), new = UUID()
+        let agentStart = Date().addingTimeInterval(-60)
+        var stale = held("from the old session"); stale.sessionID = old
+        stale.failure = ChatQueueStore.notTypedText
+        var legacyOld = held("legacy, before this agent"); legacyOld.queuedAt = agentStart.addingTimeInterval(-600)
+        var legacyNew = held("legacy, while this agent ran"); legacyNew.queuedAt = agentStart.addingTimeInterval(10)
+        store.update("local:ws:1") { $0 += [stale, legacyOld, legacyNew] }
+        store.claim(tabKey: "local:ws:1", session: new, agentStarted: agentStart,
+                    chatSince: Date())
+        #expect(store.messages("local:ws:1").isEmpty)
+        // The old session's keeps under its own key (its paused view shows it).
+        #expect(store.messages(ChatQueueStore.sessionKey(old)).map(\.text) == ["from the old session"])
+        // The new one gets only what was written while its agent ran.
+        let mine = store.messages(ChatQueueStore.sessionKey(new))
+        #expect(mine.map(\.text) == ["legacy, while this agent ran"])
+        #expect(mine.first?.sessionID == new)
+    }
+
+    @Test("S1-1: an unattributed message is left alone until the agent's start is known")
+    func claimWaitsForAgentStart() {
+        let store = fastStore()
+        var legacy = held("legacy"); legacy.queuedAt = Date().addingTimeInterval(-3600)
+        store.update("local:ws:1") { $0.append(legacy) }
+        store.claim(tabKey: "local:ws:1", session: UUID(), agentStarted: nil, chatSince: Date())
+        #expect(store.messages("local:ws:1").count == 1)
+    }
+
+    @Test("S1-1: the store never types a message into a tab another session now holds")
+    func driverRefusesOtherSession() async {
+        let store = fastStore()
+        let old = UUID()
+        var q = held("old session's"); q.sessionID = old
+        let key = ChatQueueStore.sessionKey(old)
+        store.update(key) { $0.append(q) }
+        var typed: [String] = []
+        let driver = ChatQueueStore.Driver(
+            isWorking: { false },
+            deliver: { text, _ in typed.append(text); return .typed },
+            accepts: { $0.sessionID == UUID() })   // the tab holds someone else
+        let out = await store.deliverHeld(key, driver: driver, fallback: nil)
+        #expect(out == nil)
+        #expect(typed.isEmpty)
+        #expect(store.messages(key).count == 1)
+    }
+
+    @Test("S1-1: a new session's chat in a reused tab shows none of the old session's held messages")
+    func newSessionInReusedTab() async {
+        let store = fastStore()
+        let p = Provider()
+        p.working = true
+        let ws = UUID()
+        var oldSession = AgentSession(profileID: ws, tool: .claude, title: "old")
+        oldSession.id = UUID()
+        let newSession = AgentSession(profileID: ws, tool: .claude, title: "new")
+        var stale = held("old held"); stale.sessionID = oldSession.id
+        stale.failure = ChatQueueStore.notTypedText
+        store.update("local:ws:1") { $0.append(stale) }
+        let chat = BeautifiedSessionModel(provider: p)
+        chat.queueStore = store
+        chat.draftKey = "local:ws:1"
+        chat.currentSession = { newSession }
+        // Not bound yet: the tab key's stale message isn't shown as this one's.
+        #expect(chat.queued.isEmpty)
+        chat.start()
+        await waitUntil { chat.queueKey == ChatQueueStore.sessionKey(newSession.id) }
+        #expect(chat.queueKey == ChatQueueStore.sessionKey(newSession.id))
+        #expect(chat.queued.isEmpty)
+        #expect(store.messages(ChatQueueStore.sessionKey(oldSession.id)).count == 1)
+        chat.stop()
+        #expect(p.typed.isEmpty)
     }
 }
 
@@ -294,4 +389,5 @@ struct ChatTypingTargetTests {
         let back = try JSONDecoder().decode(PaneTarget.self, from: JSONEncoder().encode(t))
         #expect(back == t)
     }
+
 }

@@ -4625,6 +4625,20 @@ final class RemoteHostWindow: NSWindow {
             workspaceName: { [weak self] id in self?.controller.profile(for: id)?.name ?? "" }))
 
     private var sessionStageActions: SessionStageActions {
+        var a = baseSessionStageActions
+        // A board task's session: its brief, and the server's Restart Session.
+        a.boardTask = { [weak self] id in
+            guard let c = self?.controller,
+                  let t = c.taskStore.tasks.first(where: { $0.sessionID == id && $0.stage != .done })
+            else { return nil }
+            let tid = t.id
+            return BoardTaskLink(title: t.title, brief: t.details,
+                                 restart: t.stage == .inProgress ? { [weak c] in c?.taskCommand(tid, "resume") } : nil)
+        }
+        return a
+    }
+
+    private var baseSessionStageActions: SessionStageActions {
         SessionStageActions(
             resume: { [weak self] id in self?.controller.sessionCommand(id, "resume") },
             close: { [weak self] id in self?.controller.sessionCommand(id, "close") },

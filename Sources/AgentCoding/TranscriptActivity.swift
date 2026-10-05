@@ -554,6 +554,9 @@ struct TurnChangesView: View {
 enum ActivitySummary {
     enum Category: Int, CaseIterable {
         case command, read, edit, search, web, agent, other
+        /// Bromure's delegation tools (hand work to another session, hear
+        /// back) — not subagents of the agent's own.
+        case delegation
 
         var symbol: String {
             switch self {
@@ -564,6 +567,7 @@ enum ActivitySummary {
             case .web:     return "globe"
             case .agent:   return "person.2"
             case .other:   return "wrench.and.screwdriver"
+            case .delegation: return "arrow.left.arrow.right"
             }
         }
 
@@ -584,6 +588,8 @@ enum ActivitySummary {
                 : String(format: NSLocalizedString("%d subagents", comment: "activity line"), n)
             case .other: return n == 1 ? NSLocalizedString("1 tool call", comment: "activity line")
                 : String(format: NSLocalizedString("%d tool calls", comment: "activity line"), n)
+            case .delegation: return n == 1 ? NSLocalizedString("1 delegation call", comment: "activity line: Bromure delegation tool calls")
+                : String(format: NSLocalizedString("%d delegation calls", comment: "activity line: Bromure delegation tool calls"), n)
             }
         }
 
@@ -596,14 +602,15 @@ enum ActivitySummary {
             case .search:  return String(format: NSLocalizedString("Searching %@", comment: "activity line"), what)
             case .web:     return String(format: NSLocalizedString("Fetching %@", comment: "activity line"), what)
             case .agent:   return String(format: NSLocalizedString("Delegating %@", comment: "activity line"), what)
-            case .other:   return String(format: NSLocalizedString("Using %@", comment: "activity line"), what)
+            case .other, .delegation:
+                return String(format: NSLocalizedString("Using %@", comment: "activity line"), what)
             }
         }
     }
 
     static func category(_ tool: String) -> Category {
         let t = tool.lowercased()
-        if t.hasPrefix("mcp__") { return t.contains("delegat") ? .agent : .other }
+        if t.hasPrefix("mcp__") { return t.contains("delegat") ? .delegation : .other }
         switch t {
         case "bash", "shell", "exec_command", "exec", "run", "run_command", "terminal", "local_shell":
             return .command

@@ -3883,3 +3883,9 @@
 "Copy message" = "复制消息";
 "%@ characters" = "%@ 个字符";
 "Showing the start of %@ characters" = "正在显示 %@ 个字符的开头";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "已送达 — 在代理的队列中";
+"Delivered — queued by %@" = "已送达 — 在 %@ 的队列中";
+"1 delegation call" = "1 次委派调用";
+"%d delegation calls" = "%d 次委派调用";

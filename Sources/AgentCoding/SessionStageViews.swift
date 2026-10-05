@@ -300,6 +300,10 @@ struct SessionStageActions {
     var showMachine: (UUID) -> Void = { _ in }
     /// Put the Switchboard on stage — starting it first when there's none.
     var openSwitchboard: () -> Void = {}
+    /// The board task a session works on, when it is one: its brief and the
+    /// board's Restart Session (a task whose agent couldn't start shows
+    /// both, as its card does).
+    var boardTask: (UUID) -> BoardTaskLink? = { _ in nil }
 
     /// The machine's settings (the workspace editor), by profile id — from
     /// a session's right-click, its ⋯ menu, its sidebar row.
@@ -1228,7 +1232,13 @@ struct SessionRestView: View {
                 ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        if let err = s.lastError, !err.isEmpty { errorCard(err) }
+                        let task = actions.boardTask(s.id)
+                        // A task whose agent never took its brief: the brief
+                        // it was given, at the top (as the live chat shows it).
+                        if let task, !(task.brief.isEmpty && task.title.isEmpty), !hasUserTurn {
+                            TaskBriefCard(link: task, accent: accent)
+                        }
+                        if let err = s.lastError, !err.isEmpty { errorCard(err, restart: task?.restart) }
                         transcript(s, bucket: bucket)
                     }
                     .frame(maxWidth: 900, alignment: .leading)
@@ -1369,10 +1379,27 @@ struct SessionRestView: View {
         }
     }
 
-    private func errorCard(_ text: String) -> some View {
+    /// Whether the conversation on screen has a turn of the user's (the
+    /// brief went in) — else a task's brief is shown above it.
+    private var hasUserTurn: Bool {
+        guard case .loaded(let items) = load else { return false }
+        return items.contains { if case .userText = $0.kind { true } else { false } }
+    }
+
+    private func errorCard(_ text: String, restart: (() -> Void)? = nil) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text(text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                if let restart {
+                    // The board's Restart Session, here too: the card says
+                    // to use it.
+                    Button(action: restart) {
+                        Label(NSLocalizedString("Restart Session", comment: ""), systemImage: "arrow.clockwise")
+                    }
+                    .controlSize(.small)
+                }
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2966,5 +2993,52 @@ private struct ComposerChip<Content: View>: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(help)
+    }
+}
+
+// MARK: - Board task link (shared with the live chat)
+
+/// The board task a session works on: its brief, and the board's Restart Session.
+struct BoardTaskLink {
+    var title: String
+    var brief: String
+    /// The board's Restart Session for it; nil when it doesn't apply.
+    var restart: (() -> Void)?
+}
+
+/// A board task's opening brief, at the top of its chat.
+struct TaskBriefCard: View {
+    let link: BoardTaskLink
+    let accent: Color
+    @State private var expanded = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(NSLocalizedString("Task brief", comment: "chat: a board task's opening brief"),
+                  systemImage: "list.bullet.rectangle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(accent)
+            Text(link.title).font(.system(size: 12.5, weight: .semibold))
+            if !link.brief.isEmpty {
+                Text(link.brief)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(expanded ? nil : 6)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if link.brief.count > 400 || link.brief.split(whereSeparator: \.isNewline).count > 6 {
+                    Button(expanded ? NSLocalizedString("Show less", comment: "task brief")
+                                    : NSLocalizedString("Show more", comment: "task brief")) { expanded.toggle() }
+                        #if os(macOS)
+                        .buttonStyle(.link)
+                        #else
+                        .buttonStyle(.borderless)
+                        #endif
+                        .font(.system(size: 11))
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(accent.opacity(0.06)))
     }
 }

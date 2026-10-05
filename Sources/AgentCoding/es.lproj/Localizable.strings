@@ -3885,3 +3885,9 @@
 "Copy message" = "Copiar mensaje";
 "%@ characters" = "%@ caracteres";
 "Showing the start of %@ characters" = "Mostrando el inicio de %@ caracteres";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "Entregado: en la cola del agente";
+"Delivered — queued by %@" = "Entregado: en la cola de %@";
+"1 delegation call" = "1 llamada de delegación";
+"%d delegation calls" = "%d llamadas de delegación";
