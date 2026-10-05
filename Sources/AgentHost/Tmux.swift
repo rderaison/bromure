@@ -46,9 +46,9 @@ enum Tmux {
     // MARK: Running tmux
 
     @discardableResult
-    static func run(_ args: [String], timeout: TimeInterval = 10) -> (status: Int32, out: String) {
+    static func run(_ args: [String], stdin: Data? = nil, timeout: TimeInterval = 10) -> (status: Int32, out: String) {
         let r = HostProcess.run(executable: binary, args: baseArgs + args,
-                                env: HostEnvironment.forCommands(), timeout: timeout)
+                                env: HostEnvironment.forCommands(), stdin: stdin, timeout: timeout)
         return (r.status, r.stdout)
     }
 
@@ -160,12 +160,46 @@ enum Tmux {
 
     /// Type `text` into the window's prompt, then Enter — split like the
     /// client's own `typeCommand`, so a TUI sees a paste followed by a key.
-    static func type(_ idx: Int, _ text: String) {
+    /// Never while the agent has a menu or approval dialog up (a digit or
+    /// Return would answer it): the text waits — checked every few seconds
+    /// for up to `patience` — and is checked again before the Enter.
+    static func type(_ idx: Int, _ text: String, patience: TimeInterval = 600) {
+        let deadline = Date().addingTimeInterval(patience)
+        while menuOpen(idx) {
+            guard Date() < deadline else {
+                AgentHostLog.log("tmux: a dialog stayed open in window \(idx) — message not typed")
+                return
+            }
+            Thread.sleep(forTimeInterval: 3)
+        }
         // Paths a client names for a Linux guest (drops, inbox) are under
-        // /home/ubuntu; here they live in the real home.
-        run(["send-keys", "-t", "\(session):\(idx)", "-l", HostExec.mapHome(text)])
+        // /home/ubuntu; here they live in the real home. One paste (bracketed
+        // when the agent asked for it, LF kept), not keystrokes: tmux refuses
+        // a send-keys over 16 KB, and a CR typed is Return.
+        let body = HostExec.mapHome(text).replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let buffer = "bromure-msg-\(UUID().uuidString.prefix(8))"
+        guard run(["load-buffer", "-b", buffer, "-"], stdin: Data(body.utf8)).status == 0 else {
+            AgentHostLog.log("tmux: couldn't load the message for window \(idx) — not typed")
+            return
+        }
+        guard run(["paste-buffer", "-p", "-r", "-d", "-b", buffer, "-t", "\(session):\(idx)"]).status == 0 else {
+            run(["delete-buffer", "-b", buffer])
+            AgentHostLog.log("tmux: couldn't paste the message into window \(idx) — not typed")
+            return
+        }
         Thread.sleep(forTimeInterval: 0.6)
+        if menuOpen(idx) {
+            AgentHostLog.log("tmux: a dialog opened in window \(idx) before Enter — not submitted")
+            return
+        }
         run(["send-keys", "-t", "\(session):\(idx)", "Enter"])
+    }
+
+    /// Whether a menu, picker or approval dialog is on the window's screen.
+    static func menuOpen(_ idx: Int) -> Bool {
+        let r = run(["capture-pane", "-p", "-t", "\(session):\(idx)"])
+        return r.status == 0 && AgentPhrases.menuOpen(r.out)
     }
 
     static func sendKeys(_ idx: Int, _ keys: [String]) {

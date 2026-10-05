@@ -967,6 +967,18 @@ struct DiffFileView: View {
                         .foregroundStyle(.red)
                     Spacer(minLength: 0)
                     Button {
+                        platformCopyToPasteboard(file.patch)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .plainAccessibilityButton(NSLocalizedString("Copy this file's diff", comment: "review")) {
+                        platformCopyToPasteboard(file.patch)
+                    }
+                    .help(NSLocalizedString("Copy this file's diff", comment: "review"))
+                    .accessibilityLabel(NSLocalizedString("Copy this file's diff", comment: "review"))
+                    Button {
                         onComment()
                     } label: {
                         Image(systemName: "text.bubble")
@@ -1049,12 +1061,22 @@ struct DiffFileView: View {
                         }
                     }
                     if file.lines.count > Self.maxLines {
-                        Text(String(format: NSLocalizedString(
-                            "… %d more lines (open the terminal for the full diff)",
-                            comment: ""), file.lines.count - Self.maxLines))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .padding(6)
+                        HStack(spacing: 10) {
+                            Text(String(format: NSLocalizedString(
+                                "… %d more lines (open the terminal for the full diff)",
+                                comment: ""), file.lines.count - Self.maxLines))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                            Button {
+                                platformCopyToPasteboard(file.patch)
+                            } label: {
+                                Label(NSLocalizedString("Copy this file's diff", comment: "review"),
+                                      systemImage: "doc.on.doc")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(6)
                     }
                 }
                 .textSelection(.enabled)
@@ -1063,6 +1085,11 @@ struct DiffFileView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6)
             .strokeBorder(Color.primary.opacity(0.10)))
+        .contextMenu {
+            Button(NSLocalizedString("Copy this file's diff", comment: "review")) {
+                platformCopyToPasteboard(file.patch)
+            }
+        }
         .onAppear { if viewed == true { expanded = false } }
         .onChange(of: viewed) { _, v in
             withAnimation(.easeInOut(duration: 0.15)) { expanded = v != true }

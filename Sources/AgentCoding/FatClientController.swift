@@ -4089,11 +4089,11 @@ final class RemoteHostWindow: NSWindow {
                 guard case .running? = AgentPaneProbe.parse(probe) else { return false }
                 // By the task's branch, re-checked in the guest at send time:
                 // the index above may be another tab's by then.
-                guard let out = try? await self.controller.guestExec(
-                    profileID,
-                    command: CodingTaskEngine.typeCommand(target: .task(branch: branch), text: text),
-                    timeout: 20) else { return false }
-                return PaneTypeGuard.refusal(in: out) == nil
+                guard let out = await PaneTypeGuard.runType(target: .task(branch: branch), text: text, exec: {
+                    try? await self.controller.guestExec(profileID, command: $0, timeout: 20)
+                }) else { return false }
+                // Held (a dialog is up) or failed: not typed.
+                return PaneTypeGuard.typed(in: out)
             },
             sendKeys: { [weak self] profileID, branch, keys in
                 guard let self, !keys.isEmpty,
@@ -6935,6 +6935,22 @@ final class RemoteHostWindow: NSWindow {
             }
         }
         m.openSession = { [weak self] sid in self?.selectSession(sid) }
+        // A board task's session: its brief, and the server's Restart Session.
+        m.boardTask = { [weak controller] in
+            guard let c = controller, let w = tabIndex else { return nil }
+            let sid = c.sessionStore.session(profileID: id, windowIndex: w)?.id
+            let branch = c.listModel.entries.first { $0.id == id }?.model.tabs
+                .first { $0.index == w }?.worktreeBranch
+            let tasks = c.taskStore.tasks.filter { $0.profileID == id && $0.stage != .done }
+            guard let t = tasks.first(where: { sid != nil && $0.sessionID == sid })
+                    ?? branch.flatMap({ b in tasks.first { t in
+                        b.hasPrefix("wt/") && (t.branch == b
+                            || t.branchSlug.map { AutomationBoard.branchMatches(b, slug: $0) } == true) } })
+            else { return nil }
+            let tid = t.id
+            return BoardTaskLink(title: t.title, brief: t.details,
+                                 restart: t.stage == .inProgress ? { [weak c] in c?.taskCommand(tid, "resume") } : nil)
+        }
         m.workspaceName = { [weak controller] pid in controller?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak controller] in
             guard let c = controller else { return [] }

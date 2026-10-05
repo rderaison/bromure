@@ -1060,7 +1060,11 @@ enum KimiTranscriptParser {
     /// leaves its turn open forever). Kimi's status hooks drive the
     /// working cue; this is the transcript's own word for it, so the chat
     /// shows the agent at work even when a hook doesn't fire.
-    static func turnInProgress(_ data: Data, now: Date = Date(), freshFor: TimeInterval = 180) -> Bool {
+    /// `notBefore`: when the agent process now running started — a turn
+    /// begun before it (the process was killed or restarted since) is
+    /// interrupted, not in progress.
+    static func turnInProgress(_ data: Data, now: Date = Date(), freshFor: TimeInterval = 180,
+                               notBefore: Date? = nil) -> Bool {
         let tail = data.suffix(256_000)
         let text = String(decoding: tail, as: UTF8.self)
         var lastTime: Double?
@@ -1073,6 +1077,8 @@ enum KimiTranscriptParser {
             case "turn.ended", "agent.turn.ended", "prompt.completed": return false
             case "turn.prompt", "agent.turn.started":
                 guard let t = lastTime else { return false }
+                if let notBefore, let began = obj["time"] as? Double,
+                   Date(timeIntervalSince1970: began / 1000) < notBefore.addingTimeInterval(-2) { return false }
                 return now.timeIntervalSince(Date(timeIntervalSince1970: t / 1000)) < freshFor
             default: continue
             }
@@ -1936,7 +1942,7 @@ struct TranscriptItemView: View {
         case .agentError(let e):
             CollapsibleRow(icon: "exclamationmark.triangle.fill", title: e.headline,
                            subtitle: firstLine(e.message), tint: .orange) {
-                if !e.message.isEmpty { codeBlock(String(e.message.prefix(4_000))) }
+                if !e.message.isEmpty { clippedBlock(e.message, limit: TranscriptCopy.errorLimit) }
             }
         case .toolResult(let tool, let content, let isError):
             CollapsibleRow(
@@ -1946,7 +1952,7 @@ struct TranscriptItemView: View {
                 subtitle: firstLine(content),
                 tint: isError ? .red : .secondary) {
                 if !content.isEmpty {
-                    codeBlock(String(content.prefix(20_000)))
+                    clippedBlock(content, limit: TranscriptCopy.outputLimit)
                 }
             }
         }
@@ -1970,6 +1976,34 @@ struct TranscriptItemView: View {
             .markdownCodeSyntaxHighlighter(TranscriptCodeHighlighter(dark: colorScheme == .dark))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Output shown up to `limit` characters; past that, a visible note of
+    /// how much is shown and a button that copies all of it.
+    @ViewBuilder
+    private func clippedBlock(_ text: String, limit: Int) -> some View {
+        let clip = TranscriptCopy.clip(text, limit: limit)
+        if let total = clip.total {
+            VStack(alignment: .leading, spacing: 6) {
+                codeBlock(clip.shown + "\n…")
+                HStack(spacing: 10) {
+                    Label(TranscriptCopy.truncationMarker(shown: limit, total: total),
+                          systemImage: "scissors")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Button {
+                        platformCopyToPasteboard(text)
+                    } label: {
+                        Label(NSLocalizedString("Copy full output", comment: "truncated transcript output"),
+                              systemImage: "doc.on.doc")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        } else {
+            codeBlock(text)
+        }
     }
 
     private func codeBlock(_ text: String) -> some View {

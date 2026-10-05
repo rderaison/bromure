@@ -519,6 +519,15 @@ enum AgentPhrases {
         return (Array(Set(footers)).sorted() + rows).joined(separator: "|")
     }
 
+    /// `menuOpenRegex` on the host side, for a screen already captured
+    /// (`tmux capture-pane -p`): its bottom 30 rows, lowercased.
+    static func menuOpen(_ screen: String) -> Bool {
+        let tail = screen.split(separator: "\n", omittingEmptySubsequences: false).suffix(30)
+            .joined(separator: "\n").lowercased()
+        if phrases(.footer, agent: nil).contains(where: { tail.contains($0) }) { return true }
+        return tail.range(of: "(❯|▶) *[0-9]+[.)]|[0-9] \\((●|○)\\)", options: .regularExpression) != nil
+    }
+
     private static func eregEscape(_ s: String) -> String {
         var out = ""
         for c in s {

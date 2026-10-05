@@ -121,13 +121,16 @@ enum ScrollBench {
 }
 
 /// `bromure-ac __bench-scroll <transcript.jsonl> --chat [--width 180]
-/// [--seconds 20] [--working]` — the REAL chat view (BeautifiedSessionView,
+/// [--seconds 20] [--working] [--hover] [--expand]` — the REAL chat view (BeautifiedSessionView,
 /// fed the file by a fixture provider) in an offscreen window that opens
 /// wide and is then squeezed to `--width` (the chat column with the browser
 /// and files panes open), stepping through narrow widths and scrolling about
 /// meanwhile. A watchdog thread pings the main queue: a layout that never
 /// converges (B23: the app froze in one SwiftUI transaction placing the
 /// lazy stack) prints HANG and exits 3. Exit 0 = every phase laid out.
+/// `--hover` keeps the pointer moving over the chat (rows hover as the
+/// layout shifts under it); `--expand` opens every long message of yours
+/// in full (S1-1: a 20 KB paste was one row screens tall and froze it).
 enum ChatLayoutCheck {
     static func run(path: String, data: Data, args: [String]) {
         func value(_ flag: String) -> Double? {
@@ -138,6 +141,9 @@ enum ChatLayoutCheck {
         let seconds = value("--seconds") ?? 20
         let working = args.contains("--working")
         let grow = args.contains("--grow")
+        // The pointer resting over the chat (rows under it hover as the
+        // layout moves): a mouse-moved event at the middle, every pump beat.
+        let hover = args.contains("--hover")
         // The watchdog: the main queue must answer within 4 s, always.
         let lastPong = OSAllocatedUnfairLockBox(Date())
         Thread.detachNewThread {
@@ -167,10 +173,22 @@ enum ChatLayoutCheck {
             let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .resizable],
                                   backing: .buffered, defer: false)
             window.contentView = host
+            window.acceptsMouseMovedEvents = true
             window.orderFront(nil)
+            func hoverMove() {
+                let p = NSPoint(x: host.bounds.midX + CGFloat.random(in: -2...2),
+                                y: host.bounds.midY + CGFloat.random(in: -2...2))
+                if let e = NSEvent.mouseEvent(with: .mouseMoved, location: p, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 0, pressure: 0) {
+                    window.sendEvent(e)
+                }
+            }
             func pump(_ s: Double) {
                 let until = Date().addingTimeInterval(s)
                 while Date() < until {
+                    if hover { hoverMove() }
                     RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
                 }
             }
@@ -196,6 +214,13 @@ enum ChatLayoutCheck {
             }
             pump(2.5)   // the poll loads the file, the history settles
             print("items \(model.items.count)")
+            // Every long message of yours opened in full (Show all).
+            if args.contains("--expand") {
+                model.expandedMessages = Set(model.items.compactMap { i -> Int? in
+                    if case .userText = i.kind { return i.id } else { return nil }
+                })
+                pump(0.5)
+            }
             // Panes opening: a few widths in a row, then the squeeze.
             let steps: [CGFloat] = [560, 420, 300, narrow, narrow + 60, narrow]
             for w in steps { resize(w); pump(0.4) }

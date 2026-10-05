@@ -1080,12 +1080,21 @@ private struct TranscriptReaderView: View {
         Task {
             // Guarded: nothing is typed unless the agent holds the tab (a
             // bare shell would run it) — the draft stays then.
-            let out = (try? await controller.guestExec(
-                profileID,
-                command: CodingTaskEngine.typeCommand(tabIndex: window, text: text),
-                timeout: 20)) ?? ""
-            let refused = PaneTypeGuard.refusal(in: out) != nil
-            await MainActor.run { if !refused { draft = "" }; sending = false }
+            // Held too: a menu or approval dialog is up in the tab, and a
+            // digit or Return would answer it — the draft stays, as it does
+            // when typing didn't go through.
+            let out = await PaneTypeGuard.runType(target: .index(window), text: text) {
+                try? await controller.guestExec(profileID, command: $0, timeout: 20)
+            } ?? ""
+            let held = PaneTypeGuard.held(in: out)
+            let refused = !PaneTypeGuard.typed(in: out)
+            await MainActor.run {
+                if !refused { draft = "" }
+                uploadError = held ? NSLocalizedString(
+                    "Not sent — the agent is asking you something. Answer it first, then send again.",
+                    comment: "iOS composer: held while the agent shows a dialog") : nil
+                sending = false
+            }
             await refreshNow()   // reflect the sent message immediately
         }
     }

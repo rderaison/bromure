@@ -15,7 +15,7 @@ struct ChatQueueStoreTests {
         var window: Int? = 3
         var working = true
         /// What a typing command prints back ("" = typed).
-        var typeReply = ""
+        var typeReply = PaneTypeGuard.typedMarker
         var typed: [String] = []
         func activeTabIndex() -> Int? { window }
         func execGuest(_ command: String, timeout: Int) async -> String? {
@@ -126,17 +126,102 @@ struct ChatQueueStoreTests {
         #expect(store.messages("k").count == 1)
         #expect(store.messages("k").first?.sending == false)
         #expect(store.messages("k").first?.failure == nil)
+        // And its row says why: the agent is asking something.
+        #expect(store.messages("k").first?.waitingOnDialog == true)
     }
 
-    @Test("two held messages go in as one, in order")
-    func batched() async {
+    @Test("J1: a composer send while an approval card is up is held, never typed")
+    func composerHoldsOnCard() async {
+        let store = fastStore()
+        let p = Provider()
+        p.working = false
+        let chat = BeautifiedSessionModel(provider: p)
+        chat.queueStore = store
+        chat.draftKey = "local:ws:j1a"
+        chat.prompt = TerminalPrompt(kind: .picker, title: "Run this command?",
+                                     options: [LoginOption(index: 1, label: "Approve once"),
+                                               LoginOption(index: 2, label: "Reject")],
+                                     selectedOption: 1)
+        chat.composerText = "QH1-Q2: after counting, reply QUEUED-ONE-OK"
+        chat.send()
+        await waitUntil { !store.messages("local:ws:j1a").isEmpty }
+        #expect(p.typed.isEmpty)                         // not one keystroke into the picker
+        let q = store.messages("local:ws:j1a").first
+        #expect(q?.text == "QH1-Q2: after counting, reply QUEUED-ONE-OK")
+        #expect(q?.held == true && q?.waitingOnDialog == true)
+        #expect(chat.prompt != nil)                      // the card stays up to be answered
+        #expect(!chat.items.contains { if case .userText = $0.kind { true } else { false } })
+    }
+
+    @Test("J1: a dialog the host didn't see yet: the guest holds it, the message lands on the strip")
+    func composerHeldByGuest() async {
+        let store = fastStore()
+        let p = Provider()
+        p.working = false
+        p.typeReply = PaneTypeGuard.heldMarker
+        let chat = BeautifiedSessionModel(provider: p)
+        chat.queueStore = store
+        chat.draftKey = "local:ws:j1b"
+        chat.composerText = "zz while picker up say PICKERTEXT"
+        chat.send()
+        await waitUntil { !store.messages("local:ws:j1b").isEmpty }
+        #expect(p.typed.count == 1)
+        #expect(p.typed.first?.contains("_bm()") == true)   // the screen check is in the typing command
+        let q = store.messages("local:ws:j1b").first
+        #expect(q?.waitingOnDialog == true && q?.held == true)
+        // No optimistic bubble for a message that never went in.
+        await waitUntil { !chat.items.contains { if case .userText = $0.kind { true } else { false } } }
+        #expect(!chat.items.contains { if case .userText = $0.kind { true } else { false } })
+    }
+
+    @Test("A queue saved before the dialog flag existed still loads")
+    func legacyQueueDecodes() throws {
+        let json = #"{"id":"7B1E5B4E-1C33-4D2B-9F62-0C2F7B1D7E11","text":"x","queuedAt":0,"held":true,"editable":true,"baseline":0,"offset":0,"sending":false}"#
+        let q = try JSONDecoder().decode(QueuedMessage.self, from: Data(json.utf8))
+        #expect(!q.waitingOnDialog)
+    }
+
+    @Test("two held messages go in one at a time, in order, never merged")
+    func oneAtATime() async {
         let store = fastStore()
         var got: [String] = []
         let driver = ChatQueueStore.Driver(isWorking: { false }, deliver: { t, _ in got.append(t); return .typed })
-        store.update("k") { $0 += [held("one"), held("two")] }
+        store.update("k") { $0 += [held("3"), held("4")] }
         _ = await store.deliverHeld("k", driver: driver, fallback: nil)
-        #expect(got == ["one\n\ntwo"])
+        #expect(got == ["3"])
+        #expect(store.messages("k").map(\.text) == ["4"])
+        _ = await store.deliverHeld("k", driver: driver, fallback: nil)
+        #expect(got == ["3", "4"])
         #expect(store.messages("k").isEmpty)
+    }
+
+    @Test("the next held message waits while an earlier one is being typed")
+    func keepsOrderWhileSending() {
+        var first = held("3")
+        first.sending = true
+        #expect(ChatQueueStore.nextHeld([first, held("4")]) == nil)
+        first.sending = false
+        #expect(ChatQueueStore.nextHeld([first, held("4")])?.text == "3")
+        var failed = held("x")
+        failed.failure = "nope"
+        #expect(ChatQueueStore.nextHeld([failed, held("4")])?.text == "4")
+    }
+
+    @Test("off screen, held messages drain one turn at a time")
+    func drainsSeparately() async {
+        let store = fastStore()
+        let p = Provider()
+        p.working = false
+        var got: [String] = []
+        store.update("k") { $0 += [held("3"), held("4")] }
+        store.setDriver("k", ChatQueueStore.Driver(isWorking: { p.working }, deliver: { t, _ in
+            got.append(t)
+            return .typed
+        }))
+        store.attach("k", owner: p, driver: nil)
+        store.detach("k", owner: p)
+        await waitUntil { store.messages("k").isEmpty }
+        #expect(got == ["3", "4"])
     }
 
     @Test("the queue persists across a relaunch: held kept, stale native and mid-send reset")

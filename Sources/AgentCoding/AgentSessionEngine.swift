@@ -911,7 +911,11 @@ final class AgentSessionEngine {
         tail.append(chunk)
         if tail.count > Self.journalTailBytes { tail = Data(tail.suffix(Self.journalTailBytes)) }
         journalTail[id] = tail
-        store.setTranscriptWorking(id, KimiTranscriptParser.turnInProgress(tail))
+        // A turn left open from before the agent was last (re)started was
+        // interrupted (killed, the app relaunched and the session resumed):
+        // not work under way.
+        store.setTranscriptWorking(id, KimiTranscriptParser.turnInProgress(
+            tail, notBefore: store.session(id)?.resumedAt))
     }
 
     /// The conversation to read back: the local copy, with what the

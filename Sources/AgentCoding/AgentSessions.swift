@@ -432,8 +432,20 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         if let p = prompt, isCutPrompt(t, of: p) || isCutPrompt(raw, of: p) {
             return title(fromMessage: p)
         }
+        // Kimi shows its session title cut at 32 characters, unmarked and
+        // mid-word ("…exactly SECOND" of "…exactly SECOND-SESSION, no
+        // tools"): never a name of its own. The fuller name the session
+        // already has wins; else it ends on a whole word.
+        if s.tool == .kimi, t.count == kimiTitleCut {
+            let have = s.title.trimmingCharacters(in: .whitespaces)
+            if have.count > t.count, have.lowercased().hasPrefix(t.lowercased()) { return have }
+            return SessionHome.wordCut(t, limit: t.count, cutPartialWord: true)
+        }
         return t
     }
+
+    /// Where Kimi cuts the session title it puts in the terminal's title.
+    static let kimiTitleCut = 32
 
     /// "Claude Code in clock" — for sessions nobody named.
     static func defaultTitle(tool: Profile.Tool, cwd: String) -> String {

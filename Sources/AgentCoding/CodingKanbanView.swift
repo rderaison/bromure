@@ -641,11 +641,15 @@ struct CodingKanbanView: View {
     }
 
     private func headerRow(compact: Bool) -> some View {
-        let running = store.tasks(in: .inProgress).count
-        let review = store.tasks(in: .testing).count
-        let needsYou = store.tasks(in: .inProgress)
-            .filter { TaskLiveState.needsAttention($0, in: model, sessions: sessionStore) }.count
-            + store.tasks(in: .testing).filter { $0.landing?.phase == .needsYou }.count
+        // Each task counted once: one that needs you (couldn't start, asks
+        // something, a landing waiting on you) isn't also "in progress".
+        let inProgress = store.tasks(in: .inProgress)
+        let testing = store.tasks(in: .testing)
+        let stuck = inProgress.filter { TaskLiveState.needsAttention($0, in: model, sessions: sessionStore) }.count
+        let landingStuck = testing.filter { $0.landing?.phase == .needsYou }.count
+        let needsYou = stuck + landingStuck
+        let running = inProgress.count - stuck
+        let review = testing.count - landingStuck
         return HStack(spacing: 12) {
             Image(systemName: "checklist")
                 .font(.system(size: 16, weight: .medium))
@@ -2093,7 +2097,9 @@ private final class CardMenuPopper: NSObject {
         self.openURL = openURL
     }
 
-    func popUp() {
+    /// At the pointer, or under `view` (an assistive client's "show menu"
+    /// has no pointer to speak of).
+    func popUp(in view: NSView? = nil) {
         let menu = NSMenu()
         menu.autoenablesItems = false
         for item in items {
@@ -2104,12 +2110,79 @@ private final class CardMenuPopper: NSObject {
             menu.addItem(m)
         }
         // Synchronous: the menu tracks until dismissed, `self` alive throughout.
-        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        if let view {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: view.isFlipped ? view.bounds.height : 0), in: view)
+        } else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        }
     }
 
     @objc private func run(_ sender: NSMenuItem) {
         guard let item = items.first(where: { $0.id == sender.tag }) else { return }
         if let url = item.url { openURL(url) } else { item.action() }
+    }
+}
+
+/// The card's accessibility element, in AppKit: a plain NSView that IS the
+/// element — role button, its label as AXDescription, its hint as AXHelp,
+/// AXPress to open the card, AXShowMenu for its menu, the menu's entries as
+/// named actions. SwiftUI's own element for a card only ever exposed the
+/// label as AXAttributedDescription (no AXDescription / AXTitle) to tools
+/// reading plain attributes, whatever modifiers it was given. Laid over the
+/// card, clicks pass through it (`hitTest` → nil): only assistive clients
+/// see it.
+final class CardAXView: NSView {
+    // Set (not just overridden): stored, they answer the attribute API
+    // (AXDescription, AXRole, AXHelp) as well as the NSAccessibility one.
+    var label = "" { didSet { setAccessibilityLabel(label) } }
+    var hint = "" { didSet { setAccessibilityHelp(hint.isEmpty ? nil : hint) } }
+    var onPress: () -> Void = {}
+    var menuItems: [CardMenuItem] = []
+    var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityEnabled(true)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func accessibilityPerformPress() -> Bool { onPress(); return true }
+    override func accessibilityPerformShowMenu() -> Bool {
+        guard !menuItems.isEmpty else { return false }
+        CardMenuPopper(items: menuItems, openURL: openURL).popUp(in: self)
+        return true
+    }
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        let items = menuItems.filter { $0.role != .divider }
+        guard !items.isEmpty else { return nil }
+        return items.map { item in
+            NSAccessibilityCustomAction(name: item.title) { [weak self] in
+                if let url = item.url { self?.openURL(url) } else { item.action() }
+                return true
+            }
+        }
+    }
+}
+
+struct CardAXElement: NSViewRepresentable {
+    let label: String
+    let hint: String
+    let onPress: () -> Void
+    let menu: [CardMenuItem]
+    let openURL: (URL) -> Void
+
+    func makeNSView(context: Context) -> CardAXView { update(CardAXView()) }
+    func updateNSView(_ v: CardAXView, context: Context) { _ = update(v) }
+    private func update(_ v: CardAXView) -> CardAXView {
+        v.label = label
+        v.hint = hint
+        v.onPress = onPress
+        v.menuItems = menu
+        v.openURL = openURL
+        return v
     }
 }
 #endif
@@ -2147,6 +2220,21 @@ struct CardAccessibility: ViewModifier {
     }
 
     func body(content: Content) -> some View {
+        #if os(macOS)
+        // The card's visible pieces stay out of the tree; the AppKit
+        // element laid over it is the card (`CardAXView`).
+        content
+            .contextMenu { CardMenuContent(items: menu) }
+            .accessibilityHidden(true)
+            .overlay(CardAXElement(label: label, hint: hint, onPress: onPress, menu: menu,
+                                   openURL: { openURL($0) })
+                        .allowsHitTesting(false))
+        #else
+        swiftUIElement(content)
+        #endif
+    }
+
+    private func swiftUIElement(_ content: Content) -> some View {
         content
             .contextMenu { CardMenuContent(items: menu) }
             // One element for the whole card — a button named by `label`,

@@ -20,7 +20,7 @@ struct TaskTypingGuardTests {
         #expect(cmd.contains("list-windows -t bromure -F '#{window_id} #{@worktree}'"))
         #expect(cmd.contains("awk -v b='wt/fix-login-261004-1352'"))
         // Every send goes to the resolved id, literally (`-l --`).
-        #expect(cmd.contains("tmux send-keys -t \"$_bt\" -l --"))
+        #expect(cmd.contains("tmux paste-buffer -p -r -d -b \"$_bb\" -t \"$_bt\""))
         #expect(cmd.contains("tmux send-keys -t \"$_bt\" Enter"))
         #expect(!cmd.contains("bromure:"))
         // The text only ever travels base64: no backtick reaches a shell.

@@ -78,25 +78,82 @@ enum TranscriptRow: Identifiable {
     }
 
     /// `text` split at paragraph breaks outside code fences into pieces of
-    /// about `limit` characters (a fence is never cut).
+    /// about `limit` characters (a fence is cut only when it alone runs
+    /// past `hardCap` pieces' worth — closed and reopened, so each piece
+    /// still renders as code). A piece never grows past `hardCap × limit`:
+    /// a reply with no blank line (one giant paragraph, a 20 KB code block)
+    /// used to stay one row several screens tall.
     static func chunks(_ text: String, limit: Int = chunkChars) -> [String] {
-        guard text.count > limit * 3 / 2 else { return [text] }
+        let limit = max(1, limit)
+        guard text.utf16.count > limit * 3 / 2, text.count > limit * 3 / 2 else { return [text] }
+        let cap = limit * hardCap
         var out: [String] = []
         var current = ""
-        var inFence = false
-        for line in text.components(separatedBy: "\n") {
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inFence.toggle() }
+        var size = 0              // current.utf16.count, kept as we go (no O(n) count per line)
+        var fence: String?        // the opening line of the fence we're in
+        var close = "```"         // what closes it
+        func push() {
+            if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(current) }
+            current = ""
+            size = 0
+        }
+        func add(_ line: Substring) {
+            if size > 0 || !current.isEmpty { current += "\n"; size += 1 }
+            current += line
+            size += line.utf16.count
+        }
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            let isFence = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
             // A break is a blank line outside a fence, once the piece is big enough.
-            if !inFence, line.trimmingCharacters(in: .whitespaces).isEmpty, current.count >= limit {
-                out.append(current)
-                current = ""
+            if fence == nil, trimmed.isEmpty, size >= limit {
+                push()
                 continue
             }
-            current += current.isEmpty ? line : "\n" + line
+            // Way past a screen with no break in sight: cut at this line
+            // (never at the line that closes a fence — it ends the piece).
+            if size >= cap, !(isFence && fence != nil) {
+                if let open = fence {
+                    current += "\n" + close
+                    push()
+                    add(Substring(open))
+                } else {
+                    push()
+                }
+            }
+            if isFence {
+                if fence == nil {
+                    fence = String(raw)
+                    close = String(trimmed.prefix(while: { $0 == "`" || $0 == "~" }))
+                } else {
+                    fence = nil
+                }
+            }
+            // One line longer than a whole piece (minified JSON, a base64
+            // blob): cut the line itself.
+            if raw.utf16.count > cap {
+                var rest = raw[...]
+                while !rest.isEmpty {
+                    let part = rest.prefix(cap)
+                    rest = rest.dropFirst(part.count)
+                    add(part)
+                    if !rest.isEmpty {
+                        if fence != nil { current += "\n" + close }
+                        push()
+                        if let open = fence { add(Substring(open)) }
+                    }
+                }
+                continue
+            }
+            add(raw)
         }
-        if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(current) }
+        push()
         return out.isEmpty ? [text] : out
     }
+
+    /// How many pieces' worth a reply piece may grow to before it is cut
+    /// without a paragraph break.
+    static let hardCap = 3
 
     /// The rows of a long reply: the first keeps the item's id (search and
     /// scroll anchors find it), the rest get ids derived from it.
@@ -110,9 +167,119 @@ enum TranscriptRow: Identifiable {
         }
     }
 
+    /// Every row id of a reply (its first row and each later piece) → the
+    /// whole reply, so Copy on ANY piece of a long reply takes all of it
+    /// (a selection can't cross the rows, nor a markdown block within one).
+    static func replyTexts(_ items: [TranscriptItem], chunkLimit: Int = chunkChars) -> [Int: String] {
+        layout(items, chunkLimit: chunkLimit).replies
+    }
+
     static func rows(_ items: [TranscriptItem], chunked: Bool = true,
-                     chunkLimit: Int = chunkChars) -> [TranscriptRow] {
-        uniqued(buildRows(items, chunked: chunked, chunkLimit: chunkLimit))
+                     chunkLimit: Int = chunkChars, expanded: Set<Int> = []) -> [TranscriptRow] {
+        layout(items, chunked: chunked, chunkLimit: chunkLimit, expanded: expanded).rows
+    }
+
+    /// The rows, and what each row of a long message stands for.
+    static func layout(_ items: [TranscriptItem], chunked: Bool = true,
+                       chunkLimit: Int = chunkChars, expanded: Set<Int> = []) -> TranscriptLayout {
+        var out = buildRows(items, chunked: chunked, chunkLimit: chunkLimit, expanded: expanded)
+        out.rows = uniqued(out.rows)
+        return out
+    }
+
+    // MARK: Long messages of yours
+
+    /// Most lines a piece of a long user message holds: a paste of short
+    /// lines is screens tall long before it is long in characters.
+    static let userLinesPerPiece = 40
+    /// The lines a collapsed long message shows.
+    static let userPreviewLines = 12
+
+    /// A message of yours too long to show whole by default. A 20 KB paste
+    /// was ONE row thousands of points tall (the reply cuts never applied
+    /// to user turns): the lazy chat stack placing it never settled and
+    /// the app froze. It shows its start, with Show all / Copy.
+    static func userCollapses(_ text: String, limit: Int = chunkChars) -> Bool {
+        var chars = 0
+        var lines = 1
+        for u in text.utf16 {
+            chars += 1
+            if u == 10 { lines += 1 }
+        }
+        return chars > max(1, limit) * 3 / 2 || lines > userLinesPerPiece * 3 / 2
+    }
+
+    /// `text` cut into pieces of at most `limit` characters and `lines`
+    /// lines, at line ends (a longer line is cut itself). `maxPieces`
+    /// stops early (a preview needs only the first).
+    static func userPieces(_ text: String, limit: Int = chunkChars, lines: Int = userLinesPerPiece,
+                           maxPieces: Int = .max) -> [String] {
+        let limit = max(1, limit), lines = max(1, lines)
+        var out: [String] = []
+        var current = ""
+        var size = 0
+        var count = 0
+        func flush() {
+            if count > 0 { out.append(current) }
+            current = ""
+            size = 0
+            count = 0
+        }
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            var rest = raw[...]
+            repeat {
+                let part = rest.prefix(limit)
+                rest = rest.dropFirst(part.count)
+                let n = part.utf16.count
+                if count > 0, size + n + 1 > limit || count >= lines {
+                    flush()
+                    if out.count >= maxPieces { return out }
+                }
+                if count > 0 { current += "\n" }
+                current += part
+                size += n + (count > 0 ? 1 : 0)
+                count += 1
+            } while !rest.isEmpty
+        }
+        flush()
+        return Array(out.prefix(maxPieces))
+    }
+
+    /// The start of a long message, shown while it's collapsed.
+    static func userPreview(_ text: String, limit: Int = chunkChars) -> String {
+        userPieces(text, limit: max(200, limit / 2), lines: userPreviewLines, maxPieces: 1).first ?? text
+    }
+
+    /// Whether a user turn is the user's own words (a host aside or a
+    /// delegation notice renders as its own short line, never cut).
+    private static func isOwnWords(_ text: String) -> Bool {
+        DelegationNotice.strip(text) == nil && DelegationNotice.stripSwitchboard(text) == nil
+            && !DelegationNotice.isHostAside(text)
+    }
+
+    /// The rows of one user turn: itself, or — long — its preview
+    /// (collapsed) or its pieces (expanded), with what each row stands for.
+    private static func userRows(_ item: TranscriptItem, text: String, limit: Int,
+                                 expanded: Bool, into layout: inout TranscriptLayout) -> [TranscriptItem] {
+        guard isOwnWords(text) else { return [item] }
+        let shown = CodingTask.displayPrompt(text)
+        guard userCollapses(shown, limit: limit) else { return [item] }
+        let total = shown.count
+        if !expanded {
+            let row = TranscriptItem(id: item.id, kind: .userText(userPreview(shown, limit: limit)),
+                                     timestamp: item.timestamp)
+            layout.longUsers[row.id] = LongUserMessage(itemID: item.id, whole: shown, total: total,
+                                                       expanded: false, controls: true)
+            return [row]
+        }
+        let pieces = userPieces(shown, limit: limit)
+        return pieces.enumerated().map { k, piece in
+            let row = TranscriptItem(id: k == 0 ? item.id : chunkID(item.id, k), kind: .userText(piece),
+                                     timestamp: item.timestamp)
+            layout.longUsers[row.id] = LongUserMessage(itemID: item.id, whole: shown, total: total,
+                                                       expanded: true, controls: k == pieces.count - 1)
+            return row
+        }
     }
 
     /// No two rows with one id, whatever the items brought: a repeat is
@@ -140,7 +307,9 @@ enum TranscriptRow: Identifiable {
         }
     }
 
-    private static func buildRows(_ items: [TranscriptItem], chunked: Bool, chunkLimit: Int) -> [TranscriptRow] {
+    private static func buildRows(_ items: [TranscriptItem], chunked: Bool, chunkLimit: Int,
+                                  expanded: Set<Int>) -> TranscriptLayout {
+        var layout = TranscriptLayout()
         var out: [TranscriptRow] = []
         var run: [TranscriptItem] = []
         var turn: [TranscriptItem] = []
@@ -156,13 +325,88 @@ enum TranscriptRow: Identifiable {
                 // Your next message closes the agent's turn: its changes go
                 // at the end of it.
                 if case .userText = item.kind { closeTurn() }
-                if chunked { out += split(item, limit: chunkLimit).map { .item($0) } } else { out.append(.item(item)) }
+                switch item.kind {
+                case .assistantText(let text):
+                    let pieces = chunked ? split(item, limit: chunkLimit) : [item]
+                    for p in pieces where layout.replies[p.id] == nil { layout.replies[p.id] = text }
+                    out += pieces.map { .item($0) }
+                case .userText(let text) where chunked:
+                    out += userRows(item, text: text, limit: chunkLimit,
+                                    expanded: expanded.contains(item.id), into: &layout).map { .item($0) }
+                default:
+                    out.append(.item(item))
+                }
             }
             turn.append(item)
         }
         if !run.isEmpty { out.append(.activity(run)) }
         closeTurn()
-        return out
+        layout.rows = out
+        return layout
+    }
+}
+
+/// The chat's rows, and what the rows of a long message stand for.
+struct TranscriptLayout {
+    var rows: [TranscriptRow] = []
+    /// Row id → the whole reply it is (a piece of).
+    var replies: [Int: String] = [:]
+    /// Row id → the long message of yours it shows (in part).
+    var longUsers: [Int: LongUserMessage] = [:]
+}
+
+/// A message of yours too long to show whole (see `TranscriptRow.userCollapses`).
+struct LongUserMessage: Equatable {
+    /// The transcript item it is (the expand/collapse key).
+    let itemID: Int
+    /// All of it, as the chat shows it (Copy, Edit).
+    let whole: String
+    /// Its length in characters.
+    let total: Int
+    let expanded: Bool
+    /// The row that carries Show all / Show less (the preview, or the last piece).
+    let controls: Bool
+}
+
+/// Under a long message of yours: how much shows, Show all / Show less, Copy.
+struct LongUserMessageBar: View {
+    let message: LongUserMessage
+    let onToggle: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(String(format: message.expanded
+                        ? NSLocalizedString("%@ characters", comment: "long message of yours: its length")
+                        : NSLocalizedString("Showing the start of %@ characters", comment: "long message of yours, collapsed"),
+                        Self.number(message.total)))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Button(message.expanded
+                   ? NSLocalizedString("Show less", comment: "long message of yours")
+                   : NSLocalizedString("Show all", comment: "long message of yours"),
+                   action: onToggle)
+                .buttonStyle(.borderless)
+                .font(.system(size: 11, weight: .medium))
+            Button {
+                platformCopyToPasteboard(message.whole)
+                copied = true
+                Task { try? await Task.sleep(nanoseconds: 1_200_000_000); copied = false }
+            } label: {
+                Label(NSLocalizedString("Copy message", comment: "long message of yours"),
+                      systemImage: copied ? "checkmark" : "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11, weight: .medium))
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+    }
+
+    static func number(_ n: Int) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return f.string(from: NSNumber(value: n)) ?? "\(n)"
     }
 }
 
@@ -595,13 +839,106 @@ struct ActivityGroupView: View {
 /// A transcript as rows: messages on their own, activity folded.
 struct TranscriptRowsView: View {
     let items: [TranscriptItem]
+    /// Long messages of yours opened in full (item ids).
+    @State private var expanded: Set<Int> = []
     var body: some View {
-        ForEach(TranscriptRow.rows(items)) { row in
+        let layout = TranscriptRow.layout(items, expanded: expanded)
+        ForEach(layout.rows) { row in
             switch row {
-            case .item(let item): TranscriptItemView(item: item).id(row.id)
+            case .item(let item):
+                if let long = layout.longUsers[item.id] {
+                    VStack(alignment: .leading, spacing: 4) {
+                        TranscriptItemView(item: item)
+                        if long.controls {
+                            LongUserMessageBar(message: long) {
+                                if long.expanded { expanded.remove(long.itemID) } else { expanded.insert(long.itemID) }
+                            }
+                        }
+                    }
+                    .id(row.id)
+                } else {
+                    TranscriptItemView(item: item).replyCopyMenu(layout.replies[item.id]).id(row.id)
+                }
             case .activity(let run): ActivityGroupView(items: run).id(row.id)
             case .changes(let c, _): TurnChangesView(changes: c).id(row.id)
             }
         }
     }
+}
+
+// MARK: - Copying out
+
+/// What leaves the chat on Copy: a whole reply (as markdown or as plain
+/// text), and output the transcript shows only the start of.
+enum TranscriptCopy {
+    /// The most of a tool's output a result row shows (a giant `Text` stalls
+    /// the layout); Copy full output takes the rest.
+    static let outputLimit = 20_000
+    /// The most of an error message an error row shows.
+    static let errorLimit = 4_000
+
+    /// `text` cut to `limit` characters, with its full length; `total` is
+    /// nil when nothing was cut.
+    static func clip(_ text: String, limit: Int) -> (shown: String, total: Int?) {
+        let n = text.count
+        guard n > limit else { return (text, nil) }
+        return (String(text.prefix(limit)), n)
+    }
+
+    /// "Showing first 20,000 of 153,201 characters".
+    static func truncationMarker(shown: Int, total: Int) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return String(format: NSLocalizedString("Showing first %@ of %@ characters", comment: "truncated transcript output"),
+                      f.string(from: NSNumber(value: shown)) ?? "\(shown)",
+                      f.string(from: NSNumber(value: total)) ?? "\(total)")
+    }
+
+    /// A reply's markdown as plain text, line for line: fences, heading and
+    /// quote markers, emphasis, code ticks and link targets dropped; list
+    /// markers and code (the fence's contents) kept as they are.
+    static func plainText(_ markdown: String) -> String {
+        var out: [String] = []
+        var inFence = false
+        for raw in markdown.components(separatedBy: "\n") {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { inFence.toggle(); continue }
+            if inFence { out.append(raw); continue }
+            var line = raw
+            line = line.replacingOccurrences(of: #"^\s{0,3}#{1,6}\s+"#, with: "", options: .regularExpression)
+            line = line.replacingOccurrences(of: #"^\s{0,3}(>\s?)+"#, with: "", options: .regularExpression)
+            line = line.replacingOccurrences(of: #"!?\[([^\]]*)\]\(([^)]*)\)"#, with: "$1", options: .regularExpression)
+            line = line.replacingOccurrences(of: #"(\*\*|__)(.+?)\1"#, with: "$2", options: .regularExpression)
+            line = line.replacingOccurrences(of: #"(?<![\w*])\*(?![\s*])(.+?)(?<![\s*])\*(?![\w*])"#, with: "$1", options: .regularExpression)
+            line = line.replacingOccurrences(of: #"~~(.+?)~~"#, with: "$1", options: .regularExpression)
+            line = line.replacingOccurrences(of: "`", with: "")
+            out.append(line)
+        }
+        return out.joined(separator: "\n")
+    }
+}
+
+/// Copy Reply / Copy as Markdown on a right-click of any row of a reply —
+/// a selection stops at a paragraph (each markdown block is its own text).
+struct ReplyCopyMenu: ViewModifier {
+    /// The whole reply (markdown); nil adds nothing.
+    let reply: String?
+    func body(content: Content) -> some View {
+        if let reply {
+            content.contextMenu {
+                Button(NSLocalizedString("Copy Reply", comment: "chat reply menu")) {
+                    platformCopyToPasteboard(TranscriptCopy.plainText(reply))
+                }
+                Button(NSLocalizedString("Copy as Markdown", comment: "chat reply menu")) {
+                    platformCopyToPasteboard(reply)
+                }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func replyCopyMenu(_ reply: String?) -> some View { modifier(ReplyCopyMenu(reply: reply)) }
 }

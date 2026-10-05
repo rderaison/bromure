@@ -1092,6 +1092,13 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     editMenu.addItem(withTitle: L("Select All"),
                      action: #selector(NSText.selectAll(_:)),
                      keyEquivalent: "a")
+    editMenu.addItem(NSMenuItem.separator())
+    // The focused terminal's whole tmux history (a selection only reaches
+    // the visible screen). Enabled only while a terminal has focus.
+    let paneHistoryItem = NSMenuItem(title: L("Copy Pane History"),
+                                     action: #selector(TerminalSurfaceView.copyPaneHistory(_:)),
+                                     keyEquivalent: "")
+    editMenu.addItem(paneHistoryItem)
 
     // View menu — the panes of the session window. Its sendEvent already
     // handles these chords; the menu makes them discoverable (and clickable).

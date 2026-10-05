@@ -1484,6 +1484,11 @@ final class DelegationEngine {
                 BACDebug.log("delegation", "held notice for “\(s.title)”: a menu or dialog is open in its tab")
                 return
             }
+            guard PaneTypeGuard.typed(in: out) else {
+                // Didn't go through (tmux refused it, no answer): still owed.
+                BACDebug.log("delegation", "notice for “\(s.title)” NOT typed: the typing command failed")
+                return
+            }
             markNoticed()
             BACDebug.log("delegation", "typed notice into “\(s.title)” took=\(BACDebug.ms(t0))")
         }

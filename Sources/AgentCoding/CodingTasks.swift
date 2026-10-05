@@ -986,7 +986,7 @@ enum AgentSessionLocator {
         + "if (!found && $3 !~ /(^|\\/)-?(bash|sh|zsh|dash|fish|login)$/) { print $1; found = 1 } } "
         + "END { if (!found) print first }'); "
         + "et=$(ps -o etimes= -p \"$pid\" 2>/dev/null | tr -d ' '); "
-        + "if [ -n \"$et\" ]; then s=$(( $(date +%s) - et )); else s=0; fi; "
+        + "if [ -n \"$et\" ]; then s=$(( $(date +%s) - et )); else s=0; fi; ps0=$s; "
         // Resuming reattaches an older transcript → don't floor it out. Match
         // only the long flags: the args string also contains the (free-text)
         // prompt, so short flags / bare words like `-c` or `resume` there
@@ -1001,21 +1001,24 @@ enum AgentSessionLocator {
         // Resumed (a short flag too — Kimi's -c / -S): an older journal is
         // its own, so no "begun by this run" test.
         + "rs=0; case \" $a \" in *' -c '*|*' -S '*|*' --session '*|*' --session='*|*' --continue'*|*' --resume'*) rs=1;; esac; "
-        + "printf '%s\\n%s\\n%s\\n%s\\n' \"$cwd\" \"$s\" \"$ks\" \"$rs\""
+        // Last: when the process itself started, resumed or not — a turn
+        // the transcript shows open from before then was interrupted.
+        + "printf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$cwd\" \"$s\" \"$ks\" \"$rs\" \"$ps0\""
     }
 
     /// `floorProbeCommand`'s answer: the tab's cwd, its floor (epoch
     /// seconds), the Kimi session its process names (if any) and whether
     /// the process resumed a conversation. nil when unreadable.
     nonisolated static func parseFloorProbe(_ out: String?)
-        -> (cwd: String, since: Int, kimiSession: String?, resumed: Bool)? {
+        -> (cwd: String, since: Int, kimiSession: String?, resumed: Bool, started: Int)? {
         let lines = (out ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard lines.count >= 2 else { return nil }
         let cwd = lines[0].trimmingCharacters(in: .whitespaces)
         guard !cwd.isEmpty else { return nil }
         let field = { (i: Int) in lines.count > i ? lines[i].trimmingCharacters(in: .whitespaces) : "" }
         let ks = field(2)
-        return (cwd, Int(field(1)) ?? 0, isKimiSessionID(ks) ? ks : nil, field(3) == "1")
+        let since = Int(field(1)) ?? 0
+        return (cwd, since, isKimiSessionID(ks) ? ks : nil, field(3) == "1", Int(field(4)) ?? since)
     }
 
     /// Sets `$varName` to the transcript the agent in tmux window `window`
@@ -1346,20 +1349,134 @@ enum PaneTypeGuard {
         resolve(t) + guardFunction(t)
     }
 
-    /// The literal send of `text` (base64 through the guest shell, so no
-    /// quoting ever reaches a shell; `-l --` so tmux reads no key names or
-    /// options out of it).
-    nonisolated static func literalSend(_ text: String) -> String {
-        let b64 = Data(text.utf8).base64EncodedString()
-        return "echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \"$_bt\" -l --"
+    /// The text as it is typed: line breaks as LF only. A CR is Return to
+    /// an agent's TUI — CRLF text (pasted from a web page or an office
+    /// document) went in as several messages, cut at the first line.
+    nonisolated static func normalizedText(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    /// The literal send of `text` into "$_bt": as ONE PASTE — loaded into a
+    /// tmux buffer from stdin and pasted with `paste-buffer -p` (bracketed,
+    /// when the agent asked for it) `-r` (line breaks kept as LF, never
+    /// turned into Return) `-d` (the buffer goes with it). Not `send-keys
+    /// -l`: tmux refuses a command over 16 KB ("command too long" — the
+    /// message vanished while the chat showed it sent), and keystrokes
+    /// make every CR an Enter. The text travels base64 through the guest
+    /// shell (no quoting ever reaches a shell) — inline, or from `staged`,
+    /// a file `stageCommands` wrote (a text too big for one command line).
+    nonisolated static func literalSend(_ text: String, staged: String? = nil) -> String {
+        let source: String
+        if let staged, isStagePath(staged) {
+            source = "base64 -d < \(quote(staged))"
+        } else {
+            source = "echo \(Data(normalizedText(text).utf8).base64EncodedString()) | base64 -d"
+        }
+        return "{ _bb=bromure-msg-$$; \(source) | tmux load-buffer -b \"$_bb\" - "
+            + "&& tmux paste-buffer -p -r -d -b \"$_bb\" -t \"$_bt\" "
+            + "|| { tmux delete-buffer -b \"$_bb\" 2>/dev/null; false; }; }"
+    }
+
+    /// Text longer than this (bytes) is staged in pieces before it's typed:
+    /// one guest command line is one argv string, capped at 128 KB.
+    nonisolated static let inlineLimit = 24 * 1024
+    /// Base64 characters per staging command.
+    nonisolated static let stageChunk = 64 * 1024
+
+    nonisolated static func needsStaging(_ text: String) -> Bool {
+        normalizedText(text).utf8.count > inlineLimit
+    }
+
+    /// A fresh path for a staged message (in the guest's /tmp).
+    nonisolated static func newStagePath() -> String {
+        "/tmp/bromure-msg-\(UUID().uuidString.lowercased()).b64"
+    }
+
+    nonisolated static func isStagePath(_ p: String) -> Bool {
+        p.hasPrefix("/tmp/bromure-msg-") && p.hasSuffix(".b64")
+            && p.dropFirst(5).allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." }
+    }
+
+    /// The guest commands that write `text` (base64) to `path`, each well
+    /// under the per-argument cap.
+    nonisolated static func stageCommands(_ text: String, path: String) -> [String] {
+        guard isStagePath(path) else { return [] }
+        let b64 = Data(normalizedText(text).utf8).base64EncodedString()
+        var out: [String] = ["umask 077; : > \(quote(path))"]
+        var i = b64.startIndex
+        while i < b64.endIndex {
+            let j = b64.index(i, offsetBy: stageChunk, limitedBy: b64.endIndex) ?? b64.endIndex
+            out.append("printf %s \(b64[i..<j]) >> \(quote(path))")
+            i = j
+        }
+        return out
+    }
+
+    /// What a guarded type prints when it held off because a menu or
+    /// dialog is up in the tab (`menuFunction`): nothing more was typed.
+    nonisolated static let heldMarker = "BROMURE_TYPE_HELD"
+    /// What it prints once the text and its Enter went in. Anything else —
+    /// no marker at all — is a failure (tmux refused it, the exec failed),
+    /// never a success.
+    nonisolated static let typedMarker = "BROMURE_TYPE_OK"
+
+    /// Defines `_bm`: true while a menu, picker or approval dialog is up in
+    /// "$_bt" — any agent's picker footer, or a highlighted numbered row
+    /// (`AgentPhrases.menuOpenRegex`), in the bottom of the screen.
+    nonisolated static var menuFunction: String {
+        "_bm() { tmux capture-pane -p -t \"$_bt\" 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
+            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'; }; "
     }
 
     /// Guarded type + Enter: checked before the text and again before the
     /// Enter. Nothing is typed when the check fails (the refusal is printed).
-    nonisolated static func typeCommand(target: PaneTarget, text: String) -> String {
-        prelude(target)
-            + "if _bg; then \(literalSend(text)) && sleep 1 && "
-            + "if _bg; then tmux send-keys -t \"$_bt\" Enter; fi; fi"
+    /// For an AGENT (a message), also never while one of its menus or
+    /// dialogs is up — an approval picker takes a digit or Return as its
+    /// answer ("1. Approve once"), and the rest of the text would go into
+    /// the agent's queue — in the same command, right before the text and
+    /// again before the Enter, so no check-then-type race: `heldMarker` is
+    /// printed instead, for the caller to hold the message until the dialog
+    /// closes. A shell command line (a relaunch) has no such dialog.
+    /// `typedMarker` is printed once it all went in. `staged`: the text was
+    /// written to that file first (`stageCommands`); removed at the end.
+    nonisolated static func typeCommand(target: PaneTarget, text: String, staged: String? = nil) -> String {
+        let send = literalSend(text, staged: staged)
+        let enter = "tmux send-keys -t \"$_bt\" Enter && echo \(typedMarker)"
+        var cmd: String
+        switch target.foreground {
+        case .shell:
+            cmd = prelude(target)
+                + "if _bg; then \(send) && sleep 1 && "
+                + "if _bg; then \(enter); fi; fi"
+        case .agent:
+            cmd = prelude(target) + menuFunction
+                + "if _bg; then if _bm; then echo \(heldMarker); "
+                + "else \(send) && sleep 1 && "
+                + "if _bg; then if _bm; then echo \(heldMarker); else \(enter); fi; fi; fi; fi"
+        }
+        if let staged, isStagePath(staged) { cmd += "; rm -f \(quote(staged))" }
+        return cmd
+    }
+
+    /// Whether a guarded type held off for an open menu or dialog.
+    nonisolated static func held(in out: String) -> Bool { out.contains(heldMarker) }
+    /// Whether a guarded type went all the way in (text and Enter).
+    nonisolated static func typed(in out: String) -> Bool { out.contains(typedMarker) }
+
+    /// Run `typeCommand` through `exec`, staging a long text first. The
+    /// command's output (nil when the machine couldn't be asked, or a
+    /// staging step failed — nothing typed then).
+    nonisolated static func runType(target: PaneTarget, text: String,
+                                    exec: (String) async -> String?) async -> String? {
+        guard needsStaging(text) else { return await exec(typeCommand(target: target, text: text)) }
+        let path = newStagePath()
+        for step in stageCommands(text, path: path) {
+            guard await exec(step) != nil else {
+                _ = await exec("rm -f \(quote(path))")
+                return nil
+            }
+        }
+        return await exec(typeCommand(target: target, text: text, staged: path))
     }
 
     /// Named tmux keys into the target, one at a time with `beat` seconds
@@ -1394,6 +1511,35 @@ enum PaneTypeGuard {
         }
         guard !steps.isEmpty else { return "" }
         return prelude(target) + steps.joined(separator: "; sleep 1; ")
+    }
+}
+
+// MARK: - Pending work
+
+/// Background work by key that a later step must wait out (a tab close in
+/// its grace period, a put-away resolving its branch). The newest one
+/// registered under a key is what `wait` waits for — and any registered
+/// while waiting.
+@MainActor
+final class PendingWork {
+    private var work: [String: (token: UUID, task: Task<Void, Never>)] = [:]
+
+    func register(_ key: String, token: UUID, task: Task<Void, Never>) {
+        work[key] = (token, task)
+    }
+
+    /// The work under `token` is over (a newer one under the key stays).
+    func finish(_ key: String, token: UUID) {
+        if work[key]?.token == token { work[key] = nil }
+    }
+
+    func isPending(_ key: String) -> Bool { work[key] != nil }
+
+    func wait(_ key: String) async {
+        while let pending = work[key] {
+            await pending.task.value
+            if work[key]?.token == pending.token { work[key] = nil }
+        }
     }
 }
 
@@ -1890,8 +2036,14 @@ final class CodingTaskEngine {
         Task { [weak self] in
             guard let self else { return }
             // Stopped a moment ago: its old tab is still closing. Typed into
-            // now, the resume brief would land there and die with it — wait
-            // for the close, then the resume opens (or finds) its own tab.
+            // now, the resume brief would land there and die with it (and a
+            // roster that still lists the killed tab routed it there: "the
+            // tab is gone"). So: wait for the whole put-away, then close
+            // whatever still carries the branch — the stopped run's, never a
+            // tab to reuse — and the resume always opens a tab of its own.
+            await self.awaitPutAway(taskID)
+            await self.awaitPendingTabClose(profileID: task.profileID, branch: branch)
+            self.closeSessionTab(profileID: task.profileID, branch: branch, afterSeconds: 0)
             await self.awaitPendingTabClose(profileID: task.profileID, branch: branch)
             if let why = await self.ensureWorkspaceUp(task.profileID, delegate: delegate) {
                 self.store.mutate(taskID) { $0.startingAt = nil; $0.lastError = why }
@@ -1922,7 +2074,9 @@ final class CodingTaskEngine {
             }
             BACDebug.log("tasks", "“\(task.title)”: resuming on its kept branch \(branch)")
             let prompt = self.store.task(taskID).map(Self.resumePrompt(for:)) ?? Self.resumePrompt(for: task)
-            _ = await self.deliverToConversation(taskID, branch: branch, text: prompt)
+            if await self.relaunchConversation(taskID, branch: branch, prompt: prompt, closeWindow: nil) {
+                self.store.mutate(taskID) { $0.lastError = nil }
+            }
         }
     }
 
@@ -2951,7 +3105,7 @@ final class CodingTaskEngine {
     }
 
     /// What `guardedTypeCommand` prints when it held off.
-    nonisolated static let typeHeldMarker = "BROMURE_TYPE_HELD"
+    nonisolated static let typeHeldMarker = PaneTypeGuard.heldMarker
 
     /// `typeCommand` for text nobody watches arrive (a delegation or
     /// Switchboard notice, a message for a session just brought back). An
@@ -2966,20 +3120,16 @@ final class CodingTaskEngine {
     }
 
     /// Defines `_bm`: true while a menu or dialog is up in "$_bt".
-    nonisolated static var menuFunction: String {
-        "_bm() { tmux capture-pane -p -t \"$_bt\" 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
-            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'; }; "
-    }
+    nonisolated static var menuFunction: String { PaneTypeGuard.menuFunction }
 
     /// `guardedTypeCommand` on a stable target: the window is resolved once
     /// (to its id) and re-checked — identity and an agent in the
     /// foreground (`PaneTypeGuard`) — before the text and again before the
     /// Enter. A failed check types nothing more and prints the refusal.
     nonisolated static func guardedTypeCommand(target: PaneTarget, text: String) -> String {
-        PaneTypeGuard.prelude(target) + menuFunction
-            + "if _bg; then if _bm; then echo \(typeHeldMarker); "
-            + "else \(PaneTypeGuard.literalSend(text)) && sleep 1 && "
-            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter; fi; fi; fi; fi"
+        var t = target
+        t.foreground = .agent
+        return PaneTypeGuard.typeCommand(target: t, text: text)
     }
 
     /// The guest command that tails a plan session's live agent transcript.
@@ -3481,12 +3631,12 @@ final class CodingTaskEngine {
         guard let delegate,
               let index = await tabIndex(profileID: profileID, branch: branch),
               await agentAlive(profileID: profileID, windowIndex: index, branch: branch),
-              let out = try? await delegate.guestExec(
-                profileID: profileID,
-                command: Self.typeCommand(target: .task(branch: branch), text: text),
-                timeout: 20)
+              let out = await PaneTypeGuard.runType(target: .task(branch: branch), text: text, exec: {
+                  try? await delegate.guestExec(profileID: profileID, command: $0, timeout: 20)
+              })
         else { return false }
-        return PaneTypeGuard.refusal(in: out) == nil
+        // Held (a menu or approval dialog is up) or failed: the box keeps it.
+        return PaneTypeGuard.typed(in: out)
     }
 
     // MARK: Planning watchdog
@@ -3512,9 +3662,7 @@ final class CodingTaskEngine {
         let key = Self.pendingCloseKey(profileID: profileID, branch: branch)
         let token = UUID()
         let task = Task { [weak self] in
-            defer {
-                if self?.pendingTabCloses[key]?.token == token { self?.pendingTabCloses[key] = nil }
-            }
+            defer { self?.tabCloses.finish(key, token: token) }
             // The tabs to close are the ones there NOW, by window id: a tab
             // the task opens on the same branch during the grace (Start right
             // after Stop & Return to Backlog) is a new window and is spared.
@@ -3543,7 +3691,7 @@ final class CodingTaskEngine {
                                               command: cmd, timeout: 15)
             BACDebug.log("tasks", "closed session tab for \(branch)")
         }
-        pendingTabCloses[key] = (token, task)
+        tabCloses.register(key, token: token, task: task)
     }
 
     /// Tab closes scheduled by `closeSessionTab` and not done yet, by
@@ -3551,7 +3699,7 @@ final class CodingTaskEngine {
     /// waits for its branch's: until then the old tab is still there,
     /// carrying the branch, and the resume brief went into it — moments
     /// before it was killed.
-    private var pendingTabCloses: [String: (token: UUID, task: Task<Void, Never>)] = [:]
+    let tabCloses = PendingWork()
 
     private static func pendingCloseKey(profileID: UUID, branch: String) -> String {
         "\(profileID.uuidString)|\(branch)"
@@ -3559,17 +3707,24 @@ final class CodingTaskEngine {
 
     /// Whether a close of `branch`'s tab is still pending.
     func hasPendingTabClose(profileID: UUID, branch: String) -> Bool {
-        pendingTabCloses[Self.pendingCloseKey(profileID: profileID, branch: branch)] != nil
+        tabCloses.isPending(Self.pendingCloseKey(profileID: profileID, branch: branch))
     }
 
     /// Wait until no close of `branch`'s tab is pending (one scheduled
     /// meanwhile is waited for too).
     func awaitPendingTabClose(profileID: UUID, branch: String) async {
-        let key = Self.pendingCloseKey(profileID: profileID, branch: branch)
-        while let pending = pendingTabCloses[key] {
-            await pending.task.value
-            if pendingTabCloses[key]?.token == pending.token { pendingTabCloses[key] = nil }
-        }
+        await tabCloses.wait(Self.pendingCloseKey(profileID: profileID, branch: branch))
+    }
+
+    /// Put-aways under way, by task: the branch is resolved first when
+    /// the pane roster doesn't know it (a detached workspace), and the
+    /// close it schedules must not be missed by a Start in that gap.
+    let putAways = PendingWork()
+
+    /// Wait until the task's put-away — branch resolution, archive, and
+    /// the tab's kill — is over.
+    func awaitPutAway(_ taskID: UUID) async {
+        await putAways.wait(taskID.uuidString)
     }
 
     /// The tmux window ids of the tabs tagged with `branch`, one per line.
@@ -3905,17 +4060,29 @@ final class CodingTaskEngine {
     /// End a task's agent session: archive it and close its tab — resolved
     /// in the guest when the workspace runs detached (no pane roster here).
     /// A task done by someone else's session leaves that session alone.
+    /// Registered at once (`putAways`), whichever way the branch is found,
+    /// so a Start in the grace waits for all of it.
     func putSessionAway(_ task: CodingTask, afterSeconds: UInt64 = 3) {
         guard task.delegationID == nil else { return }
+        let key = task.id.uuidString
+        let token = UUID()
         if let b = task.branch ?? liveBranch(of: task) {
             closeSessionTab(profileID: task.profileID, branch: b, afterSeconds: afterSeconds)
+            let work = Task { [weak self] in
+                await self?.awaitPendingTabClose(profileID: task.profileID, branch: b)
+                self?.putAways.finish(key, token: token)
+            }
+            putAways.register(key, token: token, task: work)
             return
         }
         guard task.branchSlug != nil else { return }
-        Task { [weak self] in
+        let work = Task { [weak self] in
+            defer { self?.putAways.finish(key, token: token) }
             guard let self, let b = await self.liveBranchResolved(of: task) else { return }
             self.closeSessionTab(profileID: task.profileID, branch: b, afterSeconds: afterSeconds)
+            await self.awaitPendingTabClose(profileID: task.profileID, branch: b)
         }
+        putAways.register(key, token: token, task: work)
     }
 
     /// Manual Review → In Progress with no feedback (the user just wants
@@ -3956,6 +4123,18 @@ final class CodingTaskEngine {
                 return AutomationBoard.branchMatches(branch, slug: slug) || branch == "wt/" + slug
             }
             return false
+        }
+    }
+
+    /// The board task a session (or a tab on `branch`) works on.
+    func task(profileID: UUID, sessionID: UUID?, branch: String?) -> CodingTask? {
+        if let sid = sessionID, let t = store.tasks.first(where: { $0.sessionID == sid && $0.stage != .done }) {
+            return t
+        }
+        guard let b = branch, b.hasPrefix("wt/") else { return nil }
+        return store.tasks.first { t in
+            t.profileID == profileID && t.stage != .done
+                && (t.branch == b || t.branchSlug.map { AutomationBoard.branchMatches(b, slug: $0) } == true)
         }
     }
 
@@ -4048,7 +4227,7 @@ extension CodingTaskEngine {
         let label = "\(target.ref)"
         while true {
             let screen = (try? await exec(inputProbeCommand(target: target))) ?? ""
-            var command = guardedTypeCommand(target: target, text: text)
+            var command: String? = nil   // nil: the guarded type (staged when long)
             var held = false
             var box = AgentInputBox.content(screen)
             if box == .unknown {
@@ -4067,7 +4246,15 @@ extension CodingTaskEngine {
                 }
             }
             if !held {
-                guard let out = try? await exec(command) else {
+                var agentTarget = target
+                agentTarget.foreground = .agent
+                let run: String?
+                if let command {
+                    run = try? await exec(command)
+                } else {
+                    run = await PaneTypeGuard.runType(target: agentTarget, text: text) { try? await exec($0) }
+                }
+                guard let out = run else {
                     // The guest couldn't be asked: nothing is known typed.
                     last = .refused(.gone)
                     guard Date() < deadline else { return last }
@@ -4078,9 +4265,16 @@ extension CodingTaskEngine {
                     BACDebug.log("type", "REFUSED to type into \(label): \(r.rawValue)")
                     return .refused(r)
                 }
-                if !out.contains(typeHeldMarker) { return .typed }
-                BACDebug.log("type", "held text for \(label): a menu or dialog is open")
-                last = .menuOpen
+                if PaneTypeGuard.typed(in: out) { return .typed }
+                if out.contains(typeHeldMarker) {
+                    BACDebug.log("type", "held text for \(label): a menu or dialog is open")
+                    last = .menuOpen
+                } else {
+                    // Ran, but didn't go through (tmux refused it): try
+                    // again — what did land is found in the box next time.
+                    BACDebug.log("type", "typing into \(label) FAILED — retrying")
+                    last = .refused(.gone)
+                }
             }
             guard Date() < deadline else { return last }
             try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -4095,7 +4289,7 @@ extension CodingTaskEngine {
 
     nonisolated static func guardedEnterCommand(target: PaneTarget) -> String {
         PaneTypeGuard.prelude(target) + menuFunction
-            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter; fi; fi"
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter && echo \(PaneTypeGuard.typedMarker); fi; fi"
     }
 
     /// The user-facing reason a guarded send typed nothing.
@@ -4130,23 +4324,19 @@ enum CodingTaskEngine {
     }
 
     /// What `guardedTypeCommand` prints when it held off.
-    nonisolated static let typeHeldMarker = "BROMURE_TYPE_HELD"
+    nonisolated static let typeHeldMarker = PaneTypeGuard.heldMarker
 
     nonisolated static func guardedTypeCommand(tabIndex: Int, text: String) -> String {
         guardedTypeCommand(target: .index(tabIndex), text: text)
     }
 
-    nonisolated static var menuFunction: String {
-        "_bm() { tmux capture-pane -p -t \"$_bt\" 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
-            + "| grep -qE '\(AgentPhrases.menuOpenRegex)'; }; "
-    }
+    nonisolated static var menuFunction: String { PaneTypeGuard.menuFunction }
 
     /// Mirrors the macOS engine's `guardedTypeCommand(target:text:)`.
     nonisolated static func guardedTypeCommand(target: PaneTarget, text: String) -> String {
-        PaneTypeGuard.prelude(target) + menuFunction
-            + "if _bg; then if _bm; then echo \(typeHeldMarker); "
-            + "else \(PaneTypeGuard.literalSend(text)) && sleep 1 && "
-            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter; fi; fi; fi; fi"
+        var t = target
+        t.foreground = .agent
+        return PaneTypeGuard.typeCommand(target: t, text: text)
     }
 
     /// The guest command that tails a plan session's live agent transcript.
@@ -4240,8 +4430,25 @@ struct TaskDiffFile: Identifiable, Equatable, Sendable {
     var id: String { path }
     var path: String
     var lines: [Line]
+    /// This file's section of the `git diff` output, headers included —
+    /// what Copy Diff puts on the pasteboard ("" when not parsed from one).
+    var raw: String = ""
     var added: Int { lines.filter { $0.kind == .added }.count }
     var removed: Int { lines.filter { $0.kind == .removed }.count }
+
+    /// The file's diff as a patch: the git output when there is one, else
+    /// rebuilt from the lines with a minimal header.
+    var patch: String {
+        if !raw.isEmpty { return raw.hasSuffix("\n") ? raw : raw + "\n" }
+        let body = lines.map(\.text).joined(separator: "\n")
+        return "diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n" + body + (body.isEmpty ? "" : "\n")
+    }
+
+    /// Several files' diffs as one patch (the whole branch, or what the
+    /// review shows).
+    static func patch(of files: [TaskDiffFile]) -> String {
+        files.map(\.patch).joined()
+    }
 }
 
 /// Tolerant unified-diff reader for `git diff` output.
@@ -4258,16 +4465,27 @@ enum TaskDiffParser {
         var current: TaskDiffFile?
         var lineID = 0
         var newCounter = 0
+        var rawLines: [Substring] = []
+        func close() {
+            guard var f = current else { return }
+            // A trailing empty piece is the final newline, not a line.
+            while rawLines.last?.isEmpty == true { rawLines.removeLast() }
+            f.raw = rawLines.joined(separator: "\n") + "\n"
+            files.append(f)
+            rawLines = []
+        }
         for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
             if line.hasPrefix("diff --git ") {
-                if let f = current { files.append(f) }
+                close()
                 // "diff --git a/path b/path" — take the b/ side (handles
                 // renames and new files, and names with spaces).
                 let path = Self.newPath(fromDiffLine: String(line))
                 current = TaskDiffFile(path: path, lines: [])
+                rawLines = [line]
                 continue
             }
             guard current != nil else { continue }
+            rawLines.append(line)
             // File-header noise between the diff line and the first hunk.
             if line.hasPrefix("index ") || line.hasPrefix("--- ")
                 || line.hasPrefix("+++ ") || line.hasPrefix("new file")
@@ -4299,7 +4517,7 @@ enum TaskDiffParser {
             current?.lines.append(.init(id: lineID, kind: kind,
                                         text: String(line), newLine: newLine))
         }
-        if let f = current { files.append(f) }
+        close()
         return files
     }
 }

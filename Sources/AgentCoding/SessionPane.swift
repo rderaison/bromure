@@ -628,6 +628,18 @@ final class SessionPane {
         m.openSession = { [weak self] id in
             self?.acDelegate?.ensureUnifiedWindow().selectSession(id)
         }
+        // A board task's session: its brief, and the board's Restart Session.
+        m.boardTask = { [weak self] in
+            guard let self, let d = self.acDelegate else { return nil }
+            let sid = d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)?.id
+            let branch = self.model.tabs.first { $0.index == windowIndex }?.worktreeBranch
+            guard let t = d.codingTaskEngine.task(profileID: self.profile.id, sessionID: sid, branch: branch)
+            else { return nil }
+            let engine = d.codingTaskEngine
+            let id = t.id
+            return BoardTaskLink(title: t.title, brief: t.details,
+                                 restart: t.stage == .inProgress ? { engine.resumeSession(id) } : nil)
+        }
         m.workspaceName = { [weak self] pid in self?.acDelegate?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak self] in
             guard let self, let d = self.acDelegate else { return [] }

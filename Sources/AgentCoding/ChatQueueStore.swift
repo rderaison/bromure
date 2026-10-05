@@ -27,6 +27,24 @@ final class ChatQueueStore: ObservableObject {
         /// The tab is gone or someone else's, or no agent holds it: nothing
         /// was typed, and the message is marked with why.
         case refused(PaneRefusal)
+        /// The typing command ran but didn't go through (tmux refused it):
+        /// marked "Not sent", for the user to edit or drop.
+        case failed
+
+        /// What a guarded type's output (`PaneTypeGuard.typeCommand`) says.
+        /// Only its success marker counts as typed.
+        static func of(_ out: String?) -> Outcome {
+            guard let out else { return .unreachable }
+            if let r = PaneTypeGuard.refusal(in: out) { return .refused(r) }
+            if PaneTypeGuard.held(in: out) { return .held }
+            return PaneTypeGuard.typed(in: out) ? .typed : .failed
+        }
+    }
+
+    /// A message whose typing failed.
+    nonisolated static var notTypedText: String {
+        NSLocalizedString("Not sent — typing it into the session failed. Edit it or send it again.",
+                          comment: "queued message: the typing command failed")
     }
 
     /// How the store reaches a chat's agent while no chat is shown.
@@ -99,6 +117,54 @@ final class ChatQueueStore: ObservableObject {
         q.held && q.failure == nil && !q.sending
     }
 
+    /// The held message to type next: the oldest deliverable one, and
+    /// none while an earlier one is still being typed (order is kept).
+    nonisolated static func nextHeld(_ list: [QueuedMessage]) -> QueuedMessage? {
+        guard !list.contains(where: { $0.held && $0.sending }) else { return nil }
+        return list.first(where: deliverable)
+    }
+
+    /// Every message written in session `id`, wherever it's keyed (a
+    /// paused session's view lists them).
+    func messages(session id: UUID) -> [(key: String, message: QueuedMessage)] {
+        queues.keys.sorted().flatMap { key in
+            (queues[key] ?? []).filter { $0.sessionID == id }.map { (key, $0) }
+        }
+    }
+
+    /// Drop one message, wherever it's keyed.
+    func remove(_ messageID: UUID) {
+        for key in queues.keys where queues[key]?.contains(where: { $0.id == messageID }) == true {
+            update(key) { $0.removeAll { $0.id == messageID } }
+        }
+    }
+
+    /// The session's chat is `key` now (it came back, maybe in another
+    /// tab): its messages kept under other keys move here, aimed at the
+    /// chat's window — and a "the tab is gone" mark from the old one goes.
+    func adopt(session id: UUID, into key: String, target: PaneTarget) {
+        let mine: (QueuedMessage) -> Bool = { $0.sessionID == id && !$0.sending && ($0.held || $0.failure != nil) }
+        let others = queues.keys.filter { k in k != key && queues[k]?.contains(where: mine) == true }
+        guard !others.isEmpty else { return }
+        let stale = Set([PaneRefusal.gone, .identity, .shell, .agent].map(Self.failureText))
+        var moved: [QueuedMessage] = []
+        for k in others.sorted() {
+            update(k) { l in
+                moved += l.filter(mine)
+                l.removeAll(where: mine)
+            }
+        }
+        update(key) { l in
+            for var q in moved.sorted(by: { $0.queuedAt < $1.queuedAt }) {
+                q.target = target
+                q.held = true
+                q.editable = true
+                if let f = q.failure, stale.contains(f) { q.failure = nil }
+                l.append(q)
+            }
+        }
+    }
+
     // MARK: Who delivers
 
     /// A chat shows `key`: it delivers from now on (the newest shown wins)
@@ -134,14 +200,16 @@ final class ChatQueueStore: ObservableObject {
 
     // MARK: Delivery
 
-    /// Type every deliverable held message of `key` into the agent as one
-    /// message (the target is the first one's, as captured when queued, else
-    /// `fallback`). Typed: they leave the queue. Refused: they stay, marked
-    /// with why. Held/unreachable: they stay for the next try. nil: nothing
-    /// to deliver.
+    /// Type the oldest deliverable held message of `key` into the agent —
+    /// ONE message: each is its own turn, as the user wrote it (two held
+    /// ones used to go in merged, "3\n\n4"). The next waits for the agent
+    /// to be done with this one (the callers' idle guard). The target is
+    /// the one captured when it was queued, else `fallback`. Typed: it
+    /// leaves the queue. Refused: it stays, marked with why. Held or
+    /// unreachable: it stays for the next try. nil: nothing to deliver.
     @discardableResult
     func deliverHeld(_ key: String, driver: Driver, fallback: PaneTarget?) async -> Outcome? {
-        let batch = messages(key).filter(Self.deliverable)
+        let batch = Self.nextHeld(messages(key)).map { [$0] } ?? []
         guard let target = batch.first?.target ?? fallback else { return nil }
         let ids = Set(batch.map(\.id))
         update(key) { l in for i in l.indices where ids.contains(l[i].id) { l[i].sending = true } }
@@ -150,8 +218,20 @@ final class ChatQueueStore: ObservableObject {
             switch outcome {
             case .typed:
                 l.removeAll { ids.contains($0.id) }
-            case .held, .unreachable:
+            case .held:
+                // A menu or dialog is up in the tab: it waits for the user
+                // to answer it (said on its row).
+                for i in l.indices where ids.contains(l[i].id) {
+                    l[i].sending = false
+                    l[i].awaitingAnswer = true
+                }
+            case .unreachable:
                 for i in l.indices where ids.contains(l[i].id) { l[i].sending = false }
+            case .failed:
+                for i in l.indices where ids.contains(l[i].id) {
+                    l[i].sending = false
+                    l[i].failure = Self.notTypedText
+                }
             case .refused(let r):
                 for i in l.indices where ids.contains(l[i].id) {
                     l[i].sending = false
@@ -211,6 +291,7 @@ final class ChatQueueStore: ObservableObject {
             guard now.timeIntervalSince(idleSince!) >= idleBeforeDelivery else { continue }
             let outcome = await deliverHeld(key, driver: driver, fallback: nil)
             if case .refused? = outcome { return }
+            if outcome == .failed { return }
             // Typed: the next batch (if any came in) waits for the next idle.
             if outcome == .typed { idleSince = nil }
         }

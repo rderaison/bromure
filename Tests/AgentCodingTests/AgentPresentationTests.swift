@@ -50,6 +50,27 @@ struct AgentPresentationTests {
         #expect(!KimiTranscriptParser.turnInProgress(Data()))
     }
 
+    @Test("J3: a turn left open from before the agent restarted is interrupted, not work under way")
+    func kimiInterruptedTurn() {
+        let began = Date(timeIntervalSince1970: 1_791_064_104_438 / 1000)
+        let at = began.addingTimeInterval(5)
+        // The process running now started after the turn: interrupted.
+        #expect(!KimiTranscriptParser.turnInProgress(kimiWire(ended: false), now: at,
+                                                      notBefore: began.addingTimeInterval(4)))
+        // Started before it (it's this process's turn): under way.
+        #expect(KimiTranscriptParser.turnInProgress(kimiWire(ended: false), now: at,
+                                                     notBefore: began.addingTimeInterval(-60)))
+    }
+
+    @Test("J3: the floor probe reports when the agent process started, resumed or not")
+    func floorProbeStarted() {
+        let p = AgentSessionLocator.parseFloorProbe("/home/ubuntu/qa\n0\n\n1\n1791069633\n")
+        #expect(p?.since == 0 && p?.resumed == true && p?.started == 1_791_069_633)
+        // An older probe answer (four lines): the floor stands in.
+        #expect(AgentSessionLocator.parseFloorProbe("/x\n12\n\n0\n")?.started == 12)
+        #expect(AgentSessionLocator.floorProbeCommand(window: 2).contains("ps0=$s"))
+    }
+
     @Test("Kimi's opening message is typed into the TUI, not passed one-shot")
     func kimiOpening() {
         #expect(AgentSessionEngine.typesOpeningMessage(.kimi))

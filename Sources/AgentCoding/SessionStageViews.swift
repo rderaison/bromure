@@ -1292,6 +1292,13 @@ struct SessionRestView: View {
                             Spacer(minLength: 0)
                         }
                         .padding(.horizontal, 6)
+                        #if os(macOS)
+                        // What's held for it (sent while it was busy, or
+                        // couldn't be typed) stays in sight, to edit or
+                        // drop; it goes in once the session is back.
+                        SessionQueueStrip(sessionID: s.id, agent: s.tool.displayName, accent: accent,
+                                          onEdit: { text in draft = draft.isEmpty ? text : text + "\n\n" + draft })
+                        #endif
                         ChatComposer(
                             placeholder: String(format: NSLocalizedString("Message %@…", comment: "session rest composer"), s.tool.displayName),
                             text: $draft, busy: sending || s.isLaunching, accent: accent,

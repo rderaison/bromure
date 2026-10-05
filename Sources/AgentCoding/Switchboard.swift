@@ -449,8 +449,7 @@ final class SwitchboardEngine {
                 profileID: c.profileID,
                 command: CodingTaskEngine.guardedTypeCommand(
                     target: AgentSessionEngine.paneTarget(c) ?? .index(w), text: line), timeout: 20)) ?? ""
-            if out.contains(CodingTaskEngine.typeHeldMarker) || PaneTypeGuard.refusal(in: out) != nil,
-               self.noticed[c.id] == newest.seq {
+            if !PaneTypeGuard.typed(in: out), self.noticed[c.id] == newest.seq {
                 self.noticed[c.id] = before
             }
         }

@@ -328,6 +328,15 @@ struct ReviewView: View {
                 .plainAccessibilityButton(NSLocalizedString("Refresh the diff", comment: "")) { Task { await load() } }
                 .help(NSLocalizedString("Refresh the diff", comment: ""))
                 .accessibilityLabel(NSLocalizedString("Refresh the diff", comment: ""))
+            Button {
+                platformCopyToPasteboard(TaskDiffFile.patch(of: visibleFiles))
+            } label: { Image(systemName: "doc.on.doc") }
+                .disabled(visibleFiles.isEmpty)
+                .plainAccessibilityButton(NSLocalizedString("Copy Diff", comment: "review")) {
+                    platformCopyToPasteboard(TaskDiffFile.patch(of: visibleFiles))
+                }
+                .help(NSLocalizedString("Copy the whole diff shown here as a patch", comment: "review"))
+                .accessibilityLabel(NSLocalizedString("Copy Diff", comment: "review"))
             Button(NSLocalizedString("Open Terminal", comment: "review"), action: source.openTerminal)
             source.trailing()
         }

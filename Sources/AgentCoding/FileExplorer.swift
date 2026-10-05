@@ -347,9 +347,12 @@ final class FileExplorerModel {
         // Guarded: typed only into that window, still carrying its markers,
         // while an agent holds it (a shell would run the feedback as
         // commands); the drafts stay otherwise.
-        let cmd = CodingTaskEngine.typeCommand(target: target, text: msg)
-        guard let out = try? await exec(cmd, timeout: 25),
-              PaneTypeGuard.refusal(in: out) == nil else { return false }
+        // A menu or dialog up in the tab holds it too (`held`), and a type
+        // that didn't go through is no success: the drafts stay.
+        let out = await PaneTypeGuard.runType(target: target, text: msg) { [weak self] in
+            try? await self?.exec($0, timeout: 25)
+        }
+        guard let out, PaneTypeGuard.typed(in: out) else { return false }
         reviewDrafts.removeAll()
         reviewTarget = nil
         return true
