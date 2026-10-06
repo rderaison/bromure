@@ -26,6 +26,15 @@ fi
 
 checkout() {
     local directory=$1 repository=$2 revision=$3
+    # A cached checkout under the build root that an interrupted run left
+    # broken (".git" present but not a repository) or at another revision is
+    # re-fetched from scratch. A source directory supplied through the
+    # environment is never deleted; it still fails below.
+    if [[ -e "$directory/.git" && "$directory" == "$build_root/sources/"* ]] &&
+       [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null) != "$revision" ]]; then
+        echo "Discarding stale source cache $directory" >&2
+        rm -rf "$directory"
+    fi
     if [[ ! -d "$directory/.git" ]]; then
         mkdir -p "$directory"
         git init -q "$directory"
@@ -37,7 +46,7 @@ checkout() {
         fi
         git -C "$directory" checkout -q --detach "$revision"
     fi
-    [[ $(git -C "$directory" rev-parse HEAD) == "$revision" ]] || {
+    [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null) == "$revision" ]] || {
         echo "Wrong source revision in $directory; use a fresh build directory" >&2; exit 1;
     }
     if [[ "$directory" != "$epoxy" && "$directory" != "$angle" && "$directory" != "$virgl" ]]; then
