@@ -90,17 +90,24 @@ fi
 cmp "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_video_videotoolbox.m"
 
 tool_pins=(meson==1.11.2 ninja==1.13.2 Mako==1.3.12 MarkupSafe==3.0.3 packaging==26.3 PyYAML==6.0.3)
-# A tool venv whose interpreter no longer runs (Xcode's Python moved) is
+# A tool dir that isn't a working venv — its interpreter no longer runs
+# (Xcode's Python moved) or it's the system Python itself, so pip would
+# install meson into the user's site and never into $tool_env/bin — is
 # rebuilt; one created without pip gets it bootstrapped. pip is always run
 # as a module — the bin/pip script isn't guaranteed to exist.
-if ! "$tool_env/bin/python3" -c '' 2>/dev/null; then
+if ! "$tool_env/bin/python3" -c 'import sys; sys.exit(sys.prefix == sys.base_prefix)' 2>/dev/null; then
+    if [[ -e "$tool_env" && "$tool_env" != "$build_root/"* ]]; then
+        echo "$tool_env is not a Python venv; point BROMURE_GPU_TOOL_ENV at a venv or a new directory" >&2
+        exit 1
+    fi
     rm -rf "$tool_env"
     xcrun python3 -m venv "$tool_env"
 fi
 if ! "$tool_env/bin/python3" -m pip --version >/dev/null 2>&1; then
     "$tool_env/bin/python3" -m ensurepip --upgrade --default-pip
 fi
-if ! "$tool_env/bin/python3" - "${tool_pins[@]}" <<'PY' 2>/dev/null
+if [[ ! -x "$tool_env/bin/meson" || ! -x "$tool_env/bin/ninja" ]] ||
+   ! "$tool_env/bin/python3" - "${tool_pins[@]}" <<'PY' 2>/dev/null
 import sys
 from importlib.metadata import version
 sys.exit(any(version(n) != v for n, v in (p.split("==") for p in sys.argv[1:])))
@@ -108,6 +115,9 @@ PY
 then
     "$tool_env/bin/python3" -m pip install --disable-pip-version-check "${tool_pins[@]}"
 fi
+for tool in meson ninja; do
+    [[ -x "$tool_env/bin/$tool" ]] || { echo "$tool missing from $tool_env/bin after install" >&2; exit 1; }
+done
 export PATH="$tool_env/bin:$prefix/bin:$PATH"
 export TMPDIR="$build_root/temporary"
 mkdir -p "$TMPDIR" "$prefix/lib" "$prefix/include"
