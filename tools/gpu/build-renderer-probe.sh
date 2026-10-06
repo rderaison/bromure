@@ -89,9 +89,24 @@ if ! cmp -s "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_vid
 fi
 cmp "$script_dir/virgl-video-videotoolbox.m" "$virgl/src/vrend/virgl_video_videotoolbox.m"
 
-if [[ ! -x "$tool_env/bin/python3" ]]; then xcrun python3 -m venv "$tool_env"; fi
-if ! "$tool_env/bin/python3" -c 'import pkg_resources; pkg_resources.require(["meson==1.11.2", "ninja==1.13.2", "Mako==1.3.12", "MarkupSafe==3.0.3", "packaging==26.3", "PyYAML==6.0.3"])' 2>/dev/null; then
-    "$tool_env/bin/pip" install --disable-pip-version-check meson==1.11.2 ninja==1.13.2 Mako==1.3.12 MarkupSafe==3.0.3 packaging==26.3 PyYAML==6.0.3
+tool_pins=(meson==1.11.2 ninja==1.13.2 Mako==1.3.12 MarkupSafe==3.0.3 packaging==26.3 PyYAML==6.0.3)
+# A tool venv whose interpreter no longer runs (Xcode's Python moved) is
+# rebuilt; one created without pip gets it bootstrapped. pip is always run
+# as a module — the bin/pip script isn't guaranteed to exist.
+if ! "$tool_env/bin/python3" -c '' 2>/dev/null; then
+    rm -rf "$tool_env"
+    xcrun python3 -m venv "$tool_env"
+fi
+if ! "$tool_env/bin/python3" -m pip --version >/dev/null 2>&1; then
+    "$tool_env/bin/python3" -m ensurepip --upgrade --default-pip
+fi
+if ! "$tool_env/bin/python3" - "${tool_pins[@]}" <<'PY' 2>/dev/null
+import sys
+from importlib.metadata import version
+sys.exit(any(version(n) != v for n, v in (p.split("==") for p in sys.argv[1:])))
+PY
+then
+    "$tool_env/bin/python3" -m pip install --disable-pip-version-check "${tool_pins[@]}"
 fi
 export PATH="$tool_env/bin:$prefix/bin:$PATH"
 export TMPDIR="$build_root/temporary"
