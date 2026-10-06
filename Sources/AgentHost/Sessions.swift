@@ -174,6 +174,13 @@ final class SessionEngine: @unchecked Sendable {
                 if !w.agentSessionID.isEmpty { s.agentTranscriptID = w.agentSessionID }
                 if !w.transcriptPath.isEmpty { s.transcriptPath = w.transcriptPath }
                 if s.launchDisplay == nil { s.launchDisplay = w.title }
+                // Renamed (or resumed) by an older build, which rewrote the
+                // tab's @display but kept the old launchDisplay: clients
+                // refused every typed message as another tab's. The tab
+                // carries the session's own title — that's its name now.
+                else if !w.display.isEmpty, w.display == s.title, s.launchDisplay != w.display {
+                    s.launchDisplay = w.display
+                }
                 // Give up on "starting" after a minute: the tab is a shell.
                 if let since = s.launchingSince, now.timeIntervalSince(since) > 60 { s.launchingSince = nil }
             } else if s.windowIndex != nil || s.launchingSince != nil {
@@ -338,6 +345,7 @@ final class SessionEngine: @unchecked Sendable {
                                                options: ["@display": s.title, "@bromure_session": s.id.uuidString])
                 else { return .failure(.failed("Couldn't open a tmux window")) }
                 s.windowIndex = idx
+                s.launchDisplay = s.title
                 s.launchingSince = Date()
                 s.resumedAt = Date()
                 s.endedAt = nil
@@ -381,6 +389,11 @@ final class SessionEngine: @unchecked Sendable {
                   !t.isEmpty else { return .failure(.bad("title required")) }
             s.title = t
             s.userTitled = true
+            // The tab is known by this name from now on: a client checks
+            // `launchDisplay` against the tab's `@display` before it types
+            // (PaneTypeGuard) — left at the old name, every chat send to a
+            // renamed session was refused as another's tab.
+            s.launchDisplay = t
             if let live { Tmux.setWindowOption(live, "@display", t) }
         case "worktree":
             // {name, tool?, message?, initGit?, base?}: a new session on a
@@ -501,6 +514,7 @@ final class SessionEngine: @unchecked Sendable {
             s.resumedAt = Date()
             s.endedAt = nil
             s.archivedAt = nil
+            s.launchDisplay = s.title
         case "delegation-link":
             s.parentSessionID = (body["parentSessionID"] as? String).flatMap(UUID.init(uuidString:))
             s.delegationID = (body["delegationID"] as? String).flatMap(UUID.init(uuidString:))
@@ -603,6 +617,7 @@ final class SessionEngine: @unchecked Sendable {
         }
         update(made.id) {
             $0.title = display.isEmpty ? branch : display
+            $0.launchDisplay = display.isEmpty ? branch : display
             $0.userTitled = true
             $0.worktreeBranch = branch
             $0.branchParent = parent.isEmpty ? nil : parent

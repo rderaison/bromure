@@ -2401,7 +2401,8 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         let tab = controller.tabsModel(for: workspaceID)?.tabs.first { $0.index == w }
         let s = controller.sessionStore.session(profileID: workspaceID, windowIndex: w)
         return .chat(window: w, windowID: s?.windowID, display: s?.launchDisplay ?? tab?.display,
-                     worktree: tab?.worktreeBranch)
+                     worktree: tab?.worktreeBranch,
+                     alsoDisplay: controller.listModel.machineIDs.contains(workspaceID) ? s?.title : nil)
     }
 
     /// The Kimi session the server pinned for the session in this tab: its

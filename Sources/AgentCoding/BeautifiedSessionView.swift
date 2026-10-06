@@ -2363,12 +2363,18 @@ final class BeautifiedSessionModel: ObservableObject {
                 await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: true)
                 await self.rescanSoon()
                 return
-            case .refused:
-                // Nothing typed (the tab is gone, or no agent holds it): the
-                // text goes back to the composer instead of a phantom bubble.
+            case .refused(let r):
+                // Nothing typed (the tab is gone or someone else's, or no
+                // agent holds it): never a phantom bubble — and never
+                // silent. Quietly putting the text back in the composer
+                // read as "it emptied and nothing happened" (a renamed
+                // Sidecar session refused every send). On the strip, with
+                // why, to edit or drop.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                if self.composerText.isEmpty { self.composerText = raw }
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                                       failure: ChatQueueStore.failureText(r))
+                return
             case .unconfirmed:
                 // In the agent's box, but its Enter never took: not shown as
                 // sent — on the strip, "Not delivered".

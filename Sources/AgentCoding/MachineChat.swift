@@ -42,7 +42,7 @@ final class MachineTranscriptProvider: BeautifiedTranscriptProvider {
         let tab = machine?.tabsModel.tabs.first { $0.index == w }
         let s = machine?.sessionStore.session(profileID: machineID, windowIndex: w)
         return .chat(window: w, windowID: s?.windowID, display: s?.launchDisplay ?? tab?.display,
-                     worktree: tab?.worktreeBranch)
+                     worktree: tab?.worktreeBranch, alsoDisplay: s?.title)
     }
 
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {

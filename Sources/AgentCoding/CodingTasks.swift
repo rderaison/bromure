@@ -1317,6 +1317,12 @@ struct PaneTarget: Equatable, Sendable, Codable {
     var ref: Ref
     var expectWorktree: String? = nil
     var expectDisplay: String? = nil
+    /// A second `@display` that also names the intended window: the
+    /// session's current title on a Bromure Sidecar machine, whose rename
+    /// (and resume) rewrites the tab's `@display` while the session's
+    /// `launchDisplay` keeps the old name — every chat send to a renamed
+    /// Sidecar session was refused as somebody else's tab. nil on VMs.
+    var expectDisplayAlt: String? = nil
     var expectWindowID: String? = nil
     var foreground: Foreground = .agent
 
@@ -1333,12 +1339,18 @@ struct PaneTarget: Equatable, Sendable, Codable {
     /// draft): by the window's stable id when known — and then only that
     /// window — else its index, and in either case still carrying the
     /// markers it showed (`@display`, `@worktree`), with an agent in front.
+    /// `alsoDisplay`: another name the tab may carry for this same session
+    /// (`expectDisplayAlt` — a Sidecar session's current title).
     static func chat(window: Int, windowID: String?, display: String?, worktree: String?,
+                     alsoDisplay: String? = nil,
                      foreground: Foreground = .agent) -> PaneTarget {
         let id = windowID.flatMap { PaneTypeGuard.isWindowID($0) ? $0 : nil }
         var t = PaneTarget(ref: id.map { .windowID($0) } ?? .index(window), foreground: foreground)
         t.expectWindowID = id
-        if let d = display, !d.isEmpty { t.expectDisplay = d }
+        if let d = display, !d.isEmpty {
+            t.expectDisplay = d
+            if let a = alsoDisplay, !a.isEmpty, a != d { t.expectDisplayAlt = a }
+        }
         if let w = worktree, !w.isEmpty { t.expectWorktree = w }
         return t
     }
@@ -1417,7 +1429,8 @@ enum PaneTypeGuard {
         if let d = t.expectDisplay {
             // A tab not named (yet) says nothing; a tab named otherwise is another's.
             f += "_bd=$(tmux display-message -p -t \"$_bt\" '#{@display}' 2>/dev/null); "
-            f += "[ -z \"$_bd\" ] || [ \"$_bd\" = \(quote(d)) ] || \(refuse(.identity)); "
+            let alt = t.expectDisplayAlt.map { " || [ \"$_bd\" = \(quote($0)) ]" } ?? ""
+            f += "[ -z \"$_bd\" ] || [ \"$_bd\" = \(quote(d)) ]\(alt) || \(refuse(.identity)); "
         }
         // The pane's foreground process group: the processes whose group
         // is the tty's foreground group (an agent .bashrc starts before job
