@@ -1042,6 +1042,23 @@ struct RoomStageView: View {
     }
 
     private func restingBar(_ s: AgentSession, _ bucket: SessionBucket) -> some View {
+        // Whole-row alternatives, widest first: the hint goes before the
+        // button's label, the label before the button — a squeezed HStack
+        // still wrapped "Resum/e" with per-piece fixedSize/ViewThatFits.
+        ViewThatFits(in: .horizontal) {
+            restingRow(s, bucket, hint: true, label: true)
+            restingRow(s, bucket, hint: false, label: true)
+            restingRow(s, bucket, hint: false, label: false)
+        }
+        .padding(.leading, 12).padding(.trailing, 5).padding(.vertical, 5)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+        .padding(12)
+    }
+
+    private func restingRow(_ s: AgentSession, _ bucket: SessionBucket,
+                            hint: Bool, label: Bool) -> some View {
         HStack(spacing: 8) {
             // Ended or asleep, both "Paused": a message picks either up.
             Image(systemName: "pause.circle.fill")
@@ -1050,37 +1067,33 @@ struct RoomStageView: View {
             Text(bucket.title)
                 .font(.system(size: 12, weight: .semibold))
                 .lineLimit(1)
-                .fixedSize()
-            // The hint goes first when the cell is narrow — never the button
-            // (its label wrapped to "Resum/e").
-            ViewThatFits(in: .horizontal) {
+            if hint {
                 Text(NSLocalizedString("a message picks it up", comment: "room cell"))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .fixedSize()
-                Color.clear.frame(width: 0, height: 0)
             }
             Spacer(minLength: 6)
             Button {
                 controller.onResume(s.id)
             } label: {
-                Label(NSLocalizedString("Resume", comment: "room cell"), systemImage: "play.fill")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Capsule().fill(accent.gradient))
+                Group {
+                    if label {
+                        Label(NSLocalizedString("Resume", comment: "room cell"), systemImage: "play.fill")
+                    } else {
+                        Image(systemName: "play.fill")
+                    }
+                }
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(Capsule().fill(accent.gradient))
             }
             .buttonStyle(.plain)
-            .layoutPriority(1)
+            .help(NSLocalizedString("Resume", comment: "room cell"))
+            .accessibilityLabel(NSLocalizedString("Resume", comment: "room cell"))
         }
-        .padding(.leading, 12).padding(.trailing, 5).padding(.vertical, 5)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-        .padding(12)
     }
 
     // MARK: Switchboard dock + the one composer
