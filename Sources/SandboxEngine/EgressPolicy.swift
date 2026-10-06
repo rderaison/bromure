@@ -88,11 +88,63 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
         public var target: Target
         public var ports: PortSet
         public var methods: MethodSpec?   // only meaningful for a `.web` proto
+        /// A switched-off rule stays in the list (serialized as `#@off …`, a
+        /// comment to older parsers) but never matches.
+        public var enabled: Bool
+        /// A temporary rule: from this instant on it no longer matches (the
+        /// evaluator checks the clock itself, so expiry is exact even before
+        /// the host flips the rule off and saves it). Serialized as
+        /// `#@until=<unix seconds>`.
+        public var expiresAt: Date?
+        /// A temporary rule that lasts until the workspace stops; the host turns
+        /// it off when the workspace's VM goes away. Serialized `#@until=stop`.
+        public var untilStop: Bool
 
         public init(action: Action, proto: Proto, target: Target,
-                    ports: PortSet = PortSet(), methods: MethodSpec? = nil) {
+                    ports: PortSet = PortSet(), methods: MethodSpec? = nil,
+                    enabled: Bool = true, expiresAt: Date? = nil, untilStop: Bool = false) {
             self.action = action; self.proto = proto; self.target = target
             self.ports = ports; self.methods = methods
+            self.enabled = enabled; self.expiresAt = expiresAt; self.untilStop = untilStop
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case action, proto, target, ports, methods, enabled, expiresAt, untilStop
+        }
+
+        /// Rules encoded before on/off + expiry existed decode as enabled,
+        /// permanent rules.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            action = try c.decode(Action.self, forKey: .action)
+            proto = try c.decode(Proto.self, forKey: .proto)
+            target = try c.decode(Target.self, forKey: .target)
+            ports = try c.decodeIfPresent(PortSet.self, forKey: .ports) ?? PortSet()
+            methods = try c.decodeIfPresent(MethodSpec.self, forKey: .methods)
+            enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            expiresAt = try c.decodeIfPresent(Date.self, forKey: .expiresAt)
+            untilStop = try c.decodeIfPresent(Bool.self, forKey: .untilStop) ?? false
+        }
+
+        /// Whether the rule takes part in evaluation at `now`: switched on and
+        /// not past its expiry.
+        public func isEffective(at now: Date) -> Bool {
+            guard enabled else { return false }
+            if let expiresAt, now >= expiresAt { return false }
+            return true
+        }
+
+        /// A temporary (timed or until-stop) rule.
+        public var isTemporary: Bool { expiresAt != nil || untilStop }
+
+        /// The rule as one pf line WITHOUT its on/off state or expiry — what the
+        /// rule does. Used as the rule's name in the Security Timeline and to
+        /// find it again for quick actions (disable / remove).
+        public var text: String {
+            var parts: [String] = [action.rawValue, proto.rawValue,
+                                    EgressPolicy.targetString(target, ports: ports)]
+            if proto == .web, let m = methods { parts.append(EgressPolicy.methodsString(m)) }
+            return parts.joined(separator: " ")
         }
 
         func matches(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16) -> Bool {
@@ -124,11 +176,19 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
 
     public var defaultAction: DefaultAction
     public var rules: [Rule]
+    /// The workspace's "Log allowed connections" choice: true/false when it
+    /// made one, nil = automatic (allowed connections are logged while a
+    /// ruleset is in force). Not part of the pf text — a per-workspace
+    /// setting carried alongside the rules to the switch and the proxy.
+    public var logsAllowed: Bool? = nil
 
     public init(defaultAction: DefaultAction = .allow, rules: [Rule] = []) {
         self.defaultAction = defaultAction
         self.rules = rules
     }
+
+    /// Whether connections this policy allows are logged (see `logsAllowed`).
+    public var reportsAllowed: Bool { logsAllowed ?? isActive }
 
     /// The all-allow policy — the non-breaking default for a profile with no
     /// rules configured.
@@ -136,21 +196,77 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
 
     public var isActive: Bool { defaultAction == .deny || !rules.isEmpty }
 
+    // MARK: - Temporary rules
+
+    /// The soonest expiry among switched-on timed rules (nil: none).
+    public var nextExpiry: Date? {
+        rules.filter(\.enabled).compactMap(\.expiresAt).min()
+    }
+
+    /// Switch off every timed rule whose expiry has passed (clearing the
+    /// expiry). True when anything changed.
+    @discardableResult
+    public mutating func disableExpired(now: Date) -> Bool {
+        var changed = false
+        for i in rules.indices {
+            if let e = rules[i].expiresAt, now >= e {
+                if rules[i].enabled { rules[i].enabled = false }
+                rules[i].expiresAt = nil
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    /// Switch off every "until the workspace stops" rule — the workspace
+    /// stopped. True when anything changed.
+    @discardableResult
+    public mutating func disableUntilStop() -> Bool {
+        var changed = false
+        for i in rules.indices where rules[i].untilStop {
+            rules[i].enabled = false
+            rules[i].untilStop = false
+            changed = true
+        }
+        return changed
+    }
+
+    /// `text` with expired rules (and, when `workspaceStopped`, until-stop
+    /// rules) switched off, or nil when nothing needs to change (or the text
+    /// doesn't parse — never rewrite what the user is still fixing).
+    public static func sweeping(_ text: String, now: Date, workspaceStopped: Bool) -> String? {
+        guard text.contains("#@"), var p = try? parse(text) else { return nil }
+        var changed = p.disableExpired(now: now)
+        if workspaceStopped { changed = p.disableUntilStop() || changed }
+        return changed ? p.serialize() : nil
+    }
+
+    /// A timed rule's expiry `seconds` from `now`, on a whole second (the text
+    /// form stores seconds, so the in-memory and saved rule compare equal).
+    public static func expiry(in seconds: TimeInterval, from now: Date = Date()) -> Date {
+        Date(timeIntervalSince1970: (now.timeIntervalSince1970 + seconds).rounded(.down))
+    }
+
     // MARK: - Evaluation
 
     /// The first rule that matches this flow (proto/target/port), or nil to fall
     /// back to `defaultAction`. Method is not considered here — the L4 and SNI
     /// layers match by flow; the verb layer applies `methods` to the same rule.
-    public func firstMatch(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16) -> Rule? {
-        rules.first { $0.matches(ip: ip, hostnames: hostnames, proto: proto, port: port) }
+    /// Switched-off and expired rules are skipped.
+    public func firstMatch(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16,
+                           now: Date = Date()) -> Rule? {
+        rules.first {
+            $0.isEffective(at: now) && $0.matches(ip: ip, hostnames: hostnames, proto: proto, port: port)
+        }
     }
 
     /// Connection-layer verdict: `.deny` = drop/close; `.mitm` = a `web` rule
     /// forces MiTM (overriding passthrough); `.allow` = permit (normal MiTM-vs-
     /// passthrough logic still applies at the SNI layer). Used by both the switch
     /// (IP/snoop) and the MiTM (SNI).
-    public func verdict(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16) -> Verdict {
-        guard let rule = firstMatch(ip: ip, hostnames: hostnames, proto: proto, port: port) else {
+    public func verdict(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16,
+                        now: Date = Date()) -> Verdict {
+        guard let rule = firstMatch(ip: ip, hostnames: hostnames, proto: proto, port: port, now: now) else {
             return defaultAction == .deny ? .deny : .allow
         }
         switch rule.action {
@@ -170,8 +286,9 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// first-matching rule as the connection layer; only a `.web` rule can
     /// forbid a method (allow-list or deny-list per its action). Everything
     /// else permits — connection deny is handled at the connection layer.
-    public func permitsMethod(hostnames: [String], port: UInt16, method: String) -> Bool {
-        guard let rule = firstMatch(ip: nil, hostnames: hostnames, proto: .tcp, port: port) else { return true }
+    public func permitsMethod(hostnames: [String], port: UInt16, method: String,
+                              now: Date = Date()) -> Bool {
+        guard let rule = firstMatch(ip: nil, hostnames: hostnames, proto: .tcp, port: port, now: now) else { return true }
         return rule.methodAllowed(method)
     }
 }
@@ -188,12 +305,16 @@ extension EgressPolicy {
         var rules: [Rule] = []
         var def: DefaultAction = .allow
         for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            let line = String(raw.prefix(while: { $0 != "#" }))
+            let ann = annotations(of: String(raw))
+            let line = String(ann.body.prefix(while: { $0 != "#" }))
             let toks = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
             if toks.isEmpty { continue }
             let ln = i + 1
 
             if toks[0].lowercased() == "default" {
+                // Only rules can be switched off; a `#@off default …` is just
+                // a comment.
+                if !ann.enabled { continue }
                 guard toks.count == 2, let d = DefaultAction(rawValue: toks[1].lowercased()) else {
                     throw ParseError(line: ln, message: "expected 'default allow' or 'default deny'")
                 }
@@ -223,21 +344,65 @@ extension EgressPolicy {
                 }
                 methods = try parseMethods(Array(toks[idx...]), line: ln)
             }
-            rules.append(Rule(action: action, proto: proto, target: target, ports: ports, methods: methods))
+            rules.append(Rule(action: action, proto: proto, target: target, ports: ports, methods: methods,
+                              enabled: ann.enabled, expiresAt: ann.expiresAt, untilStop: ann.untilStop))
         }
         return EgressPolicy(defaultAction: def, rules: rules)
     }
 
     /// Canonical pf text for the ruleset (round-trips through `parse`).
     public func serialize() -> String {
-        var out = rules.map { rule -> String in
-            var parts: [String] = [rule.action.rawValue, rule.proto.rawValue,
-                                    Self.targetString(rule.target, ports: rule.ports)]
-            if rule.proto == .web, let m = rule.methods { parts.append(Self.methodsString(m)) }
-            return parts.joined(separator: " ")
-        }
+        var out = rules.map { Self.annotate($0.text, enabled: $0.enabled,
+                                            expiresAt: $0.expiresAt, untilStop: $0.untilStop) }
         out.append("default \(defaultAction.rawValue)")
         return out.joined(separator: "\n")
+    }
+
+    // MARK: on/off + expiry annotations
+    //
+    // Kept inside comments so the text stays plain pf for anything that reads
+    // it, and an older parser degrades safely: a switched-off rule
+    // (`#@off allow …`) is a comment there, i.e. still off; an expiry
+    // (`allow … #@until=1760000000`, `#@until=stop`) is an ignored comment.
+
+    /// Split a raw line into its rule text and the Bromure annotations.
+    static func annotations(of raw: String) -> (body: String, enabled: Bool, expiresAt: Date?, untilStop: Bool) {
+        var body = raw
+        var enabled = true
+        let lead = raw.drop(while: { $0 == " " || $0 == "\t" })
+        if lead.hasPrefix("#@off") {
+            let rest = lead.dropFirst(5)
+            if rest.isEmpty || rest.first == " " || rest.first == "\t" {
+                enabled = false
+                body = String(rest)
+            }
+        }
+        var expiresAt: Date?
+        var untilStop = false
+        if let hash = body.firstIndex(of: "#") {
+            let comment = body[body.index(after: hash)...]
+            if comment.hasPrefix("@") {
+                for tok in comment.dropFirst().split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+                    let t = tok.lowercased()
+                    guard t.hasPrefix("until=") else { continue }   // unknown: forward-compatible
+                    let v = t.dropFirst(6)
+                    if v == "stop" { untilStop = true }
+                    else if let secs = Double(v) { expiresAt = Date(timeIntervalSince1970: secs) }
+                }
+            }
+        }
+        return (body, enabled, expiresAt, untilStop)
+    }
+
+    /// A rule line (`code`, no comment) with its on/off state and expiry.
+    static func annotate(_ code: String, enabled: Bool, expiresAt: Date?, untilStop: Bool) -> String {
+        var line = code
+        if untilStop {
+            line += " #@until=stop"
+        } else if let expiresAt {
+            line += " #@until=\(Int(expiresAt.timeIntervalSince1970.rounded(.down)))"
+        }
+        return enabled ? line : "#@off " + line
     }
 
     // MARK: parse helpers
@@ -311,7 +476,7 @@ extension EgressPolicy {
         return .cidr(net: ip, mask: mask)
     }
 
-    static func parseIPv4(_ s: String) -> UInt32? {
+    public static func parseIPv4(_ s: String) -> UInt32? {
         let octets = s.split(separator: ".", omittingEmptySubsequences: false)
         guard octets.count == 4 else { return nil }
         var v: UInt32 = 0
@@ -328,7 +493,7 @@ extension EgressPolicy {
         "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
     }
 
-    private static func targetString(_ t: Target, ports: PortSet) -> String {
+    static func targetString(_ t: Target, ports: PortSet) -> String {
         let host: String
         switch t {
         case .any: host = "any"
@@ -343,7 +508,7 @@ extension EgressPolicy {
         return "\(host):\(p)"
     }
 
-    private static func methodsString(_ m: MethodSpec) -> String {
+    static func methodsString(_ m: MethodSpec) -> String {
         switch m {
         case .readOnly:     return "read-only"
         case .list(let ms): return ms.joined(separator: ",")
@@ -363,10 +528,18 @@ extension EgressPolicy {
         public var host: String
         public var ports: String
         public var methods: String
+        /// Off rows are kept (as `#@off …`) but never match.
+        public var enabled: Bool
+        /// A timed row's expiry (nil: permanent).
+        public var expiresAt: Date?
+        /// A row that lasts until the workspace stops.
+        public var untilStop: Bool
         public init(action: String = "allow", proto: String = "tcp", host: String = "any",
-                    ports: String = "", methods: String = "") {
+                    ports: String = "", methods: String = "",
+                    enabled: Bool = true, expiresAt: Date? = nil, untilStop: Bool = false) {
             self.action = action; self.proto = proto; self.host = host
             self.ports = ports; self.methods = methods
+            self.enabled = enabled; self.expiresAt = expiresAt; self.untilStop = untilStop
         }
     }
 
@@ -390,7 +563,8 @@ extension EgressPolicy {
             case nil:              methods = ""
             }
             return EditRow(action: r.action.rawValue, proto: r.proto.rawValue,
-                           host: host, ports: ports, methods: methods)
+                           host: host, ports: ports, methods: methods,
+                           enabled: r.enabled, expiresAt: r.expiresAt, untilStop: r.untilStop)
         }
     }
 
@@ -409,7 +583,8 @@ extension EgressPolicy {
             if proto == "web", !m.isEmpty {
                 parts.append(m)   // bare list or read-only — parseMethods handles both
             }
-            return parts.joined(separator: " ")
+            return annotate(parts.joined(separator: " "), enabled: row.enabled,
+                            expiresAt: row.expiresAt, untilStop: row.untilStop)
         }
         lines.append("default \(defaultAllow ? "allow" : "deny")")
         return lines.joined(separator: "\n")

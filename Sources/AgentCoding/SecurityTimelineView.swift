@@ -76,6 +76,8 @@ struct SecurityTimelineView: View {
     @State private var outcomeFilter: SecurityTimeline.Decision?
     /// "" = this Mac; a host's name = that mirrored host; nil = all.
     @State private var machineFilter: String?
+    /// Selected rows (the context menu acts on the clicked one).
+    @State private var selection = Set<SecurityTimeline.Event.ID>()
 
     private var machines: [String] { timeline.remote.keys.sorted() }
 
@@ -251,7 +253,8 @@ struct SecurityTimelineView: View {
     }
 
     private var table: some View {
-        Table(rows) {
+        let rows = rows
+        return Table(rows, selection: $selection) {
             TableColumn(NSLocalizedString("Time", comment: "")) { e in
                 Text(e.time, format: .dateTime.year().month(.twoDigits).day(.twoDigits)
                         .hour().minute().second())
@@ -279,16 +282,20 @@ struct SecurityTimelineView: View {
             .width(min: 140, ideal: 160, max: 190)
 
             TableColumn(NSLocalizedString("Condition", comment: "")) { e in
+                // The hover area is the whole cell (not just the glyphs), so
+                // a truncated host:port shows in full in the tooltip.
                 Text(e.condition)
-                    .lineLimit(1).truncationMode(.tail)
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                     .help(e.condition)
-                    .textSelection(.enabled)
             }
+            .width(min: 140, ideal: 240)
 
             TableColumn(NSLocalizedString("Decision", comment: "")) { e in
                 HStack(spacing: 5) {
                     Circle().fill(color(e.kind)).frame(width: 7, height: 7)
-                    Text(e.decision).foregroundStyle(color(e.kind)).lineLimit(1)
+                    Text(e.decision).foregroundStyle(color(e.kind)).lineLimit(1).truncationMode(.tail)
                     if let n = e.repeats {
                         Text(verbatim: "×\(n)")
                             .font(.caption.weight(.semibold)).monospacedDigit()
@@ -298,11 +305,25 @@ struct SecurityTimelineView: View {
                             .fixedSize()
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
                 .help(e.repeats.map {
                     String(format: NSLocalizedString("%1$@ (%2$d times, last one shown)", comment: "security timeline: coalesced row; 1 = decision, 2 = repeats"), e.decision, $0)
                 } ?? e.decision)
             }
-            .width(min: 120, ideal: 160, max: 260)
+            .width(min: 140, ideal: 260, max: 520)
+
+            // Firewall rows: allow a block / block an allow / switch the
+            // deciding rule off — applied live to the running workspace.
+            TableColumn("") { e in
+                FirewallRowActionButton(event: e)
+            }
+            .width(min: 64, ideal: 80, max: 110)
+        }
+        .contextMenu(forSelectionType: SecurityTimeline.Event.ID.self) { ids in
+            if let id = ids.first, let e = rows.first(where: { $0.id == id }), e.firewall != nil {
+                FirewallRowMenuItems(event: e)
+            }
         }
     }
 
@@ -328,6 +349,204 @@ struct SecurityTimelineView: View {
         }
     }
 }
+/// What the firewall quick actions on one timeline row can work with: the
+/// verdict, plus — for this Mac's own workspaces — the workspace's current
+/// rules (to offer only a rule that still exists).
+@MainActor
+private struct FirewallRowContext {
+    let event: SecurityTimeline.Event
+    let fw: SecurityTimeline.Firewall
+    /// nil: a mirrored (remote) host's row, or a workspace that's gone.
+    let profile: Profile?
+
+    init?(_ e: SecurityTimeline.Event) {
+        guard let fw = e.firewall, FirewallRuleActions.isActionable(fw) else { return nil }
+        event = e
+        self.fw = fw
+        profile = e.machine == nil
+            ? (NSApp.delegate as? ACAppDelegate)?.profiles.first(where: { $0.id == e.profileID })
+            : nil
+    }
+
+    var isRemote: Bool { event.machine != nil }
+
+    /// What the workspace's rules decide for this destination NOW, when that
+    /// differs from the row (a blocked host allowed since, or the reverse):
+    /// the row then says so instead of offering the same flip again.
+    var changedSince: (denied: Bool, rule: String?)? {
+        guard let profile,
+              let now = FirewallRuleActions.currentDecision(for: fw, policy: profile.resolvedEgressPolicy),
+              now.denied != fw.denied else { return nil }
+        return now
+    }
+
+    /// The deciding rule, when it's still in the workspace's rules.
+    var editableRule: String? {
+        guard let rule = fw.rule, let profile,
+              FirewallRuleActions.contains(ruleText: rule, in: profile.egressRules) else { return nil }
+        return rule
+    }
+
+    var portSuffix: String { (fw.port ?? 0) > 0 ? ":\(fw.port!)" : "" }
+
+    /// The inline button's title.
+    var buttonTitle: String {
+        if let now = changedSince {
+            return now.denied
+                ? NSLocalizedString("Blocked now", comment: "security timeline: firewall row whose destination the current rules block")
+                : NSLocalizedString("Allowed now", comment: "security timeline: firewall row whose destination the current rules allow")
+        }
+        if fw.denied { return NSLocalizedString("Allow…", comment: "security timeline: firewall quick action button") }
+        if fw.rule != nil { return NSLocalizedString("Rule…", comment: "security timeline: firewall quick action button") }
+        return NSLocalizedString("Block…", comment: "security timeline: firewall quick action button")
+    }
+
+    func perform(_ edit: FirewallRuleActions.Edit) {
+        guard let profile else { return }
+        (NSApp.delegate as? ACAppDelegate)?.applyFirewallEdit(edit, profileID: profile.id)
+    }
+}
+
+/// The firewall quick actions for one timeline row — shared by the row's
+/// context menu and its inline button.
+@MainActor
+private struct FirewallRowMenuItems: View {
+    let event: SecurityTimeline.Event
+
+    var body: some View {
+        if let ctx = FirewallRowContext(event) {
+            if ctx.isRemote {
+                Text(NSLocalizedString("Change this workspace's firewall rules in its settings on the Mac that runs it.",
+                                       comment: "security timeline: firewall quick actions, remote row"))
+            } else if ctx.profile != nil {
+                items(ctx)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func items(_ ctx: FirewallRowContext) -> some View {
+        let targets = FirewallRuleActions.targets(for: ctx.fw)
+        if let now = ctx.changedSince {
+            // Already flipped by the current rules: say by what, don't offer
+            // to insert the same rule again.
+            let word = now.denied
+                ? NSLocalizedString("Blocked now by “%@”", comment: "security timeline: the current rules block this destination; %@ = rule")
+                : NSLocalizedString("Allowed now by “%@”", comment: "security timeline: the current rules allow this destination; %@ = rule")
+            Text(now.rule.map { String(format: word, $0) }
+                 ?? (now.denied
+                     ? NSLocalizedString("Blocked now by the default policy", comment: "security timeline: the current default policy blocks this destination")
+                     : NSLocalizedString("Allowed now by the default policy", comment: "security timeline: the current default policy allows this destination")))
+        } else if ctx.fw.denied {
+            ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
+                if let rule = FirewallRuleActions.allowRule(target: target.name, fw: ctx.fw) {
+                    Menu(target.wholeDomain
+                         ? String(format: NSLocalizedString("Allow all of %@", comment: "security timeline: allow a whole domain; %@ = domain:port"),
+                                  target.name + ctx.portSuffix)
+                         : String(format: NSLocalizedString("Allow %@", comment: "security timeline: allow a blocked destination; %@ = host:port"),
+                                  target.name + ctx.portSuffix)) {
+                        if let existing = ctx.profile.flatMap({ FirewallRuleActions.existing(rule, in: $0.egressRules) }) {
+                            // Re-allowing replaces this rule (moved first): show
+                            // its current state so a shorter time isn't picked
+                            // by accident.
+                            Text(Self.existingSummary(existing))
+                            Divider()
+                        }
+                        allowDurations(rule, ctx)
+                    }
+                }
+            }
+        } else if ctx.fw.rule == nil {
+            ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
+                if let rule = FirewallRuleActions.blockRule(target: target.name) {
+                    Button(target.wholeDomain
+                           ? String(format: NSLocalizedString("Block all of %@", comment: "security timeline: block a whole domain; %@ = domain"), target.name)
+                           : String(format: NSLocalizedString("Block %@", comment: "security timeline: block a destination; %@ = host"), target.name)) {
+                        ctx.perform(.insert(rule))
+                    }
+                }
+            }
+        }
+        if let rule = ctx.editableRule {
+            if ctx.fw.denied || ctx.changedSince != nil { Divider() }
+            Button(String(format: NSLocalizedString("Switch off rule “%@”", comment: "security timeline: disable the rule that decided; %@ = rule"), rule)) {
+                ctx.perform(.disable(ruleText: rule))
+            }
+            Button(String(format: NSLocalizedString("Remove rule “%@”", comment: "security timeline: delete the rule that decided; %@ = rule"), rule),
+                   role: .destructive) {
+                ctx.perform(.remove(ruleText: rule))
+            }
+        } else if !ctx.fw.denied, ctx.fw.rule != nil, ctx.changedSince == nil {
+            Text(NSLocalizedString("The rule that allowed this is no longer in the workspace's rules.",
+                                   comment: "security timeline: firewall quick actions"))
+        }
+    }
+
+    /// "“allow tcp a.com:443” is on until 14:05" — an identical rule's state.
+    static func existingSummary(_ r: EgressPolicy.Rule, now: Date = Date()) -> String {
+        if !r.isEffective(at: now) {
+            return String(format: NSLocalizedString("“%@” exists and is off", comment: "security timeline: an identical firewall rule exists, switched off; %@ = rule"), r.text)
+        }
+        if r.untilStop {
+            return String(format: NSLocalizedString("“%@” is on until the workspace stops", comment: "security timeline: an identical firewall rule exists; %@ = rule"), r.text)
+        }
+        if let e = r.expiresAt {
+            return String(format: NSLocalizedString("“%1$@” is on until %2$@", comment: "security timeline: an identical timed firewall rule exists; 1 = rule, 2 = time"),
+                          r.text, e.formatted(date: .omitted, time: .shortened))
+        }
+        return String(format: NSLocalizedString("“%@” is already on, with no time limit", comment: "security timeline: an identical permanent firewall rule exists; %@ = rule"), r.text)
+    }
+
+    @ViewBuilder
+    private func allowDurations(_ rule: EgressPolicy.Rule, _ ctx: FirewallRowContext) -> some View {
+        Button(NSLocalizedString("Always", comment: "security timeline: allow duration")) { insert(rule, .always, ctx) }
+        Button(NSLocalizedString("For 15 minutes", comment: "security timeline: allow duration")) { insert(rule, .fifteenMinutes, ctx) }
+        Button(NSLocalizedString("For 1 hour", comment: "security timeline: allow duration")) { insert(rule, .oneHour, ctx) }
+        Button(NSLocalizedString("Until the workspace stops", comment: "security timeline: allow duration")) { insert(rule, .untilStop, ctx) }
+    }
+
+    private func insert(_ rule: EgressPolicy.Rule, _ d: FirewallRuleActions.Duration, _ ctx: FirewallRowContext) {
+        var r = rule
+        d.apply(to: &r, now: Date())
+        ctx.perform(.insert(r))
+    }
+}
+
+/// The inline quick-action button in a firewall row's last column. A
+/// mirrored host's row shows it disabled, with why in the tooltip: the fat
+/// client doesn't edit a remote workspace's rules from here.
+@MainActor
+private struct FirewallRowActionButton: View {
+    let event: SecurityTimeline.Event
+
+    var body: some View {
+        if let ctx = FirewallRowContext(event) {
+            if ctx.isRemote {
+                Text(ctx.buttonTitle)
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .help(NSLocalizedString("Change this workspace's firewall rules in its settings on the Mac that runs it.",
+                                            comment: "security timeline: firewall quick actions, remote row"))
+            } else if ctx.profile != nil {
+                Menu {
+                    FirewallRowMenuItems(event: event)
+                } label: {
+                    Text(ctx.buttonTitle).font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(ctx.changedSince != nil
+                      ? NSLocalizedString("The workspace's rules have changed since this connection",
+                                          comment: "security timeline: firewall quick action help")
+                      : ctx.fw.denied
+                      ? NSLocalizedString("Add a rule allowing this destination — applies to the running workspace at once",
+                                          comment: "security timeline: firewall quick action help")
+                      : NSLocalizedString("Switch off the rule that allowed this, or block the destination — applies at once",
+                                          comment: "security timeline: firewall quick action help"))
+            }
+        }
+    }
+}
+
 /// The Overview tab: what the engines did in the last 24 hours, each
 /// workspace's protections, and the latest blocks.
 private struct SecurityOverview: View {

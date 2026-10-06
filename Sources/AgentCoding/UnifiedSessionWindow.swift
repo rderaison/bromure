@@ -3298,6 +3298,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     toggleWatch: { [weak self] id in self?.acDelegate?.repoWatchEngine.toggleWatch(id) },
                     scanNow: { [weak self] id in self?.acDelegate?.repoWatchEngine.scanNow(id) },
+                    scanBaseline: { [weak self] id in
+                        self?.acDelegate?.repoWatchEngine.scanNow(id, baseline: true)
+                    },
                     fix: { [weak self] id in self?.acDelegate?.repoWatchEngine.fix(id) },
                     routeToSwitchboard: { [weak self] id, room in
                         self?.acDelegate?.routeFindingToSwitchboard(id, room: room)

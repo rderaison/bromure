@@ -172,6 +172,33 @@ Two things can stop an unattended run from completing on its own:
 - **Ask-before-use credentials.** If any credential the run would use is set to *Ask before use*, the run pauses in a consent dialog on this Mac until you approve it. The editor surfaces this up front as an amber **Won't run fully unattended** banner listing the exact credentials, with an **Open Workspace Settings…** button that opens the machine's settings so you can change them — it is a warning, never a save blocker. See [Credentials](08-credentials.mdx).
 - **Lifecycle decisions.** A machine that an automation starts never waits on a question: a pending base-image upgrade is skipped (the machine boots as it is, as if you had answered **No**), and a machine flagged compromised isn't started — the run fails with the reason, and you start the machine yourself to confirm the wipe. See [Machines](06f-machines.mdx#questions-before-a-boot).
 
+## Code review
+
+A **code review** watches a GitHub repository with an agent on one of your machines and files what it finds as structured *findings*, deduplicated across every scan. Create one from **New Automation › Code review**, or **Watch a Repository…** on the hub's **Code Review** tab. A watch runs up to three kinds of scan, each an ordinary automation it owns:
+
+| Scan | When it runs | What it covers |
+| --- | --- | --- |
+| **Scheduled review** | Weekly, on the day and hour you pick (off = only when you press **Scan Now**). | Its **Review** scope — see below. |
+| **Every new commit** | Each commit that lands on the watched branch. | That commit. |
+| **Every new pull request** | Each pull request opened in the repository. | What the pull request changes. |
+
+### What the scheduled review covers
+
+The **Review** choice decides what each scheduled review — and **Scan Now** — looks at:
+
+- **New commits since the last review** (the default for new watches): only the commits that landed on the watched branch since the previous review finished. Quick and cheap; when nothing new has landed, the run is skipped and the run list says *No new commits since the last review*. The editor shows how far the reviews have got (*Reviewed through 1a2b3c4*). With nothing reviewed yet, the first review covers **the last 20 commits** — or the whole repository, if you turn on **Start with a full-repository baseline**.
+- **The full repository (baseline)**: the whole codebase every time. The agent sizes the repository, maps its architecture, then works directory by directory in order of risk (request handlers, authentication, input parsing, file / process / network / database access, cryptography, configuration), reports each directory's findings before moving on — so a run cut short keeps what it found — and on a large repository favors depth over breadth, saying in its summary what it did not cover. Watches created before this choice existed keep this behavior.
+
+Whatever the scope, **Run Baseline Now** in a watch's **⋯** menu starts a one-off full-repository review. A finished review of either kind moves the "reviewed through" point, so the next incremental review starts after it.
+
+Each review is pinned to a commit: when the review fires, the app asks GitHub (with the machine's github.com token) for the tip of the watched branch, the run's worktree starts at that commit — fetching first if the machine's checkout is behind — and the run list names the range it covered (*Review of new commits 1a2b3c4…5d6e7f8*). If GitHub cannot be asked, the agent fetches and reviews the branch tip itself and reports the commit it reviewed. If the branch history was rewritten, the agent falls back to the latest 20 commits and says so. The watched branch is the **Branch** field (empty = the repository's default branch), shared with the commit scan.
+
+### Choosing the agent
+
+The **Agent** picker offers every agent — Claude Code, Codex, Grok, Kimi Code and Oh My Pi — and defaults to the machine's main agent (or Claude Code). An agent that is not set up on the chosen machine is marked *(not set up here)*, with a warning: an unattended review would stop at its sign-in, so set it up in the machine's settings (or sign in from a session there) first.
+
+Every agent runs a review the same unattended way an automation does — Claude Code, Codex and Oh My Pi with their skip-approval flags, Kimi Code in its one-shot mode, the review folder pre-trusted for each — and reports through the same findings tools (`findings_list`, `findings_report`, `findings_resolve`), declared in whichever configuration file that agent reads. Each review ends with the agent calling **`findings_done`** with a summary and the commit it reviewed: that closes the run for every agent, including the ones that have no completion signal of their own (Codex, Grok, Oh My Pi). The run's window renders its transcript with that agent's own reader.
+
 ## Letting agents manage automations
 
 Every agent on a machine gets a built-in MCP server, `bromure-automations`, with no configuration. It lets the agent read and change the machine's automations without the UI, so you can simply ask: *"Set up an automation that reviews every new pull request on acme/web every weekday morning"*.
@@ -184,6 +211,9 @@ Every agent on a machine gets a built-in MCP server, `bromure-automations`, with
 | `automation_update` | Changes the fields given, and only those. |
 | `automation_delete` | Deletes an automation and its run history. |
 | `automation_run` | Fires one now, as if its trigger had just happened. |
+| `findings_list`, `findings_get` | The findings of this machine's watched repositories. |
+| `findings_report`, `findings_resolve` | File verified issues (deduplicated against known findings) / mark one gone from the code. |
+| `findings_done` | Ends a code-review run, recording the commit it reviewed. |
 
 The server is scoped to the machine the agent runs on. The agent only ever sees that machine's automations: an automation of another machine reads as not found, anything it creates or edits belongs to this machine whatever it asks, and a chain can only follow one of this machine's automations. Fields are checked the way the editor checks them — a repository for GitHub triggers, only agents available on the machine, sensible hours and intervals.
 
@@ -200,5 +230,7 @@ The whole automation feature is mirrored on the app's control socket, so a [rich
 | `DELETE /automations/<id>` | Delete an automation. |
 | `POST /automations/<id>/run` | Fire it now, without changing the schedule. |
 | `POST /automations/<id>/toggle` | Pause or resume it. |
+| `POST /watches/<id>/scan` | Run a code review's scheduled review now (its scope). |
+| `POST /watches/<id>/baseline` | Run a one-off full-repository review. |
 
 These routes are control-socket only. For the full control-plane picture — the socket and the loopback automation API — see [CLI, API & MCP](16-automation-cli.mdx).

@@ -52,4 +52,25 @@ struct DNSSnoopTests {
         #expect(c.names(for: 0x08080808, now: now.addingTimeInterval(4000)).isEmpty)  // past max TTL
         #expect(c.names(for: 0x01010101, now: now).isEmpty)
     }
+
+    @Test("The queried name comes first, the CNAME target after (#38)")
+    func queriedNameFirst() {
+        // parseResponse marks which name was asked for.
+        let answers = DNSSnoop.parseResponse(response())
+        #expect(answers.contains { $0.name == "example.com" && $0.query })
+        #expect(answers.contains { $0.name == "cdn.example.net" && !$0.query })
+
+        let c = DNSSnoopCache()
+        let t = Date()
+        // Alias recorded first and alphabetically before — still second.
+        c.record(ip: 1, name: "dyna.wikimedia.org", ttl: 300, query: false, now: t)
+        c.record(ip: 1, name: "www.wikipedia.org", ttl: 300, query: true, now: t)
+        #expect(c.names(for: 1, now: t) == ["www.wikipedia.org", "dyna.wikimedia.org"])
+        // A shared address: the most recently looked-up site leads.
+        c.record(ip: 1, name: "www.wikimedia.org", ttl: 300, query: true, now: t.addingTimeInterval(5))
+        #expect(c.names(for: 1, now: t.addingTimeInterval(6)).first == "www.wikimedia.org")
+        // A name once asked for stays a query even if later seen as an alias.
+        c.record(ip: 1, name: "www.wikipedia.org", ttl: 300, query: false, now: t.addingTimeInterval(7))
+        #expect(c.names(for: 1, now: t.addingTimeInterval(8)).prefix(2).contains("www.wikipedia.org"))
+    }
 }

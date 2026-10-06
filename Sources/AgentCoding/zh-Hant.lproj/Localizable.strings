@@ -3213,7 +3213,6 @@
 "Closed" = "已關閉";
 "Commit" = "提交";
 "Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "提交和提取要求掃描會將第三方文字交給代理程式處理，因此需要 PromptGuard 模型。儲存監看時會下載該模型；在其就緒之前，這些掃描會被封鎖。";
-"Commit and pull-request scans start with what lands after the watch is created. Use Scan Now for the existing code." = "提交和提取要求掃描從監看建立之後送達的內容開始。對現有程式碼請使用「立即掃描」。";
 "Commits" = "提交";
 "Couldn't clone %1$@ into %2$@ — %3$@" = "無法將 %1$@ 複製到 %2$@——%3$@";
 "Critical" = "嚴重";
@@ -3323,7 +3322,6 @@
 "Watch a Repository…" = "監看儲存庫…";
 "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "修正已開始——代理程式正在其獨立分支上處理。準備就緒後會移至「審查中」。";
 "Full scan of %@ requested — it shows under Recent scans once the agent starts." = "已要求對 %@ 進行完整掃描——代理程式開始後會顯示在「最近的掃描」下。";
-"Now watching %@ — the first full scan is starting." = "現在正在監看 %@——首次完整掃描正在開始。";
 "Now watching %@." = "現在正在監看 %@。";
 "%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ 在 %3$@ 中，於 %2$@ 的新分支上處理你的提示詞";
 "%d run(s) need your attention" = "%d 個執行需要你注意";
@@ -3991,3 +3989,87 @@
 /* Subscription workspace vs the global API key */
 "%@ subscription not signed in" = "%@ 訂閱未登入";
 "using API key" = "正在使用 API 金鑰";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "變更在儲存後立即套用到執行中的工作區，無需重新啟動。取消勾選某條規則即可關閉它而不刪除，也可以透過它的時鐘選單限時開啟。";
+"Time limit" = "時限";
+"On — untick to switch this rule off without deleting it" = "已開啟 — 取消勾選可關閉此規則而不刪除";
+"Off — this rule is ignored until you tick it" = "已關閉 — 勾選前此規則將被忽略";
+"On for 15 minutes" = "開啟 15 分鐘";
+"On for 1 hour" = "開啟 1 小時";
+"On until the workspace stops" = "開啟直到工作區停止";
+"Make permanent" = "設為永久";
+"until stop" = "直到停止";
+"expired" = "已過期";
+"On until this workspace stops, then switched off automatically" = "開啟直到此工作區停止，之後自動關閉";
+"Switches off automatically at %@" = "將於 %@ 自動關閉";
+"Turn this rule on for a limited time" = "限時開啟此規則";
+"%@ — default policy" = "%@ — 預設政策";
+"Allow…" = "允許…";
+"Rule…" = "規則…";
+"Block…" = "封鎖…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "請在執行此工作區的 Mac 上，於其設定中變更此工作區的防火牆規則。";
+"Allow %@" = "允許 %@";
+"Allow all of %@" = "允許整個 %@";
+"Block %@" = "封鎖 %@";
+"Block all of %@" = "封鎖整個 %@";
+"Switch off rule “%@”" = "關閉規則「%@」";
+"Remove rule “%@”" = "移除規則「%@」";
+"The rule that allowed this is no longer in the workspace's rules." = "允許此連線的規則已不在工作區的規則中。";
+"Always" = "永遠";
+"For 15 minutes" = "15 分鐘";
+"For 1 hour" = "1 小時";
+"Until the workspace stops" = "直到工作區停止";
+"Add a rule allowing this destination — applies to the running workspace at once" = "新增一條允許此目標的規則 — 立即套用到執行中的工作區";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "關閉允許此連線的規則，或封鎖該目標 — 立即生效";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "自上次審查以來的新提交";
+"The full repository (baseline)" = "整個儲存庫（基準）";
+"New commits" = "新提交";
+"Baseline review at %@" = "在 %@ 的基準審查";
+"Review of new commits %1$@…%2$@" = "新提交 %1$@…%2$@ 的審查";
+"Review of the last %1$d commits up to %2$@" = "截至 %2$@ 的最近 %1$d 個提交的審查";
+"No new commits since the last review (%@)" = "自上次審查以來沒有新提交（%@）";
+"%@ (not set up here)" = "%@（此處未設定）";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ 未在此工作區中設定——無人值守的審查會停在它的登入步驟。請在首次掃描前於工作區設定中加入它（或在該工作區的工作階段中登入）。";
+"Scheduled review" = "排程審查";
+"Start with a full-repository baseline" = "先對整個儲存庫進行基準審查";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "提交和提取要求掃描從監看建立之後送達的內容開始。對現有程式碼請使用「立即執行基準審查」。";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "每次審查只涵蓋自上一次以來送達 %@ 的提交——快速又省錢。沒有新內容就不執行。";
+"Reviewed through %1$@ (%2$@)." = "已審查至 %1$@（%2$@）。";
+"The first review covers the whole repository; later ones only what's new." = "首次審查涵蓋整個儲存庫；之後只審查新內容。";
+"Nothing reviewed yet: the first review covers the last %d commits." = "尚未審查任何內容：首次審查涵蓋最近 %d 個提交。";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "每次審查都會走過整個程式碼庫，先看風險最高的部分。很徹底，但大型儲存庫耗時更久，消耗的 token 也更多。";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "已要求審查 %@ 的新提交——代理程式開始後會顯示在「最近的掃描」下（若自上次審查以來沒有新內容，則不執行）。";
+"Now watching %@ — the first review is starting." = "現在正在監看 %@——首次審查正在開始。";
+"Run Baseline Now" = "立即執行基準審查";
+"Review the commits that landed since the last review" = "審查自上次審查以來送達的提交";
+"Review the whole repository" = "審查整個儲存庫";
+"Review the new commits on %@ now" = "立即審查 %@ 的新提交";
+"New commits %1$@ %2$02d:00" = "新提交 %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "允許";
+"deny" = "拒絕";
+"“%@” no longer allows it" = "「%@」不再允許它";
+"connection closed — %@" = "連線已關閉 — %@";
+"Blocked now" = "現已封鎖";
+"Allowed now" = "現已允許";
+"Blocked now by “%@”" = "現已由「%@」封鎖";
+"Allowed now by “%@”" = "現已由「%@」允許";
+"Blocked now by the default policy" = "現已由預設原則封鎖";
+"Allowed now by the default policy" = "現已由預設原則允許";
+"“%@” exists and is off" = "「%@」已存在且已關閉";
+"“%@” is on until the workspace stops" = "「%@」在工作區停止前保持開啟";
+"“%1$@” is on until %2$@" = "「%1$@」開啟至 %2$@";
+"“%@” is already on, with no time limit" = "「%@」已開啟，無時間限制";
+"The workspace's rules have changed since this connection" = "自此連線以來，工作區的規則已變更";
+"Log allowed connections" = "記錄允許的連線";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "在安全時間軸中也列出防火牆放行的連線——每個目的地一列，重複項目合併顯示——讓你可以從那裡封鎖主機。關閉：只列出被封鎖的連線。在你做出選擇之前，工作區有規則時此項會開啟。";
+"Enable rule %@" = "啟用規則 %@";
+"Time limit set" = "已設定時間限制";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "規則在編輯器之外被變更（安全時間軸中的操作或時間限制）。該變更已合併到你未儲存的編輯中。";
+"The rules changed outside the editor while you have unsaved edits." = "你有未儲存的編輯時，規則在編輯器之外被變更。";
+"Reload" = "重新載入";
+"Keep my edits" = "保留我的編輯";

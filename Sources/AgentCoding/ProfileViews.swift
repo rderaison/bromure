@@ -4153,7 +4153,8 @@ struct ProfileEditorView: View {
                 // mirrors profiles but neither edits nor enforces egress
                 // rules, so the pane simply omits the table there.
                 #if os(macOS)
-                EgressRulesEditor(pfText: $draft.egressRules)
+                EgressRulesEditor(pfText: $draft.egressRules, profileID: draft.id,
+                                  logAllowed: $draft.logAllowedConnections)
                 #else
                 Text(NSLocalizedString("Outbound connection rules are edited on the Mac that runs this workspace.", comment: "Firewall pane, remote client"))
                     .font(.caption).foregroundStyle(.secondary)

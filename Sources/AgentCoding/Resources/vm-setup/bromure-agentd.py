@@ -3085,7 +3085,8 @@ def _grok_legacy_settings_remove(workdir, name, shim):
 
 
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
-                     task=False, background=False, base="", host_flags=""):
+                     task=False, background=False, base="", host_flags="",
+                     review=False):
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -3148,6 +3149,8 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
         flags = host_flags.strip()
     if task:
         flags += _task_mcp_setup(branch, tool, wt_dir)
+    if review:
+        _review_mcp_setup(tool, wt_dir)
     _delegation_mcp_setup(tool, wt_dir)
     if flags:
         _env["BROMURE_AC_WT_FLAGS"] = flags
@@ -3559,13 +3562,16 @@ def _plan_stream(cwd, slug, display, tool, prompt_b64):
     _bg(_wait)
 
 
-def _automation_run(cwd, slug, display, tool, prompt_b64, mode=""):
+def _automation_run(cwd, slug, display, tool, prompt_b64, mode="", base=""):
     """Automation fire: a worktree when cwd is inside a git repo, a plain
     agent tab otherwise (the host can't tell — the guest decides here).
     Unattended, so the agent launches in yolo mode (no trust/permission
     prompt to hang on). mode "task" = coding-board task: the run gets the
-    board MCP tools wired in. mode "plan" = planning interview, run in cwd
-    itself (no worktree)."""
+    board MCP tools wired in. mode "review" = a repository-watch scan: the
+    findings tools (automations MCP) are wired into the agent's project
+    scope too, and `base` (a commit or origin/<branch>) is where the
+    worktree starts — the review is pinned to it. mode "plan" = planning
+    interview, run in cwd itself (no worktree)."""
     if mode == "plan":
         # The host stages the plan-stream-enabled marker when it can serve
         # the vsock 5832 listener; without it (old host) plans keep the
@@ -3585,13 +3591,62 @@ def _automation_run(cwd, slug, display, tool, prompt_b64, mode=""):
         return
     if root:
         _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True,
-                         task=(mode == "task"))
+                         task=(mode == "task"),
+                         base=_resolve_run_base(cwd, base) if base else "",
+                         review=(mode == "review"))
     elif mode == "task":
         # A plain tab has no branch, so the card could never leave In
         # Progress — refuse instead of degrading silently.
         worktree_err("task: %s is not a git repo" % cwd)
     else:
         _automation_tab(cwd, display, tool, prompt_b64, slug=slug)
+
+
+def _commit_exists(cwd, ref):
+    return subprocess.run(["git", "-C", cwd, "rev-parse", "--verify", "--quiet",
+                           ref + "^{commit}"], stdout=_DEVNULL,
+                          stderr=_DEVNULL).returncode == 0
+
+
+def _resolve_run_base(cwd, base):
+    """The start point a review run is pinned to, if the checkout has it —
+    fetching once when it doesn't (a checkout cloned weeks ago lags the
+    branch the host just asked GitHub about). "" = start from the
+    checkout's HEAD: the prompt then tells the agent how to catch up, so a
+    failed fetch degrades the run instead of failing it."""
+    if not base or base.startswith("-"):
+        return ""
+    if _commit_exists(cwd, base):
+        return base
+    try:
+        subprocess.run(["git", "-C", cwd, "fetch", "--quiet", "origin"],
+                       stdout=_DEVNULL, stderr=_DEVNULL, timeout=600,
+                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except Exception as e:
+        log("automation", "fetch for %s failed: %s" % (base, e))
+    if _commit_exists(cwd, base):
+        return base
+    log("automation", "review base %s not found — starting from HEAD" % base)
+    return ""
+
+
+_AUTOMATIONS_MCP_SHIM = "/mnt/bromure-meta/bromure-automations-mcp.py"
+
+
+def _review_mcp_setup(tool, workdir):
+    """A repository-watch scan reports through the findings tools of the
+    automations MCP. Claude Code and Codex get that server from the
+    user-scope configs the host writes (~/.claude.json, ~/.codex/
+    config.toml). Grok, Kimi and omp are declared there too by the login
+    shell, but a project-scope declaration is what each of them reliably
+    loads (Grok reads .grok/config.toml, Kimi .kimi-code/mcp.json once the
+    folder is trusted, omp .mcp.json) — so the scan's worktree declares it
+    under the SAME name, "automations": where the user scope has it too,
+    the two collapse into one server instead of listing every tool twice.
+    The shim announces the worktree branch, which binds each report to its
+    run."""
+    if tool in ("grok", "kimi", "omp"):
+        _project_mcp_add(tool, workdir, "automations", _AUTOMATIONS_MCP_SHIM)
 
 
 def _save_claude_transcript(wt_dir):
@@ -4594,9 +4649,12 @@ def _dispatch_command(action, arg):
         # Same field layout as worktree-create; falls back to a plain agent
         # tab when the path isn't a git repo. Optional 6th field: run mode
         # ("task" = coding-board task -> the run gets the board MCP tools).
-        f = _fields(arg, 6)
+        # Optional 7th (base64): the commit / origin ref a review run's
+        # worktree starts from.
+        f = _fields(arg, 7)
         _bg(_automation_run, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), f[4], _b64d(f[5]) if f[5] else "")
+            _b64d(f[3]), f[4], _b64d(f[5]) if f[5] else "",
+            _b64d(f[6]) if f[6] else "")
     elif action == "automation-finish":
         f = _fields(arg, 1)
         _bg(_automation_finish, _b64d(f[0]))

@@ -3244,7 +3244,6 @@
 "Closed" = "Closed";
 "Commit" = "Commit";
 "Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked.";
-"Commit and pull-request scans start with what lands after the watch is created. Use Scan Now for the existing code." = "Commit and pull-request scans start with what lands after the watch is created. Use Scan Now for the existing code.";
 "Commits" = "Commits";
 "Couldn't clone %1$@ into %2$@ — %3$@" = "Couldn't clone %1$@ into %2$@ — %3$@";
 "Critical" = "Critical";
@@ -3354,7 +3353,6 @@
 "Watch a Repository…" = "Watch a Repository…";
 "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.";
 "Full scan of %@ requested — it shows under Recent scans once the agent starts." = "Full scan of %@ requested — it shows under Recent scans once the agent starts.";
-"Now watching %@ — the first full scan is starting." = "Now watching %@ — the first full scan is starting.";
 "Now watching %@." = "Now watching %@.";
 "%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ works on your prompt in a new branch of %2$@, in %3$@";
 "%d run(s) need your attention" = "%d run(s) need your attention";
@@ -4022,3 +4020,87 @@
 /* Subscription workspace vs the global API key */
 "%@ subscription not signed in" = "%@ subscription not signed in";
 "using API key" = "using API key";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.";
+"Time limit" = "Time limit";
+"On — untick to switch this rule off without deleting it" = "On — untick to switch this rule off without deleting it";
+"Off — this rule is ignored until you tick it" = "Off — this rule is ignored until you tick it";
+"On for 15 minutes" = "On for 15 minutes";
+"On for 1 hour" = "On for 1 hour";
+"On until the workspace stops" = "On until the workspace stops";
+"Make permanent" = "Make permanent";
+"until stop" = "until stop";
+"expired" = "expired";
+"On until this workspace stops, then switched off automatically" = "On until this workspace stops, then switched off automatically";
+"Switches off automatically at %@" = "Switches off automatically at %@";
+"Turn this rule on for a limited time" = "Turn this rule on for a limited time";
+"%@ — default policy" = "%@ — default policy";
+"Allow…" = "Allow…";
+"Rule…" = "Rule…";
+"Block…" = "Block…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "Change this workspace's firewall rules in its settings on the Mac that runs it.";
+"Allow %@" = "Allow %@";
+"Allow all of %@" = "Allow all of %@";
+"Block %@" = "Block %@";
+"Block all of %@" = "Block all of %@";
+"Switch off rule “%@”" = "Switch off rule “%@”";
+"Remove rule “%@”" = "Remove rule “%@”";
+"The rule that allowed this is no longer in the workspace's rules." = "The rule that allowed this is no longer in the workspace's rules.";
+"Always" = "Always";
+"For 15 minutes" = "For 15 minutes";
+"For 1 hour" = "For 1 hour";
+"Until the workspace stops" = "Until the workspace stops";
+"Add a rule allowing this destination — applies to the running workspace at once" = "Add a rule allowing this destination — applies to the running workspace at once";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "Switch off the rule that allowed this, or block the destination — applies at once";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "New commits since the last review";
+"The full repository (baseline)" = "The full repository (baseline)";
+"New commits" = "New commits";
+"Baseline review at %@" = "Baseline review at %@";
+"Review of new commits %1$@…%2$@" = "Review of new commits %1$@…%2$@";
+"Review of the last %1$d commits up to %2$@" = "Review of the last %1$d commits up to %2$@";
+"No new commits since the last review (%@)" = "No new commits since the last review (%@)";
+"%@ (not set up here)" = "%@ (not set up here)";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan.";
+"Scheduled review" = "Scheduled review";
+"Start with a full-repository baseline" = "Start with a full-repository baseline";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code.";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run.";
+"Reviewed through %1$@ (%2$@)." = "Reviewed through %1$@ (%2$@).";
+"The first review covers the whole repository; later ones only what's new." = "The first review covers the whole repository; later ones only what's new.";
+"Nothing reviewed yet: the first review covers the last %d commits." = "Nothing reviewed yet: the first review covers the last %d commits.";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens.";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review).";
+"Now watching %@ — the first review is starting." = "Now watching %@ — the first review is starting.";
+"Run Baseline Now" = "Run Baseline Now";
+"Review the commits that landed since the last review" = "Review the commits that landed since the last review";
+"Review the whole repository" = "Review the whole repository";
+"Review the new commits on %@ now" = "Review the new commits on %@ now";
+"New commits %1$@ %2$02d:00" = "New commits %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "allow";
+"deny" = "deny";
+"“%@” no longer allows it" = "“%@” no longer allows it";
+"connection closed — %@" = "connection closed — %@";
+"Blocked now" = "Blocked now";
+"Allowed now" = "Allowed now";
+"Blocked now by “%@”" = "Blocked now by “%@”";
+"Allowed now by “%@”" = "Allowed now by “%@”";
+"Blocked now by the default policy" = "Blocked now by the default policy";
+"Allowed now by the default policy" = "Allowed now by the default policy";
+"“%@” exists and is off" = "“%@” exists and is off";
+"“%@” is on until the workspace stops" = "“%@” is on until the workspace stops";
+"“%1$@” is on until %2$@" = "“%1$@” is on until %2$@";
+"“%@” is already on, with no time limit" = "“%@” is already on, with no time limit";
+"The workspace's rules have changed since this connection" = "The workspace's rules have changed since this connection";
+"Log allowed connections" = "Log allowed connections";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules.";
+"Enable rule %@" = "Enable rule %@";
+"Time limit set" = "Time limit set";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits.";
+"The rules changed outside the editor while you have unsaved edits." = "The rules changed outside the editor while you have unsaved edits.";
+"Reload" = "Reload";
+"Keep my edits" = "Keep my edits";

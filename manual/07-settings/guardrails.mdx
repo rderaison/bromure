@@ -85,11 +85,33 @@ Grants are per machine and per scope: one Kubernetes API server, AWS as a whole,
 
 | Column | Values | Meaning |
 |---|---|---|
+| (checkbox) | on / off | Untick a rule to switch it off without deleting it. A switched-off rule is kept, dimmed, and ignored until you tick it again. |
 | **Action** | `allow` / `deny` | What happens to a match. |
 | **Proto** | `tcp` / `udp` / `web` / `any` | `web` is HTTP(S), the only protocol whose rules can also restrict methods. |
 | **Host / CIDR** | `any`, a hostname, or an IPv4 CIDR | `example.com` covers the domain and all subdomains; `*.example.com` subdomains only. A bare IP is a /32. |
 | **Ports** | `any`, a port, a range (`8000-8999`) or a list | Empty means any. |
 | **Methods** | HTTP verbs, `web` rules only | With `allow`, only these verbs pass (`GET,POST`); with `deny`, these verbs are refused (`PUT,DELETE`). `read-only` means GET/HEAD/OPTIONS. |
+| **Time limit** | clock menu | Turn the rule on for a limited time: **On for 15 minutes**, **On for 1 hour** or **On until the workspace stops**; **Make permanent** removes the limit. A timed rule shows its time left ("14m"), an until-stop rule shows "until stop". |
+
+### Changing rules on a running machine
+
+Rule changes apply to a running machine as soon as you click **Save** — no restart, and they never appear in the restart prompt. New connections follow the new rules at once, and so do the ones already open: switching a rule off, removing it, adding a deny rule, a time limit running out, or an until-stop rule ending all re-check every open connection of the machine, and the ones the new rules deny are cut on both sides. So switching off a temporary allow really ends the access, rather than leaving an open download running to completion.
+
+- Connections made through the proxy settings (`HTTPS_PROXY` — curl, git, npm and the agents use them by default) are cut by the proxy itself: it closes the VM's side and cancels the request to the server, WebSockets included. The Security Timeline records each one as *connection closed — “allow tcp …” no longer allows it*.
+- Direct connections are cut by the virtual switch on their next packet: it drops it and sends the VM a TCP reset, and for intercepted HTTP(S) traffic the proxy's connection to the server is closed too.
+
+A timed rule is switched off at the very second its time is up, and the connections it allowed are cut then.
+
+### Temporary rules
+
+Some rules are only needed for a moment — reaching GitHub or the npm registry long enough to upgrade dependencies, for example. Rather than adding the rule and remembering to delete it, set a time limit with the rule's clock menu:
+
+- **On for 15 minutes** / **On for 1 hour** — the rule stops matching the moment the time is up, even if Bromure is busy; shortly after, it is switched off and saved that way, so it stays in the list for next time.
+- **On until the workspace stops** — the rule is switched off when the machine stops (or restarts), and at the next launch of Bromure if it was still running when the app quit.
+
+To use the rule again later, tick it or pick a new time limit.
+
+The quickest way to allow something that was just blocked is from the [Security Timeline](../11a-security-timeline.mdx#firewall-quick-actions): **Allow…** on the blocked row offers **Always**, **For 15 minutes**, **For 1 hour** and **Until the workspace stops**.
 
 The **pf format** disclosure shows the same rules as text — one per line, ending in `default allow` or `default deny` — which is how they are stored and what the CLI and managed profiles use:
 
@@ -102,9 +124,23 @@ deny  any 10.0.0.0/8
 default deny
 ```
 
+Switched-off and temporary rules carry a short note in a comment, so the text stays plain pf:
+
+```
+#@off allow tcp registry.npmjs.org:443          # switched off
+allow tcp github.com:443 #@until=1767225600      # on until this time (Unix seconds)
+allow tcp pypi.org:443 #@until=stop              # on until the machine stops
+```
+
 Enforcement happens on the Mac, in two layers: the virtual network switch checks every connection by destination IP and by the hostname seen in DNS (all protocols), and the proxy checks again by TLS server name and, for `web` rules, by HTTP method. That is what lets a machine read an API it may not write to: `allow web api.example.com GET,POST` gives the agent queries without changes, whatever tool it uses.
 
-Every decision is recorded in the [Security Timeline](../11a-security-timeline.mdx), and on enrolled Macs sent to your organization.
+Every decision is recorded in the [Security Timeline](../11a-security-timeline.mdx), with the rule that decided it, and on enrolled Macs sent to your organization.
+
+### Logging allowed connections
+
+Blocked connections are always recorded. **Log allowed connections**, under the **Unmatched traffic** choice, decides whether the connections the firewall lets through are recorded too — which is what gives their rows the **Block…** and **Rule…** quick actions. Until you choose, it is on while the machine has rules (or denies unmatched traffic) and off for a machine with no firewall, so a machine without rules doesn't fill the Timeline with "allowed" rows. Turn it on there to see where the agent connects and block a host from the Timeline; turn it off on a ruled machine to list blocks only.
+
+Allowed connections stay low-noise either way: one row per destination (host, port and protocol — a host behind several addresses is one row) at most once a minute, and repeats fold into the previous row with a count. The on-Mac local-models endpoint is never listed.
 
 > **Note:** Local models are always reachable: an allow rule for the on-Mac inference endpoint is placed ahead of your rules, so even `default deny` can't cut agents off from an on-device model.
 

@@ -3950,10 +3950,13 @@ final class RemoteHostWindow: NSWindow {
                 hub: automationHub,
                 workspaces: {
                     c.profiles.map { p in
-                        let tools = p.allToolSpecs.map(\.tool)
+                        // The mirror can't see the host's Models settings or
+                        // shared sign-ins: offer every agent without the
+                        // "not set up" warning — the host decides.
+                        let tools = Profile.Tool.allCases
                         return WatchWorkspaceChoice(
                             id: p.id, name: p.name, tools: tools,
-                            defaultTool: tools.contains(p.tool) ? p.tool : (tools.first ?? p.tool),
+                            defaultTool: WatchWorkspaceChoice.defaultTool(primary: p.tool, ready: tools),
                             hasGitHubToken: c.credentials(for: p.id)?.github ?? p.hasGitHubCredential,
                             askBeforeUseLabels: c.credentials(for: p.id)?.askBeforeUseLabels
                                 ?? p.askBeforeUseCredentialLabels)
@@ -3975,6 +3978,7 @@ final class RemoteHostWindow: NSWindow {
                     deleteWatch: { c.watchCommand($0, "") },
                     toggleWatch: { c.watchCommand($0, "toggle") },
                     scanNow: { c.watchCommand($0, "scan") },
+                    scanBaseline: { c.watchCommand($0, "baseline") },
                     fix: { c.findingCommand($0, "fix") },
                     routeToSwitchboard: { id, room in
                         c.findingCommand(id, "switchboard", body: room.map { ["room": $0.uuidString] } ?? [:])

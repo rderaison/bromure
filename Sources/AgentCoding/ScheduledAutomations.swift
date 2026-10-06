@@ -366,11 +366,32 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     /// Failed/blocked runs sit in the board's Needs Attention column until
     /// the user dismisses them; this stamps the dismissal.
     var acknowledgedAt: Date?
+    /// The agent that ran it (the automation's at fire time — it may have
+    /// been switched since). nil on runs recorded before it was kept.
+    var tool: Profile.Tool?
+    /// A repository watch's scheduled review: what it covered.
+    var review: ReviewInfo?
+
+    /// What a repository-watch review run covered, kept on the run so its
+    /// completion can move the watch's "reviewed through" mark.
+    struct ReviewInfo: Codable, Equatable, Sendable {
+        /// "baseline" / "newCommits" (WatchedRepo.ReviewScope raw values).
+        var scope: String
+        /// Branch key the review followed ("" = the default branch).
+        var branch: String
+        /// The last reviewed commit the range started after (incremental).
+        var base: String?
+        /// The commit reviewed up to — the branch tip at fire time, or what
+        /// the agent reported through findings_done when GitHub couldn't
+        /// be asked.
+        var head: String?
+    }
 
     init(id: UUID = UUID(), automationID: UUID, firedAt: Date,
          outcome: Outcome, detail: String, branchSlug: String? = nil,
          itemKey: String? = nil, runProfileID: UUID? = nil,
-         completedAt: Date? = nil, acknowledgedAt: Date? = nil) {
+         completedAt: Date? = nil, acknowledgedAt: Date? = nil,
+         tool: Profile.Tool? = nil, review: ReviewInfo? = nil) {
         self.id = id
         self.automationID = automationID
         self.firedAt = firedAt
@@ -381,6 +402,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
         self.runProfileID = runProfileID
         self.completedAt = completedAt
         self.acknowledgedAt = acknowledgedAt
+        self.tool = tool
+        self.review = review
     }
 }
 
@@ -536,6 +559,15 @@ final class ScheduledAutomationStore {
         guard let i = runs.firstIndex(where: { $0.id == runID }),
               runs[i].completedAt == nil else { return }
         runs[i].completedAt = date
+        save()
+    }
+
+    /// A review run whose head commit wasn't known at fire time learns it
+    /// from the agent (findings_done). Never overwrites a known head.
+    func setReviewHead(_ runID: UUID, sha: String) {
+        guard let i = runs.firstIndex(where: { $0.id == runID }),
+              runs[i].review != nil, runs[i].review?.head == nil else { return }
+        runs[i].review?.head = sha
         save()
     }
 
@@ -870,6 +902,19 @@ enum GitHubPRPoller {
         }
     }
 
+    /// The commit at the tip of `branch` (empty = the default branch) — what
+    /// a repository watch's scheduled review is pinned to.
+    nonisolated static func fetchHeadSHA(repo: String, token: String,
+                                         branch: String) async throws -> String {
+        struct Commit: Decodable { var sha: String }
+        let b = branch.trimmingCharacters(in: .whitespaces)
+        let ref = b.isEmpty ? "HEAD" : b
+        let enc = ref.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ref
+        let data = try await get(URL(string: "https://api.github.com/repos/\(repo)/commits/\(enc)")!,
+                                 token: token)
+        return try JSONDecoder().decode(Commit.self, from: data).sha
+    }
+
     /// The token owner's login — used for assigned-to-me filtering, and the
     /// cheapest possible "is this token alive" check.
     nonisolated static func fetchLogin(token: String) async throws -> String {
@@ -1172,6 +1217,29 @@ final class ScheduledAutomationEngine {
     /// repository watches count a scan's findings off this.
     var onRunCompleted: ((AutomationRunRecord) -> Void)?
 
+    /// A repository watch's scheduled review, decided at fire time: the
+    /// prompt for what it covers, the run-list line, the commit the guest
+    /// starts the worktree from, and what the run record keeps — or a
+    /// reason not to run at all (nothing new since the last review).
+    struct WatchRunPreparation: Sendable {
+        var prompt: String
+        var detail: String
+        /// Guest worktree start point (a commit or origin/<branch>); ""
+        /// = the checkout's own HEAD.
+        var base: String
+        var review: AutomationRunRecord.ReviewInfo
+        var skipReason: String?
+    }
+
+    /// Set by the app: plans a watch's scheduled review (`forceBaseline`:
+    /// the one-off "Run Baseline Now"). nil result = fire the stored prompt.
+    var prepareWatchRun: ((ScheduledAutomation, _ forceBaseline: Bool) async -> WatchRunPreparation?)?
+
+    /// How long a run whose agent DECLARED itself done (findings_done) but
+    /// has no transcript the quiet probe can read gets to finish its last
+    /// message before its tab is closed.
+    static let declaredDoneGrace: UInt64 = 45_000_000_000
+
     func start() {
         guard timer == nil else { return }
         let t = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
@@ -1417,8 +1485,8 @@ final class ScheduledAutomationEngine {
 
     /// Manual "Run now" — the same path as a scheduled fire; the schedule is
     /// left untouched.
-    func runNow(_ automation: ScheduledAutomation) {
-        fire(automation, now: Date())
+    func runNow(_ automation: ScheduledAutomation, forceBaseline: Bool = false) {
+        fire(automation, now: Date(), forceBaseline: forceBaseline)
     }
 
     // MARK: Firing
@@ -1427,15 +1495,44 @@ final class ScheduledAutomationEngine {
                       promptOverride: String? = nil,
                       detailOverride: String? = nil,
                       slugSuffix: String? = nil,
-                      itemKey: String? = nil) {
+                      itemKey: String? = nil,
+                      forceBaseline: Bool = false,
+                      prepared: WatchRunPreparation? = nil) {
         guard let delegate else { return }
         guard delegate.profile(for: a.profileID) != nil else {
             store.record(AutomationRunRecord(
                 automationID: a.id, firedAt: now, outcome: .failed,
                 detail: NSLocalizedString("The workspace no longer exists",
-                                          comment: "failed automation run")))
+                                          comment: "failed automation run"),
+                tool: a.tool))
             return
         }
+
+        // A repository watch's scheduled review (or its "Scan now"): what
+        // it covers is decided now — the scope, the commit range since the
+        // last review, the branch tip — not when the watch was saved.
+        if prepared == nil, promptOverride == nil, a.watchID != nil,
+           a.trigger == .schedule, let prepare = prepareWatchRun {
+            Task { [weak self] in
+                let prep = await prepare(a, forceBaseline)
+                guard let self else { return }
+                guard let prep else {
+                    self.fire(a, now: now, promptOverride: a.prompt, itemKey: itemKey)
+                    return
+                }
+                if let why = prep.skipReason {
+                    BACDebug.log("automation", "skipping “\(a.name)” — \(why)")
+                    self.store.record(AutomationRunRecord(
+                        automationID: a.id, firedAt: now, outcome: .skipped,
+                        detail: why, tool: a.tool, review: prep.review))
+                    return
+                }
+                self.fire(a, now: now, promptOverride: prep.prompt,
+                          detailOverride: prep.detail, itemKey: itemKey, prepared: prep)
+            }
+            return
+        }
+        let review = prepared?.review
 
         var slug = Self.branchSlug(for: a.name, at: now)
         if let slugSuffix { slug += "-" + slugSuffix }
@@ -1444,15 +1541,22 @@ final class ScheduledAutomationEngine {
         // git repo and falls back to a plain agent tab when it isn't. The
         // prompt carries the unattended-run operating constraints (no
         // questions, no sub-agents) appended for every fire.
-        let args = [Self.guestPath(a.repoPath), slug, a.name, a.tool.rawValue,
+        var args = [Self.guestPath(a.repoPath), slug, a.name, a.tool.rawValue,
                     Self.withAutomationDirectives(promptOverride ?? a.prompt)]
+        // A watch's scans run in "review" mode (the guest wires the findings
+        // tools into agents that only read project-scope MCP files), from
+        // the commit the review is pinned to when there is one.
+        if a.watchID != nil {
+            args.append("review")
+            if let base = prepared?.base, !base.isEmpty { args.append(base) }
+        }
 
         // Clone-first run: a disposable duplicate of the workspace, never
         // the workspace itself. Restricted to the agents with a real done
         // signal — the teardown rides on it (see `hasReliableDoneSignal`).
         if a.cloneWorkspaceFirst && a.tool.hasReliableDoneSignal {
             fireInClone(a, slug: slug, detail: detail, args: args,
-                        now: now, itemKey: itemKey)
+                        now: now, itemKey: itemKey, review: review)
             return
         }
 
@@ -1461,7 +1565,7 @@ final class ScheduledAutomationEngine {
         if let url = a.cloneURL?.trimmingCharacters(in: .whitespacesAndNewlines),
            !url.isEmpty {
             fireWithCheckout(a, cloneURL: url, slug: slug, detail: detail,
-                             args: args, now: now, itemKey: itemKey)
+                             args: args, now: now, itemKey: itemKey, review: review)
             return
         }
 
@@ -1472,7 +1576,8 @@ final class ScheduledAutomationEngine {
             BACDebug.log("automation", "launched “\(a.name)” → \(slug)")
             store.record(AutomationRunRecord(
                 automationID: a.id, firedAt: now, outcome: .launched,
-                detail: detail, branchSlug: slug, itemKey: itemKey))
+                detail: detail, branchSlug: slug, itemKey: itemKey,
+                tool: a.tool, review: review))
             return
         }
 
@@ -1510,7 +1615,8 @@ final class ScheduledAutomationEngine {
                     BACDebug.log("automation", "launched “\(a.name)” → \(slug) (after boot)")
                     self.store.record(AutomationRunRecord(
                         automationID: a.id, firedAt: now, outcome: .launched,
-                        detail: detail, branchSlug: slug, itemKey: itemKey))
+                        detail: detail, branchSlug: slug, itemKey: itemKey,
+                        tool: a.tool, review: review))
                     return
                 }
                 // The start was refused (nobody to answer its prompt): say
@@ -1567,14 +1673,16 @@ final class ScheduledAutomationEngine {
     /// needed, booting the workspace first if the automation allows it.
     private func fireWithCheckout(_ a: ScheduledAutomation, cloneURL: String,
                                   slug: String, detail: String, args: [String],
-                                  now: Date, itemKey: String?) {
+                                  now: Date, itemKey: String?,
+                                  review: AutomationRunRecord.ReviewInfo? = nil) {
         Task { [weak self] in
             guard let self else { return }
             @MainActor func launched() {
                 BACDebug.log("automation", "launched “\(a.name)” → \(slug)")
                 self.store.record(AutomationRunRecord(
                     automationID: a.id, firedAt: now, outcome: .launched,
-                    detail: detail, branchSlug: slug, itemKey: itemKey))
+                    detail: detail, branchSlug: slug, itemKey: itemKey,
+                    tool: a.tool, review: review))
             }
             @MainActor func failed(_ why: String) {
                 BACDebug.log("automation", "“\(a.name)”: \(why)")
@@ -1624,7 +1732,8 @@ final class ScheduledAutomationEngine {
     /// agentFinished) or if it never boots; with closeWhenDone off it's
     /// deliberately kept for inspection.
     private func fireInClone(_ a: ScheduledAutomation, slug: String, detail: String,
-                             args: [String], now: Date, itemKey: String?) {
+                             args: [String], now: Date, itemKey: String?,
+                             review: AutomationRunRecord.ReviewInfo? = nil) {
         Task { [weak self] in
             guard let self, let delegate = self.delegate else { return }
             // The delegate syncs a running source's page cache before the
@@ -1652,7 +1761,7 @@ final class ScheduledAutomationEngine {
                     self.store.record(AutomationRunRecord(
                         automationID: a.id, firedAt: now, outcome: .launched,
                         detail: detail, branchSlug: slug, itemKey: itemKey,
-                        runProfileID: clone.id))
+                        runProfileID: clone.id, tool: a.tool, review: review))
                     return
                 }
                 if let refusal = delegate.unattendedLaunchRefusal(clone.id) {
@@ -1678,33 +1787,63 @@ final class ScheduledAutomationEngine {
     /// positive would kill live work. Runs that pause on .needsInput finish
     /// whenever the user unblocks them and the next .done arrives.
     func agentFinished(profileID: UUID, worktreeBranch: String?) {
-        guard let branch = worktreeBranch, branch.hasPrefix("wt/"),
-              !finishSent.contains(branch) else { return }
+        guard let branch = worktreeBranch,
+              let found = launchedRun(profileID: profileID, branch: branch),
+              // Only a hook-driven done is trustworthy — the Codex/Grok proxy
+              // heuristic can flip .done during a long silent stretch.
+              found.automation.tool.hasReliableDoneSignal
+        else { return }
+        finishRun(found.run, found.automation, profileID: profileID, branch: branch, declared: false)
+    }
+
+    /// The agent of a run said it is finished, explicitly (a repository
+    /// watch's findings_done) — the done signal every agent can give, hook
+    /// or not. Same completion as a hook-driven done.
+    @discardableResult
+    func runDeclaredDone(profileID: UUID, worktreeBranch: String?) -> Bool {
+        guard let branch = worktreeBranch,
+              let found = launchedRun(profileID: profileID, branch: branch)
+        else { return false }
+        finishRun(found.run, found.automation, profileID: profileID, branch: branch,
+                  declared: !found.automation.tool.hasReliableDoneSignal)
+        return true
+    }
+
+    /// The newest launched, unfinished run behind a worktree branch (exact
+    /// slug, or with the guest's -N dedup suffix) whose session runs in
+    /// `profileID` (a clone-first run's clone, else the automation's own).
+    private func launchedRun(profileID: UUID, branch: String)
+        -> (run: AutomationRunRecord, automation: ScheduledAutomation)? {
+        guard branch.hasPrefix("wt/"), !finishSent.contains(branch) else { return nil }
         let slugPart = String(branch.dropFirst(3))
-        // Newest launched run whose slug matches the branch (exact, or with
-        // the guest's -N dedup suffix).
         guard let run = store.runs.first(where: { run in
             guard run.outcome == .launched, let slug = run.branchSlug else { return false }
             return slugPart == slug || (slugPart.hasPrefix(slug + "-")
                 && Int(slugPart.dropFirst(slug.count + 1)) != nil)
         }),
             let automation = store.automation(run.automationID),
-            // Clone-first runs live in the clone, not the automation's own
-            // workspace — match whichever profile the run executed in.
-            (run.runProfileID ?? automation.profileID) == profileID,
-            // Only a hook-driven done is trustworthy — the Codex/Grok proxy
-            // heuristic can flip .done during a long silent stretch.
-            automation.tool.hasReliableDoneSignal
-        else { return }
+            (run.runProfileID ?? automation.profileID) == profileID
+        else { return nil }
+        return (run: run, automation: automation)
+    }
+
+    /// Stamp, chain, archive the transcript and (closeWhenDone) close the
+    /// run's tab. `declared`: the agent has no transcript the quiet probe
+    /// can read — give its closing message a fixed grace instead.
+    private func finishRun(_ run: AutomationRunRecord, _ automation: ScheduledAutomation,
+                           profileID: UUID, branch: String, declared: Bool) {
         finishSent.insert(branch)
 
-        BACDebug.log("automation", "run done signal for \(branch)")
+        BACDebug.log("automation", "run done signal for \(branch)\(declared ? " (declared by the agent)" : "")")
         let closeWhenDone = automation.closeWhenDone
         let cloneID = run.runProfileID
         let runID = run.id
         let automationID = automation.id
-        let tool = automation.tool
+        let tool = run.tool ?? automation.tool
         Task { [weak self] in
+            if declared {
+                try? await Task.sleep(nanoseconds: Self.declaredDoneGrace)
+            }
             // A done with background subagents still running isn't done —
             // settle on transcript quiescence before stamping, chaining,
             // and tearing the session down.

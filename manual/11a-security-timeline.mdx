@@ -70,6 +70,7 @@ The Timeline is one table of every event, newest first:
 | **Engine** | Which engine decided, with its icon. |
 | **Condition** | What the engine saw: the host, package, snippet, key… Hover for the full text; the text can be selected and copied. |
 | **Decision** | What it decided, colour-coded. |
+| (last column) | For firewall rows, a quick-action button: **Allow…**, **Block…** or **Rule…** — see [Firewall quick actions](#firewall-quick-actions). |
 
 Colours read the same way everywhere in the window:
 
@@ -93,13 +94,29 @@ The toolbar above the table filters it:
 |---|---|---|
 | **Credential brokering** | Credential swaps on the wire ([Credentials](08-credentials.mdx)), exfiltration attempts, and hosts allowed from the compromise alert. | "swapped in sk-a…9f" (blue); "blocked — exfiltration attempt, VM paused" (red), or "blocked — exfiltration attempt (alerts off, VM not paused)" when the machine has exfiltration alerts turned off; "allowed by user for this session" (green) |
 | **Credential used** | SSH signatures and AWS SigV4 signings the host performed for the agent. | "signed" (green) |
-| **Firewall** | Egress-firewall verdicts, per host, port and protocol. A flow is reported again only once a minute has passed since its last report. | "allow" (green); "deny" (red) |
+| **Firewall** | Egress-firewall verdicts, per host, port and protocol, with the rule that decided — or "default policy" when no rule matched — for direct connections and for those made through the proxy settings alike. The host is the name the program asked for (`www.wikipedia.org`), not the CDN name it resolves to. A destination is reported again only once a minute has passed since its last report, or at once after the rules change; allowed connections are listed only when the machine [logs them](07-settings/guardrails.mdx#logging-allowed-connections), and their repeats fold into one row with a count. An open connection cut because the rules changed gets its own row. | "allow — allow tcp github.com:443" (green); "deny — default policy" (red); "connection closed — “allow tcp github.com:443” no longer allows it" (red); "deny" (red) for connections dropped regardless of rules (IPv6, QUIC, IP fragments) |
 | **Guardrails** | Write-policy blocks ([Guardrails](07-settings/guardrails.mdx)), with the method and path. | "blocked — …" (red) |
 | **Supply chain** | Every package fetch, including `apt` `.deb` downloads ([Supply-Chain Protection](09-supply-chain.mdx)). | "checked", "downloaded" (green); "checked — versions newer than the cooldown hidden", "install scripts stripped" (blue); "blocked — …" (red) |
 | **Prompt injection** | Detector hits, with the detector, the source and a short snippet ([Prompt-Injection Detection](10-prompt-injection.mdx)). | "log", "allowed" (green); "blocked" (red) |
 | **PII protection** | Requests in which personal data was swapped, with counts by kind and the host — never the values ([PII Protection](10a-pii.mdx)) — and requests whose scan ran out of model budget. | "swapped for stand-ins" (blue); "partial — model budget reached; pattern rules only" (blue) |
 | **Agent delegation** | Each message one agent sent another through [delegation](06d-delegation.mdx). | "relayed" (blue); "withheld — prompt injection" (red) |
 | **Upstream TLS** | Upstream certificates the host refused to trust, and uses of the per-request insecure bypass. | "blocked — …" (red); "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" (green) |
+
+## Firewall quick actions
+
+Firewall rows can change the machine's [outbound-connection rules](07-settings/guardrails.mdx#outbound-connections-egress-firewall) on the spot. Use the button in the row's last column, or right-click the row. The change is saved to the machine and applies to it immediately if it's running — no restart.
+
+- **A blocked connection** — **Allow** *host:port* adds an allow rule for exactly that host, protocol and port, placed first so it wins over the rule that blocked it. When the host is a subdomain, **Allow all of** *domain:port* is offered too (for example `github.com` for `api.github.com`), which covers every subdomain — except under CDN and shared-hosting domains (`cloudflare.net`, `cloudfront.net`, `amazonaws.com`, `github.io`, `herokuapp.com`…), where "all of" would mean every customer of that provider. The other names the host resolved through (its CDN aliases) are offered as exact hosts after it. Each offers **Always**, **For 15 minutes**, **For 1 hour** or **Until the workspace stops**; a timed rule switches itself off when the time is up. If the same rule already exists, the menu first says how it stands (switched off, or on until when), so re-allowing never silently shortens it. If a deny rule blocked it, that rule can also be switched off or removed.
+- **A connection allowed by a rule** — **Switch off rule** keeps the rule but stops it matching (tick it again in the editor to bring it back); **Remove rule** deletes it. Connections the change now denies are cut.
+- **A connection allowed because no rule matched** — **Block** *host* (or **Block all of** *domain*) adds a deny rule for every protocol and port to it.
+
+Rules made here use the name the program asked for, the same name the proxy checks, so they hold however the program connects.
+
+When the rules have changed since the row was recorded — a blocked host allowed since, or the reverse — the button reads **Allowed now** or **Blocked now** and its menu names the rule (or default policy) that decides now, instead of offering the same change again.
+
+Quick actions appear only for rows that a rule change can affect: not for IPv6, QUIC or fragment drops, and not for HTTP-method blocks from `web` rules. On a remote Mac's rows the button is greyed out: change that machine's rules in its settings on the Mac that runs it.
+
+> **Note:** If the machine's settings are open, the rule table picks up the change. Unsaved edits are kept: the change is merged into them rule by rule, and a note above the table says so. If your edits can't be merged (a rule that doesn't parse yet), the note offers **Reload** (take the saved rules) or **Keep my edits**.
 
 The Timeline records security decisions only. File reads, commands, tool calls and model usage are not in it; they belong to [tracing](11-tracing.mdx).
 

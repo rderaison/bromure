@@ -2221,6 +2221,8 @@ enum KimiTranscriptParser {
 /// finished, and by the kanban board's Done cards.
 struct ClaudeTranscriptPane: View {
     let url: URL
+    /// The agent that wrote it ("codex", …), when known; nil = sniffed.
+    var agent: String? = nil
     @State private var items: [TranscriptItem]?
     @State private var failed = false
 
@@ -2249,11 +2251,12 @@ struct ClaudeTranscriptPane: View {
         }
         .task(id: url) {
             let target = url
+            let agent = agent
             let parsed = await Task.detached(priority: .userInitiated) { () -> [TranscriptItem]? in
                 guard let data = try? Data(contentsOf: target) else { return nil }
-                // Sniffed, not assumed: archived runs may have been driven
-                // by any of the supported agents.
-                return AgentTranscript.parse(data)
+                // Archived runs may have been driven by any of the supported
+                // agents: the recorded one when known, else sniffed.
+                return AgentTranscript.parse(data, agent: agent)
             }.value
             if let parsed { items = parsed } else { failed = true }
         }

@@ -85,6 +85,7 @@ struct AutomationsHomeTab: View {
                                     hub.editingWatch = w
                                 },
                                 onScan: { actions.scanNow(w.id) },
+                                onBaseline: { actions.scanBaseline(w.id) },
                                 onToggle: { actions.toggleWatch(w.id) })
                         }
                     }
@@ -381,6 +382,7 @@ struct WatchSummaryRow: View {
     var onOpen: () -> Void
     var onEdit: () -> Void
     var onScan: () -> Void
+    var onBaseline: () -> Void = {}
     var onToggle: () -> Void
     @State private var hovering = false
 
@@ -388,7 +390,9 @@ struct WatchSummaryRow: View {
         var parts: [String] = []
         if watch.scans.contains(.fullScan) {
             let day = Calendar.current.shortWeekdaySymbols[min(max(watch.fullScanWeekday, 1), 7) - 1]
-            parts.append(String(format: NSLocalizedString("Full scan %1$@ %2$02d:00", comment: "watch row: weekday, hour"),
+            parts.append(String(format: watch.scheduledScope == .newCommits
+                ? NSLocalizedString("New commits %1$@ %2$02d:00", comment: "watch row: weekly review of what landed since the last one — weekday, hour")
+                : NSLocalizedString("Full scan %1$@ %2$02d:00", comment: "watch row: weekday, hour"),
                                 day, watch.fullScanHour))
         }
         if watch.scans.contains(.commits) { parts.append(NSLocalizedString("every commit", comment: "watch row")) }
@@ -476,6 +480,10 @@ struct WatchSummaryRow: View {
                 Menu {
                     Button(NSLocalizedString("Edit…", comment: ""), action: onEdit)
                     Button(NSLocalizedString("Show Findings", comment: "watch row"), action: onOpen)
+                    if watch.scheduledScope == .newCommits {
+                        Button(NSLocalizedString("Run Baseline Now", comment: "watch: one-off full-repository review"),
+                               action: onBaseline)
+                    }
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 22, height: 22)
                 }

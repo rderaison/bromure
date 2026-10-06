@@ -3210,7 +3210,6 @@
 "Closed" = "已关闭";
 "Commit" = "提交";
 "Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "提交和拉取请求扫描会将第三方文本交给代理处理，因此需要 PromptGuard 模型。保存监视时会下载该模型；在其就绪之前，这些扫描会被阻止。";
-"Commit and pull-request scans start with what lands after the watch is created. Use Scan Now for the existing code." = "提交和拉取请求扫描从监视创建之后到达的内容开始。对现有代码请使用“立即扫描”。";
 "Commits" = "提交";
 "Couldn't clone %1$@ into %2$@ — %3$@" = "无法将 %1$@ 克隆到 %2$@——%3$@";
 "Critical" = "严重";
@@ -3320,7 +3319,6 @@
 "Watch a Repository…" = "监视仓库…";
 "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "修复已开始——代理正在其独立分支上处理。准备就绪后会移至“审查中”。";
 "Full scan of %@ requested — it shows under Recent scans once the agent starts." = "已请求对 %@ 进行完整扫描——代理开始后会显示在“最近的扫描”下。";
-"Now watching %@ — the first full scan is starting." = "现在正在监视 %@——首次完整扫描正在开始。";
 "Now watching %@." = "现在正在监视 %@。";
 "%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ 在 %3$@ 中，于 %2$@ 的新分支上处理你的提示词";
 "%d run(s) need your attention" = "%d 个运行需要你关注";
@@ -3988,3 +3986,87 @@
 /* Subscription workspace vs the global API key */
 "%@ subscription not signed in" = "%@ 订阅未登录";
 "using API key" = "正在使用 API 密钥";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "更改在保存后立即应用到正在运行的工作区，无需重启。取消勾选某条规则即可关闭它而不删除，也可以通过它的时钟菜单限时开启。";
+"Time limit" = "时限";
+"On — untick to switch this rule off without deleting it" = "已开启 — 取消勾选可关闭此规则而不删除";
+"Off — this rule is ignored until you tick it" = "已关闭 — 勾选前此规则将被忽略";
+"On for 15 minutes" = "开启 15 分钟";
+"On for 1 hour" = "开启 1 小时";
+"On until the workspace stops" = "开启直到工作区停止";
+"Make permanent" = "设为永久";
+"until stop" = "直到停止";
+"expired" = "已过期";
+"On until this workspace stops, then switched off automatically" = "开启直到此工作区停止，之后自动关闭";
+"Switches off automatically at %@" = "将于 %@ 自动关闭";
+"Turn this rule on for a limited time" = "限时开启此规则";
+"%@ — default policy" = "%@ — 默认策略";
+"Allow…" = "允许…";
+"Rule…" = "规则…";
+"Block…" = "阻止…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "请在运行此工作区的 Mac 上，于其设置中更改此工作区的防火墙规则。";
+"Allow %@" = "允许 %@";
+"Allow all of %@" = "允许整个 %@";
+"Block %@" = "阻止 %@";
+"Block all of %@" = "阻止整个 %@";
+"Switch off rule “%@”" = "关闭规则“%@”";
+"Remove rule “%@”" = "移除规则“%@”";
+"The rule that allowed this is no longer in the workspace's rules." = "允许此连接的规则已不在工作区的规则中。";
+"Always" = "始终";
+"For 15 minutes" = "15 分钟";
+"For 1 hour" = "1 小时";
+"Until the workspace stops" = "直到工作区停止";
+"Add a rule allowing this destination — applies to the running workspace at once" = "添加一条允许此目标的规则 — 立即应用到正在运行的工作区";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "关闭允许此连接的规则，或阻止该目标 — 立即生效";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "自上次审查以来的新提交";
+"The full repository (baseline)" = "整个仓库（基线）";
+"New commits" = "新提交";
+"Baseline review at %@" = "在 %@ 的基线审查";
+"Review of new commits %1$@…%2$@" = "新提交 %1$@…%2$@ 的审查";
+"Review of the last %1$d commits up to %2$@" = "截至 %2$@ 的最近 %1$d 个提交的审查";
+"No new commits since the last review (%@)" = "自上次审查以来没有新提交（%@）";
+"%@ (not set up here)" = "%@（此处未设置）";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ 未在此工作区中设置——无人值守的审查会停在它的登录步骤。请在首次扫描前在工作区设置中添加它（或在该工作区的会话中登录）。";
+"Scheduled review" = "定时审查";
+"Start with a full-repository baseline" = "先对整个仓库进行基线审查";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "提交和拉取请求扫描从监视创建之后到达的内容开始。对现有代码请使用“立即运行基线审查”。";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "每次审查只覆盖自上一次以来到达 %@ 的提交——快速且省钱。没有新内容就不运行。";
+"Reviewed through %1$@ (%2$@)." = "已审查至 %1$@（%2$@）。";
+"The first review covers the whole repository; later ones only what's new." = "首次审查覆盖整个仓库；之后只审查新内容。";
+"Nothing reviewed yet: the first review covers the last %d commits." = "尚未审查任何内容：首次审查覆盖最近 %d 个提交。";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "每次审查都会遍历整个代码库，先看风险最高的部分。很彻底，但大型仓库耗时更长，消耗的 token 也更多。";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "已请求审查 %@ 的新提交——代理开始后会显示在“最近的扫描”下（如果自上次审查以来没有新内容，则不运行）。";
+"Now watching %@ — the first review is starting." = "现在正在监视 %@——首次审查正在开始。";
+"Run Baseline Now" = "立即运行基线审查";
+"Review the commits that landed since the last review" = "审查自上次审查以来到达的提交";
+"Review the whole repository" = "审查整个仓库";
+"Review the new commits on %@ now" = "立即审查 %@ 的新提交";
+"New commits %1$@ %2$02d:00" = "新提交 %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "允许";
+"deny" = "拒绝";
+"“%@” no longer allows it" = "“%@”不再允许它";
+"connection closed — %@" = "连接已关闭 — %@";
+"Blocked now" = "现已阻止";
+"Allowed now" = "现已允许";
+"Blocked now by “%@”" = "现已由“%@”阻止";
+"Allowed now by “%@”" = "现已由“%@”允许";
+"Blocked now by the default policy" = "现已由默认策略阻止";
+"Allowed now by the default policy" = "现已由默认策略允许";
+"“%@” exists and is off" = "“%@”已存在且已关闭";
+"“%@” is on until the workspace stops" = "“%@”在工作区停止前保持开启";
+"“%1$@” is on until %2$@" = "“%1$@”开启至 %2$@";
+"“%@” is already on, with no time limit" = "“%@”已开启，无时间限制";
+"The workspace's rules have changed since this connection" = "自此连接以来，工作区的规则已更改";
+"Log allowed connections" = "记录允许的连接";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "在安全时间线中也列出防火墙放行的连接——每个目标一行，重复项合并显示——以便你从那里阻止某个主机。关闭：只列出被阻止的连接。在你做出选择之前，工作区有规则时此项开启。";
+"Enable rule %@" = "启用规则 %@";
+"Time limit set" = "已设置时间限制";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "规则在编辑器之外被更改（安全时间线中的操作或时间限制）。该更改已合并到你未保存的编辑中。";
+"The rules changed outside the editor while you have unsaved edits." = "你有未保存的编辑时，规则在编辑器之外被更改。";
+"Reload" = "重新载入";
+"Keep my edits" = "保留我的编辑";

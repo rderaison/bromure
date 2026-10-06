@@ -109,8 +109,17 @@ public final class MitmEngine {
     nonisolated(unsafe) private var guardrailsConfigs: [UUID: GuardrailsConfig] = [:]
 
     public nonisolated func setGuardrailsConfig(_ config: GuardrailsConfig, for profileID: UUID) {
-        guardrailsLock.lock(); defer { guardrailsLock.unlock() }
+        guardrailsLock.lock()
+        let prior = guardrailsConfigs[profileID]?.egressPolicy
         guardrailsConfigs[profileID] = config
+        guardrailsLock.unlock()
+        // The firewall is live: a connection the new rules deny is cut now,
+        // not left running until it ends on its own (the proxy route never
+        // crosses the switch, which re-checks the transparent route per
+        // frame). Every call re-checks — also the expiry pass, which arrives
+        // here once a timed rule lapses.
+        if prior != config.egressPolicy { EgressReportDeduper.shared.reset(profileID: profileID) }
+        EgressConnectionRegistry.shared.reevaluate(profileID: profileID, policy: config.egressPolicy)
     }
     public nonisolated func guardrailsConfig(for profileID: UUID) -> GuardrailsConfig? {
         guardrailsLock.lock(); defer { guardrailsLock.unlock() }
@@ -492,11 +501,17 @@ public final class MitmEngine {
                     switch policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
                                           port: UInt16(truncatingIfNeeded: destPort)) {
                     case .deny:
+                        if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
+                                                                   port: destPort, denied: true) {
                         SupplyChainLog.shared.record(
                             "[firewall] ✗ deny tcp \(host):\(destPort) (\(profileID.uuidString.prefix(8)))")
                         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                             eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                                        "host": .string(host), "port": .int(destPort), "layer": .string("l4")])
+                                        "host": .string(host), "port": .int(destPort), "layer": .string("l4"),
+                                        "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
+                                                                      port: UInt16(truncatingIfNeeded: destPort))?.text),
+                                        "by_policy": .bool(true)])
+                        }
                         close(appFD); return
                     case .mitm:  shouldSplice = false
                     case .allow: break
@@ -534,11 +549,17 @@ public final class MitmEngine {
                let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
                 switch policy.verdict(ip: nil, hostnames: [sni], proto: .tcp, port: UInt16(truncatingIfNeeded: destPort)) {
                 case .deny:
+                    if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: sni,
+                                                               port: destPort, denied: true) {
                     SupplyChainLog.shared.record(
                         "[firewall] ✗ deny tcp \(sni):\(destPort) (\(profileID.uuidString.prefix(8)))")
                     BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                         eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                                    "host": .string(sni), "port": .int(destPort), "layer": .string("sni")])
+                                    "host": .string(sni), "port": .int(destPort), "layer": .string("sni"),
+                                    "rule": .of(policy.firstMatch(ip: nil, hostnames: [sni], proto: .tcp,
+                                                                  port: UInt16(truncatingIfNeeded: destPort))?.text),
+                                    "by_policy": .bool(true)])
+                    }
                     close(appFD); return
                 case .mitm:  shouldSplice = false               // `web` rule overrides passthrough
                 case .allow: break

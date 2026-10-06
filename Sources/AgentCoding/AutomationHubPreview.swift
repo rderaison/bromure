@@ -111,9 +111,11 @@ enum AutomationHubPreview {
 
         var store = WatchedRepo(repo: "acme/storefront", profileID: ws1, focus: .both,
                                 fullScanWeekday: 2, fullScanHour: 3, commitBranch: "main",
-                                autoFixMinSeverity: .critical)
+                                autoFixMinSeverity: .critical,
+                                reviewedThrough: ["main": .init(sha: "4f9c2e1a7b3d5c6e8f0a1b2c3d4e5f6a7b8c9d0e",
+                                                                at: ago(30))])
         var pay = WatchedRepo(repo: "acme/payments-api", profileID: ws2,
-                              scans: [.fullScan, .pullRequests])
+                              scans: [.fullScan, .pullRequests], scheduledScope: .baseline)
         for scan in WatchedRepo.Scan.allCases {
             for w in [store, pay] where scan == .fullScan || w.scans.contains(scan) {
                 let a = RepoWatchEngine.automation(for: scan, of: w, id: UUID(), createdAt: ago(200))

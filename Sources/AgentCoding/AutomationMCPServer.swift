@@ -91,7 +91,8 @@ final class AutomationMCPServer: MCPLineHandler {
     GitHub repositories this workspace watches: findings_list and \
     findings_get read them, findings_report files issues you verified (they \
     are deduplicated against what is already known), findings_resolve marks \
-    an open finding as gone from the code.
+    an open finding as gone from the code, and findings_done ends a scan run \
+    (call it once, last, with the commit you reviewed).
     """
 
     private static let fieldProperties: [String: Any] = [
@@ -218,6 +219,16 @@ final class AutomationMCPServer: MCPLineHandler {
                                            "reason": ["type": "string", "description": "One line: why it is gone."]],
                             "required": ["id", "reason"]],
         ],
+        [
+            "name": "findings_done",
+            "description": "End a repository scan run: call it once, as your last action, after your last findings_report. Records the commit you reviewed — the next review of new commits starts after it — and closes the run.",
+            "inputSchema": ["type": "object",
+                            "properties": [
+                                "summary": ["type": "string", "description": "What you covered, what you skipped, how many findings you reported."],
+                                "commit": ["type": "string", "description": "The commit you reviewed (`git rev-parse HEAD`)."],
+                            ] as [String: Any],
+                            "required": ["summary"]],
+        ],
     ]
 
     // MARK: Findings
@@ -319,6 +330,15 @@ final class AutomationMCPServer: MCPLineHandler {
                 return errorResult("only open findings without a running fix can be resolved (this one is \(f.status.rawValue))")
             }
             return textResult("Marked fixed.")
+        case "findings_done":
+            let summary = ((args["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let commit = (args["commit"] as? String)?.trimmingCharacters(in: .whitespaces)
+            guard engine.scanDone(profileID: profileID, branch: branch,
+                                  commit: commit?.isEmpty == true ? nil : commit,
+                                  summary: String(summary.prefix(2000))) else {
+                return errorResult("this session isn't a running repository-watch scan — nothing to close")
+            }
+            return textResult("Recorded — the run closes shortly. You are done: stop here.")
         default:
             return errorResult("Unknown tool: \(name)")
         }

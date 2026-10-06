@@ -113,10 +113,20 @@ final class AutomationHubModel {
 struct WatchWorkspaceChoice: Identifiable, Equatable {
     let id: UUID
     var name: String
+    /// Agents ready to run unattended in this workspace (signed in / with a
+    /// key or model). The editor offers every agent; others get a warning.
     var tools: [Profile.Tool]
     var defaultTool: Profile.Tool
     var hasGitHubToken: Bool
     var askBeforeUseLabels: [String]
+
+    /// A new watch's agent: the workspace's main agent when it's ready,
+    /// else Claude Code when that is, else the first ready one.
+    static func defaultTool(primary: Profile.Tool, ready: [Profile.Tool]) -> Profile.Tool {
+        if ready.contains(primary) { return primary }
+        if ready.contains(.claude) { return .claude }
+        return ready.first ?? primary
+    }
 }
 
 struct AutomationHubView: View {
@@ -128,6 +138,8 @@ struct AutomationHubView: View {
         var deleteWatch: (UUID) -> Void = { _ in }
         var toggleWatch: (UUID) -> Void = { _ in }
         var scanNow: (UUID) -> Void = { _ in }
+        /// A one-off full-repository review, whatever the watch's scope.
+        var scanBaseline: (UUID) -> Void = { _ in }
         var fix: (UUID) -> Void = { _ in }
         /// Ask a Switchboard (room nil = the global one) who should fix it.
         var routeToSwitchboard: ((UUID, UUID?) -> Void)?
@@ -159,6 +171,15 @@ struct AutomationHubView: View {
         let hub = hub
         a.scanNow = { id in
             actions.scanNow(id)
+            let w = store.watch(id)
+            hub.showFlash(String(format: w?.scheduledScope == .newCommits
+                ? NSLocalizedString("Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review).",
+                                    comment: "hub flash")
+                : NSLocalizedString("Full scan of %@ requested — it shows under Recent scans once the agent starts.",
+                                    comment: "hub flash"), w?.repo ?? ""))
+        }
+        a.scanBaseline = { id in
+            actions.scanBaseline(id)
             hub.showFlash(String(format: NSLocalizedString(
                 "Full scan of %@ requested — it shows under Recent scans once the agent starts.",
                 comment: "hub flash"), store.watch(id)?.repo ?? ""))
@@ -169,7 +190,7 @@ struct AutomationHubView: View {
             guard isNew else { return }
             hub.showSecurity(.repositories)
             hub.showFlash(String(format: scan
-                ? NSLocalizedString("Now watching %@ — the first full scan is starting.", comment: "hub flash")
+                ? NSLocalizedString("Now watching %@ — the first review is starting.", comment: "hub flash")
                 : NSLocalizedString("Now watching %@.", comment: "hub flash"), w.repo))
         }
         a.fix = { id in
@@ -345,7 +366,9 @@ struct AutomationHubView: View {
                     Label(NSLocalizedString("Scan Now", comment: "watch"), systemImage: "play.fill")
                 }
                 .controlSize(.small)
-                .help(String(format: NSLocalizedString("Run a full scan of %@ now", comment: ""), first.repo))
+                .help(String(format: first.scheduledScope == .newCommits
+                    ? NSLocalizedString("Review the new commits on %@ now", comment: "")
+                    : NSLocalizedString("Run a full scan of %@ now", comment: ""), first.repo))
             } else {
                 Menu {
                     ForEach(findingStore.watches) { w in
@@ -2147,8 +2170,16 @@ struct WatchCard: View {
                         Label(NSLocalizedString("Scan Now", comment: "watch"), systemImage: "play.fill")
                     }
                     .controlSize(.small)
+                    .help(watch.scheduledScope == .newCommits
+                          ? NSLocalizedString("Review the commits that landed since the last review", comment: "watch")
+                          : NSLocalizedString("Review the whole repository", comment: "watch"))
                     Menu {
                         Button(NSLocalizedString("Edit…", comment: ""), action: onEdit)
+                        if watch.scheduledScope == .newCommits {
+                            Button(NSLocalizedString("Run Baseline Now", comment: "watch: one-off full-repository review")) {
+                                actions.scanBaseline(watch.id)
+                            }
+                        }
                         Button(watch.enabled ? NSLocalizedString("Pause", comment: "")
                                              : NSLocalizedString("Resume", comment: "")) {
                             actions.toggleWatch(watch.id)
@@ -2213,7 +2244,7 @@ struct WatchCard: View {
             Image(systemName: scan.systemImage)
                 .frame(width: 16)
                 .foregroundStyle(on ? .primary : .tertiary)
-            Text(scan.shortName)
+            Text(watch.scanShortName(scan))
                 .font(.system(size: 12))
                 .foregroundStyle(on ? .primary : .tertiary)
             Spacer()
@@ -2373,9 +2404,28 @@ struct WatchEditorSheet: View {
                               text: Binding(get: { draft.repoPath },
                                             set: { draft.repoPath = $0; pathEdited = true }))
                         .help(NSLocalizedString("Where the repository is (or will be cloned) inside the workspace.", comment: ""))
-                    if let ws = workspace, !ws.tools.isEmpty {
-                        Picker(NSLocalizedString("Agent", comment: ""), selection: $draft.tool) {
-                            ForEach(ws.tools, id: \.self) { Text($0.displayName).tag($0) }
+                    Picker(NSLocalizedString("Agent", comment: ""), selection: $draft.tool) {
+                        ForEach(Profile.Tool.allCases, id: \.self) { t in
+                            Text(agentReady(t) ? t.displayName
+                                 : String(format: NSLocalizedString("%@ (not set up here)", comment: "watch editor: agent not signed in / configured in this workspace"),
+                                          t.displayName))
+                                .tag(t)
+                        }
+                    }
+                    if !agentReady(draft.tool) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Label(String(format: NSLocalizedString(
+                                "%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan.",
+                                comment: "watch editor"), draft.tool.displayName),
+                                  systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .font(.system(size: 11))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                            Button(NSLocalizedString("Edit Workspace…", comment: "")) {
+                                onEditWorkspace(draft.profileID)
+                            }
+                            .controlSize(.small)
                         }
                     }
                     Picker(NSLocalizedString("Look for", comment: ""), selection: $draft.focus) {
@@ -2383,7 +2433,26 @@ struct WatchEditorSheet: View {
                     }
                 }
                 Section(NSLocalizedString("Scans", comment: "watch editor")) {
-                    Toggle(WatchedRepo.Scan.fullScan.displayName, isOn: scanBinding(.fullScan))
+                    Toggle(NSLocalizedString("Scheduled review", comment: "watch editor: the weekly review toggle"),
+                           isOn: scanBinding(.fullScan))
+                    // What the scheduled review (and Scan Now) covers. Shown
+                    // even with the schedule off: Scan Now follows it too.
+                    Picker(NSLocalizedString("Review", comment: "watch editor: review scope picker"),
+                           selection: $draft.scheduledScope) {
+                        ForEach(WatchedRepo.ReviewScope.allCases, id: \.self) {
+                            Text($0.displayName).tag($0)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    scopeExplanation
+                    if draft.scheduledScope == .newCommits, draft.lastReviewed == nil {
+                        Toggle(NSLocalizedString("Start with a full-repository baseline", comment: "watch editor"),
+                               isOn: $draft.firstRunBaseline)
+                    }
+                    if draft.scheduledScope == .newCommits || draft.scans.contains(.commits) {
+                        TextField(NSLocalizedString("Branch", comment: ""), text: $draft.commitBranch,
+                                  prompt: Text(NSLocalizedString("default branch", comment: "")))
+                    }
                     if draft.scans.contains(.fullScan) {
                         LabeledContent(NSLocalizedString("Weekly", comment: "full scan cadence")) {
                             HStack(spacing: 6) {
@@ -2405,10 +2474,6 @@ struct WatchEditorSheet: View {
                         }
                     }
                     Toggle(WatchedRepo.Scan.commits.displayName, isOn: scanBinding(.commits))
-                    if draft.scans.contains(.commits) {
-                        TextField(NSLocalizedString("Branch", comment: ""), text: $draft.commitBranch,
-                                  prompt: Text(NSLocalizedString("default branch", comment: "")))
-                    }
                     Toggle(WatchedRepo.Scan.pullRequests.displayName, isOn: scanBinding(.pullRequests))
                     if !promptGuardInstalled,
                        draft.scans.contains(.commits) || draft.scans.contains(.pullRequests) {
@@ -2419,7 +2484,7 @@ struct WatchEditorSheet: View {
                             .foregroundStyle(.orange)
                     }
                     Text(NSLocalizedString(
-                        "Commit and pull-request scans start with what lands after the watch is created. Use Scan Now for the existing code.",
+                        "Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code.",
                         comment: ""))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
@@ -2482,7 +2547,9 @@ struct WatchEditorSheet: View {
         .frame(width: 580, height: 720)
         .task(id: draft.profileID) { await loadRepos() }
         .onAppear {
-            if let ws = workspace, !ws.tools.isEmpty, !ws.tools.contains(draft.tool) {
+            // A new watch starts on an agent that can run; an existing one
+            // keeps its choice (the warning says what's missing).
+            if isNew, let ws = workspace, !ws.tools.isEmpty, !ws.tools.contains(draft.tool) {
                 draft.tool = ws.defaultTool
             }
         }
@@ -2492,6 +2559,47 @@ struct WatchEditorSheet: View {
         .onChange(of: draft.profileID) { _, _ in
             if let ws = workspace, !ws.tools.contains(draft.tool) { draft.tool = ws.defaultTool }
         }
+    }
+
+    /// Whether the agent can run unattended in the chosen workspace.
+    private func agentReady(_ t: Profile.Tool) -> Bool {
+        guard let ws = workspace else { return true }
+        return ws.tools.contains(t)
+    }
+
+    /// What the chosen scope means, in a sentence — and how far the
+    /// reviews have got when they have.
+    @ViewBuilder private var scopeExplanation: some View {
+        let branch = draft.reviewBranchKey.isEmpty
+            ? NSLocalizedString("the default branch", comment: "watch editor")
+            : draft.reviewBranchKey
+        VStack(alignment: .leading, spacing: 3) {
+            switch draft.scheduledScope {
+            case .newCommits:
+                Text(String(format: NSLocalizedString(
+                    "Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run.",
+                    comment: "watch editor"), branch))
+                if let mark = draft.lastReviewed {
+                    Text(String(format: NSLocalizedString("Reviewed through %1$@ (%2$@).", comment: "watch editor"),
+                                mark.shortSHA,
+                                mark.at.formatted(date: .abbreviated, time: .shortened)))
+                } else if draft.firstRunBaseline {
+                    Text(NSLocalizedString("The first review covers the whole repository; later ones only what's new.",
+                                           comment: "watch editor"))
+                } else {
+                    Text(String(format: NSLocalizedString(
+                        "Nothing reviewed yet: the first review covers the last %d commits.",
+                        comment: "watch editor"), WatchedRepo.recentCommitWindow))
+                }
+            case .baseline:
+                Text(NSLocalizedString(
+                    "Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens.",
+                    comment: "watch editor"))
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// The picker's list: everything, or what matches what's typed so far.

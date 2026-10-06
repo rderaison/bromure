@@ -1583,12 +1583,25 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// (switch L4 + SNI) and, via `web` rules, HTTP method restrictions.
     public var egressRules: String = ""
 
+    /// "Log allowed connections" (Firewall pane): whether the Security
+    /// Timeline gets a row for connections the firewall lets through, not just
+    /// the blocked ones. nil = automatic — logged while the workspace has
+    /// rules (or denies unmatched traffic), so a workspace with no firewall
+    /// doesn't claim to have "allowed" anything. Rows are deduplicated per
+    /// destination (one a minute) and fold into a counted row.
+    public var logAllowedConnections: Bool? = nil
+
     /// Parsed firewall rules, or allow-all when empty/unparseable (never blocks
     /// on a bad rule — the editor validates before save).
     public var resolvedEgressPolicy: EgressPolicy {
-        guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .allowAll }
         #if canImport(SandboxEngine)
-        guard var policy = try? EgressPolicy.parse(egressRules) else { return .allowAll }
+        var none = EgressPolicy.allowAll
+        none.logsAllowed = logAllowedConnections
+        guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              var policy = try? EgressPolicy.parse(egressRules) else { return none }
+        // Automatic: by the user's own rules, before the built-in allowance
+        // below makes every parsed ruleset look "active".
+        policy.logsAllowed = logAllowedConnections ?? policy.isActive
         // The local-inference sentinel (guest → https://bromure.llm → on-host
         // engine) never leaves this Mac, so no egress ruleset may cut agents
         // off from Local Models — without this, `default deny` 403s every
@@ -1603,6 +1616,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         #else
         // Client mirror (iOS/visionOS): the stub EgressPolicy carries no rule
         // model and the client never enforces egress — the server does.
+        guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .allowAll }
         return (try? EgressPolicy.parse(egressRules)) ?? .allowAll
         #endif
     }
@@ -2152,6 +2166,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kubeconfigs
         case guardrails
         case egressRules
+        case logAllowedConnections
         case disableTransparentProxy
         case disableExfiltrationAlerts
         case supplyChain
@@ -2278,6 +2293,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
         egressRules = try c.decodeIfPresent(String.self, forKey: .egressRules) ?? ""
+        logAllowedConnections = try c.decodeIfPresent(Bool.self, forKey: .logAllowedConnections)
         disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
         disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
@@ -2433,6 +2449,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !egressRules.isEmpty {
             try c.encode(egressRules, forKey: .egressRules)
         }
+        try c.encodeIfPresent(logAllowedConnections, forKey: .logAllowedConnections)
         if disableExfiltrationAlerts {
             try c.encode(disableExfiltrationAlerts, forKey: .disableExfiltrationAlerts)
         }

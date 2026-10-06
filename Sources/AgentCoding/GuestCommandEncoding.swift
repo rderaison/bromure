@@ -60,11 +60,17 @@ enum GuestCommand {
         case "run":
             // Automation fire: same layout as "create", but the guest falls
             // back to a plain agent tab when cwd isn't a git repo. Optional
-            // 6th arg: run mode ("task" wires the board MCP tools in).
-            guard args.count >= 4 else { return nil }   // cwd, slug, display, tool[, prompt[, mode]]
+            // 6th arg: run mode ("task" wires the board MCP tools in,
+            // "review" the findings tools). Optional 7th: the commit (or
+            // origin/<branch>) the worktree starts from — a mode-less run
+            // with a base holds the 6th slot with the placeholder.
+            guard args.count >= 4 else { return nil }   // cwd, slug, display, tool[, prompt[, mode[, base]]]
             name = "automation-run"
+            let mode = args.count >= 6 ? args[5] : ""
+            let base = args.count >= 7 ? args[6] : ""
             encoded = args.prefix(4).map(arg) + [arg(args.count >= 5 ? args[4] : "")]
-                + (args.count >= 6 && !args[5].isEmpty ? [arg(args[5])] : [])
+                + (!mode.isEmpty || !base.isEmpty ? [arg(mode)] : [])
+                + (!base.isEmpty ? [arg(base)] : [])
         case "finish":
             guard args.count >= 1 else { return nil }   // worktree branch
             name = "automation-finish"; encoded = [arg(args[0])]

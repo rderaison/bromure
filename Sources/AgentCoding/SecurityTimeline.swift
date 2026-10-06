@@ -65,6 +65,56 @@ public final class SecurityTimeline {
         /// Repeats of a routine event (same credential swapped in for the same
         /// host) share this key and fold into one row with a `count` (B40).
         public var coalesceKey: String? = nil
+        /// A connection-level firewall verdict, structured — what the row's
+        /// quick actions (allow / block / switch the rule off) work from.
+        public var firewall: Firewall? = nil
+    }
+
+    /// The destination and deciding rule of a firewall connection verdict.
+    public struct Firewall: Sendable, Equatable {
+        /// The hostname (DNS-snooped name, SNI, CONNECT host); nil for a flow
+        /// to a bare IP.
+        public var host: String?
+        public var ip: String?
+        public var port: Int?
+        /// "tcp" / "udp" (or "ipv6" for the v6 drop).
+        public var proto: String?
+        /// The deciding rule's text (`EgressPolicy.Rule.text`); nil = the
+        /// default action decided.
+        public var rule: String?
+        public var denied: Bool
+        /// False for drops that aren't a ruleset decision (IPv6 / QUIC / IP
+        /// fragments) — nothing a rule change would alter.
+        public var byPolicy: Bool
+        /// The destination's other DNS names (CNAME targets, other names
+        /// seen for its address) — `host` is the one the guest asked for.
+        public var aliases: [String] = []
+
+        public init(host: String?, ip: String?, port: Int?, proto: String?, rule: String?,
+                    denied: Bool, byPolicy: Bool, aliases: [String] = []) {
+            self.host = host; self.ip = ip; self.port = port; self.proto = proto
+            self.rule = rule; self.denied = denied; self.byPolicy = byPolicy
+            self.aliases = aliases
+        }
+
+        var wire: [String: Any] {
+            var d: [String: Any] = ["denied": denied, "byPolicy": byPolicy]
+            if !aliases.isEmpty { d["aliases"] = aliases }
+            if let host { d["host"] = host }
+            if let ip { d["ip"] = ip }
+            if let port { d["port"] = port }
+            if let proto { d["proto"] = proto }
+            if let rule { d["rule"] = rule }
+            return d
+        }
+
+        init?(wire d: [String: Any]?) {
+            guard let d else { return nil }
+            self.init(host: d["host"] as? String, ip: d["ip"] as? String, port: d["port"] as? Int,
+                      proto: d["proto"] as? String, rule: d["rule"] as? String,
+                      denied: d["denied"] as? Bool ?? false, byPolicy: d["byPolicy"] as? Bool ?? false,
+                      aliases: d["aliases"] as? [String] ?? [])
+        }
     }
 
     /// A routine row folds into an earlier one with the same `coalesceKey`
@@ -88,6 +138,7 @@ public final class SecurityTimeline {
                                        workspace: e.workspace ?? old.workspace, machine: e.machine,
                                        count: (old.count ?? 1) + (e.count ?? 1))
                     merged.coalesceKey = key
+                    merged.firewall = e.firewall ?? old.firewall
                     events.remove(at: i)
                     events.append(merged)
                     return
@@ -191,6 +242,7 @@ public final class SecurityTimeline {
         if let w = e.workspace { d["w"] = w }
         if let n = e.count { d["n"] = n }
         if let ck = e.coalesceKey { d["ck"] = ck }
+        if let fw = e.firewall { d["fw"] = fw.wire }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -209,6 +261,7 @@ public final class SecurityTimeline {
                       profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
                       workspace: d["w"] as? String, count: d["n"] as? Int)
         e.coalesceKey = (d["ck"] as? String).map(SecretFingerprint.redactLegacy)
+        e.firewall = Firewall(wire: d["fw"] as? [String: Any])
         return e
     }
 
@@ -308,6 +361,7 @@ public final class SecurityTimeline {
             if let w = e.workspace { r["workspace"] = w }
             if let n = e.count { r["count"] = n }
             if let ck = e.coalesceKey { r["ck"] = ck }
+            if let fw = e.firewall { r["fw"] = fw.wire }
             return r
         }
     }
@@ -328,6 +382,7 @@ public final class SecurityTimeline {
                           profileID: pid, workspace: r["workspace"] as? String, machine: host,
                           count: r["count"] as? Int)
             e.coalesceKey = r["ck"] as? String
+            e.firewall = Firewall(wire: r["fw"] as? [String: Any])
             return e
         }
     }
@@ -456,16 +511,62 @@ public final class SecurityTimeline {
             let host = str(d, "host") ?? str(d, "ip") ?? "?"
             let action = (str(d, "action") ?? "allowed").lowercased()
             let kind: Decision = action.contains("allow") ? .allowed : .blocked
+            // The verdict word, localized (the event carries English
+            // "allow"/"deny", older ones "allowed"/"blocked").
+            let word = kind == .allowed
+                ? NSLocalizedString("allow", comment: "Security Timeline firewall decision word: the connection was let through")
+                : NSLocalizedString("deny", comment: "Security Timeline firewall decision word: the connection was refused")
             // A `web` rule's verb decision carries the request: show it like a
             // guardrails block ("POST httpbin.org/post").
             if let method = str(d, "method"), !method.isEmpty {
                 let cond = "\(method) \(host)\(str(d, "path") ?? "")"
-                let decision = str(d, "reason").map { "\(action) — \($0)" } ?? action
+                let decision = str(d, "reason").map { "\(word) — \($0)" } ?? word
                 return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), cond, decision, kind)
             }
             let port = int(d, "port").map { ":\($0)" } ?? ""
             let proto = str(d, "proto").map { " \($0)" } ?? ""
-            return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), "\(host)\(port)\(proto)", action, kind)
+            // A ruleset decision names what decided: the matching rule, or the
+            // default action. Older events carry neither key — left as they
+            // were. Transport drops (IPv6 / QUIC / fragments) say by_policy false.
+            var byPolicy = d["rule"] != nil
+            if case .bool(let v)? = d["by_policy"] { byPolicy = v }
+            let rule = str(d, "rule")
+            var decision = word
+            if byPolicy {
+                decision = rule.map { "\(word) — \($0)" }
+                    ?? String(format: NSLocalizedString("%@ — default policy",
+                                                        comment: "Security Timeline decision: firewall verdict from the unmatched-traffic default; %@ = the localized allow/deny word"),
+                              word)
+            }
+            // An open connection the firewall cut when its rules changed
+            // (a rule switched off, expired, or a new deny).
+            var closed = false
+            if case .bool(true)? = d["closed"] {
+                closed = true
+                let why = str(d, "previous_rule").map {
+                    String(format: NSLocalizedString("“%@” no longer allows it",
+                                                     comment: "Security Timeline: why an open connection was closed; %@ = the rule that had allowed it"), $0)
+                } ?? decision
+                decision = String(format: NSLocalizedString("connection closed — %@",
+                                                            comment: "Security Timeline decision: an open connection cut by a firewall change; %@ = why"),
+                                  why)
+            }
+            var e = row(NSLocalizedString("Firewall", comment: "Security Timeline engine"),
+                        "\(host)\(port)\(proto)", decision, kind)
+            let primary = str(d, "host")
+            var aliases: [String] = []
+            if case .array(let names)? = d["hostnames"] {
+                for case .string(let n) in names where n != primary && !aliases.contains(n) { aliases.append(n) }
+            }
+            e.firewall = Firewall(host: primary, ip: str(d, "ip"), port: int(d, "port"),
+                                  proto: str(d, "proto"), rule: rule,
+                                  denied: kind == .blocked, byPolicy: byPolicy, aliases: aliases)
+            // Allowed connections are routine: repeats to one destination
+            // fold into one counted row (blocks and cuts stay one row each).
+            if kind == .allowed, !closed {
+                e.coalesceKey = "egress_allow|\(primary ?? str(d, "ip") ?? "")|\(int(d, "port") ?? 0)|\(str(d, "proto") ?? "")|\(rule ?? "")"
+            }
+            return e
 
         case "credential.consent":
             // The user's answer to a credential-approval prompt (or its

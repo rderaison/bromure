@@ -47,6 +47,10 @@ final class RepoWatchEngine {
     func saveWatch(_ input: WatchedRepo) -> WatchedRepo {
         guard let delegate else { return input }
         var w = input
+        // How far the reviews got is the engine's to write: an editor (or a
+        // fat client) saving a copy it opened before a review finished must
+        // not wind the mark back.
+        if let current = store.watch(w.id) { w.reviewedThrough = current.reviewedThrough }
         let autoStore = delegate.scheduledAutomationStore
         for scan in WatchedRepo.Scan.allCases {
             let wanted = scan == .fullScan || w.scans.contains(scan)
@@ -83,7 +87,7 @@ final class RepoWatchEngine {
                                        id: UUID, createdAt: Date?) -> ScheduledAutomation {
         var a = ScheduledAutomation(
             id: id,
-            name: "\(w.repoName) · \(scan.shortName)",
+            name: "\(w.repoName) · \(w.scanShortName(scan))",
             profileID: w.profileID,
             enabled: w.enabled && w.scans.contains(scan),
             githubRepo: w.repo,
@@ -129,8 +133,9 @@ final class RepoWatchEngine {
         saveWatch(w)
     }
 
-    /// Fire the full scan now.
-    func scanNow(_ id: UUID) {
+    /// Fire the scheduled review now — what it covers follows the watch's
+    /// scope; `baseline` forces a one-off full-repository review.
+    func scanNow(_ id: UUID, baseline: Bool = false) {
         guard var w = store.watch(id) else { return }
         if w.automationID(for: .fullScan) == nil
             || delegate?.scheduledAutomationStore.automation(w.automationID(for: .fullScan)!) == nil {
@@ -138,8 +143,51 @@ final class RepoWatchEngine {
             w = saveWatch(w)
         }
         guard let aid = w.automationID(for: .fullScan) else { return }
-        BACDebug.log("watch", "scan now: \(w.repo)")
-        delegate?.runAutomationNow(aid)
+        BACDebug.log("watch", "scan now: \(w.repo)\(baseline ? " (baseline)" : "")")
+        guard let delegate, let automation = delegate.scheduledAutomationStore.automation(aid) else { return }
+        delegate.scheduledAutomationEngine.runNow(automation, forceBaseline: baseline)
+    }
+
+    // MARK: Fire-time planning
+
+    /// Plan a watch's scheduled review as it fires: ask GitHub for the
+    /// branch tip, decide what the run covers (`ReviewPlan`), and write
+    /// the prompt for the watch's agent. A run with nothing new to review
+    /// is skipped. nil = not a watch's scheduled review.
+    func prepareRun(_ a: ScheduledAutomation, forceBaseline: Bool) async
+        -> ScheduledAutomationEngine.WatchRunPreparation? {
+        guard let wid = a.watchID, let w = store.watch(wid),
+              w.automationID(for: .fullScan) == a.id else { return nil }
+        var head: String?
+        if let delegate, let token = delegate.githubToken(profileID: w.profileID), !token.isEmpty {
+            do {
+                head = try await GitHubPRPoller.fetchHeadSHA(repo: w.repo, token: token,
+                                                             branch: w.reviewBranchKey)
+            } catch {
+                BACDebug.log("watch", "\(w.repo): couldn't read the branch tip — \(error.localizedDescription); the agent resolves it")
+            }
+        }
+        // The watch may have been edited while GitHub answered.
+        let current = store.watch(wid) ?? w
+        return Self.preparation(for: current, automation: a, forceBaseline: forceBaseline, head: head)
+    }
+
+    /// The pure half of `prepareRun`.
+    nonisolated static func preparation(for w: WatchedRepo, automation a: ScheduledAutomation,
+                                        forceBaseline: Bool, head: String?)
+        -> ScheduledAutomationEngine.WatchRunPreparation {
+        let plan = ReviewPlan.make(for: w, forceBaseline: forceBaseline, head: head)
+        let info = AutomationRunRecord.ReviewInfo(
+            scope: plan.scope.rawValue, branch: w.reviewBranchKey,
+            base: plan.base, head: plan.head)
+        let remoteRef = w.reviewBranchKey.isEmpty ? "origin/HEAD" : "origin/\(w.reviewBranchKey)"
+        var prep = ScheduledAutomationEngine.WatchRunPreparation(
+            prompt: RepoWatchPrompts.scheduledReview(w, plan: plan, tool: a.tool),
+            detail: plan.runDetail,
+            base: plan.head ?? remoteRef,
+            review: info)
+        if case .upToDate = plan { prep.skipReason = plan.runDetail }
+        return prep
     }
 
     /// Runs of the watch's automations, newest first.
@@ -269,7 +317,7 @@ final class RepoWatchEngine {
             details: brief.details,
             profileID: watch?.profileID ?? f.profileID,
             repoPath: watch?.repoPath ?? WatchedRepo.defaultRepoPath(for: f.repo),
-            tool: watch?.tool ?? .claude,
+            tool: watch?.tool ?? delegate.profile(for: f.profileID)?.tool ?? .claude,
             stage: .backlog,
             cloneURL: "https://github.com/\(f.repo).git")
         delegate.codingTaskStore.upsert(task)
@@ -299,10 +347,31 @@ final class RepoWatchEngine {
 
     // MARK: Scan completion
 
+    /// findings_done: the scanning agent says it's finished. Records the
+    /// commit it reviewed when the run didn't know it yet, and completes
+    /// the run — the one done signal every agent can give (Codex, Grok and
+    /// omp have no completion hook). false = not a watch scan's session.
+    func scanDone(profileID: UUID, branch: String?, commit: String?, summary: String) -> Bool {
+        let b = binding(profileID: profileID, branch: branch)
+        guard let delegate, let run = b.run, b.watch != nil else { return false }
+        if let c = commit?.trimmingCharacters(in: .whitespaces), RepoWatchPrompts.isSHA(c) {
+            delegate.scheduledAutomationStore.setReviewHead(run.id, sha: c.lowercased())
+        }
+        BACDebug.log("watch", "scan done (agent): \(branch ?? "?") — \(summary.prefix(200))")
+        return delegate.scheduledAutomationEngine.runDeclaredDone(profileID: profileID,
+                                                                 worktreeBranch: branch)
+    }
+
     func runCompleted(_ run: AutomationRunRecord) {
         guard let delegate,
               let automation = delegate.scheduledAutomationStore.automation(run.automationID),
               let wid = automation.watchID, let w = store.watch(wid) else { return }
+        // A finished scheduled review moves the branch's mark to what it
+        // covered — the next incremental review starts after it.
+        if let review = run.review, let head = run.review?.head,
+           store.advanceReviewMark(watchID: wid, branch: review.branch, sha: head, at: run.firedAt) {
+            BACDebug.log("watch", "\(w.repo): reviewed through \(head.prefix(7))")
+        }
         let fresh = store.findings(firstReportedBy: run.id)
         let seen = store.findings(forWatch: wid).filter { $0.runIDs.contains(run.id) }
         BACDebug.log("watch", "scan done on \(w.repo): \(fresh.count) new, \(seen.count) reported")

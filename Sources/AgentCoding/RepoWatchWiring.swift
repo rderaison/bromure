@@ -6,13 +6,19 @@ import Foundation
 // control-socket routes (the fat client's and the debug hooks'), and the
 // workspace list the watch editor offers.
 extension ACAppDelegate {
-    /// Workspaces as the watch editor needs them.
+    /// Workspaces as the watch editor needs them. `tools` = the agents
+    /// ready to run unattended there (set up in the workspace, or reachable
+    /// through the Models settings / a shared sign-in) — the same set a new
+    /// session counts as ready. The editor offers every agent and warns
+    /// about the others.
     func watchWorkspaceChoices() -> [WatchWorkspaceChoice] {
         profiles.map { p in
-            let tools = p.allToolSpecs.map(\.tool)
+            let ready = p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
+                                             subscribed: subscribedProviders(for: p))
+            let tools = Profile.Tool.allCases.filter { ready.contains($0) }
             return WatchWorkspaceChoice(
                 id: p.id, name: p.name, tools: tools,
-                defaultTool: tools.contains(p.tool) ? p.tool : (tools.first ?? p.tool),
+                defaultTool: WatchWorkspaceChoice.defaultTool(primary: p.tool, ready: tools),
                 hasGitHubToken: p.hasGitHubCredential,
                 askBeforeUseLabels: p.askBeforeUseCredentialLabels)
         }
@@ -94,7 +100,8 @@ extension ACAppDelegate {
     /// body; "error" set = failure.
     ///
     ///   POST   /watches                    upsert (body: a WatchedRepo doc)
-    ///   POST   /watches/{id}/scan          full scan now
+    ///   POST   /watches/{id}/scan          scheduled review now (its scope)
+    ///   POST   /watches/{id}/baseline      one-off full-repository review
     ///   POST   /watches/{id}/toggle        pause / resume
     ///   DELETE /watches/{id}               stop watching (findings removed)
     ///   POST   /findings/{id}/fix          start a fix task
@@ -129,6 +136,7 @@ extension ACAppDelegate {
             guard let id, findingStore.watch(id) != nil else { return ["error": "unknown watch"] }
             switch (method, action) {
             case ("POST", "scan"):   repoWatchEngine.scanNow(id)
+            case ("POST", "baseline"): repoWatchEngine.scanNow(id, baseline: true)
             case ("POST", "toggle"): repoWatchEngine.toggleWatch(id)
             case ("DELETE", ""):     repoWatchEngine.removeWatch(id, removeFindings: true)
             default: return ["error": "not found"]

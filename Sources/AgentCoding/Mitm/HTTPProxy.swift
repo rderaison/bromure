@@ -87,6 +87,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
+    /// Firewall cut (`EgressConnectionRegistry`): the upstream session in
+    /// flight, so a cut cancels it at once (an idle long-poll would otherwise
+    /// linger until its next chunk), and whether `fd` is already closed (a
+    /// cut must never `shutdown` a descriptor the process has since reused).
+    private let cutLock = NSLock()
+    private var activeUpstreamSession: URLSession?
+    private var fdClosed = false
+    private var firewallCut = false
+
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
          traceStore: TraceStore,
@@ -125,7 +134,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// regardless of success.
     @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
     func run() async {
-        defer { close(fd) }
+        defer { closeFD() }
         do {
             try await drive()
         } catch {
@@ -190,7 +199,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
                 return
             }
-            try await driveTLS(host: host, port: port, t0: t0, cleartext: true, prefix: rewritten)
+            reportProxyAllowed(host: host, port: port)
+            try await trackedForFirewall(host: host, port: port, route: "proxy") {
+                try await driveTLS(host: host, port: port, t0: t0, cleartext: true, prefix: rewritten)
+            }
             return
         }
 
@@ -208,10 +220,87 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return
         }
 
-        // 2. Confirm the tunnel.
-        try writeAll(fd: fd, bytes: Array("HTTP/1.1 200 Connection established\r\n\r\n".utf8))
+        reportProxyAllowed(host: host, port: port)
+        try await trackedForFirewall(host: host, port: port, route: "proxy") {
+            // 2. Confirm the tunnel.
+            try writeAll(fd: fd, bytes: Array("HTTP/1.1 200 Connection established\r\n\r\n".utf8))
 
-        try await driveTLS(host: host, port: port, t0: t0)
+            try await driveTLS(host: host, port: port, t0: t0)
+        }
+    }
+
+    /// Run `body` (the life of this connection) registered with the firewall's
+    /// open-connection registry, so a rule change that denies `host:port` cuts
+    /// it mid-transfer. Re-checks the verdict once registered: a policy swap
+    /// that landed between the opening check and the registration would
+    /// otherwise miss this connection.
+    private func trackedForFirewall(host: String, port: Int, route: String,
+                                    _ body: () async throws -> Void) async throws {
+        let p16 = UInt16(truncatingIfNeeded: port)
+        let rule = guardrailsProvider()?.egressPolicy?
+            .firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text
+        let token = EgressConnectionRegistry.shared.register(
+            profileID: profileID, host: host, port: port, route: route, rule: rule) { [weak self] in
+                self?.cutForFirewall()
+            }
+        defer { EgressConnectionRegistry.shared.unregister(token) }
+        if let policy = guardrailsProvider()?.egressPolicy,
+           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16) == .deny {
+            return
+        }
+        try await body()
+    }
+
+    /// The firewall now denies this connection: close the guest side (every
+    /// blocked read/write on it fails, which ends the relay) and cancel the
+    /// upstream request in flight.
+    private func cutForFirewall() {
+        cutLock.lock()
+        defer { cutLock.unlock() }
+        guard !fdClosed, !firewallCut else { return }
+        firewallCut = true
+        Darwin.shutdown(fd, SHUT_RDWR)
+        activeUpstreamSession?.invalidateAndCancel()
+    }
+
+    /// Remember the upstream session in flight (cancelled at once if the
+    /// firewall already cut this connection).
+    private func noteUpstreamSession(_ session: URLSession) {
+        cutLock.lock()
+        activeUpstreamSession = session
+        let cut = firewallCut
+        cutLock.unlock()
+        if cut { session.invalidateAndCancel() }
+    }
+
+    /// Close `fd` — after which a firewall cut must leave it alone.
+    private func closeFD() {
+        cutLock.lock()
+        fdClosed = true
+        activeUpstreamSession = nil
+        cutLock.unlock()
+        close(fd)
+    }
+
+    /// An allowed CONNECT / forward-proxy request, for the Security Timeline —
+    /// the proxy-route twin of the switch's allowed-flow report, with the same
+    /// fields, the same "Log allowed connections" gate and the same
+    /// per-destination dedupe. The on-host local-inference endpoint is never
+    /// reported (it never leaves this Mac).
+    private func reportProxyAllowed(host: String, port: Int) {
+        guard let policy = guardrailsProvider()?.egressPolicy, policy.reportsAllowed,
+              host.lowercased() != InferenceService.localMitmHost,
+              EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
+                                                      port: port, denied: false) else { return }
+        let rule = policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
+                                     port: UInt16(truncatingIfNeeded: port))?.text
+        SupplyChainLog.shared.record(
+            "[firewall] → allow tcp \(host):\(port) (\(profileID.uuidString.prefix(8)))")
+        BACEventEmitter.shared.emitDetached(
+            profileID: profileID, eventType: "egress.firewall",
+            eventData: ["action": .string("allow"), "proto": .string("tcp"),
+                        "host": .string(host), "port": .int(port), "layer": .string("proxy"),
+                        "rule": .of(rule), "by_policy": .bool(true)])
     }
 
     /// Connection-layer egress check for proxied flows: true when the profile's
@@ -221,14 +310,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// chain, which sees the decrypted request.
     private func deniedByEgressPolicy(host: String, port: Int) -> Bool {
         guard let policy = guardrailsProvider()?.egressPolicy else { return false }
+        let p16 = UInt16(truncatingIfNeeded: port)
         guard case .deny = policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
-                                          port: UInt16(truncatingIfNeeded: port)) else { return false }
+                                          port: p16) else { return false }
+        // Refused every time; reported once a minute per destination.
+        guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
+                                                      port: port, denied: true) else { return true }
         SupplyChainLog.shared.record(
             "[firewall] ✗ deny tcp \(host):\(port) (\(profileID.uuidString.prefix(8)))")
         BACEventEmitter.shared.emitDetached(
             profileID: profileID, eventType: "egress.firewall",
             eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                        "host": .string(host), "port": .int(port), "layer": .string("proxy")])
+                        "host": .string(host), "port": .int(port), "layer": .string("proxy"),
+                        "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text),
+                        "by_policy": .bool(true)])
         return true
     }
 
@@ -240,9 +335,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// exit, like `run()`.
     @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
     func runTransparentTLS(host: String, port: Int) async {
-        defer { close(fd) }
+        defer { closeFD() }
         do {
-            try await driveTLS(host: host, port: port, t0: Date())
+            try await trackedForFirewall(host: host, port: port, route: "transparent") {
+                try await driveTLS(host: host, port: port, t0: Date())
+            }
         } catch {
             FileHandle.standardError.write(Data("[mitm] \(error)\n".utf8))
         }
@@ -254,9 +351,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// `Host` header (the switch has no SNI for cleartext). Closes the FD on exit.
     @available(macOS, deprecated: 10.15, message: "shares driveTLS, which drives SecureTransport for the HTTPS path")
     func runTransparentHTTP(host: String, port: Int) async {
-        defer { close(fd) }
+        defer { closeFD() }
         do {
-            try await driveTLS(host: host, port: port, t0: Date(), cleartext: true)
+            try await trackedForFirewall(host: host, port: port, route: "transparent") {
+                try await driveTLS(host: host, port: port, t0: Date(), cleartext: true)
+            }
         } catch {
             FileHandle.standardError.write(Data("[mitm] \(error)\n".utf8))
         }
@@ -854,6 +953,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
            capture.matches(host: host, method: reqMethod, path: reqPath,
                            body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
             let captureSession = upstreamSession(for: host, insecure: insecure)
+            noteUpstreamSession(captureSession)
             defer { captureSession.finishTasksAndInvalidate() }
             let upstream = try await relayUpstreamCollecting(
                 rawRequest: swap.modified, host: host, port: port,
@@ -998,6 +1098,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     SecIdentity (Kubernetes API server et al.) when the
         //     upstream challenges for a client cert.
         let session = upstreamSession(for: host, insecure: insecure)
+        noteUpstreamSession(session)
         // URLSession strong-refs its delegate until invalidated (per
         // Apple's docs). Without this `defer`, every MITM connection
         // leaks one URLSession + one ClientCertChallengeDelegate

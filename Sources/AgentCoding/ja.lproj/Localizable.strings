@@ -3210,7 +3210,6 @@
 "Closed" = "クローズ";
 "Commit" = "コミット";
 "Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "コミットとプルリクエストのスキャンでは第三者のテキストをエージェントに渡すため、PromptGuard モデルが必要です。監視を保存するとダウンロードされます。準備ができるまで、これらのスキャンはブロックされます。";
-"Commit and pull-request scans start with what lands after the watch is created. Use Scan Now for the existing code." = "コミットとプルリクエストのスキャンは、監視の作成後に届いたものから開始します。既存のコードには「今すぐスキャン」を使用してください。";
 "Commits" = "コミット";
 "Couldn't clone %1$@ into %2$@ — %3$@" = "%1$@ を %2$@ にクローンできませんでした — %3$@";
 "Critical" = "緊急";
@@ -3320,7 +3319,6 @@
 "Watch a Repository…" = "リポジトリを監視…";
 "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "修正を開始しました。エージェントが専用のブランチで作業しています。準備ができると「レビュー中」に移動します。";
 "Full scan of %@ requested — it shows under Recent scans once the agent starts." = "%@ のフルスキャンをリクエストしました。エージェントが開始すると「最近のスキャン」に表示されます。";
-"Now watching %@ — the first full scan is starting." = "%@ の監視を開始しました。最初のフルスキャンを開始しています。";
 "Now watching %@." = "%@ の監視を開始しました。";
 "%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ が %3$@ で、%2$@ の新しいブランチ上でプロンプトに取り組みます";
 "%d run(s) need your attention" = "%d 件の実行に対応が必要です";
@@ -3988,3 +3986,87 @@
 /* Subscription workspace vs the global API key */
 "%@ subscription not signed in" = "%@ のサブスクリプションにサインインしていません";
 "using API key" = "API キーを使用";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "変更は保存した時点で実行中のワークスペースに適用されます。再起動は不要です。ルールのチェックを外すと削除せずにオフにでき、時計メニューから期間限定でオンにすることもできます。";
+"Time limit" = "有効期間";
+"On — untick to switch this rule off without deleting it" = "オン — チェックを外すと、このルールを削除せずにオフにします";
+"Off — this rule is ignored until you tick it" = "オフ — チェックを入れるまで、このルールは無視されます";
+"On for 15 minutes" = "15 分間オン";
+"On for 1 hour" = "1 時間オン";
+"On until the workspace stops" = "ワークスペースが停止するまでオン";
+"Make permanent" = "常時有効にする";
+"until stop" = "停止まで";
+"expired" = "期限切れ";
+"On until this workspace stops, then switched off automatically" = "このワークスペースが停止するまでオン。その後、自動的にオフになります";
+"Switches off automatically at %@" = "%@ に自動的にオフになります";
+"Turn this rule on for a limited time" = "このルールを期間限定でオンにする";
+"%@ — default policy" = "%@ — デフォルトのポリシー";
+"Allow…" = "許可…";
+"Rule…" = "ルール…";
+"Block…" = "ブロック…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "このワークスペースのファイアウォールルールは、それを実行している Mac 上の設定で変更してください。";
+"Allow %@" = "%@ を許可";
+"Allow all of %@" = "%@ 全体を許可";
+"Block %@" = "%@ をブロック";
+"Block all of %@" = "%@ 全体をブロック";
+"Switch off rule “%@”" = "ルール「%@」をオフにする";
+"Remove rule “%@”" = "ルール「%@」を削除";
+"The rule that allowed this is no longer in the workspace's rules." = "これを許可したルールは、ワークスペースのルールにもうありません。";
+"Always" = "常に";
+"For 15 minutes" = "15 分間";
+"For 1 hour" = "1 時間";
+"Until the workspace stops" = "ワークスペースが停止するまで";
+"Add a rule allowing this destination — applies to the running workspace at once" = "この宛先を許可するルールを追加します — 実行中のワークスペースにすぐ適用されます";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "これを許可したルールをオフにするか、宛先をブロックします — すぐに適用されます";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "前回のレビュー以降の新しいコミット";
+"The full repository (baseline)" = "リポジトリ全体（ベースライン）";
+"New commits" = "新しいコミット";
+"Baseline review at %@" = "%@ でのベースラインレビュー";
+"Review of new commits %1$@…%2$@" = "新しいコミット %1$@…%2$@ のレビュー";
+"Review of the last %1$d commits up to %2$@" = "%2$@ までの直近 %1$d 件のコミットのレビュー";
+"No new commits since the last review (%@)" = "前回のレビュー以降、新しいコミットはありません（%@）";
+"%@ (not set up here)" = "%@（ここでは未設定）";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ はこのワークスペースで設定されていません。無人のレビューはサインインで止まってしまいます。最初のスキャンの前に、ワークスペースの設定で追加してください（またはそのワークスペースのセッションからサインインしてください）。";
+"Scheduled review" = "スケジュールされたレビュー";
+"Start with a full-repository baseline" = "リポジトリ全体のベースラインから始める";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "コミットとプルリクエストのスキャンは、監視の作成後に届いたものから開始します。既存のコードには「今すぐベースラインを実行」を使用してください。";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "各レビューは、前回以降に %@ に届いたコミットだけを対象にします。速くて低コストです。新しいものがなければ実行しません。";
+"Reviewed through %1$@ (%2$@)." = "%1$@ までレビュー済み（%2$@）。";
+"The first review covers the whole repository; later ones only what's new." = "最初のレビューはリポジトリ全体を対象にし、以降は新しい部分だけを対象にします。";
+"Nothing reviewed yet: the first review covers the last %d commits." = "まだ何もレビューしていません。最初のレビューは直近 %d 件のコミットを対象にします。";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "各レビューはコードベース全体を、リスクの高い領域から順に確認します。徹底的ですが、大きなリポジトリでは時間がかかり、トークンも多く使います。";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "%@ の新しいコミットのレビューをリクエストしました。エージェントが開始すると「最近のスキャン」に表示されます（前回のレビュー以降に何も届いていなければ実行しません）。";
+"Now watching %@ — the first review is starting." = "%@ の監視を開始しました。最初のレビューを開始しています。";
+"Run Baseline Now" = "今すぐベースラインを実行";
+"Review the commits that landed since the last review" = "前回のレビュー以降に届いたコミットをレビュー";
+"Review the whole repository" = "リポジトリ全体をレビュー";
+"Review the new commits on %@ now" = "%@ の新しいコミットを今すぐレビュー";
+"New commits %1$@ %2$02d:00" = "新しいコミット %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "許可";
+"deny" = "拒否";
+"“%@” no longer allows it" = "「%@」では許可されなくなりました";
+"connection closed — %@" = "接続を切断 — %@";
+"Blocked now" = "現在はブロック";
+"Allowed now" = "現在は許可";
+"Blocked now by “%@”" = "現在は「%@」でブロック";
+"Allowed now by “%@”" = "現在は「%@」で許可";
+"Blocked now by the default policy" = "現在はデフォルトポリシーでブロック";
+"Allowed now by the default policy" = "現在はデフォルトポリシーで許可";
+"“%@” exists and is off" = "「%@」は存在しますがオフです";
+"“%@” is on until the workspace stops" = "「%@」はワークスペースが停止するまでオンです";
+"“%1$@” is on until %2$@" = "「%1$@」は %2$@ までオンです";
+"“%@” is already on, with no time limit" = "「%@」はすでにオンです（時間制限なし）";
+"The workspace's rules have changed since this connection" = "この接続以降にワークスペースのルールが変更されました";
+"Log allowed connections" = "許可された接続を記録";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "ファイアウォールが通過させた接続もセキュリティタイムラインに表示します（宛先ごとに 1 行、繰り返しはまとめて表示）。そこからホストをブロックできます。オフ：ブロックされた接続のみを表示します。選択するまでは、ワークスペースにルールがある場合にオンになります。";
+"Enable rule %@" = "ルール %@ を有効にする";
+"Time limit set" = "時間制限あり";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "エディタの外でルールが変更されました（セキュリティタイムラインの操作または時間制限）。変更は未保存の編集内容に統合されました。";
+"The rules changed outside the editor while you have unsaved edits." = "未保存の編集内容がある間に、エディタの外でルールが変更されました。";
+"Reload" = "再読み込み";
+"Keep my edits" = "編集内容を保持";

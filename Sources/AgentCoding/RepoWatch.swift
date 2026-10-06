@@ -72,6 +72,36 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
         }
     }
 
+    /// What the SCHEDULED review (and "Scan now") covers.
+    enum ReviewScope: String, Codable, CaseIterable, Sendable {
+        /// Only what landed on the branch since the previous review — the
+        /// default for new watches.
+        case newCommits
+        /// The whole codebase every time (what every watch did before
+        /// there was a choice — older watches decode to it).
+        case baseline
+
+        var displayName: String {
+            switch self {
+            case .newCommits: return NSLocalizedString("New commits since the last review", comment: "review scope")
+            case .baseline:   return NSLocalizedString("The full repository (baseline)", comment: "review scope")
+            }
+        }
+    }
+
+    /// How far the scheduled review has got on a branch: the commit the
+    /// last finished review covered, and when that review was started.
+    struct ReviewMark: Codable, Equatable, Sendable {
+        var sha: String
+        var at: Date
+
+        var shortSHA: String { String(sha.prefix(7)) }
+    }
+
+    /// A first incremental review with nothing reviewed before covers this
+    /// many of the branch's latest commits (unless `firstRunBaseline`).
+    static let recentCommitWindow = 20
+
     var id: UUID
     /// "owner/name".
     var repo: String
@@ -98,6 +128,15 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
     /// The automation behind each enabled scan kind (Scan.rawValue → id).
     var automationIDs: [String: UUID]
     var createdAt: Date
+    /// What the scheduled review covers.
+    var scheduledScope: ReviewScope
+    /// Incremental watch with nothing reviewed yet: start with a full
+    /// baseline instead of the latest `recentCommitWindow` commits.
+    var firstRunBaseline: Bool
+    /// Branch key (`reviewBranchKey`: the branch name, "" = the default
+    /// branch) → how far the scheduled review has got. Written by the
+    /// engine when a review finishes, never by the editor.
+    var reviewedThrough: [String: ReviewMark]
 
     init(id: UUID = UUID(), repo: String, profileID: UUID,
          repoPath: String = "", tool: Profile.Tool = .claude,
@@ -108,7 +147,10 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
          commitBranch: String = "", instructions: String = "",
          autoFixMinSeverity: RepoFinding.Severity? = nil,
          automationIDs: [String: UUID] = [:],
-         createdAt: Date = Date()) {
+         createdAt: Date = Date(),
+         scheduledScope: ReviewScope = .newCommits,
+         firstRunBaseline: Bool = false,
+         reviewedThrough: [String: ReviewMark] = [:]) {
         self.id = id
         self.repo = repo
         self.profileID = profileID
@@ -124,12 +166,16 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
         self.autoFixMinSeverity = autoFixMinSeverity
         self.automationIDs = automationIDs
         self.createdAt = createdAt
+        self.scheduledScope = scheduledScope
+        self.firstRunBaseline = firstRunBaseline
+        self.reviewedThrough = reviewedThrough
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, repo, profileID, repoPath, tool, enabled, scans, focus
         case fullScanWeekday, fullScanHour, commitBranch, instructions
         case autoFixMinSeverity, automationIDs, createdAt
+        case scheduledScope, firstRunBaseline, reviewedThrough
     }
 
     init(from decoder: Decoder) throws {
@@ -151,6 +197,12 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
         autoFixMinSeverity = try c.decodeIfPresent(RepoFinding.Severity.self, forKey: .autoFixMinSeverity)
         automationIDs   = try c.decodeIfPresent([String: UUID].self, forKey: .automationIDs) ?? [:]
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        // A watch saved before the choice existed reviewed the whole
+        // repository on every scheduled run — it keeps doing so. (An
+        // unknown scope from a newer build falls back the same way.)
+        scheduledScope  = (try? c.decodeIfPresent(ReviewScope.self, forKey: .scheduledScope)) ?? .baseline
+        firstRunBaseline = try c.decodeIfPresent(Bool.self, forKey: .firstRunBaseline) ?? false
+        reviewedThrough = try c.decodeIfPresent([String: ReviewMark].self, forKey: .reviewedThrough) ?? [:]
         if repoPath.isEmpty { repoPath = Self.defaultRepoPath(for: repo) }
     }
 
@@ -164,6 +216,87 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
     var cloneURL: String { "https://github.com/\(repo).git" }
 
     func automationID(for scan: Scan) -> UUID? { automationIDs[scan.rawValue] }
+
+    /// The branch the scheduled review follows ("" = the default branch) —
+    /// the same one the commit scan follows.
+    var reviewBranchKey: String { commitBranch.trimmingCharacters(in: .whitespaces) }
+
+    /// How far the scheduled review has got on its branch.
+    var lastReviewed: ReviewMark? { reviewedThrough[reviewBranchKey] }
+
+    /// The scan's name on cards and in automation names: the scheduled
+    /// review is named after what it covers.
+    func scanShortName(_ scan: Scan) -> String {
+        guard scan == .fullScan else { return scan.shortName }
+        switch scheduledScope {
+        case .baseline:   return scan.shortName
+        case .newCommits: return NSLocalizedString("New commits", comment: "watch scan kind, short: the scheduled review of what landed since the last one")
+        }
+    }
+}
+
+// MARK: - Review scope → what a run covers (pure)
+
+/// What one scheduled (or "Scan now") review run covers, decided at fire
+/// time from the watch's scope, how far it got last time, and the branch
+/// head GitHub reports right now.
+enum ReviewPlan: Equatable, Sendable {
+    /// The whole codebase at `head`.
+    case baseline(head: String?)
+    /// The commits after `base` up to `head` (the branch tip when nil).
+    case range(base: String, head: String?)
+    /// The latest `count` commits — an incremental watch's first review.
+    case recent(count: Int, head: String?)
+    /// Nothing landed since the last review: no run.
+    case upToDate(head: String)
+
+    var head: String? {
+        switch self {
+        case .baseline(let h), .range(_, let h), .recent(_, let h): return h
+        case .upToDate(let h): return h
+        }
+    }
+
+    var scope: WatchedRepo.ReviewScope {
+        if case .baseline = self { return .baseline }
+        return .newCommits
+    }
+
+    var base: String? {
+        if case .range(let b, _) = self { return b }
+        return nil
+    }
+
+    /// `forceBaseline`: the one-off "Run Baseline Now". `head`: the
+    /// branch tip, when GitHub could be asked.
+    static func make(for w: WatchedRepo, forceBaseline: Bool, head: String?) -> ReviewPlan {
+        let head = head.flatMap { RepoWatchPrompts.isSHA($0) ? $0.lowercased() : nil }
+        if forceBaseline || w.scheduledScope == .baseline { return .baseline(head: head) }
+        if let mark = w.lastReviewed {
+            if let head, head == mark.sha.lowercased() { return .upToDate(head: head) }
+            return .range(base: mark.sha, head: head)
+        }
+        if w.firstRunBaseline { return .baseline(head: head) }
+        return .recent(count: WatchedRepo.recentCommitWindow, head: head)
+    }
+
+    /// One line for the run list ("Baseline review at 1a2b3c4", …).
+    var runDetail: String {
+        func short(_ s: String?) -> String { s.map { String($0.prefix(7)) } ?? "HEAD" }
+        switch self {
+        case .baseline(let h):
+            return String(format: NSLocalizedString("Baseline review at %@", comment: "run detail"), short(h))
+        case .range(let b, let h):
+            return String(format: NSLocalizedString("Review of new commits %1$@…%2$@", comment: "run detail"),
+                          short(b), short(h))
+        case .recent(let n, let h):
+            return String(format: NSLocalizedString("Review of the last %1$d commits up to %2$@", comment: "run detail"),
+                          n, short(h))
+        case .upToDate(let h):
+            return String(format: NSLocalizedString("No new commits since the last review (%@)", comment: "run detail"),
+                          short(h))
+        }
+    }
 }
 
 /// One issue a scan found in a watched repository.
@@ -566,16 +699,35 @@ enum RepoWatchPrompts {
         }
     }
 
+    /// A full or abbreviated git commit id.
+    static func isSHA(_ s: String) -> Bool {
+        (7...40).contains(s.count) && s.allSatisfy { $0.isHexDigit }
+    }
+
+    /// Where the findings tools are, in the calling agent's terms. They are
+    /// one MCP server ("automations") whatever the agent, but every agent
+    /// names MCP tools its own way — Claude Code shows them as
+    /// mcp__<server>__<tool>, others with a dotted or bare prefix.
+    static func toolNote(_ tool: Profile.Tool) -> String {
+        switch tool {
+        case .claude:
+            return "The findings_* tools are on the Bromure MCP server named `automations` (in your tool list: mcp__automations__findings_list, mcp__automations__findings_report, mcp__automations__findings_resolve, mcp__automations__findings_done)."
+        case .codex, .grok, .kimi, .omp:
+            return "The findings_* tools are on the Bromure MCP server named `automations`; your tool list may show them with the server name as a prefix (for example automations__findings_report, automations.findings_report or mcp__automations__findings_report) — they are the same tools. Call them as MCP tools, not as shell commands."
+        }
+    }
+
     /// The reporting contract shared by every scan prompt.
-    static func reportingRules(repo: String) -> String {
+    static func reportingRules(repo: String, tool: Profile.Tool = .claude) -> String {
         """
         How to report:
+        - \(toolNote(tool))
         - First call findings_list with repo "\(repo)" to see what is already known. Do not re-report a known issue unless you have something new; if you do, pass its id as duplicateOf.
-        - Report each real issue with findings_report — one call can carry several findings. Give each: title, severity (critical/high/medium/low/info), category (security/bug/dependency/quality), cwe when it applies, file (repo-relative) and line, a markdown summary of what is wrong and why it is exploitable or harmful, evidence (the offending code), a recommendation, and a short stable fingerprint key (e.g. "sqli-orders-search") that you would give the same issue next time.
+        - Report each real issue with findings_report — one call can carry several findings. Give each: title, severity (critical/high/medium/low/info), category (security/bug/dependency/quality), cwe when it applies, file (repo-relative) and line, a markdown summary of what is wrong and why it is exploitable or harmful, evidence (the offending code), a recommendation, and a short stable fingerprint key (e.g. "sqli-orders-search") that you would give the same issue next time. Pass the commit you reviewed as commit.
         - Only report issues you have verified by reading the code. No style nits, no speculative "consider" items, no issues in vendored or generated code.
         - If a finding listed by findings_list as open is clearly gone from the code you reviewed, call findings_resolve with its id and a one-line reason.
         - Do not modify files, commit, push, or open pull requests or issues — this run only reports.
-        - End with a short summary: what you covered and how many findings you reported.
+        - When you are done, call findings_done once, as your last action, with a short summary (what you covered, what you skipped, how many findings you reported) and the commit you reviewed (`git rev-parse HEAD`). It closes the run.
         """
     }
 
@@ -583,56 +735,131 @@ enum RepoWatchPrompts {
         "The repository \(w.repo) is checked out in the current directory (a fresh worktree)."
     }
 
-    static func fullScan(_ w: WatchedRepo) -> String {
-        var s = """
-        Code review of the GitHub repository \(w.repo). \(checkoutNote(w))
+    private static func ownerInstructions(_ w: WatchedRepo) -> String {
+        let t = w.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? "" : "\n\nAdditional instructions from the repository owner:\n" + w.instructions
+    }
 
-        Review the whole codebase for \(focusText(w.focus)). Start by mapping the architecture: entry points, trust boundaries, where untrusted input comes in, how authentication and authorization work, and how data is stored. Then trace untrusted input to the sensitive sinks.
+    private static func branchName(_ w: WatchedRepo) -> String {
+        w.reviewBranchKey.isEmpty ? "the default branch" : "the branch \(w.reviewBranchKey)"
+    }
 
-        \(reportingRules(repo: w.repo))
-        """
-        if !w.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            s += "\n\nAdditional instructions from the repository owner:\n" + w.instructions
+    /// The commit the review is pinned to, and how to get the worktree
+    /// there if the checkout lagged behind. Unknown head: the branch tip.
+    private static func pinNote(_ w: WatchedRepo, head: String?) -> String {
+        let remoteRef = w.reviewBranchKey.isEmpty ? "origin/HEAD" : "origin/\(w.reviewBranchKey)"
+        if let head {
+            return "Review the code as of commit \(head). If `git rev-parse HEAD` is not that commit, run `git fetch origin` and then `git reset --hard \(head)` (this worktree's branch is disposable)."
         }
-        return s
+        return "Start with `git fetch origin`; review \(remoteRef) (the tip of \(branchName(w))) — if the worktree is behind it, run `git reset --hard \(remoteRef)` (this worktree's branch is disposable)."
+    }
+
+    /// The scheduled review / "Scan now" prompt for one run. `plan` is
+    /// decided at fire time (`ReviewPlan.make`).
+    static func scheduledReview(_ w: WatchedRepo, plan: ReviewPlan, tool: Profile.Tool) -> String {
+        switch plan {
+        case .baseline(let head):
+            return baselineReview(w, head: head, tool: tool)
+        case .upToDate(let head):
+            // Not normally run (the engine skips it); a forced run re-reviews.
+            return baselineReview(w, head: head, tool: tool)
+        case .range(let base, let head):
+            return incrementalReview(w, base: base, head: head, tool: tool)
+        case .recent(let count, let head):
+            return recentReview(w, count: count, head: head, tool: tool)
+        }
+    }
+
+    /// The whole codebase — with a strategy that holds up on a big repo:
+    /// size it, map it, go through it directory by directory in risk order,
+    /// report as you go, depth over breadth.
+    static func baselineReview(_ w: WatchedRepo, head: String?, tool: Profile.Tool) -> String {
+        """
+        Baseline code review of the GitHub repository \(w.repo): the whole codebase. \(checkoutNote(w)) \(pinNote(w, head: head))
+
+        Look for \(focusText(w.focus)).
+
+        How to work through the codebase:
+        1. Size it first: `git ls-files | wc -l`, the top-level directories, the build files and entry points.
+        2. Map the architecture: entry points, trust boundaries, where untrusted input comes in, how authentication and authorization work, how data is stored.
+        3. Rank the directories (or modules) by risk — request handlers and APIs, authentication and session code, input parsing and deserialization, file / process / network / database sinks, cryptography, configuration and secrets — and review them in that order, one at a time. Skip vendored, generated, test-fixture and build-output trees.
+        4. Trace untrusted input to the sensitive sinks. Read code in a targeted way (search for the sinks, read the functions that matter) rather than whole large files.
+        5. Report each directory's verified findings with findings_report before you move on to the next one, so a run that is cut short keeps what it found.
+        6. Depth over breadth: on a large repository (more than about 300 source files) cover the highest-risk areas thoroughly instead of everything superficially, and stop once what is left would only get a superficial look. Say in your findings_done summary which areas you did not cover.
+
+        \(reportingRules(repo: w.repo, tool: tool))
+        """ + ownerInstructions(w)
+    }
+
+    /// The commits after the last reviewed one.
+    static func incrementalReview(_ w: WatchedRepo, base: String, head: String?, tool: Profile.Tool) -> String {
+        let tip = head ?? (w.reviewBranchKey.isEmpty ? "origin/HEAD" : "origin/\(w.reviewBranchKey)")
+        return """
+        Review the changes that landed on \(branchName(w)) of \(w.repo) since the last review: the commits after \(base) up to \(tip). \(checkoutNote(w)) \(pinNote(w, head: head))
+
+        Look for \(focusText(w.focus)).
+
+        How to work:
+        1. `git fetch origin` if needed, then `git log --oneline \(base)..\(tip)` to list the commits and `git diff --stat \(base)..\(tip)` to size the change.
+        2. If \(base) is unknown or is not an ancestor of \(tip) (`git merge-base --is-ancestor \(base) \(tip)` fails — the history was rewritten), review the last \(WatchedRepo.recentCommitWindow) commits instead (`git log -\(WatchedRepo.recentCommitWindow) \(tip)`), and say so in your summary.
+        3. Review the change — commit by commit (`git show <sha>`) when there are several, as one diff when it is small. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
+        4. If the range is very large (hundreds of commits), start with the commits that touch risky areas (request handling, authentication, input parsing, file / process / network / database access, cryptography, configuration) and say in your summary what you skipped.
+
+        \(reportingRules(repo: w.repo, tool: tool))
+        """ + ownerInstructions(w)
+    }
+
+    /// An incremental watch's first run: the latest commits.
+    static func recentReview(_ w: WatchedRepo, count: Int, head: String?, tool: Profile.Tool) -> String {
+        let tip = head ?? (w.reviewBranchKey.isEmpty ? "origin/HEAD" : "origin/\(w.reviewBranchKey)")
+        return """
+        Review the latest \(count) commits on \(branchName(w)) of \(w.repo) (this is the first review of this repository; later reviews cover only what lands after it). \(checkoutNote(w)) \(pinNote(w, head: head))
+
+        Look for \(focusText(w.focus)).
+
+        How to work:
+        1. `git log --oneline -\(count) \(tip)` to list the commits (fewer when the history is shorter), `git diff --stat` over the same range to size the change.
+        2. Review the change — commit by commit (`git show <sha>`) when there are several. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
+
+        \(reportingRules(repo: w.repo, tool: tool))
+        """ + ownerInstructions(w)
+    }
+
+    /// The scheduled review's stored prompt — what the automation shows
+    /// when its prompt is read before a run. The run itself gets the
+    /// fire-time plan (`scheduledReview`).
+    static func fullScan(_ w: WatchedRepo) -> String {
+        scheduledReview(w, plan: .make(for: w, forceBaseline: false, head: nil), tool: w.tool)
     }
 
     static func commitScan(_ w: WatchedRepo) -> String {
-        var s = """
+        """
         Review a new commit on \(w.repo) for \(focusText(w.focus)). \(checkoutNote(w))
 
         Inspect the change with `git fetch origin` then `git show {{commit.key}}` (the commit is described below). Focus on what the change introduces or makes reachable, reading surrounding code as needed to confirm impact.
 
-        \(reportingRules(repo: w.repo))
+        \(reportingRules(repo: w.repo, tool: w.tool))
 
         Commit {{commit.key}}: {{commit.title}}
         Author: {{commit.author}}
         {{commit.url}}
-        """
-        if !w.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            s += "\n\nAdditional instructions from the repository owner:\n" + w.instructions
-        }
-        return s
+        """ + ownerInstructions(w)
     }
 
     static func pullRequestScan(_ w: WatchedRepo) -> String {
-        var s = """
+        """
         Review pull request #{{pr.number}} on \(w.repo) for \(focusText(w.focus)). \(checkoutNote(w))
 
         Get the change with `gh pr diff {{pr.number}}` (and `gh pr checkout {{pr.number}}` if you need the full files). Report only issues the pull request introduces or makes reachable. Do not comment on the pull request.
 
-        \(reportingRules(repo: w.repo))
+        \(reportingRules(repo: w.repo, tool: w.tool))
 
         Pull request #{{pr.number}}: {{pr.title}}
         Author: {{pr.author}} · Branch: {{pr.branch}}
         {{pr.url}}
 
         {{pr.body}}
-        """
-        if !w.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            s += "\n\nAdditional instructions from the repository owner:\n" + w.instructions
-        }
-        return s
+        """ + ownerInstructions(w)
     }
 
     static func prompt(for scan: WatchedRepo.Scan, _ w: WatchedRepo) -> String {
@@ -721,6 +948,20 @@ final class FindingStore {
             }
         }
         save()
+    }
+
+    /// Record that a scheduled review covered `branch` up to `sha`. A mark
+    /// only moves forward in time: a slow older run finishing after a newer
+    /// one never winds it back. Returns whether it moved.
+    @discardableResult
+    func advanceReviewMark(watchID: UUID, branch: String, sha: String, at: Date) -> Bool {
+        guard RepoWatchPrompts.isSHA(sha),
+              let i = watches.firstIndex(where: { $0.id == watchID }) else { return false }
+        let key = branch.trimmingCharacters(in: .whitespaces)
+        if let cur = watches[i].reviewedThrough[key], cur.at > at { return false }
+        watches[i].reviewedThrough[key] = WatchedRepo.ReviewMark(sha: sha.lowercased(), at: at)
+        save()
+        return true
     }
 
     /// The watch that owns an automation.

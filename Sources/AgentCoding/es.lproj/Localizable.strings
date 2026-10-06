@@ -3212,7 +3212,6 @@
 "Closed" = "Cerrado";
 "Commit" = "Commit";
 "Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "Los análisis de commits y pull requests muestran texto de terceros a un agente, por lo que requieren el modelo PromptGuard. Se descarga al guardar la vigilancia; hasta que esté listo, esos análisis quedan bloqueados.";
-"Commit and pull-request scans start with what lands after the watch is created. Use Scan Now for the existing code." = "Los análisis de commits y pull requests empiezan con lo que llegue después de crear la vigilancia. Usa Analizar ahora para el código existente.";
 "Commits" = "Commits";
 "Couldn't clone %1$@ into %2$@ — %3$@" = "No se pudo clonar %1$@ en %2$@: %3$@";
 "Critical" = "Crítica";
@@ -3322,7 +3321,6 @@
 "Watch a Repository…" = "Vigilar un repositorio…";
 "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "Corrección iniciada: un agente trabaja en ella en su propia rama. Pasará a «En revisión» cuando esté lista.";
 "Full scan of %@ requested — it shows under Recent scans once the agent starts." = "Análisis completo de %@ solicitado: aparecerá en «Análisis recientes» cuando el agente empiece.";
-"Now watching %@ — the first full scan is starting." = "Ahora vigilando %@: el primer análisis completo está comenzando.";
 "Now watching %@." = "Ahora vigilando %@.";
 "%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ trabaja en tu prompt en una nueva rama de %2$@, en %3$@";
 "%d run(s) need your attention" = "%d ejecución(es) requieren tu atención";
@@ -3990,3 +3988,87 @@
 /* Subscription workspace vs the global API key */
 "%@ subscription not signed in" = "Suscripción de %@ sin iniciar sesión";
 "using API key" = "usando la clave de API";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Los cambios se aplican a un espacio de trabajo en ejecución en cuanto guardas, sin reiniciar. Desmarca una regla para desactivarla sin borrarla, o usa su menú de reloj para activarla durante un tiempo limitado.";
+"Time limit" = "Límite de tiempo";
+"On — untick to switch this rule off without deleting it" = "Activada: desmárcala para desactivar esta regla sin borrarla";
+"Off — this rule is ignored until you tick it" = "Desactivada: esta regla se ignora hasta que la marques";
+"On for 15 minutes" = "Activa durante 15 minutos";
+"On for 1 hour" = "Activa durante 1 hora";
+"On until the workspace stops" = "Activa hasta que se detenga el espacio de trabajo";
+"Make permanent" = "Hacer permanente";
+"until stop" = "hasta detener";
+"expired" = "caducada";
+"On until this workspace stops, then switched off automatically" = "Activa hasta que este espacio de trabajo se detenga; luego se desactiva sola";
+"Switches off automatically at %@" = "Se desactiva automáticamente a las %@";
+"Turn this rule on for a limited time" = "Activar esta regla durante un tiempo limitado";
+"%@ — default policy" = "%@ — política predeterminada";
+"Allow…" = "Permitir…";
+"Rule…" = "Regla…";
+"Block…" = "Bloquear…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "Cambia las reglas de firewall de este espacio de trabajo en sus ajustes, en el Mac que lo ejecuta.";
+"Allow %@" = "Permitir %@";
+"Allow all of %@" = "Permitir todo %@";
+"Block %@" = "Bloquear %@";
+"Block all of %@" = "Bloquear todo %@";
+"Switch off rule “%@”" = "Desactivar la regla «%@»";
+"Remove rule “%@”" = "Eliminar la regla «%@»";
+"The rule that allowed this is no longer in the workspace's rules." = "La regla que permitió esto ya no está en las reglas del espacio de trabajo.";
+"Always" = "Siempre";
+"For 15 minutes" = "Durante 15 minutos";
+"For 1 hour" = "Durante 1 hora";
+"Until the workspace stops" = "Hasta que se detenga el espacio de trabajo";
+"Add a rule allowing this destination — applies to the running workspace at once" = "Añadir una regla que permita este destino: se aplica al instante al espacio de trabajo en ejecución";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "Desactivar la regla que permitió esto o bloquear el destino: se aplica al instante";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "Commits nuevos desde la última revisión";
+"The full repository (baseline)" = "El repositorio completo (línea base)";
+"New commits" = "Commits nuevos";
+"Baseline review at %@" = "Revisión de línea base en %@";
+"Review of new commits %1$@…%2$@" = "Revisión de los commits nuevos %1$@…%2$@";
+"Review of the last %1$d commits up to %2$@" = "Revisión de los últimos %1$d commits hasta %2$@";
+"No new commits since the last review (%@)" = "No hay commits nuevos desde la última revisión (%@)";
+"%@ (not set up here)" = "%@ (no configurado aquí)";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ no está configurado en este espacio de trabajo: una revisión desatendida se detendría en su inicio de sesión. Añádelo en los ajustes del espacio de trabajo (o inicia sesión desde una sesión allí) antes del primer análisis.";
+"Scheduled review" = "Revisión programada";
+"Start with a full-repository baseline" = "Empezar con una línea base de todo el repositorio";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "Los análisis de commits y pull requests empiezan con lo que llegue después de crear la vigilancia. Usa Ejecutar línea base ahora para el código existente.";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "Cada revisión cubre solo los commits que llegaron a %@ desde la anterior: rápida y económica. Si no hay nada nuevo, no se ejecuta.";
+"Reviewed through %1$@ (%2$@)." = "Revisado hasta %1$@ (%2$@).";
+"The first review covers the whole repository; later ones only what's new." = "La primera revisión cubre todo el repositorio; las siguientes, solo lo nuevo.";
+"Nothing reviewed yet: the first review covers the last %d commits." = "Aún no se ha revisado nada: la primera revisión cubre los últimos %d commits.";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "Cada revisión recorre todo el código, empezando por las zonas de mayor riesgo. Es exhaustiva, pero un repositorio grande tarda más y usa más tokens.";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "Revisión de los commits nuevos de %@ solicitada: aparecerá en «Análisis recientes» cuando el agente empiece (no se ejecuta si no llegó nada desde la última revisión).";
+"Now watching %@ — the first review is starting." = "Ahora vigilando %@: la primera revisión está comenzando.";
+"Run Baseline Now" = "Ejecutar línea base ahora";
+"Review the commits that landed since the last review" = "Revisar los commits que llegaron desde la última revisión";
+"Review the whole repository" = "Revisar todo el repositorio";
+"Review the new commits on %@ now" = "Revisar ahora los commits nuevos de %@";
+"New commits %1$@ %2$02d:00" = "Commits nuevos %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "permitir";
+"deny" = "denegar";
+"“%@” no longer allows it" = "“%@” ya no la permite";
+"connection closed — %@" = "conexión cerrada — %@";
+"Blocked now" = "Bloqueado ahora";
+"Allowed now" = "Permitido ahora";
+"Blocked now by “%@”" = "Bloqueado ahora por “%@”";
+"Allowed now by “%@”" = "Permitido ahora por “%@”";
+"Blocked now by the default policy" = "Bloqueado ahora por la política predeterminada";
+"Allowed now by the default policy" = "Permitido ahora por la política predeterminada";
+"“%@” exists and is off" = "“%@” existe y está desactivada";
+"“%@” is on until the workspace stops" = "“%@” está activa hasta que el espacio de trabajo se detenga";
+"“%1$@” is on until %2$@" = "“%1$@” está activa hasta las %2$@";
+"“%@” is already on, with no time limit" = "“%@” ya está activa, sin límite de tiempo";
+"The workspace's rules have changed since this connection" = "Las reglas del espacio de trabajo han cambiado desde esta conexión";
+"Log allowed connections" = "Registrar las conexiones permitidas";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "Muestra también en la Cronología de seguridad las conexiones que el firewall deja pasar — una fila por destino, con las repeticiones agrupadas — para que puedas bloquear un host desde ahí. Desactivado: solo se muestran las conexiones bloqueadas. Mientras no elijas, está activado si el espacio de trabajo tiene reglas.";
+"Enable rule %@" = "Activar la regla %@";
+"Time limit set" = "Límite de tiempo establecido";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "Las reglas cambiaron fuera del editor (una acción de la Cronología de seguridad o un límite de tiempo). El cambio se combinó con tus ediciones sin guardar.";
+"The rules changed outside the editor while you have unsaved edits." = "Las reglas cambiaron fuera del editor mientras tienes ediciones sin guardar.";
+"Reload" = "Recargar";
+"Keep my edits" = "Conservar mis ediciones";
