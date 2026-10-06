@@ -84,7 +84,8 @@ class GuestGraphicsConfigTests(unittest.TestCase):
                         capture_output=True, check=True)
                     args = result.stdout.decode().rstrip("\0").split("\0")
                 expected = ["--no-first-run"]
-                if value and value.strip(): expected.append("--user-agent=" + value.strip())
+                expected.append("--user-agent=" + ((value or "").strip() or
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"))
                 self.assertEqual(args, expected, (browser, value))
 
     def test_virgl_request_without_negotiated_device_stays_software(self):

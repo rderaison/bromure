@@ -338,8 +338,10 @@ def browser_binary(cfg):
 
 
 def resolve_user_agent(cfg):
-    """Empty means no override; each browser supplies its native identity."""
-    return (cfg.get("userAgent") or "").strip()
+    """Use the compatible Linux identity unless the profile overrides it."""
+    return (cfg.get("userAgent") or "").strip() or (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    )
 
 
 def graphics_backend(cfg):

@@ -150,8 +150,8 @@ public struct VMConfig {
     /// Home page URL for the browser.
     public var homePage: String
 
-    /// Custom User-Agent override. Empty leaves the selected browser's native
-    /// identity unchanged. Non-empty is passed via `--user-agent`.
+    /// Custom User-Agent override. Empty uses the default Linux Chrome identity.
+    /// The resolved value is passed via `--user-agent`.
     public var userAgent: String
 
     /// Which browser the session launches (Chromium or Google Chrome).
