@@ -205,10 +205,10 @@ struct QuitConfirmationTextTests {
         #expect(ACAppDelegate.quitConfirmationText(workspaces: [("a", .ask), ("b", .background), ("c", .suspend)], machines: [])
             == "The workspaces a, b, and c will be suspended and resume where they left off.")
         #expect(ACAppDelegate.quitConfirmationText(workspaces: [], machines: ["connector"])
-            == "The infrastructure machine connector is running and will be suspended.")
+            == "The infrastructure machine “connector” is running and will be suspended.")
         let both = ACAppDelegate.quitConfirmationText(workspaces: [("dev", .shutdown)], machines: ["connector", "registry"])
         #expect(both.hasPrefix("The workspace dev will be shut down."))
-        #expect(both.hasSuffix("2 infrastructure machines are running (connector, registry) and will be suspended."))
+        #expect(both.hasSuffix("2 infrastructure machines are running (“connector”, “registry”) and will be suspended."))
         #expect(!both.contains("close action"))
     }
 }

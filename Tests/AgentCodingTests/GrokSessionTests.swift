@@ -382,6 +382,43 @@ struct GrokAgentdTests {
         }
     }
 
+    @Test("Claude's folder trust covers the share symlink, its realpath and the git roots",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func claudePretrust() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run("""
+            home = d + '/home'; os.makedirs(home); m.HOME = home
+            share = d + '/mnt-share-1'; os.makedirs(share + '/sub')
+            subprocess.run(['git', 'init', '-q', share], check=True)
+            os.symlink(share, home + '/cc-demo')
+            cj = home + '/.claude.json'
+            open(cj, 'w').write(json.dumps({"projects": {share: {"allowedTools": ["x"]}}, "theme": "dark"}))
+            m._pretrust('claude', home + '/cc-demo/sub')
+            first = open(cj).read()
+            p = json.loads(first)['projects']
+            ok = lambda k: p.get(k, {}).get('hasTrustDialogAccepted') is True
+            print('SYMLINK', ok(home + '/cc-demo/sub'))
+            print('REAL', ok(share + '/sub'))
+            print('GITROOT', ok(share))
+            print('KEPT', p[share].get('allowedTools') == ['x'] and json.loads(first)['theme'] == 'dark')
+            print('NO_HOME', home not in p and '/' not in p)
+            m._pretrust('claude', home + '/cc-demo/sub')
+            print('IDEMPOTENT', first == open(cj).read())
+            # A task worktree: its own root and the main checkout's.
+            subprocess.run(['git', '-C', share, '-c', 'user.name=t', '-c', 'user.email=t@example.com',
+                            'commit', '-q', '--allow-empty', '-m', 'i'], check=True)
+            wt = d + '/wt'
+            subprocess.run(['git', '-C', share, 'worktree', 'add', '-q', wt], check=True)
+            m._pretrust('claude', wt, home + '/cc-demo')
+            p = json.loads(open(cj).read())['projects']
+            print('WORKTREE', ok(wt) and ok(home + '/cc-demo'))
+            """, dir: dir)
+        for key in ["SYMLINK", "REAL", "GITROOT", "KEPT", "NO_HOME", "IDEMPOTENT", "WORKTREE"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+
     @Test("The guest grok() wrapper pins Ask when Grok's own config asks; any other choice passes through")
     func grokPermissionWrapper() throws {
         let rc = ProfileStore.bashrcContent

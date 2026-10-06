@@ -179,19 +179,51 @@ enum ToolCallRepair {
         return r
     }
 
+    /// Did the chat request ask for the usage frame
+    /// (`stream_options.include_usage`)?
+    static func wantsStreamUsage(_ payload: [String: Any]) -> Bool {
+        ((payload["stream_options"] as? [String: Any])?["include_usage"] as? Bool) ?? false
+    }
+
+    /// A message's usage in chat-completions terms (`prompt_tokens` /
+    /// `completion_tokens` / `total_tokens`), from either the chat or the
+    /// messages/responses spelling; nil when there's nothing to report.
+    static func chatUsage(_ any: Any?) -> [String: Any]? {
+        guard let u = any as? [String: Any] else { return nil }
+        func int(_ k: String) -> Int? { (u[k] as? Int) ?? (u[k] as? NSNumber)?.intValue }
+        guard let prompt = int("prompt_tokens") ?? int("input_tokens"),
+              let completion = int("completion_tokens") ?? int("output_tokens") else { return nil }
+        guard prompt > 0 || completion > 0 else { return nil }
+        var out = u
+        out["prompt_tokens"] = prompt
+        out["completion_tokens"] = completion
+        out["total_tokens"] = int("total_tokens") ?? prompt + completion
+        out.removeValue(forKey: "input_tokens")
+        out.removeValue(forKey: "output_tokens")
+        return out
+    }
+
     /// Render an OpenAI chat.completion as the SSE chunk stream the client
     /// (Grok / OpenAI-compatible) expects, terminated with `[DONE]`.
-    static func chatSSE(_ resp: [String: Any]) -> Data {
+    /// Usage rides along — the agent's token counter (omp's header) only
+    /// reads it from the stream: its own `choices: []` frame before `[DONE]`
+    /// when the client asked (`includeUsage`), else on the finishing chunk.
+    static func chatSSE(_ resp: [String: Any], includeUsage: Bool = false) -> Data {
         var out = ""
         let id = resp["id"] as? String ?? "chatcmpl-" + UUID().uuidString.prefix(8)
         let model = resp["model"] as? String ?? ""
         let created = resp["created"] as? Int ?? 0
-        func chunk(_ delta: [String: Any], _ finish: Any) {
-            let obj: [String: Any] = ["id": id, "object": "chat.completion.chunk",
-                "created": created, "model": model,
-                "choices": [["index": 0, "delta": delta, "finish_reason": finish]]]
+        let usage = chatUsage(resp["usage"])
+        func emit(_ obj: [String: Any]) {
             let d = (try? JSONSerialization.data(withJSONObject: obj)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
             out += "data: \(d)\n\n"
+        }
+        func chunk(_ delta: [String: Any], _ finish: Any) {
+            var obj: [String: Any] = ["id": id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [["index": 0, "delta": delta, "finish_reason": finish]]]
+            if !(finish is NSNull), !includeUsage, let usage { obj["usage"] = usage }
+            emit(obj)
         }
         let choice = (resp["choices"] as? [[String: Any]])?.first ?? [:]
         let message = choice["message"] as? [String: Any] ?? [:]
@@ -207,6 +239,10 @@ enum ToolCallRepair {
         } else {
             if let text = message["content"] as? String { chunk(["content": text], NSNull()) }
             chunk([:], choice["finish_reason"] as? String ?? "stop")
+        }
+        if includeUsage, let usage {
+            emit(["id": id, "object": "chat.completion.chunk", "created": created,
+                  "model": model, "choices": [] as [Any], "usage": usage])
         }
         out += "data: [DONE]\n\n"
         return Data(out.utf8)

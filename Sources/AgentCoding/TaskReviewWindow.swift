@@ -221,16 +221,33 @@ struct TaskReviewSummary: Equatable, Sendable {
         return s
     }
 
-    /// The agent's last words in a task transcript — its final report.
+    /// The agent's last words in a task transcript — its final report: what
+    /// it wrote in its last turn (since the last prompt), not only its last
+    /// message. A no-code task's answer is often a message of its own ("the
+    /// haiku") followed by a wrap-up that points at it ("I wrote the haiku
+    /// in the chat above") — the wrap-up alone showed no haiku. The last
+    /// three messages at most.
     static func finalReport(fromTranscript text: String, agent: String?) -> String? {
         let items = AgentTranscript.parse(Data(text.utf8), agent: agent)
+        var turn: [String] = []
         for item in items.reversed() {
+            if case .userText = item.kind { break }
             if case .assistantText(let t) = item.kind {
                 let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return trimmed }
+                if !trimmed.isEmpty { turn.insert(trimmed, at: 0) }
             }
         }
-        return nil
+        if turn.isEmpty {
+            // No prose since the last prompt: its last words anywhere.
+            for item in items.reversed() {
+                if case .assistantText(let t) = item.kind {
+                    let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty { return trimmed }
+                }
+            }
+            return nil
+        }
+        return turn.suffix(3).joined(separator: "\n\n")
     }
 }
 
@@ -319,6 +336,7 @@ final class TaskReviewWindowManager {
                     guard let task = t(), let text = task.mergeReport ?? task.deliverySummary else { return nil }
                     return (task.assignment?.label ?? NSLocalizedString("The agent", comment: "review"), text)
                 },
+                noCode: { t()?.isNoCode == true },
                 fetch: { base, _ in
                     guard let task = t() else { return nil }
                     // A refresh (↻) re-reads the summary banner too.
@@ -881,6 +899,14 @@ struct LandingConfirmSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             if let warning = what.warning {
                 Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // A Send Back that didn't get through leaves its comments pending.
+            let pending = task.comments.filter { $0.sentAt == nil }.count
+            if pending > 0 {
+                Label(TaskPlurals.pendingAtLanding(pending), systemImage: "exclamationmark.bubble.fill")
                     .font(.system(size: 12))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)

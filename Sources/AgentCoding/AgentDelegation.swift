@@ -580,6 +580,28 @@ enum DelegationNotice {
         return rest
     }
 
+    /// How the instructions the host appends for the AGENT start (" — that
+    /// is the whole request: …", " — call read_inbox now …"): plumbing the
+    /// reader needn't wade through. Longest first.
+    static let instructionMarkers = [
+        " — that is the whole request", " — that is the whole question", " — that is the whole reply",
+        " — call read_inbox now", " — call read_inbox to take it", " — review it", " — stop working on it",
+    ]
+
+    /// A notice line as the reader wants it: what was asked or answered,
+    /// and the instructions for the agent (nil when there are none).
+    static func readable(_ line: String) -> (summary: String, instructions: String?) {
+        var cut: Range<String.Index>?
+        for m in instructionMarkers {
+            if let r = line.range(of: m, options: .backwards), cut == nil || r.lowerBound > cut!.lowerBound { cut = r }
+        }
+        guard let r = cut else { return (line, nil) }
+        let summary = String(line[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        let rest = String(line[r.lowerBound...].dropFirst(3)).trimmingCharacters(in: .whitespaces)   // " — "
+        guard !summary.isEmpty else { return (line, nil) }
+        return (summary, rest.isEmpty ? nil : rest)
+    }
+
     /// Typed by the host (a delegation or Switchboard notice), not by the user.
     static func isHostAside(_ userText: String) -> Bool {
         strip(userText) != nil || stripSwitchboard(userText) != nil
@@ -759,10 +781,14 @@ struct DelegationNoticeRow: View {
             }
             .foregroundStyle(.secondary)
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                Text(line)
+                let parts = switchboard ? (summary: line, instructions: nil) : DelegationNotice.readable(line)
+                Text(parts.summary)
                     .font(.system(size: Self.textSize))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                if let instructions = parts.instructions {
+                    NoticeInstructions(text: instructions)
+                }
             }
         }
         .padding(.vertical, 10)
@@ -775,6 +801,39 @@ struct DelegationNoticeRow: View {
                 .frame(width: 3)
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// The instructions Bromure typed for the agent under a notice, folded:
+/// the request reads first, the plumbing opens on a click.
+private struct NoticeInstructions: View {
+    let text: String
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { open.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                    Text(NSLocalizedString("Instructions for the agent", comment: "delegation notice: the host's instructions to the agent, folded"))
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                Text(text)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 #endif

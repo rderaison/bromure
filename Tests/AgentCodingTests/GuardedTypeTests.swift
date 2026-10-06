@@ -226,8 +226,16 @@ struct GuardedTypeTests {
         let env = ["TMUX_TMPDIR": dir.path, "PATH": "\(bin):/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"]
         defer { Self.sh("tmux kill-server", env: env) }
         let out = dir.appendingPathComponent("out")
-        // The "agent": raw mode, no echo, every byte it gets into a file.
-        let agent = "bash -c 'stty raw -echo; exec -a kimi cat > \(out.path)'"
+        // The "agent": raw mode, no echo, every byte it gets into a file —
+        // and, like any TUI, its screen moves when a Return comes in (the
+        // type confirms its Enter by that).
+        let script = dir.appendingPathComponent("agent.pl")
+        try #"""
+        binmode STDIN; $| = 1;
+        open(my $o, ">>", $ARGV[0]) or die; binmode $o; select((select($o), $| = 1)[0]);
+        while (sysread(STDIN, my $b, 65536)) { print $o $b; print STDOUT "\r\nRECEIVED\r\n" if $b =~ /\r/; }
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        let agent = "bash -c 'stty raw -echo; exec -a kimi perl \(script.path) \(out.path)'"
         Self.sh("tmux new-session -d -s bromure -x 120 -y 30 \"\(agent)\"", env: env)
         Thread.sleep(forTimeInterval: 0.6)
 

@@ -66,8 +66,14 @@ struct LongMessageRowsTests {
         let collapsed = userTexts(TranscriptRow.rows([item(9, .userText(text))]))
         guard case .userText(let shown)? = collapsed.first?.kind else { Issue.record("no user row"); return }
         #expect(shown.count <= TranscriptRow.chunkChars)
-        let open = userTexts(TranscriptRow.rows([item(9, .userText(text))], expanded: [9]))
-        #expect(open.count >= 100)
+        let layout = TranscriptRow.layout([item(9, .userText(text))], expanded: [9])
+        let open = userTexts(layout.rows)
+        // Opened, it shows its start in pieces (the chat's rows are eager:
+        // a 200 KB message is bounded to `expandedChars`); Copy takes all.
+        #expect(open.count >= TranscriptRow.expandedChars / TranscriptRow.chunkChars)
+        #expect(open.allSatisfy { if case .userText(let t) = $0.kind { t.utf16.count <= TranscriptRow.chunkChars } else { false } })
+        let bar = layout.longUsers[open.last!.id]
+        #expect(bar?.partial == true && bar?.whole == text)
     }
 
     @Test("Short messages and host asides stay as they are")

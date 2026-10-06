@@ -297,14 +297,15 @@ final class AgentSessionEngine {
                     // Codex without a known conversation: its exit line names
                     // it ("codex resume <uuid>") — read it off the tab.
                     // Grok's names its own the same way ("grok --resume <id>").
-                    if s.tool == .codex || s.tool == .grok,
+                    if s.tool == .codex || s.tool == .grok || s.tool == .omp,
                        s.agentTranscriptID.map(Self.isTranscriptID) != true,
                        let screen = try? await delegate.guestExec(
                            profileID: s.profileID,
                            command: "tmux capture-pane -p -J -S -300 -t bromure:\(w) 2>/dev/null; true",
                            timeout: 8),
                        let tid = s.tool == .codex ? Self.codexResumeID(inScreen: screen)
-                                                  : Self.grokResumeID(inScreen: screen),
+                                : s.tool == .grok ? Self.grokResumeID(inScreen: screen)
+                                                  : Self.ompResumeID(inScreen: screen),
                        !self.store.conversationsClaimed(tool: s.tool, profileID: s.profileID, besides: id)
                            .contains(tid.lowercased()) {
                         self.store.setTranscriptID(id, tid)
@@ -915,10 +916,17 @@ final class AgentSessionEngine {
             // (a paused Grok read the folder's newest — an archived
             // session's — into its copy after a relaunch).
             var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
+            if (s.tool == .grok && pin.grokSession == nil) || (s.tool == .codex && pin.codexSession == nil)
+                || (s.tool == .omp && pin.ompSession == nil) {
+                pin.foreignConversations = self.store.conversationsClaimed(
+                    tool: s.tool, profileID: s.profileID, besides: s.id)
+            }
             if s.tool == .grok, let id = pin.grokSession,
                let k = known, Self.grokConversationID(inPath: k.path)?.lowercased() != id.lowercased() { known = nil }
             if s.tool == .codex, let id = pin.codexSession,
                let k = known, Self.codexConversationID(inPath: k.path)?.lowercased() != id.lowercased() { known = nil }
+            if s.tool == .omp, let id = pin.ompSession,
+               let k = known, Self.ompConversationID(inPath: k.path)?.lowercased() != id.lowercased() { known = nil }
             // The tab's own Kimi session, learned from this read: by the id
             // its process names, or as the journal this run began.
             var learnsID = false
@@ -967,6 +975,8 @@ final class AgentSessionEngine {
                     bytes: Self.snapshotFirstBytes, earlier: false),
                   let out = try? await delegate.guestExec(profileID: s.profileID, command: cmd, timeout: 30),
                   let f = TranscriptFetch.parse(Data(out.utf8)) else { return }
+            // Another session's conversation (the folder's newest): not ours.
+            if Self.isForeignConversation(path: f.path, agent: s.tool.rawValue, pin: pin) { return }
             // This run's journal: from now on the session reads it by id (and
             // a resume reopens it by id, never "the last one here").
             var newConversation = false
@@ -999,11 +1009,20 @@ final class AgentSessionEngine {
                !self.store.grokConversationsClaimed(profileID: s.profileID, besides: s.id).contains(id.lowercased()) {
                 self.store.setTranscriptID(s.id, id)
             }
+            // omp: its session id is a uuidv7 (and its file name opens with
+            // when it began) — one begun since this session is its own.
+            if s.tool == .omp, s.agentTranscriptID.map(Self.isTranscriptID) != true,
+               let id = Self.ompConversationID(inPath: f.path),
+               let began = Self.ompConversationStart(inPath: f.path), began >= s.createdAt.addingTimeInterval(-120),
+               !self.store.conversationsClaimed(tool: .omp, profileID: s.profileID, besides: s.id).contains(id.lowercased()) {
+                self.store.setTranscriptID(s.id, id)
+            }
             let continues = newConversation
                 || (known.map { $0.path == f.path && $0.end == f.start } ?? false)
             self.snapshotCursor[s.id] = (f.path, f.end)
             if s.tool == .kimi { self.noteJournal(s.id, f.chunk, continues: continues && !newConversation) }
             guard !f.chunk.isEmpty else { return }
+            if let m = TranscriptSearchIndex.liveModel(in: f.chunk) { self.store.setLastModel(s.id, m) }
             if continues {
                 self.transcripts.append(s.id, f.chunk)
             } else {
@@ -1220,6 +1239,8 @@ final class AgentSessionEngine {
     /// / `codex resume` take.
     static func transcriptID(fromFileName name: String) -> String? {
         if isTranscriptID(name) { return name }
+        // omp: `<timestamp>_<uuidv7>`.
+        if let id = ompConversationID(inFileName: name) { return id }
         guard name.hasPrefix("rollout-"), name.count > 36 else { return nil }
         let tail = String(name.suffix(36))
         return isTranscriptID(tail) ? tail : nil
@@ -1227,6 +1248,21 @@ final class AgentSessionEngine {
 
     /// The Codex conversation id in a rollout path
     /// (`…/rollout-2026-10-05T11-54-51-<uuid>.jsonl`), nil when it isn't one.
+    /// A read that landed on another session's Grok / Codex conversation
+    /// (`TranscriptPin.foreignConversations`): not this session's history.
+    static func isForeignConversation(path: String, agent: String?, pin: TranscriptPin) -> Bool {
+        guard !pin.foreignConversations.isEmpty else { return false }
+        let id: String?
+        switch agent {
+        case "codex": id = codexConversationID(inPath: path)
+        case "grok": id = grokConversationID(inPath: path)
+        case "omp": id = ompConversationID(inPath: path)
+        default: id = nil
+        }
+        guard let id else { return false }
+        return pin.foreignConversations.contains(id.lowercased())
+    }
+
     static func codexConversationID(inPath path: String) -> String? {
         var name = (path as NSString).lastPathComponent
         if name.hasSuffix(".jsonl") { name = String(name.dropLast(6)) }
@@ -1265,6 +1301,54 @@ final class AgentSessionEngine {
         guard let id = comps.last, isTranscriptID(id),
               comps.dropLast().contains(".grok") else { return nil }
         return id
+    }
+
+    /// omp's session id in a session file's name (`<timestamp>_<uuid>`,
+    /// minus `.jsonl`), nil when it isn't one.
+    static func ompConversationID(inFileName name: String) -> String? {
+        guard let us = name.lastIndex(of: "_") else { return nil }
+        let id = String(name[name.index(after: us)...])
+        return isTranscriptID(id) ? id : nil
+    }
+
+    /// omp's session id in a session path
+    /// (`~/.omp/agent/sessions/<cwd>/<ts>_<uuid>.jsonl`), nil when it isn't one.
+    static func ompConversationID(inPath path: String) -> String? {
+        var name = (path as NSString).lastPathComponent
+        guard name.hasSuffix(".jsonl"), path.contains("/sessions/") else { return nil }
+        name = String(name.dropLast(6))
+        return ompConversationID(inFileName: name)
+    }
+
+    /// When an omp session began: its uuidv7, else the timestamp its file
+    /// name opens with (`2026-10-05T12-34-56-789Z_…`).
+    static func ompConversationStart(inPath path: String) -> Date? {
+        guard let id = ompConversationID(inPath: path) else { return nil }
+        if let d = uuidV7Date(id) { return d }
+        let name = (path as NSString).lastPathComponent
+        guard let us = name.lastIndex(of: "_") else { return nil }
+        let ts = String(name[..<us])   // 2026-10-05T12-34-56-789Z
+        let parts = ts.split(separator: "T", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        let t = parts[1].split(separator: "-").map(String.init)   // 12 34 56 789Z
+        guard t.count >= 3 else { return nil }
+        let iso = "\(parts[0])T\(t[0]):\(t[1]):\(t[2])Z"
+        return ISO8601DateFormatter().date(from: iso)
+    }
+
+    /// The id omp prints when it exits — "omp --resume <id>" (maybe with
+    /// `--profile <name>` before it) — in a capture of its pane.
+    static func ompResumeID(inScreen text: String) -> String? {
+        for marker in ["--resume ", " -r "] {
+            var search = text[...]
+            while let r = search.range(of: marker, options: .backwards) {
+                let id = String(search[r.upperBound...].prefix(36))
+                let line = search[..<r.lowerBound].split(separator: "\n", omittingEmptySubsequences: false).last ?? ""
+                if isTranscriptID(id), line.contains("omp") { return id }
+                search = search[..<r.lowerBound]
+            }
+        }
+        return nil
     }
 
     /// When a UUID version 7 was minted (its first 48 bits: Unix ms);
@@ -1417,6 +1501,10 @@ final class AgentSessionEngine {
         }
         // Grok: likewise — `-c` takes the folder's latest.
         if s.tool == .grok, let id = s.agentTranscriptID, isTranscriptID(id) {
+            return "--resume \(id)"
+        }
+        // omp: likewise — `--continue` takes the folder's latest.
+        if s.tool == .omp, let id = s.agentTranscriptID, isTranscriptID(id) {
             return "--resume \(id)"
         }
         return sharedFolder ? "" : s.tool.resumeFlags

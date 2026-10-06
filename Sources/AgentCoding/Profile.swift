@@ -1451,8 +1451,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// probed) — set on the launch copy by the models overlay, never saved.
     /// Wins over the server's advertised value and the 128K fallback.
     public var localModelContextWindow: Int? = nil
-    /// The same for omp switched natively to a custom OpenAI-compatible
-    /// server (its own provider, not the local route). Launch copy only.
+    /// The context window on omp's own Models row: omp switched natively to a
+    /// custom OpenAI-compatible server, or omp's local-route model (wins over
+    /// `localModelContextWindow` for omp's models.yml). Launch copy only.
     public var ompContextWindow: Int? = nil
     /// The providers configured in Settings → Models that omp isn't on, so
     /// its model picker still offers them (the assigned one stays the
@@ -4024,6 +4025,38 @@ public final class ProfileStore {
     ///   that touches other host dirs (legacy ssh migration) is skipped
     ///   (`seedMode == true`) and handled by the agent from
     ///   `claude-settings.spec.json` instead.
+    /// The generic identity agents commit under when nobody configured one —
+    /// deliberately not a real person (Bromure ships widely; never the
+    /// user's own name or address).
+    static let genericGitName = "Bromure Agent"
+    static let genericGitEmail = "agent@bromure.invalid"
+
+    /// The `[user]` identity written to the guest's ~/.gitconfig. The
+    /// workspace's own identity wins; with none, the template's (the one set
+    /// for all workspaces); a field still missing — and not supplied by an
+    /// imported ~/.gitconfig, which is written above the managed block —
+    /// takes the generic agent identity, so a first commit never dies on
+    /// "Please tell me who you are". Returned empty fields are not written.
+    static func resolvedGitIdentity(name rawName: String, email rawEmail: String,
+                                    template: Profile?,
+                                    importedGitconfig: String?) -> (name: String, email: String) {
+        let ws = CharacterSet.whitespaces
+        var name = rawName.trimmingCharacters(in: ws)
+        var email = rawEmail.trimmingCharacters(in: ws)
+        if name.isEmpty && email.isEmpty, let template {
+            name = template.gitUserName.trimmingCharacters(in: ws)
+            email = template.gitUserEmail.trimmingCharacters(in: ws)
+        }
+        #if os(macOS)
+        let imported = importedGitconfig.flatMap { try? GitConfigParse.parse($0) }?.identity
+        #else
+        let imported: (name: String?, email: String?)? = nil   // the iOS client never seeds a guest home
+        #endif
+        if name.isEmpty && (imported?.name ?? "").isEmpty { name = genericGitName }
+        if email.isEmpty && (imported?.email ?? "").isEmpty { email = genericGitEmail }
+        return (name, email)
+    }
+
     private func populateManagedHome(in home: URL,
                                      profile: Profile,
                                      tokenPlan: SessionTokenPlan?,
@@ -4113,12 +4146,13 @@ public final class ProfileStore {
         // A workspace with no identity of its own takes the one set for all
         // workspaces (the template) — else agents can't commit, and stall
         // asking whose name to use.
-        let own = (profile.gitUserName.trimmingCharacters(in: .whitespaces),
-                   profile.gitUserEmail.trimmingCharacters(in: .whitespaces))
-        let fallback = own.0.isEmpty && own.1.isEmpty ? loadTemplate() : nil
-        let name = own.0.isEmpty ? (fallback?.gitUserName.trimmingCharacters(in: .whitespaces) ?? "") : own.0
-        let email = own.1.isEmpty && own.0.isEmpty ? (fallback?.gitUserEmail.trimmingCharacters(in: .whitespaces) ?? "") : own.1
         let importedGit = profile.importedConfigFiles.first { $0.path == ".gitconfig" }
+        let (name, email) = Self.resolvedGitIdentity(
+            name: profile.gitUserName, email: profile.gitUserEmail,
+            template: profile.gitUserName.trimmingCharacters(in: .whitespaces).isEmpty
+                && profile.gitUserEmail.trimmingCharacters(in: .whitespaces).isEmpty
+                ? loadTemplate() : nil,
+            importedGitconfig: importedGit?.contents)
         if !name.isEmpty || !email.isEmpty || !usableCreds.isEmpty || importedGit != nil {
             var lines = [Self.managedSentinel]
             // The user's own file goes FIRST: git resolves single-valued keys
@@ -4669,9 +4703,26 @@ public final class ProfileStore {
               const env = (typeof process !== "undefined" && process.env) ? process.env : {};
               const tmux = env.TMUX || "";
               const pane = env.TMUX_PANE || "";
-              const report = (state: string): void => {
+              // The session's own file and id, Claude-hook shaped, so
+              // agent-status.sh records which transcript THIS tab writes
+              // (two omp sessions in one folder never read each other's) and
+              // the host learns the id it resumes with `--resume <id>`.
+              const sessionJSON = (ctx: any): string => {
+                try {
+                  const sm = ctx?.sessionManager;
+                  const file = sm?.getSessionFile?.() ?? "";
+                  const id = sm?.getSessionId?.() ?? "";
+                  if (!file && !id) return "";
+                  return JSON.stringify({ hook_event_name: "SessionStart", session_id: id, transcript_path: file });
+                } catch {
+                  return "";
+                }
+              };
+              const report = (state: string, ctx?: any): void => {
                 if (!pane) return;
-                const cmd = "TMUX='" + tmux + "' TMUX_PANE='" + pane +
+                const json = ctx ? sessionJSON(ctx) : "";
+                const feed = json ? "echo " + Buffer.from(json).toString("base64") + " | base64 -d | " : "";
+                const cmd = feed + "TMUX='" + tmux + "' TMUX_PANE='" + pane +
                   "' /home/ubuntu/.bromure/agent-status.sh '" + state + "'";
                 try {
                   Promise.resolve(pi.exec("sh", ["-c", cmd])).catch(() => {});
@@ -4679,11 +4730,12 @@ public final class ProfileStore {
                   /* status reporting must never break a turn */
                 }
               };
+              pi.on("session_start", (_event: any, ctx: any) => { report("start", ctx); });
               // agent_start / agent_end bracket the whole run of one prompt.
               // turn_end fires after EVERY model step — including the one
               // that only asks for a tool — so it read "done" while the tool
               // ran (verified on omp 18.2.8).
-              pi.on("agent_start", () => { report("working"); });
+              pi.on("agent_start", (_event: any, ctx: any) => { report("working", ctx); });
               // The call itself, Claude-hook shaped, for the tool-call lineage
               // line agent-status.sh writes (agent-tool-<win>.jsonl).
               pi.on("tool_call", (event: any) => {
@@ -5355,10 +5407,23 @@ public final class ProfileStore {
                     printf '%s' /mnt/bromure-meta/omp-config.yml
                 fi
             }
+            # Provider keys omp isn't configured for (a sibling agent's, an
+            # unused provider's) are unset for omp alone: it would otherwise
+            # poll those catalogs with the real key and could fall back onto
+            # a paid cloud model.
+            _bromure_omp_run() {
+                local _u=() _v
+                if [ -r /mnt/bromure-meta/omp-env-unset ]; then
+                    while IFS= read -r _v; do
+                        [ -n "$_v" ] && _u+=(-u "$_v")
+                    done < /mnt/bromure-meta/omp-env-unset
+                fi
+                command env "${_u[@]}" omp "$@"
+            }
             if [ -r "$HOME/.omp/agent/hooks/agent-status.ts" ]; then
-                omp() { command omp --config "$(_bromure_omp_config)" --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
+                omp() { _bromure_omp_run --config "$(_bromure_omp_config)" --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
             else
-                omp() { command omp --config "$(_bromure_omp_config)" "$@"; }
+                omp() { _bromure_omp_run --config "$(_bromure_omp_config)" "$@"; }
             fi
         fi
     fi
@@ -5445,6 +5510,9 @@ public final class ProfileStore {
         if users and "enabledModels:" in overlay:
             at = overlay.index("enabledModels:") + 1
             overlay[at:at] = ["  - " + chr(34) + name + "/*" + chr(34) for name in users]
+        if users and "disabledProviders:" in overlay:
+            gone = set("  - " + chr(34) + name + chr(34) for name in users)
+            overlay = [l for l in overlay if l not in gone]
         with open(overlay_dest + ".bromure-tmp", "w") as f:
             f.write(NL.join(overlay) + NL)
         os.replace(overlay_dest + ".bromure-tmp", overlay_dest)
@@ -5669,7 +5737,15 @@ public final class ProfileStore {
         case "$(cat /mnt/bromure-meta/kimi-approvals 2>/dev/null)" in --yolo) _kimi_mode=--yolo ;; esac
         case " $_wt_flags " in *" --auto "*|*" --yolo "*) _kimi_mode= ;; esac
         if command -v "$_wt_tool" >/dev/null 2>&1; then
-            printf '\\033[2m[bromure-ac] starting %s in worktree…\\033[0m\\n' "$_wt_tool"
+            # Say "in worktree" only for a linked git worktree (its git dir
+            # differs from the shared common dir) — a plain session runs in
+            # the folder itself.
+            _wt_where=
+            if [ "$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)" != \\
+                 "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]; then
+                _wt_where=' in worktree'
+            fi
+            printf '\\033[2m[bromure-ac] starting %s%s…\\033[0m\\n' "$_wt_tool" "$_wt_where"
             if [ "$_wt_tool" = "kimi" ] && [ -n "$_wt_interactive" ]; then
                 # A coding-board task (agentd sets BROMURE_AC_WT_INTERACTIVE):
                 # Kimi must stay in its TUI so review feedback and the

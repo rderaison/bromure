@@ -30,6 +30,9 @@ struct ReviewSource {
     /// What the agent the task was handed to said when it delivered
     /// (who, and its words) — shown even when there's no diff to read.
     var note: () -> (who: String, text: String)? = { nil }
+    /// Known to have no code to review (a task measured with nothing to
+    /// merge): the diff pane says so instead of waiting on a read.
+    var noCode: () -> Bool = { false }
     /// The diff at `base`. The second argument: a file the review is about
     /// (a turn's edit) — its git checkout is diffed, which may not be the
     /// session's folder (a worktree the agent edits in).
@@ -501,7 +504,10 @@ struct ReviewView: View {
     // MARK: Diff
 
     @ViewBuilder private var diffPane: some View {
-        if let data, !(loading && visibleFiles.isEmpty) {
+        // A re-read under way keeps the spinner only while it may still find
+        // files: a diff already known to be empty says "No changes" at once
+        // (the spinner stayed up for a task with no code at all).
+        if let data, !(loading && visibleFiles.isEmpty && !data.files.isEmpty) {
             let files = visibleFiles
             if files.isEmpty {
                 emptyState(data)
@@ -533,6 +539,11 @@ struct ReviewView: View {
                     }
                 }
             }
+        } else if source.noCode() {
+            ContentUnavailableView(
+                NSLocalizedString("No code changes", comment: "review: a task that changed no files"),
+                systemImage: "checkmark.seal",
+                description: Text(NSLocalizedString("The agent's work is its report above — there is no diff to read.", comment: "review")))
         } else if loadFailed {
             ContentUnavailableView(
                 NSLocalizedString("Can't reach the machine", comment: "review"),

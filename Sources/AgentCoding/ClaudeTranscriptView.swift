@@ -331,6 +331,15 @@ enum ClaudeTranscriptParser {
                 items.append(TranscriptItem(id: items.count, kind: kind, timestamp: stamp))
             }
 
+            // `/compact`'s summary is written as a user message ("This
+            // session is being continued from a previous conversation…"):
+            // not something the user said — one folded row, the summary
+            // behind its disclosure.
+            if type == "user", obj["isCompactSummary"] as? Bool == true {
+                add(compactSummaryItem(resultText(message["content"])))
+                continue
+            }
+
             // A refused API call ("Please run /login · API Error: 401 …"),
             // written as a synthetic assistant turn but tagged with its enum
             // and status — the tags are the signal, the text only the detail.
@@ -505,6 +514,13 @@ enum ClaudeTranscriptParser {
     }
 
     /// tool_result content: bare string, or an array of text blocks.
+    /// The folded row a compaction summary becomes.
+    static func compactSummaryItem(_ summary: String) -> TranscriptItem.Kind {
+        .toolUse(name: "Compact",
+                 summary: NSLocalizedString("Conversation compacted", comment: "transcript: /compact summary row"),
+                 detail: summary.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     fileprivate static func resultText(_ content: Any?) -> String {
         if let s = content as? String { return s }
         guard let blocks = content as? [[String: Any]] else { return "" }
@@ -744,6 +760,11 @@ enum OmpTranscriptParser {
         var todoInit: [TodoRowModel] = []
         var todoResult: String?
         var todoAnchor: Int?
+        // omp's own `ask` calls by id: where the call's card sits and what it
+        // asked. Once its result is in, the card turns into the answered
+        // question (the answer stays in the chat); while it's open, the
+        // dialog on screen is the way to answer it.
+        var askAnchors: [String: (at: Int, questions: [TranscriptQuestion])] = [:]
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
@@ -767,8 +788,10 @@ enum OmpTranscriptParser {
             // level. (Older omp inlined a `tool_result` block in a user
             // message — still handled in the block loop below.)
             if role == "toolResult" {
-                let tool = message["toolName"] as? String
-                    ?? (message["toolCallId"] as? String).flatMap { toolNames[$0] }
+                // The call's name as the chat knows it first: an `xd://` device
+                // write was renamed to the tool it ran (its result says "write").
+                let tool = (message["toolCallId"] as? String).flatMap { toolNames[$0] }
+                    ?? message["toolName"] as? String
                     ?? "tool"
                 let content = ClaudeTranscriptParser.resultText(message["content"])
                 // The todo result is the authoritative per-item status — fold it
@@ -777,6 +800,16 @@ enum OmpTranscriptParser {
                 if tool == "todo", todoAnchor != nil {
                     todoResult = content
                     continue
+                }
+                if tool == "ask", let callID = message["toolCallId"] as? String,
+                   let anchor = askAnchors.removeValue(forKey: callID) {
+                    let answered = Self.answeredAsk(anchor.questions, result: content,
+                                                    isError: message["isError"] as? Bool ?? false)
+                    if let first = answered.first {
+                        items[anchor.at].kind = .question(first)
+                        answered.dropFirst().forEach { add(.question($0)) }
+                        continue
+                    }
                 }
                 add(.toolResult(tool: tool, content: content,
                                 isError: message["isError"] as? Bool ?? false))
@@ -800,7 +833,7 @@ enum OmpTranscriptParser {
 
             // content: a bare string or an array of blocks.
             if let s = message["content"] as? String {
-                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                let t = (isUser ? Self.unwrapAttachments(s) : s).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !t.isEmpty { add(isUser ? .userText(t) : .assistantText(t)) }
                 continue
             }
@@ -808,7 +841,8 @@ enum OmpTranscriptParser {
             for block in blocks {
                 switch block["type"] as? String {
                 case "text":
-                    let s = (block["text"] as? String ?? "")
+                    let raw = block["text"] as? String ?? ""
+                    let s = (isUser ? Self.unwrapAttachments(raw) : raw)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if !s.isEmpty { add(isUser ? .userText(s) : .assistantText(s)) }
                 case "thinking":
@@ -818,9 +852,18 @@ enum OmpTranscriptParser {
                 // Current omp: `toolCall` (args in `arguments`, plus a human
                 // `intent`). Older omp / Anthropic: `tool_use` (`input`).
                 case "toolCall", "tool_use":
-                    let name = block["name"] as? String ?? "tool"
+                    var name = block["name"] as? String ?? "tool"
+                    var input = Self.toolInput(block)
+                    // omp drives MCP / mounted tools through read/write on
+                    // `xd://<tool>` and pages spilled output via
+                    // `artifact://N`: the tool it really ran, not a file edit.
+                    var virtualSummary: String?
+                    if let v = Self.virtualCall(name: name, input: input) {
+                        name = v.name
+                        input = v.input
+                        virtualSummary = v.summary
+                    }
                     if let id = block["id"] as? String { toolNames[id] = name }
-                    let input = Self.toolInput(block)
                     // omp's todo list → one consolidated, live-ticking .todo item
                     // (its per-item status is folded in from the result above).
                     if name == "todo" {
@@ -838,12 +881,16 @@ enum OmpTranscriptParser {
                     if !questions.isEmpty {
                         questions.forEach { add(.question($0)) }
                     } else {
+                        if name == "ask", let id = block["id"] as? String {
+                            let asked = Self.askQuestions(input)
+                            if !asked.isEmpty { askAnchors[id] = (items.count, asked) }
+                        }
                         // Prefer omp's own one-line `intent` ("Writing foo.html")
                         // as the summary; fall back to the derived one.
                         let intent = (block["intent"] as? String)?
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         let summary = (intent?.isEmpty == false) ? intent!
-                            : ClaudeTranscriptParser.toolSummary(name: name, input: input)
+                            : virtualSummary ?? ClaudeTranscriptParser.toolSummary(name: name, input: input)
                         add(.toolUse(name: name, summary: summary,
                                      detail: ClaudeTranscriptParser.prettyJSON(input)))
                     }
@@ -865,6 +912,115 @@ enum OmpTranscriptParser {
                                   rows: TodoParse.merge(initRows: todoInit, resultText: todoResult))
         }
         return items
+    }
+
+    /// omp's `ask` arguments: `questions: [{id, question, options: [{label,
+    /// description?}], multi?}]`.
+    static func askQuestions(_ input: [String: Any]) -> [TranscriptQuestion] {
+        guard let qs = input["questions"] as? [[String: Any]] else { return [] }
+        return qs.compactMap { q in
+            guard let text = q["question"] as? String, !text.isEmpty else { return nil }
+            let opts = (q["options"] as? [[String: Any]] ?? []).compactMap { o -> TranscriptQuestion.Option? in
+                guard let label = o["label"] as? String, !label.isEmpty else { return nil }
+                return .init(label: label, description: o["description"] as? String ?? "")
+            }
+            return TranscriptQuestion(question: text, header: q["id"] as? String ?? "",
+                                      multiSelect: q["multi"] as? Bool ?? false, options: opts)
+        }
+    }
+
+    /// The questions with what the user answered, from omp's result text:
+    /// "User selected: Green", "User provided custom input: teal", or for
+    /// several questions "User answers:\n<id>: Green". An error result (Esc:
+    /// "cancelled") is a declined question.
+    static func answeredAsk(_ questions: [TranscriptQuestion], result: String,
+                            isError: Bool) -> [TranscriptQuestion] {
+        var out = questions
+        let lines = result.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        func value(after prefix: String) -> String? {
+            lines.first { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces) }
+        }
+        let cancelled = isError || result.contains("User cancelled the selection")
+            || result.contains("User did not select any options")
+        for i in out.indices {
+            if cancelled { out[i].declined = true; continue }
+            var answer: String?
+            if questions.count == 1 {
+                answer = value(after: "User selected:") ?? value(after: "User provided custom input:")
+            }
+            if answer == nil, !out[i].header.isEmpty {
+                answer = value(after: out[i].header + ":").map {
+                    var a = $0
+                    if a.hasPrefix("["), a.hasSuffix("]") { a = String(a.dropFirst().dropLast()) }
+                    if a.hasPrefix("\""), a.hasSuffix("\""), a.count >= 2 { a = String(a.dropFirst().dropLast()) }
+                    return a
+                }
+            }
+            if answer == "(cancelled)" { out[i].declined = true; continue }
+            out[i].answer = answer ?? ""
+        }
+        return out
+    }
+
+    /// A paste omp wrapped for the model (`<attachment>\n…\n</attachment>`,
+    /// its large-paste marker): the words the user pasted, unwrapped — the
+    /// chat folds a long one like any long message.
+    static func unwrapAttachments(_ text: String) -> String {
+        guard text.contains("<attachment>") else { return text }
+        return text.replacingOccurrences(
+            of: #"<attachment>\r?\n?([\s\S]*?)\r?\n?</attachment>"#, with: "$1", options: .regularExpression)
+    }
+
+    /// A read/write that isn't a file: omp's `xd://<tool>` devices (a write
+    /// RUNS the tool with `content` as its JSON arguments, a read fetches
+    /// its docs) and `artifact://N` (an earlier command's spilled output).
+    struct VirtualCall {
+        let name: String
+        let summary: String?
+        let input: [String: Any]
+    }
+
+    /// Tool name for a docs lookup of an `xd://` device.
+    static let toolLookupName = "tool_lookup"
+    /// Tool name for a read of spilled output (`artifact://N`).
+    static let readOutputName = "read_output"
+
+    static func virtualCall(name: String, input: [String: Any]) -> VirtualCall? {
+        let n = name.lowercased()
+        guard n == "read" || n == "write",
+              let path = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return nil }
+        let lower = path.lowercased()
+        if lower.hasPrefix("xd://") {
+            let tool = path.dropFirst(5)
+                .split(whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" || $0 == ":" })
+                .first.map(String.init) ?? ""
+            if n == "write" {
+                guard !tool.isEmpty else { return nil }
+                var args: [String: Any] = [:]
+                if let d = input["content"] as? [String: Any] {
+                    args = d
+                } else if let c = input["content"] as? String,
+                          let d = try? JSONSerialization.jsonObject(with: Data(c.utf8)) as? [String: Any] {
+                    args = d
+                }
+                return VirtualCall(name: tool, summary: nil, input: args)
+            }
+            let label = tool.isEmpty
+                ? NSLocalizedString("Listing its tools", comment: "omp step: read of xd:// (the agent lists the tools it can call)")
+                : String(format: NSLocalizedString("Looking up %@", comment: "omp step: read of a tool's docs (xd://tool); %@ = tool"),
+                         ActivitySummary.humanTool(tool))
+            return VirtualCall(name: toolLookupName, summary: label, input: tool.isEmpty ? [:] : ["tool": tool])
+        }
+        if n == "read", lower.hasPrefix("artifact://") {
+            let rest = String(path.dropFirst("artifact://".count))
+            let id = String(rest.prefix { $0.isNumber })
+            let label = id.isEmpty
+                ? NSLocalizedString("Reading earlier output", comment: "omp step: read of a spilled command output (artifact://)")
+                : String(format: NSLocalizedString("Reading earlier output #%@", comment: "omp step: read of spilled command output N (artifact://N)"), id)
+            return VirtualCall(name: readOutputName, summary: label, input: ["artifact": rest])
+        }
+        return nil
     }
 
     /// A tool call's arguments as a dict: `input` (Anthropic/older omp) or
@@ -3150,8 +3306,10 @@ struct TranscriptItemView: View {
         case .todo(let title, let rows):
             TodoListView(title: title, rows: rows)
         case .agentError(let e):
+            // A Bromure block says what it is in its title: the agent's raw
+            // "API error (status 451 …)" stays behind the disclosure.
             CollapsibleRow(icon: "exclamationmark.triangle.fill", title: e.headline,
-                           subtitle: firstLine(e.message), tint: .orange) {
+                           subtitle: e.kind == .blocked ? "" : firstLine(e.message), tint: .orange) {
                 if let hint = e.blockedBy?.recoveryHint {
                     Text(hint)
                         .font(.system(size: 11.5))
@@ -3365,7 +3523,8 @@ struct ToolCallCard: View {
         } else if isFileTool(n), let p = firstString(["file_path", "path", "pattern", "query", "notebook_path"]) {
             FileCard(icon: fileIcon(n), tool: name, value: p)
         } else {
-            CollapsibleRow(icon: "wrench.and.screwdriver", title: name,
+            CollapsibleRow(icon: ActivitySummary.category(name) == .delegation ? "arrow.left.arrow.right" : "wrench.and.screwdriver",
+                           title: ActivitySummary.humanTool(name),
                            subtitle: summary, tint: .secondary) {
                 if !detail.isEmpty { RawJSONBlock(detail) }
             }

@@ -338,6 +338,9 @@ struct QARound3FixesTests {
         #expect(!out.isRedundant(with: TerminalPrompt.privacyCard("x")))
         var live = out
         live.live = true
+        // Brought up by the watch: the card wins. Opened by hand: it shows.
+        #expect(live.isRedundant(with: picker))
+        live.byHand = true
         #expect(!live.isRedundant(with: picker))
     }
 }

@@ -120,6 +120,12 @@ struct ConsentPanelLayoutTests {
             #expect(Self.screen.contains(frame), "\(v.name): panel \(frame) not within \(Self.screen)")
             #expect(frame.width >= 400, "\(v.name): panel too narrow \(frame.width)")
             #expect(w.buttons.count == v.choices.count)
+            // A full margin under the lowest button (it used to sit flush
+            // against the panel's bottom edge, clipped).
+            let lowest = w.buttons.map { $0.convert($0.bounds, to: content) }
+                .map { content.isFlipped ? content.bounds.maxY - $0.maxY : $0.minY }.min() ?? 0
+            #expect(lowest >= ConsentPanelWindow.inset - 1,
+                    "\(v.name): only \(lowest) pt under the buttons")
             for b in w.buttons {
                 let r = b.convert(b.bounds, to: content)
                 #expect(content.bounds.insetBy(dx: -0.5, dy: -0.5).contains(r),

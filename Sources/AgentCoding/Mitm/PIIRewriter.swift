@@ -9,6 +9,70 @@ import Foundation
 /// it. Signed or opaque content (thinking blocks, signatures, encrypted
 /// reasoning, base64 data) is never touched in either direction, so the
 /// provider's signature checks still pass.
+/// Which locally-routed turns PII protection covers. Only the on-device
+/// engine is exempt (the built-in MLX engine, or a custom server on this Mac's
+/// loopback / own address): nothing leaves the Mac there. A custom/external
+/// engine is usually another machine (a LAN box, a rented GPU, Bedrock,
+/// OpenRouter) — the conversation leaves the Mac, so it gets the same swap /
+/// restore as a cloud provider. The swap runs in the MITM before the turn
+/// enters the repair/translation proxy, and the relay restores whatever that
+/// proxy streams back (any guest wire), so the agent still sees real values.
+enum PIIEngineScope {
+    /// The workspace's external engine (nil = the built-in on-device engine).
+    /// Replaceable for tests.
+    nonisolated(unsafe) static var externalEngine: (UUID) -> ExternalEngine.Config? = {
+        InferenceRepairProxy.shared.externalEngine(for: $0)
+    }
+
+    /// The host a locally-routed turn of `profileID` really goes to, when
+    /// it's off this Mac; nil when the engine is on-device.
+    static func offMacEngineHost(profileID: UUID) -> String? {
+        guard let host = externalEngine(profileID)?.base.host, !host.isEmpty,
+              !isOnThisMac(host) else { return nil }
+        return host
+    }
+
+    /// Loopback, unspecified, this Mac's own name, or one of its interface
+    /// addresses.
+    static func isOnThisMac(_ rawHost: String) -> Bool {
+        var h = rawHost.lowercased()
+        if h.hasPrefix("["), h.hasSuffix("]") { h = String(h.dropFirst().dropLast()) }
+        if h == "localhost" || h.hasSuffix(".localhost") || h == "::1" || h == "::"
+            || h == "0.0.0.0" || h.hasPrefix("127.") || h == "0:0:0:0:0:0:0:1" { return true }
+        if h.hasPrefix("::ffff:127.") { return true }
+        var buf = [CChar](repeating: 0, count: 256)
+        if gethostname(&buf, buf.count) == 0 {
+            let name = String(cString: buf).lowercased()
+            if !name.isEmpty, h == name || h == name + ".local"
+                || (name.hasSuffix(".local") && h == String(name.dropLast(6))) { return true }
+        }
+        return localInterfaceAddresses().contains(h)
+    }
+
+    private static func localInterfaceAddresses() -> Set<String> {
+        var out: Set<String> = []
+        var ifap: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifap) == 0, let first = ifap else { return out }
+        defer { freeifaddrs(ifap) }
+        var cur: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = cur {
+            defer { cur = p.pointee.ifa_next }
+            guard let sa = p.pointee.ifa_addr else { continue }
+            let family = sa.pointee.sa_family
+            guard family == UInt8(AF_INET) || family == UInt8(AF_INET6) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let len = socklen_t(family == UInt8(AF_INET) ? MemoryLayout<sockaddr_in>.size
+                                                         : MemoryLayout<sockaddr_in6>.size)
+            if getnameinfo(sa, len, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                var s = String(cString: host).lowercased()
+                if let pct = s.firstIndex(of: "%") { s = String(s[..<pct]) }   // fe80::1%en0
+                out.insert(s)
+            }
+        }
+        return out
+    }
+}
+
 enum PIIRewriter {
 
     /// JSON keys whose string values are never scanned or rewritten.
@@ -47,14 +111,19 @@ enum PIIRewriter {
     }
 
     /// Is this an AI API call whose body carries a conversation?
-    static func isEligible(host: String, method: String, body: Data) -> Bool {
+    /// `localEngineOffMac`: the local-inference sentinel (`bromure.llm`) is
+    /// eligible too — its engine is a custom/external server on another
+    /// machine, so the conversation does leave the Mac (`PIIEngineScope`).
+    static func isEligible(host: String, method: String, body: Data,
+                           localEngineOffMac: Bool = false) -> Bool {
         // First non-whitespace byte opens a JSON object (a pretty-printed
         // body may start with a newline).
         let first = body.first { !($0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D) }
         guard method.uppercased() == "POST", body.count > 2, first == UInt8(ascii: "{") else { return false }
         let h = host.lowercased()
         guard TraceLevel.aiHosts.contains(where: { h.contains($0) }),
-              !h.contains("huggingface.co"), h != InferenceService.localMitmHost else { return false }
+              !h.contains("huggingface.co"),
+              localEngineOffMac || h != InferenceService.localMitmHost else { return false }
         // A conversation: Anthropic `messages`, OpenAI `messages`/`input`,
         // Gemini `contents`. Cheap byte probe before any parsing.
         for k in ["\"messages\"", "\"input\"", "\"contents\""] where body.range(of: Data(k.utf8)) != nil {
@@ -123,12 +192,14 @@ enum PIIRewriter {
         var budget = modelBudget
         var outcome = Outcome(body: body)
         for text in texts.reversed() where plans[text] == nil {
-            let (spans, cached) = await detector.detect(text, useModel: budget > 0)
-            if !cached {
+            // Long strings are scanned per content-defined chunk, so only the
+            // parts the model hasn't read before cost budget (and time).
+            let d = await detector.detectIncremental(text, useModel: budget > 0)
+            if !d.cached {
                 if budget <= 0 { outcome.partial = true }
-                budget -= (text as NSString).length
+                budget -= d.modelUnits
             }
-            plans[text] = (plan(spans, in: text, policy: policy), !cached)
+            plans[text] = (plan(d.spans, in: text, policy: policy), !d.cached)
         }
         // Learn every value before replacing any, so a name found late in the
         // body is also swapped where it appeared earlier.
@@ -295,10 +366,7 @@ enum PIIRewriter {
             case .givenName, .surname:
                 guard policy.names, s.length >= 2 else { return false }
                 guard isPlausibleName(t) else { return false }
-                // A lone dictionary word ("Rerun", "Will") needs the model to
-                // be sure; agent traffic is full of capitalized words.
-                if !t.contains(" "), PIISurrogates.isCommonWord(t.lowercased()), s.score < 0.85 { return false }
-                return true
+                return isConfidentName(t, in: ns, span: s)
             case .email:
                 guard policy.contact else { return false }
                 return isPlausibleEmail(t)
@@ -344,6 +412,70 @@ enum PIIRewriter {
         "kotlin", "scala", "elixir", "erlang", "haskell", "ghostty", "tmux", "vim", "emacs",
         "darwin", "mozilla", "kernel", "unix", "posix", "windows", "android", "safari", "webkit",
     ]
+
+    /// Capitalized words the model takes for names that aren't anyone's
+    /// name: colors, days, answer and UI words. QA: the single word "Blue" (a
+    /// multiple-choice answer, a line of a README) was swapped, and Claude saw
+    /// a stand-in where the file said "Blue". A run made only of these ("Navy
+    /// Blue", "Light Blue") is never a name.
+    static let nonNameWords: Set<String> = [
+        "blue", "yellow", "orange", "purple", "pink", "teal", "cyan", "magenta", "indigo",
+        "maroon", "beige", "turquoise", "lavender", "lilac", "navy", "scarlet", "crimson",
+        "azure", "khaki", "charcoal", "light", "dark", "pale", "bright", "silver", "golden",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "spring", "summer", "autumn", "winter", "today", "tomorrow", "yesterday",
+        "morning", "evening", "night", "noon",
+        "yes", "no", "ok", "okay", "none", "true", "false", "maybe", "done", "next", "back",
+        "cancel", "continue", "apply", "submit", "option", "choice", "answer", "first",
+        "second", "third", "last", "left", "right", "top", "bottom", "north", "south", "east",
+        "west", "small", "medium", "large", "high", "low", "new", "old", "other", "all", "any",
+    ]
+
+    /// Lone words that are names only when something introduces a person:
+    /// the non-name words above, plus colors, months and nouns that are also
+    /// names or surnames ("Mr Brown", "Dear June" — but not "June" alone).
+    /// Lower-case dictionary words get the same treatment.
+    static let contextOnlyNames: Set<String> = nonNameWords.union([
+        "red", "green", "brown", "black", "white", "gray", "grey", "gold", "amber", "olive",
+        "coral", "rose", "ruby", "jade", "ivory",
+        "january", "february", "march", "april", "may", "june", "july", "august", "september",
+        "october", "november", "december",
+        "cherry", "honey", "ginger", "daisy", "lily", "iris", "violet", "hazel", "sky", "river",
+        "stone", "king", "queen", "prince", "major", "dean", "grace", "hope", "faith", "joy",
+        "angel", "star", "smith", "miller", "baker", "hunter", "mason", "porter", "page", "bell",
+    ])
+
+    /// Words before a lone name that say "a person is named here".
+    private static let nameContext = try! NSRegularExpression(pattern:
+        #"(?i)(?:\b(?:mr|mrs|ms|miss|mx|dr|prof|sir|madam|dear|hi|hello|hey|thanks|thank you|regards|cheers|sincerely|name(?:d|s)?|called|by|from|to|with|cc|contact|customer|client|patient|employee|user|author|owner|manager|colleague|friend|wife|husband|son|daughter|mother|father|brother|sister|nom|prénom|herr|frau|señor|señora|sr|sra)\b\.?[:,]?\s*)$"#)
+
+    /// Is a model "name" worth swapping? Multi-word names are (unless every
+    /// word is a `nonNameWords` word); a lone color/day/answer word, month or
+    /// dictionary word needs the model to be sure AND a word before it that
+    /// introduces a person ("Dear Will", "named Grace", "Mr Brown"); a very
+    /// short token ("Bob") needs one or the other.
+    /// A word sitting alone on its line or as the whole text (a README line,
+    /// a one-word answer) has no such context, so a common word there stays.
+    static func isConfidentName(_ t: String, in ns: NSString, span s: PIISpan) -> Bool {
+        let words = t.split(whereSeparator: { $0 == " " || $0 == "\u{00a0}" })
+            .map { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !words.isEmpty else { return false }
+        if words.allSatisfy({ nonNameWords.contains($0) }) { return false }
+        // Multi-word ("Margaret Holloway", "Jane Q. Example"): the model saw a
+        // full name — keep it (the plausibility check already ran).
+        if words.count >= 2 { return true }
+        let w = words[0]
+        let common = contextOnlyNames.contains(w) || PIISurrogates.isCommonWord(w)
+        let short = w.count <= 3
+        guard common || short else { return true }
+        let from = max(0, s.start - 40)
+        let before = ns.substring(with: NSRange(location: from, length: s.start - from))
+        let context = nameContext.firstMatch(in: before, range: NSRange(location: 0, length: (before as NSString).length)) != nil
+        if common { return s.score >= 0.85 && context }
+        // A short non-dictionary token ("Bob", "Ann", "Kai"): sure, or introduced.
+        return s.score >= 0.85 || context
+    }
 
     /// Not an image asset (`icon@2x.png`) or other file name.
     static func isPlausibleEmail(_ t: String) -> Bool {

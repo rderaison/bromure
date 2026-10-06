@@ -490,6 +490,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // sees a hard failure rather than a hung connection. We
             // never forward a single byte to the destination host
             // when a leak fires.
+            BromureBlockLog.shared.record(.credentialLeak, profileID: profileID)
             let body = "Bromure: outbound request blocked — leaked credential to non-designated host.\n"
             var resp = "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
             resp += "Content-Type: text/plain; charset=utf-8\r\n"
@@ -1614,8 +1615,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 switch pi.onDetection {
                 case .block:
                     record(outcome: "blocked")
-                    PromptInjectionRedactions.shared.block(f.spans, profileID: pid)
-                    try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
+                    PromptInjectionRedactions.shared.block(f, profileID: pid)
+                    try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source,
+                                                               instructionsWithheld: !f.ruleSpans.isEmpty))
                     return
                 case .ask:
                     let allow = await Self.promptInjectionBroker.consent(
@@ -1623,8 +1625,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         source: f.source, flaggedText: f.preview)
                     record(outcome: allow ? "allowed" : "blocked")
                     if !allow {
-                        PromptInjectionRedactions.shared.block(f.spans, profileID: pid)
-                        try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
+                        PromptInjectionRedactions.shared.block(f, profileID: pid)
+                        try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source,
+                                                                   instructionsWithheld: !f.ruleSpans.isEmpty))
                         return
                     }
                 case .log:
@@ -1666,18 +1669,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         // PII protection: swap personal data in the conversation for
         // stand-ins before it leaves the Mac; the relay below puts the real
-        // values back in the reply. Not for a turn served by the on-host
-        // engine — nothing leaves the Mac there. Runs before Fusion so its
-        // fan-out never carries the real values either.
+        // values back in the reply. Not for a turn served by the on-device
+        // engine — nothing leaves the Mac there. A locally-routed turn whose
+        // engine is a custom server on another machine DOES leave the Mac:
+        // it is swapped here, before the repair/translation proxy, and the
+        // relay restores that proxy's streamed reply (`PIIEngineScope`).
+        // Runs before Fusion so its fan-out never carries the real values.
         var piiVault: PIIVault? = nil
-        if routedBackend == .cloud, bodyFile == nil,
+        let offMacEngine: String? = routedBackend == .local
+            ? PIIEngineScope.offMacEngineHost(profileID: profileID) : nil
+        if routedBackend == .cloud || offMacEngine != nil, bodyFile == nil,
            let pii = Self.piiPolicyProvider?(profileID), pii.isActive,
            let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
             let head = toForward.subdata(in: 0..<split.upperBound)
             let body = toForward.subdata(in: split.upperBound..<toForward.count)
             let encoded = Self.headerValue("Content-Encoding",
                                            inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
-            if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body) {
+            if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body,
+                                                localEngineOffMac: offMacEngine != nil) {
                 let vault = PIIVault.forProfile(profileID)
                 let t = Date()
                 let outcome = await PIIRewriter.rewriteRequest(body, policy: pii, vault: vault)
@@ -1686,8 +1695,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let ms = Date().timeIntervalSince(t) * 1000
                 // A partial scan is recorded even with nothing swapped: the
                 // Timeline must show that part of the text got pattern rules only.
+                // The Timeline names where the text really went: the
+                // custom engine's host, not the `bromure.llm` sentinel.
                 if outcome.total > 0 || outcome.partial {
-                    Self.recordPIISwaps(outcome, host: host, profileID: profileID, ms: ms)
+                    Self.recordPIISwaps(outcome, host: offMacEngine ?? host, profileID: profileID, ms: ms)
                 }
                 if outcome.total > 0 || ms > 250 || outcome.partial {
                     FileHandle.standardError.write(Data(String(
@@ -2534,42 +2545,54 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return collected
     }
 
-    /// OpenAI Responses wire (Codex): one item per message. The fresh tool
-    /// output is the trailing run of output items answering the model's last
-    /// batch of calls — `[…, call₁, call₂, out₁, out₂]`, or just `[out₁]` on a
-    /// WebSocket turn chained by `previous_response_id`. Walking back: take
-    /// outputs, step over the calls; an output BEFORE those calls belongs to
-    /// an earlier step (already scanned), and any message text ends the run.
+    /// OpenAI Responses wire (Codex, Grok): one item per message. The fresh
+    /// tool output is the trailing run of call / output items since the last
+    /// message with real text — `[…, call₁, call₂, out₁, out₂]`, or just
+    /// `[out₁]` on a WebSocket turn chained by `previous_response_id`.
+    ///
+    /// Grok (1.0.46, cli-chat-proxy /v1/responses) pairs each call with its
+    /// output (`call₁, out₁, call₂, out₂`) and slips harness notes
+    /// (`<system-reminder>` user messages) between steps; the older "outputs
+    /// after the last batch of calls only" walk stopped at the first of either
+    /// and left a shell `cat` of a planted file unscanned while its Read was
+    /// caught. Now every output in the run is a span: an output already
+    /// scanned is a verdict-cache hit (and logged once, see `scanAndLog`); a
+    /// blocked one arrives as the redaction placeholder.
+    static let maxResponsesRunSpans = 64
     private static func newResponsesToolOutputs(
         in conv: Conversation
     ) -> [(id: String?, content: String)] {
         var collected: [(id: String?, content: String)] = []
-        var passedCalls = false
         for message in conv.messages.reversed() {
             var results: [(id: String?, content: String)] = []
-            var calls = 0, other = 0
+            var calls = 0
+            var texts: [String] = []
             for block in message.content {
                 switch block {
                 case let .toolResult(id, content, _):
                     if !content.isEmpty { results.append((id: id, content: content)) }
                 case .toolUse: calls += 1
-                default: if message.role != .tool { other += 1 }   // a screenshot output is still output
+                case let .text(t): if message.role != .tool { texts.append(t) }
+                case .image: break   // a screenshot output is still output
                 }
             }
-            if other > 0 { break }
-            if !results.isEmpty {
-                // An mcp_call item carries its call AND its (fresh) result.
-                if passedCalls && calls == 0 { break }
+            if !results.isEmpty || calls > 0 || message.role == .tool {
                 collected.insert(contentsOf: results, at: 0)
-                if calls > 0 { passedCalls = true }
+                if collected.count >= maxResponsesRunSpans { break }
                 continue
             }
-            if calls > 0 { passedCalls = true; continue }
-            // A tool output with nothing in it: still part of the run.
-            if message.role == .tool, !passedCalls { continue }
+            // A harness note between steps isn't the user talking.
+            if message.role == .user, !texts.isEmpty, texts.allSatisfy(isHarnessReminder) { continue }
             break
         }
-        return collected
+        return Array(collected.suffix(maxResponsesRunSpans))
+    }
+
+    /// An agent harness's own note in a user turn (`<system-reminder>…`),
+    /// not something the user typed.
+    static func isHarnessReminder(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("<system-reminder>") && t.hasSuffix("</system-reminder>")
     }
 
     /// 451 response the guest sees when a prompt-injection detection blocks the
@@ -2692,9 +2715,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// it happens on every later turn, the Timeline already has the block.
     static func recordInjectionRedacted(count: Int, host: String, profileID: UUID) {
         SupplyChainLog.shared.record(
-            "[prompt-injection] redacted: \(count) blocked tool output(s) replaced by a placeholder → \(host)")
+            "[prompt-injection] redacted: \(count) blocked tool output(s) or instruction file(s) replaced by a placeholder → \(host)")
         FileHandle.standardError.write(Data(
-            "[prompt-injection] \(host): \(count) blocked tool output(s) sent as a placeholder (workspace \(profileID.uuidString.prefix(8)))\n".utf8))
+            "[prompt-injection] \(host): \(count) blocked tool output(s) or instruction file(s) sent as a placeholder (workspace \(profileID.uuidString.prefix(8)))\n".utf8))
     }
 
     /// "Unavailable For Legal Reasons - Bromure blocked: possible prompt
@@ -2705,14 +2728,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return "Unavailable For Legal Reasons - Bromure blocked: possible \(d)"
     }
 
-    static func injectionBlockResponse(detector: String, source: String) -> Data {
+    static func injectionBlockResponse(detector: String, source: String,
+                                       instructionsWithheld: Bool = false) -> Data {
         // The agent shows this text: say what happens next. Tool output that
         // was blocked is taken out of later requests (the session goes on);
         // rewinding or a new session clears it for good.
-        let next = detector == "prompt injection"
-            ? " Bromure will replace that content with a placeholder in later requests, so the next message can go through."
-                + " If it keeps failing, rewind the conversation past that step or start a new session."
-            : " Fix or remove the flagged instructions, or start a new session."
+        // The next step goes on its own line: agents that print one line of
+        // the error (omp's TUI wraps it; the chat card shows the line) still
+        // show a whole sentence instead of "…Bromure will replace that content".
+        let next = injectionNextStep(detector: detector, instructionsWithheld: instructionsWithheld)
         let body = "Bromure blocked this request: possible \(detector) detected in \(source).\(next)\n"
         // The reason phrase names the block too: an agent that reports only
         // the status line (Grok: "API error (status 451 …): Request failed")

@@ -34,6 +34,10 @@ final class TranscriptSearchIndex {
         /// The user's first real request (no notices, no host asides).
         var firstPrompt: String? = nil
         var modified: Date
+        /// The conversation the copy holds, when it says (Codex's
+        /// `session_meta` id): a copy that took another session's
+        /// conversation in is never counted as this one's.
+        var conversationID: String? = nil
     }
 
     struct Turn: Sendable, Equatable {
@@ -87,11 +91,12 @@ final class TranscriptSearchIndex {
                 guard let data = try? Data(contentsOf: url) else { continue }
                 updates[id] = Self.entry(data, modified: date)
             }
+            let found = updates, seen = present
             await MainActor.run {
-                for (id, e) in updates { self.entries[id] = e }
-                for id in self.entries.keys where !present.contains(id) { self.entries[id] = nil }
+                for (id, e) in found { self.entries[id] = e }
+                for id in self.entries.keys where !seen.contains(id) { self.entries[id] = nil }
                 self.refreshing = false
-                if !updates.isEmpty { self.onUpdate?(Array(updates.keys)) }
+                if !found.isEmpty { self.onUpdate?(Array(found.keys)) }
             }
         }
     }
@@ -150,7 +155,44 @@ final class TranscriptSearchIndex {
                      lastReply: String(oneLine.prefix(160)),
                      tokens: tokens(in: data), model: codexModel(data) ?? model(in: data),
                      turns: turns, timeline: SessionTimeline.build(items),
-                     agentTitle: agentTitle(in: data), firstPrompt: firstPrompt, modified: modified)
+                     agentTitle: agentTitle(in: data), firstPrompt: firstPrompt, modified: modified,
+                     conversationID: conversationID(in: data))
+    }
+
+    /// Codex's conversation id, from the copy's `session_meta` record (the
+    /// rollout's first line; a copy keeps it when it holds the whole file).
+    nonisolated static func conversationID(in data: Data) -> String? {
+        let head = data.prefix(262_144)
+        for line in head.split(separator: 0x0A, maxSplits: 64) {
+            guard line.count < 200_000,
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  obj["type"] as? String == "session_meta",
+                  let p = obj["payload"] as? [String: Any],
+                  let id = (p["id"] as? String) ?? (p["session_id"] as? String),
+                  UUID(uuidString: id) != nil else { continue }
+            return id.lowercased()
+        }
+        return nil
+    }
+
+    /// The entry for `s`, unless its copy holds a conversation that isn't
+    /// the session's own (`agentTranscriptID`).
+    private func ownEntry(_ s: AgentSession) -> Entry? {
+        guard let e = entries[s.id], Self.holdsOwnConversation(e, of: s) else { return nil }
+        return e
+    }
+
+    /// Whether `e` (the session's copy) holds the session's own conversation
+    /// — or can't tell (no id on either side).
+    nonisolated static func holdsOwnConversation(_ e: Entry, of s: AgentSession) -> Bool {
+        guard let own = s.agentTranscriptID?.lowercased(), UUID(uuidString: own) != nil,
+              let held = e.conversationID else { return true }
+        return held == own
+    }
+
+    /// The session's token use, read only from its own conversation.
+    func tokens(for s: AgentSession) -> TokenUsage? {
+        ownEntry(s).map(\.tokens).flatMap { $0.total > 0 ? $0 : nil }
     }
 
     /// The last model the agent logged: Claude's per-message `"model"`,
@@ -250,7 +292,7 @@ final class TranscriptSearchIndex {
     /// still starting), the one its agent last used on the same machine —
     /// so the header doesn't gain the model only once the agent is ready.
     func model(for s: AgentSession, among sessions: [AgentSession]) -> String? {
-        if let m = model(s.id) { return m }
+        if let m = ownEntry(s)?.model.map(Self.prettyModel) { return m }
         if let live = liveModels[s.id] { return Self.prettyModel(live) }
         return sessions
             .filter { $0.id != s.id && $0.profileID == s.profileID && $0.tool == s.tool }

@@ -169,6 +169,17 @@ enum TaskPlurals {
                     comment: "review: 2 or more"), n)
     }
 
+    /// Landing while review comments are still pending: they never reached
+    /// the agent, so what lands doesn't address them.
+    static func pendingAtLanding(_ n: Int) -> String {
+        n == 1 ? NSLocalizedString(
+                    "1 review comment hasn't reached the agent yet — landing now merges without it.",
+                    comment: "landing confirm")
+               : String(format: NSLocalizedString(
+                    "%d review comments haven't reached the agent yet — landing now merges without them.",
+                    comment: "landing confirm: 2 or more"), n)
+    }
+
     /// "\n\n<dropped comments>" when a task has unsent comments, else "".
     static func droppedSuffix(_ task: CodingTask) -> String {
         let n = task.comments.filter { $0.sentAt == nil }.count

@@ -30,6 +30,16 @@ final class ChatQueueStore: ObservableObject {
         /// The typing command ran but didn't go through (tmux refused it):
         /// marked "Not sent", for the user to edit or drop.
         case failed
+        /// The text went in but the agent never took its Enter (the screen
+        /// didn't move, twice): it sits in the agent's input box. Marked
+        /// "Not delivered" — never shown as sent.
+        case unconfirmed
+        /// The Enter didn't take and the agent's input box is EMPTY: the
+        /// text isn't waiting there (the TUI dropped it — or took it late).
+        /// Retried later for a held message (its arrival is checked against
+        /// the transcript before it's typed again); "Not delivered" for a
+        /// message sent straight from the composer.
+        case dropped
 
         /// What a guarded type's output (`PaneTypeGuard.typeCommand`) says.
         /// Only its success marker counts as typed.
@@ -37,8 +47,16 @@ final class ChatQueueStore: ObservableObject {
             guard let out else { return .unreachable }
             if let r = PaneTypeGuard.refusal(in: out) { return .refused(r) }
             if PaneTypeGuard.held(in: out) { return .held }
-            return PaneTypeGuard.typed(in: out) ? .typed : .failed
+            if PaneTypeGuard.typed(in: out) { return .typed }
+            if PaneTypeGuard.dropped(in: out) { return .dropped }
+            return PaneTypeGuard.unconfirmed(in: out) ? .unconfirmed : .failed
         }
+    }
+
+    /// A message whose Enter the agent never took.
+    nonisolated static var notDeliveredText: String {
+        NSLocalizedString("Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again.",
+                          comment: "queued message: typed, but the agent never took the Enter")
     }
 
     /// A message whose typing failed.
@@ -288,7 +306,11 @@ final class ChatQueueStore: ObservableObject {
         let outcome = await driver.deliver(batch.map(\.text).joined(separator: "\n\n"), target)
         update(key) { l in
             switch outcome {
-            case .typed:
+            case .typed, .dropped:
+                // `.dropped`: the box is empty, so maybe it went in late —
+                // marked delivered like a typed one, and the chat's
+                // reconcile puts it back on hold (then "Not delivered")
+                // when no turn came of it: never typed twice on a guess.
                 // In the agent's hands now — but not necessarily a turn yet
                 // (Kimi queues a message typed while it still works, "ctrl-s
                 // to steer"): kept on the strip, "Delivered", until the
@@ -313,6 +335,11 @@ final class ChatQueueStore: ObservableObject {
                 for i in l.indices where ids.contains(l[i].id) {
                     l[i].sending = false
                     l[i].failure = Self.notTypedText
+                }
+            case .unconfirmed:
+                for i in l.indices where ids.contains(l[i].id) {
+                    l[i].sending = false
+                    l[i].failure = Self.notDeliveredText
                 }
             case .refused(let r):
                 for i in l.indices where ids.contains(l[i].id) {
@@ -374,12 +401,12 @@ final class ChatQueueStore: ObservableObject {
             guard now.timeIntervalSince(idleSince!) >= idleBeforeDelivery else { continue }
             let outcome = await deliverHeld(key, driver: driver, fallback: nil)
             if case .refused? = outcome { return }
-            if outcome == .failed { return }
+            if outcome == .failed || outcome == .unconfirmed { return }
             // Typed: the next batch (if any came in) waits for the next idle.
             // Held (a dialog is up): it waits for a fresh idle stretch too —
             // the agent redraws once the dialog closes, and text typed into
             // that moment is lost.
-            if outcome == .typed || outcome == .held { idleSince = nil }
+            if outcome == .typed || outcome == .dropped || outcome == .held { idleSince = nil }
         }
     }
 

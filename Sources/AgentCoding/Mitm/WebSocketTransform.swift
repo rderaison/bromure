@@ -34,6 +34,9 @@ struct PromptInjectionFlag: Sendable, Equatable {
     /// The tool output that was scanned (source detections): what a block
     /// redacts from later requests (`PromptInjectionRedactions`).
     var spans: [String] = []
+    /// The instruction-file bodies that tripped a rules detection: what a
+    /// block withholds from later requests (`blockInstructions`).
+    var ruleSpans: [String] = []
     var detectorCode: String { detector == "rogue instructions" ? "rules" : "source" }
 }
 
@@ -43,8 +46,11 @@ extension HTTPMitmConnection {
     static func detectPromptInjection(in conv: Conversation,
                                       policy pi: PromptInjectionPolicy) async -> PromptInjectionFlag? {
         if pi.detectSourceInjection {
+            // A blocked output already went out as the placeholder: scan what's
+            // left, never the placeholder itself.
             let spans = newToolResultSpans(in: conv)
-            if let preview = await PromptInjectionClassifier.shared.detect(spans: spans) {
+            if let preview = await PromptInjectionClassifier.shared.detect(
+                spans: PromptInjectionRedactions.scannable(spans)) {
                 return PromptInjectionFlag(detector: "prompt injection", method: "model",
                                            source: "tool output", preview: preview,
                                            spans: spans.map(\.content))
@@ -55,27 +61,62 @@ extension HTTPMitmConnection {
             // read); then the ModernBERT semantic pass over the spans.
             // Repo instruction files pasted into the conversation (Codex's
             // AGENTS.md user message, Claude's CLAUDE.md reminder) count too.
-            let extra = RulesFileScanner.conversationInstructionSpans(conv)
+            let extra = RulesFileScanner.scannable(RulesFileScanner.conversationInstructionSpans(conv))
             if let hit = RulesFileScanner.shared.detect(systemPrompt: conv.systemPrompt,
                                                         extraSpans: extra) {
+                let all = extra + (conv.systemPrompt.map(RulesFileScanner.extractInstructionSpans) ?? [])
+                let flagged = all.filter { $0.source == hit.source && RulesFileScanner.isHighRisk($0.content) }
                 return PromptInjectionFlag(detector: "rogue instructions", method: "heuristic",
-                                           source: hit.source, preview: hit.preview)
+                                           source: hit.source, preview: hit.preview,
+                                           ruleSpans: flagged.map(\.content))
             }
             let ruleSpans = RulesFileScanner.classifierSpans(conv.systemPrompt, extraSpans: extra)
             if let preview = await PromptInjectionClassifier.claudeMd.detect(spans: ruleSpans) {
-                let source = extra.isEmpty ? "CLAUDE.md"
+                // Which file(s) tripped it (each verdict is cached: cheap).
+                var flagged: [(id: String?, content: String)] = []
+                for s in ruleSpans where await PromptInjectionClassifier.claudeMd.detect(spans: [s]) != nil {
+                    flagged.append(s)
+                }
+                let named = flagged.compactMap(\.id)
+                let source = named.count == 1 ? named[0]
+                    : extra.isEmpty ? "CLAUDE.md"
                     : extra.count == 1 ? extra[0].source : "instruction files"
                 return PromptInjectionFlag(detector: "rogue instructions", method: "model",
-                                           source: source, preview: preview)
+                                           source: source, preview: preview,
+                                           ruleSpans: flagged.map(\.content))
             }
         }
         return nil
+    }
+
+    /// What the agent is told happens next, on its own line (agents that
+    /// print one line of the error still show a whole sentence).
+    ///  - tool output: later requests carry a placeholder instead.
+    ///  - instructions: the conversation itself carries the file's text —
+    ///    resent every turn, so removing CLAUDE.md alone never unblocked the
+    ///    session. When the flagged bodies are known they're withheld from
+    ///    later requests too; otherwise the way out is a new session / clear.
+    static func injectionNextStep(detector: String, instructionsWithheld: Bool) -> String {
+        if detector == "prompt injection" {
+            return "\nLater requests carry a placeholder instead of that output, so the next message can go through."
+                + " If it keeps failing, rewind the conversation past that step or start a new session."
+        }
+        if instructionsWithheld {
+            return "\nThis conversation still carries those instructions, so later requests carry a placeholder instead of them and the next message can go through."
+                + " Fix or remove the flagged file too; to drop them from the conversation entirely, start a new session (or /clear)."
+        }
+        return "\nThis conversation still carries those instructions: removing the file isn't enough for this session."
+            + " Fix or remove the flagged file, then start a new session (or /clear)."
     }
 
     /// Security log + cloud event for a resolved detection ("blocked" /
     /// "allowed").
     static func recordPromptInjection(_ f: PromptInjectionFlag, outcome: String,
                                       host: String, profileID: UUID) {
+        if outcome == "blocked" {
+            BromureBlockLog.shared.record(f.detectorCode == "rules" ? .rulesInjection : .promptInjection,
+                                          profileID: profileID)
+        }
         SupplyChainLog.shared.record(
             "[prompt-injection] \(outcome): \(f.detector) in \(f.source) → \(host)")
         PromptInjectionCloudEvent.emit(
@@ -89,7 +130,7 @@ extension HTTPMitmConnection {
                                    host: String, profileID: UUID) {
         let pid = profileID
         if pi.detectSourceInjection {
-            let untrusted = newToolResultSpans(in: conv)
+            let untrusted = PromptInjectionRedactions.scannable(newToolResultSpans(in: conv))
             if !untrusted.isEmpty {
                 Task.detached(priority: .utility) {
                     await PromptInjectionClassifier.shared.scanAndLog(
@@ -101,7 +142,7 @@ extension HTTPMitmConnection {
             // Deterministic pass (hidden-Unicode + capability heuristics)
             // …plus the fine-tuned ModernBERT semantic pass over the same
             // instruction-file spans.
-            let extra = RulesFileScanner.conversationInstructionSpans(conv)
+            let extra = RulesFileScanner.scannable(RulesFileScanner.conversationInstructionSpans(conv))
             RulesFileScanner.shared.scanAndLog(
                 systemPrompt: conv.systemPrompt, extraSpans: extra, host: host, profileID: pid)
             let ruleSpans = RulesFileScanner.classifierSpans(conv.systemPrompt, extraSpans: extra)
@@ -365,8 +406,11 @@ final class WSContentGuard: @unchecked Sendable {
     /// opaque (compressed) pipe: not a model provider, or neither engine on.
     static func make(host: String, path: String, profileID: UUID) -> WSContentGuard? {
         let h = host.lowercased()
+        // The local-inference sentinel only when its engine is off this Mac
+        // (a custom server elsewhere) — the on-device engine is exempt.
         guard HTTPMitmConnection.isAIHost(h), !h.contains("huggingface.co"),
-              h != InferenceService.localMitmHost else { return nil }
+              h != InferenceService.localMitmHost
+                || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil else { return nil }
         let piiOn = HTTPMitmConnection.piiPolicyProvider?(profileID)?.isActive ?? false
         let piOn = HTTPMitmConnection.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
         guard piiOn || piOn else { return nil }
@@ -407,13 +451,13 @@ final class WSContentGuard: @unchecked Sendable {
             } else if let f = await detect(conv, pi) {
                 if pi.onDetection == .block {
                     recordInjection(f, "blocked")
-                    PromptInjectionRedactions.shared.block(f.spans, profileID: profileID)
+                    PromptInjectionRedactions.shared.block(f, profileID: profileID)
                     return .block(reply: Self.blockEvent(f, requestType: type))
                 }
                 let allow = await consent(f)
                 recordInjection(f, allow ? "allowed" : "blocked")
                 if !allow {
-                    PromptInjectionRedactions.shared.block(f.spans, profileID: profileID)
+                    PromptInjectionRedactions.shared.block(f, profileID: profileID)
                     return .block(reply: Self.blockEvent(f, requestType: type))
                 }
             }
@@ -439,11 +483,9 @@ final class WSContentGuard: @unchecked Sendable {
     /// code would make it retry the same blocked turn). Anything else gets the
     /// realtime-style `error` event.
     static func blockEvent(_ f: PromptInjectionFlag, requestType: String?) -> Data {
-        var message = "Bromure blocked this request: possible \(f.detector) detected in \(f.source)."
-        if f.detector == "prompt injection" {
-            message += " Bromure will replace that content with a placeholder in later requests, so the next message can go through."
-                + " If it keeps failing, rewind the conversation past that step or start a new session."
-        }
+        let message = "Bromure blocked this request: possible \(f.detector) detected in \(f.source)."
+            + HTTPMitmConnection.injectionNextStep(detector: f.detector,
+                                                   instructionsWithheld: !f.ruleSpans.isEmpty)
         let obj: [String: Any]
         if requestType == nil || requestType == "response.create" {
             obj = ["type": "response.failed",

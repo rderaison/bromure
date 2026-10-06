@@ -365,6 +365,17 @@ public final class SecurityTimeline {
             e.coalesceKey = "token_swap|\(fake)|\(real)|\(host)"
             return e
 
+        case "credential.subscription_auth":
+            // A workspace set to its subscription that runs on the API key
+            // from Settings › Models instead: a neutral note, not a block.
+            let agent = str(d, "agent").flatMap { Profile.Tool(rawValue: $0)?.displayName } ?? str(d, "agent") ?? "?"
+            var e = row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                        String(format: NSLocalizedString("%@ subscription not signed in", comment: "Security Timeline condition: agent name"), agent),
+                        NSLocalizedString("using API key", comment: "Security Timeline decision: subscription workspace runs on the API key"),
+                        .info)
+            e.coalesceKey = "subscription_auth|\(agent)"
+            return e
+
         case "credential.exfiltration":
             let fake = str(d, "fake_preview") ?? "fake"
             let cred = str(d, "credential") ?? "session token"

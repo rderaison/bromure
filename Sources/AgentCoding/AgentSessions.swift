@@ -277,6 +277,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// The user named this session by hand — the agent's own title never
     /// overrides it.
     var userTitled: Bool?
+    /// The model the agent last answered with, as the host read it off the
+    /// transcript — for surfaces with no copy of their own (a fat client's
+    /// mirror header).
+    var lastModel: String?
     /// The name the tab was given when WE opened it (`@display`). A tab at
     /// the same index carrying another name is somebody else's — the
     /// machine rebooted and the indices started over.
@@ -895,6 +899,12 @@ final class AgentSessionStore {
     /// A session the roster just adopted whose conversation turns out to be
     /// an unbound session's own is that session's tab, not a new one: the
     /// original gets its tab back and the adoptee goes (`foldTwin`).
+    func setLastModel(_ id: UUID, _ model: String) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }), sessions[i].lastModel != model else { return }
+        sessions[i].lastModel = model
+        save()
+    }
+
     func setTranscriptID(_ id: UUID, _ tid: String) {
         guard let i = sessions.firstIndex(where: { $0.id == id }), sessions[i].agentTranscriptID != tid else { return }
         if let o = Self.twinOrigin(of: sessions[i], transcriptID: tid, in: sessions,
@@ -1866,7 +1876,9 @@ enum SessionHome {
         if s.providerError != nil { return .needsYou }
         switch tab.agentStatus {
         case .needsInput: return .needsYou
-        case .working:    return .working
+        // A dialog on its screen while its hooks still say working: a tool
+        // blocked on the user (omp's `ask` runs inside its turn).
+        case .working:    return s.awaitingAnswer == true ? .needsYou : .working
         // Its hooks say done, its transcript says a turn is running (Kimi).
         case .done:
             if s.transcriptWorking == true { return .working }
@@ -3706,5 +3718,17 @@ struct SessionSectionsView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+    }
+}
+
+extension AgentSession {
+    /// What a live session's tab is called on the machine list and the
+    /// grid: its title, once it has one (the tab's own label is the first
+    /// prompt it opened with). nil: ended, deleted or untitled — the tab's
+    /// label stands.
+    static func liveTitle(_ s: AgentSession) -> String? {
+        let t = s.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.hasEnded, !s.isDeleted, !t.isEmpty else { return nil }
+        return t
     }
 }

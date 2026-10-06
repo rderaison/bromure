@@ -102,6 +102,15 @@ struct OmpAgentTests {
         let c = try #require(composed)
         #expect(c.contains("  - \"mine/*\"") && c.contains("  - \"theirs/*\"") && c.contains("  - \"zai/*\""))
         #expect(!c.contains("bromure-managed"))
+        // A user provider named like a built-in omp would otherwise poll
+        // (here "mine" is not one, but "ollama" is): never left disabled.
+        var withOllama: String?
+        _ = try runModelsMerge(rc: rc, mine: "providers:\n  ollama:\n    api: openai-completions\n",
+                               staged: SessionDisk.ompModelsYAML(base: "http://x/v1", model: "big"),
+                               overlay: overlay, composed: &withOllama)
+        let o = try #require(withOllama)
+        #expect(o.contains("  - \"ollama/*\"") && !o.contains("  - \"ollama\"\n"))
+        #expect(o.contains("  - \"kilo\""))
         // No staged overlay any more: the composed one goes too.
         var gone: String? = "x"
         _ = try runModelsMerge(rc: rc, mine: user, staged: nil, overlay: nil, composed: &gone)
@@ -236,6 +245,71 @@ struct OmpAgentTests {
             authMode: .token, provider: .openai, modelName: "default")
         #expect(bare.contains("- \"openai/*\""))
         #expect(!bare.contains("modelRoles:"))
+    }
+
+    @Test("omp-config overlay disables every unused built-in provider and update polling")
+    func configOverlayDisablesDiscovery() {
+        let local = SessionDisk.ompConfigOverlay(authMode: .local, provider: .anthropic,
+                                                 modelName: "glm-5.3-flash")
+        let disabled = local.components(separatedBy: "disabledProviders:\n")[1]
+            .components(separatedBy: "\n").prefix { $0.hasPrefix("  - ") }
+            .map { $0.dropFirst(5).dropLast() }.map(String.init)
+        // The catalogs QA saw polled (incl. Anthropic/z.ai/xAI with real keys).
+        for p in ["anthropic", "zai", "xai", "kilo", "venice", "zenmux", "commandcode",
+                  "charm-hyper", "alibaba-coding-plan", "openai"] {
+            #expect(disabled.contains(p), "\(p) should be disabled")
+        }
+        #expect(!disabled.contains("web") && !disabled.contains("local") && !disabled.contains("bromure"))
+        #expect(local.contains("startup:\n  checkUpdate: false\n"))
+        #expect(local.contains("marketplace:\n  autoUpdate: \"off\"\n"))
+        // Cloud omp keeps its own provider (and a configured extra) enabled.
+        let cloud = SessionDisk.ompConfigOverlay(authMode: .token, provider: .zai,
+                                                 modelName: "glm-5.3-flash", extraProviders: ["xai"])
+        #expect(!cloud.contains("  - \"zai\"\n") && !cloud.contains("  - \"xai\"\n"))
+        #expect(cloud.contains("  - \"anthropic\"\n"))
+    }
+
+    @Test("omp only sees the key env vars of the providers it's configured for")
+    func hiddenKeyEnvVars() {
+        // Local omp next to a Claude sibling: ANTHROPIC/XAI/ZAI hidden from omp,
+        // OPENAI_API_KEY (the engine key its models.yml reads) kept.
+        var p = Profile(name: "ws", tool: .claude, authMode: .token, apiKey: "k")
+        p.additionalTools = [Profile.ToolSpec(tool: .omp, authMode: .local)]
+        let hidden = SessionDisk.ompHiddenKeyEnvVars(profile: p)
+        #expect(hidden.contains("ANTHROPIC_API_KEY") && hidden.contains("ZAI_API_KEY")
+                && hidden.contains("XAI_API_KEY") && hidden.contains("ANTHROPIC_AUTH_TOKEN"))
+        #expect(!hidden.contains("OPENAI_API_KEY"))
+        // Cloud omp on z.ai with an xAI tier: both kept.
+        var z = Profile(name: "z", tool: .omp, authMode: .token, apiKey: "k")
+        z.ompProvider = .zai
+        z.ompExtraProviders = [Profile.OmpExtraProvider(provider: .xai, apiKey: "x", baseURL: nil, models: [])]
+        let zh = SessionDisk.ompHiddenKeyEnvVars(profile: z)
+        #expect(!zh.contains("ZAI_API_KEY") && !zh.contains("XAI_API_KEY"))
+        #expect(zh.contains("ANTHROPIC_API_KEY") && zh.contains("OPENAI_API_KEY"))
+        // No omp: nothing to hide.
+        #expect(SessionDisk.ompHiddenKeyEnvVars(profile: Profile(name: "c", tool: .claude, authMode: .token)).isEmpty)
+    }
+
+    @Test("bashrc omp() wrapper unsets the staged hidden key vars")
+    func wrapperUnsetsHiddenKeys() throws {
+        let rc = try renderBashrc(tool: .omp)
+        #expect(rc.contains("/mnt/bromure-meta/\(SessionDisk.ompEnvUnsetMetaFile)"))
+        #expect(rc.contains("command env \"${_u[@]}\" omp \"$@\""))
+        #expect(rc.contains("omp() { _bromure_omp_run --config"))
+    }
+
+    @Test("omp's local models.yml context window is the one on omp's Models row")
+    func localContextFromOmpRow() {
+        var s = ModelSettings()
+        s.localServer = LocalServer(baseURL: "http://10.0.0.5:8000")
+        // Another row names the same model with a different window: omp's wins.
+        s.tiers[.medium] = ModelRef(source: .localServer, modelID: "glm",
+                                    capabilities: ModelCapabilities(contextWindow: 128_000))
+        s.agentTiers[.omp] = [.medium: ModelRef(source: .localServer, modelID: "glm",
+                                                capabilities: ModelCapabilities(contextWindow: 1_000_000))]
+        let out = Profile(name: "t", tool: .omp, authMode: .token).overlaidWithGlobalModels(s)
+        #expect(out.ompContextWindow == 1_000_000)
+        #expect(SessionDisk.ompLocalContext(profile: out) == 1_000_000)
     }
 
     @Test("Token plan mints an omp fake shaped for the selected provider")

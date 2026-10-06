@@ -45,7 +45,7 @@ struct QACodex2FixesTests {
         #expect(spans.first?.content.hasPrefix("Script completed") == true)
     }
 
-    @Test("Every Responses output item type maps, string or parts; only the newest step is scanned")
+    @Test("Every Responses output item type maps, string or parts; the run since the last message is scanned")
     func outputItemTypes() throws {
         let body = responsesBody([
             ["type": "message", "role": "user", "content": [["type": "input_text", "text": "go"]]],
@@ -64,8 +64,10 @@ struct QACodex2FixesTests {
         ])
         let conv = try #require(ConversationParser.parse(host: "chatgpt.com", requestBody: body, responseBody: nil))
         let contents = HTTPMitmConnection.newToolResultSpans(in: conv).map(\.content)
-        #expect(contents == ["mcp says hi", "plain string out", "Success. Updated the following files", "shell stdout"])
-        #expect(!contents.contains("OLD step output"))
+        #expect(contents == ["OLD step output", "mcp says hi", "plain string out",
+                             "Success. Updated the following files", "shell stdout"])
+        // A user message ends the run: nothing before it is rescanned.
+        #expect(!contents.contains("go"))
     }
 
     @Test("A chained WebSocket turn carrying only the output is scanned")

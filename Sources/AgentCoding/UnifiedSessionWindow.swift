@@ -1435,6 +1435,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 onStart: { [weak self] pid in self?.acDelegate?.startProfile(pid) },
                 onJump: { [weak self] pid, windowIndex in
                     self?.jumpFromGrid(profileID: pid, windowIndex: windowIndex)
+                },
+                sessionTitle: { [weak self] pid, w in
+                    self?.acDelegate?.agentSessionStore.session(profileID: pid, windowIndex: w)
+                        .flatMap(AgentSession.liveTitle)
                 })
             let v = GridStageView(store: gridStore, dataSource: dataSource)
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -1533,6 +1537,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             mountSelected(nil)               // drop any stale framebuffer behind the overlay
             showVMDashboard(id)              // spec + config dashboard, not a bare "is down" card
         }
+    }
+
+    /// `id`'s pane is the one in the stage's slot.
+    func isMounted(_ id: Profile.ID) -> Bool {
+        guard let pane = pane(id) else { return false }
+        return mountedPane === pane && pane.containerView.superview === paneSlot
     }
 
     private func mountSelected(_ pane: SessionPane?) {
@@ -2179,7 +2189,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if sessionHeaderHost?.isHidden == false {
             sessionHeaderHeight?.constant = SessionHome.headerHeight(s, base: Self.sessionHeaderHeightValue)
         }
-        guard key != sessionPresentationKey else { return }
+        // Same plan — unless the live chat's pane fell out of the slot (see
+        // `selectTab`): then it's planned again, not left blank.
+        guard key != sessionPresentationKey || (liveChat && machine == nil && !isMounted(s.profileID)) else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
         // The browser pane follows the session: its own state when live,
@@ -3531,7 +3543,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearKubeDashboard()
         clearRegistryDashboard()
         clearVMDashboard()
-        if selectedID != id { select(profileID: id) }
+        // Mount it when it isn't what the stage holds — not only when another
+        // machine was picked: a pane removed and re-added while a room had
+        // the stage (re-attached quietly, never mounted) kept `selectedID`,
+        // and its sessions came back to a blank stage with no composer.
+        if selectedID != id || !isMounted(id) { select(profileID: id) }
         guard let pane = pane(id) else { return }
         pane.switchTo(index: index)
         // A tab picked by hand from the Machines list is a terminal — the
@@ -4782,9 +4798,11 @@ private struct VMSection: View {
     /// hand — its `@display` can't follow (it's what binds the session to
     /// the tab), so the rename would otherwise never reach the sidebar.
     private func label(of tab: TabsModel.Tab) -> String {
+        // The session's title (the agent names it, or the user did) over
+        // the tab's, which is the first prompt it opened with.
         if let s = sessionStore?.session(profileID: row.id, windowIndex: tab.index),
-           s.userTitled == true, !s.hasEnded, !s.isDeleted, !s.title.isEmpty {
-            return s.title
+           let title = AgentSession.liveTitle(s) {
+            return title
         }
         return tab.shownLabel
     }

@@ -362,8 +362,10 @@ final class TerminalSessionController {
                 // flags alone doesn't run tmux's recalculate_sizes, -C does —
                 // so the window snaps to this client without waiting for a
                 // real resize or keystroke.
+                // A size floor left by an idle pass (below) yields first.
                 parts.append(
-                    "set -- $(tmux list-clients -t '\(session)'"
+                    "tmux set-option -wu -t 'bromure:\(index)' window-size 2>/dev/null"
+                    + "; set -- $(tmux list-clients -t '\(session)'"
                     + " -F '#{client_tty} #{client_width} #{client_height}'"
                     + " 2>/dev/null | head -1)"
                     + "; [ -n \"$1\" ] && tmux refresh-client -t \"$1\" -f '!ignore-size'"
@@ -373,9 +375,35 @@ final class TerminalSessionController {
                     "set -- $(tmux list-clients -t '\(session)' -F '#{client_tty}'"
                     + " 2>/dev/null | head -1)"
                     + "; [ -n \"$1\" ] && tmux refresh-client -t \"$1\" -f ignore-size")
+                parts.append(Self.sizeFloorCommand(window: index))
             }
         }
         runInGuest(parts.joined(separator: "; ") + "; true")
+    }
+
+    /// The smallest a shared agent window may get while nobody holds size
+    /// authority. With every client passive, tmux falls back to the latest
+    /// client's size — a tiny inline/offscreen surface or a narrow mirror
+    /// pinned Grok's window at 52x20, where its approval dialog didn't fit
+    /// (the chat showed "Needs you" with no card). The chat reads the screen,
+    /// so the window must stay readable while the chat is what's on show.
+    static let floorColumns = 100
+    static let floorRows = 30
+
+    /// Grow window `window` of the `bromure` session to the floor when no
+    /// size-authoritative client shows it. `resize-window` leaves the window
+    /// on `window-size manual`; the next grant unsets that (above), so an
+    /// active surface takes over again. Identical on every side (local and
+    /// fat client), so two idle sides never fight over it.
+    static func sizeFloorCommand(window: Int) -> String {
+        let t = "'bromure:\(window)'"
+        let (c, r) = (floorColumns, floorRows)
+        return "if ! tmux list-clients -F '#{window_index} #{client_flags}' 2>/dev/null"
+            + " | grep -v ignore-size | grep -q '^\(window) '; then"
+            + " set -- $(tmux display-message -p -t \(t) '#{window_width} #{window_height}' 2>/dev/null)"
+            + "; if [ -n \"$1\" ] && { [ \"$1\" -lt \(c) ] || [ \"$2\" -lt \(r) ]; }; then"
+            + " tmux resize-window -t \(t) -x $(( $1 < \(c) ? \(c) : $1 )) -y $(( $2 < \(r) ? \(r) : $2 ))"
+            + "; fi; fi"
     }
 
     /// Run a shell command in the workspace's guest over this side's own

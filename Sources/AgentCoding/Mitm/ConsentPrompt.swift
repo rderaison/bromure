@@ -33,6 +33,11 @@ enum ConsentPrompt {
                        style: NSAlert.Style = .informational,
                        detailText: String? = nil,
                        timeout: TimeInterval = ConsentPrompt.defaultTimeout) async -> Int? {
+        // ONE deadline for every surface and for the held request: fixed
+        // here, when the question is asked. The panel counts down to it, the
+        // watchdog denies at it, the remote surfaces get what's left of it —
+        // so "No answer within N s" is exactly when the request is refused.
+        let deadline = Date().addingTimeInterval(max(1, timeout))
         switch RemoteConsent.route(for: profileID) {
         case .fatClient:
             // On the fat client AND here: whoever answers first wins, the
@@ -43,26 +48,29 @@ enum ConsentPrompt {
                 remote: {
                     await PendingPromptBroker.shared.answerAsync(
                         profileID: profileID, title: title, message: body,
-                        buttons: choices, fallback: denyIndex, timeout: timeout)
+                        buttons: choices, fallback: denyIndex,
+                        timeout: max(1, deadline.timeIntervalSinceNow))
                 },
                 local: { token in
-                    await ConsentPanelPresenter.shared.present(
+                    await ConsentPanelPresenter.shared.presentOffMain(
                         profileID: profileID, title: title, message: message, choices: choices,
                         denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout,
-                        token: token)
+                        token: token, deadline: deadline)
                 }) ?? denyIndex
             return idx == denyIndex ? nil : idx
         case .terminalPump:
             let body = detailText.map { message + "\n\n" + String($0.prefix(1500)) } ?? message
             let idx = await Task.detached {
                 RemoteConsent.choose(profileID: profileID, title: title, message: body,
-                                     choices: choices, timeoutSeconds: timeout)
+                                     choices: choices,
+                                     timeoutSeconds: max(1, deadline.timeIntervalSinceNow))
             }.value
             return idx == denyIndex ? nil : idx
         case .localAlert:
-            let idx = await ConsentPanelPresenter.shared.present(
+            let idx = await ConsentPanelPresenter.shared.presentOffMain(
                 profileID: profileID, title: title, message: message, choices: choices,
-                denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout)
+                denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout,
+                deadline: deadline)
             return idx == denyIndex ? nil : idx
         }
     }
@@ -116,6 +124,43 @@ final class ConsentPanelPresenter {
         var isNotice = false
         /// The caller's handle for `withdraw(token:)`.
         var token: UUID? = nil
+        /// When no answer becomes the deny answer — fixed when the question
+        /// is asked (`ConsentPrompt.choose`), never reset when the panel goes
+        /// on screen: the panel's countdown, the watchdog and the held
+        /// request all read this one value. (A panel that showed late — a
+        /// busy main thread, a prompt queued behind another — counts down
+        /// the time really left instead of a fresh full timeout the request
+        /// didn't have.)
+        var deadline: Date? = nil
+        /// The deadline in force (`deadline`, else `timeout` from now).
+        func effectiveDeadline(now: Date = Date()) -> Date {
+            deadline ?? now.addingTimeInterval(max(1, timeout))
+        }
+    }
+
+    /// The asking caller's continuation, resumed exactly once from whichever
+    /// side gets there first: an answer on the main thread, or the deadline
+    /// watchdog, which runs OFF the main thread. The old backstop was a
+    /// main-actor Task: while the main thread was stalled (a long layout
+    /// pass), the countdown froze — "47 s" stayed up ~79 s — and the agent's
+    /// request waited for the main thread to recover. Now the deadline holds
+    /// to the second regardless; the panel closes once the main thread is back.
+    final class Reply: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cont: CheckedContinuation<Int?, Never>?
+        init(_ cont: CheckedContinuation<Int?, Never>) { self.cont = cont }
+        /// False when it was already answered.
+        @discardableResult
+        func resume(_ value: Int?) -> Bool {
+            lock.lock()
+            let c = cont
+            cont = nil
+            lock.unlock()
+            guard let c else { return false }
+            c.resume(returning: value)
+            return true
+        }
+        var isAnswered: Bool { lock.lock(); defer { lock.unlock() }; return cont == nil }
     }
 
     /// Builds and shows the UI for a request; calls `answer` (index, or nil
@@ -125,8 +170,8 @@ final class ConsentPanelPresenter {
         ConsentPanelWindow(request: req, answer: answer)
     }
 
-    private var queues: [UUID: [(Request, CheckedContinuation<Int?, Never>)]] = [:]
-    private var active: [UUID: (request: Request, cont: CheckedContinuation<Int?, Never>, ui: ConsentPanelUI?)] = [:]
+    private var queues: [UUID: [(Request, Reply)]] = [:]
+    private var active: [UUID: (request: Request, cont: Reply, ui: ConsentPanelUI?)] = [:]
 
     /// Prompts currently on screen or waiting (all workspaces) — for tests and
     /// the debug state.
@@ -135,16 +180,106 @@ final class ConsentPanelPresenter {
 
     func present(profileID: UUID, title: String, message: String, choices: [String],
                  denyIndex: Int, style: NSAlert.Style, detailText: String?,
-                 timeout: TimeInterval, isNotice: Bool = false, token: UUID? = nil) async -> Int? {
+                 timeout: TimeInterval, isNotice: Bool = false, token: UUID? = nil,
+                 deadline: Date? = nil) async -> Int? {
+        let req = Self.request(profileID: profileID, title: title, message: message, choices: choices,
+                               denyIndex: denyIndex, style: style, detailText: detailText,
+                               timeout: timeout, isNotice: isNotice, token: token, deadline: deadline)
+        return await withCheckedContinuation { cont in
+            let reply = Reply(cont)
+            armWatchdog(req, reply)
+            enqueue(req, reply)
+        }
+    }
+
+    /// `present` for callers off the main actor (the consent brokers): the
+    /// caller's continuation lives off the main actor, so the deadline
+    /// watchdog's answer reaches the caller — the agent's held request —
+    /// even while the main thread is stalled. (`present` itself is
+    /// main-actor: its epilogue would wait for the main thread.)
+    nonisolated func presentOffMain(profileID: UUID, title: String, message: String, choices: [String],
+                                    denyIndex: Int, style: NSAlert.Style, detailText: String?,
+                                    timeout: TimeInterval, isNotice: Bool = false,
+                                    token: UUID? = nil, deadline: Date? = nil) async -> Int? {
+        let req = Self.request(profileID: profileID, title: title, message: message, choices: choices,
+                               denyIndex: denyIndex, style: style, detailText: detailText,
+                               timeout: timeout, isNotice: isNotice, token: token, deadline: deadline)
+        return await withCheckedContinuation { cont in
+            let reply = Reply(cont)
+            // The deadline holds even when the main thread is wedged before
+            // the panel could be put up, or the prompt waits in the queue.
+            armWatchdog(req, reply)
+            DispatchQueue.main.async {
+                // Answered meanwhile (the main thread was wedged past the
+                // deadline): nothing to show.
+                guard !reply.isAnswered else { return }
+                MainActor.assumeIsolated { self.enqueue(req, reply) }
+            }
+        }
+    }
+
+    /// The one deadline's backstop, off the main thread (wall clock): at the
+    /// request's deadline the caller gets its deny — on screen, queued or
+    /// not yet enqueued — then the panel/queue entry is tidied up once the
+    /// main thread runs again.
+    nonisolated private func armWatchdog(_ req: Request, _ reply: Reply) {
+        guard !req.isNotice || req.deadline != nil else { return }
+        let wait = max(0, req.effectiveDeadline().timeIntervalSinceNow)
+        let pid = req.profileID
+        let reqID = req.id
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(wallDeadline: .now() + wait) { [weak self] in
+            guard !reply.isAnswered else { return }
+            FileHandle.standardError.write(Data(
+                "[consent] prompt for \(pid.uuidString.prefix(8)) timed out after \(Int(max(1, req.timeout)))s — denied\n".utf8))
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.expire(pid, requestID: reqID) }
+            }
+            // A responsive main thread resolves (and closes the panel) first;
+            // the background answer is the backstop a quarter second later.
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(wallDeadline: .now() + 0.25) {
+                if reply.resume(req.denyIndex) {
+                    FileHandle.standardError.write(Data(
+                        "[consent] main thread busy — prompt for \(pid.uuidString.prefix(8)) denied from the watchdog\n".utf8))
+                }
+            }
+        }
+    }
+
+    /// The deadline passed: close the panel (deny), or drop the request from
+    /// the queue (deny) if it never showed.
+    private func expire(_ profileID: UUID, requestID: UUID) {
+        if let a = active[profileID], a.request.id == requestID {
+            resolve(profileID, requestID: requestID, choice: nil)
+            return
+        }
+        if var q = queues[profileID], let i = q.firstIndex(where: { $0.0.id == requestID }) {
+            let (req, reply) = q.remove(at: i)
+            queues[profileID] = q.isEmpty ? nil : q
+            reply.resume(req.denyIndex)
+        }
+    }
+
+
+    nonisolated private static func request(profileID: UUID, title: String, message: String,
+                                            choices: [String], denyIndex: Int, style: NSAlert.Style,
+                                            detailText: String?, timeout: TimeInterval,
+                                            isNotice: Bool, token: UUID?, deadline: Date? = nil) -> Request {
         var req = Request(profileID: profileID, title: title, message: message, choices: choices,
                           denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout)
         req.isNotice = isNotice
         req.token = token
-        if let token, withdrawn.remove(token) != nil { return denyIndex }
-        return await withCheckedContinuation { cont in
-            queues[profileID, default: []].append((req, cont))
-            pump(profileID)
+        // Fixed now, at the ask — not when the panel shows (see `deadline`).
+        req.deadline = isNotice ? nil : (deadline ?? Date().addingTimeInterval(max(1, timeout)))
+        return req
+    }
+
+    private func enqueue(_ req: Request, _ reply: Reply) {
+        if let token = req.token, withdrawn.remove(token) != nil {
+            reply.resume(req.denyIndex)
+            return
         }
+        queues[req.profileID, default: []].append((req, reply))
+        pump(req.profileID)
     }
 
     /// Tokens withdrawn before their request arrived (the race's other
@@ -165,7 +300,7 @@ final class ConsentPanelPresenter {
                 var rest = q
                 rest.remove(at: i)
                 queues[pid] = rest.isEmpty ? nil : rest
-                cont.resume(returning: req.denyIndex)
+                cont.resume(req.denyIndex)
                 return
             }
         }
@@ -182,28 +317,30 @@ final class ConsentPanelPresenter {
 
     private func pump(_ profileID: UUID) {
         guard active[profileID] == nil, var q = queues[profileID], !q.isEmpty else { return }
-        let (req, cont) = q.removeFirst()
+        let (queued, cont) = q.removeFirst()
+        var req = queued
         queues[profileID] = q.isEmpty ? nil : q
+        // Already answered (its deadline passed while it waited): next.
+        if cont.isAnswered { pump(profileID); return }
+        if req.deadline == nil {
+            // A notice: its (display-only) time runs from when it shows.
+            req.deadline = Date().addingTimeInterval(max(1, req.timeout))
+            armWatchdog(req, cont)
+        }
+        // A question keeps the deadline fixed when it was asked — the
+        // panel, the watchdog (armed then) and the held request share it.
         active[profileID] = (req, cont, nil)
         let ui = makeUI(req) { [weak self] choice in
             self?.resolve(profileID, requestID: req.id, choice: choice)
         }
         if active[profileID]?.request.id == req.id { active[profileID]?.ui = ui }
-        // No answer means no.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(max(1, req.timeout) * 1_000_000_000))
-            guard let self, self.active[profileID]?.request.id == req.id else { return }
-            FileHandle.standardError.write(Data(
-                "[consent] prompt for \(profileID.uuidString.prefix(8)) timed out after \(Int(req.timeout))s — denied\n".utf8))
-            self.resolve(profileID, requestID: req.id, choice: nil)
-        }
     }
 
     private func resolve(_ profileID: UUID, requestID: UUID, choice: Int?) {
         guard let a = active[profileID], a.request.id == requestID else { return }
         active[profileID] = nil
         a.ui?.dismiss()
-        a.cont.resume(returning: choice.map { $0 >= 0 && $0 < a.request.choices.count ? $0 : a.request.denyIndex }
+        a.cont.resume(choice.map { $0 >= 0 && $0 < a.request.choices.count ? $0 : a.request.denyIndex }
                       ?? a.request.denyIndex)
         pump(profileID)
     }
@@ -253,7 +390,9 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
          show: Bool = true, screenFrame: NSRect? = nil) {
         self.answer = answer
         self.req = req
-        self.deadline = Date().addingTimeInterval(req.timeout)
+        // The presenter's deadline (shared with its watchdog); a panel built
+        // outside the presenter (tests, shots) starts its own.
+        self.deadline = req.deadline ?? Date().addingTimeInterval(req.timeout)
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
@@ -293,6 +432,12 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
         countdown.textColor = .secondaryLabelColor
         countdown.lineBreakMode = .byTruncatingTail
         countdown.translatesAutoresizingMaskIntoConstraints = false
+        // The real remaining time from the first frame (it used to be blank
+        // for the first second, then a tick-late number).
+        if !req.isNotice {
+            countdown.stringValue = Self.countdownLine(
+                secondsLeft: Self.secondsLeft(until: deadline), request: req)
+        }
 
         // Buttons: one row if they fit, else a full-width stack (index 0 on
         // top, like NSAlert), wrapping any label wider than the panel.
@@ -373,13 +518,16 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
         }
 
         var column: [NSView] = [title]
+        var messageHeight: NSLayoutConstraint?, detailHeight: NSLayoutConstraint?
         if let m = messageView {
-            m.scroll.heightAnchor.constraint(equalToConstant: messageH).isActive = true
+            messageHeight = m.scroll.heightAnchor.constraint(equalToConstant: messageH)
+            messageHeight?.isActive = true
             m.scroll.hasVerticalScroller = m.natural > messageH + 0.5
             column.append(m.scroll)
         }
         if let d = detailView {
-            d.scroll.heightAnchor.constraint(equalToConstant: detailH).isActive = true
+            detailHeight = d.scroll.heightAnchor.constraint(equalToConstant: detailH)
+            detailHeight?.isActive = true
             column.append(d.scroll)
         }
         if !req.isNotice { column.append(countdown) }
@@ -392,27 +540,39 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
         text.translatesAutoresizingMaskIntoConstraints = false
         for v in column { v.widthAnchor.constraint(equalToConstant: textW).isActive = true }
 
-        let outer = NSStackView(views: [icon, text])
-        outer.orientation = .horizontal
-        outer.alignment = .top
-        outer.spacing = 12
-        outer.edgeInsets = NSEdgeInsets(top: Self.inset, left: Self.inset,
-                                        bottom: Self.inset, right: Self.inset)
-        outer.translatesAutoresizingMaskIntoConstraints = false
+        // Explicit margins: a top-aligned horizontal NSStackView doesn't
+        // hold its bottom edge inset, so the buttons sat flush against the
+        // panel's bottom edge.
         let content = NSView()
-        content.addSubview(outer)
+        content.addSubview(icon)
+        content.addSubview(text)
         NSLayoutConstraint.activate([
-            outer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            outer.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            outer.topAnchor.constraint(equalTo: content.topAnchor),
-            outer.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            icon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.inset),
+            icon.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.inset),
             icon.widthAnchor.constraint(equalToConstant: 28),
+            icon.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -Self.inset),
+            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
+            text.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Self.inset),
+            text.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.inset),
+            text.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.inset),
         ])
         panel.contentView = content
         tick()
         content.layoutSubtreeIfNeeded()
         var size = content.fittingSize
-        size.height = min(size.height, maxContentH)
+        // The estimate above can run a few points over (a wrapped title or
+        // countdown): take the overrun out of the scroll sections — never
+        // clip the panel, which cut off the bottom margin under the buttons.
+        var over = size.height - maxContentH
+        for c in [detailHeight, messageHeight].compactMap({ $0 }) where over > 0 {
+            let cut = min(over, max(0, c.constant - 40))
+            c.constant -= cut
+            over -= cut
+        }
+        if size.height > maxContentH {
+            content.layoutSubtreeIfNeeded()
+            size = content.fittingSize
+        }
         panel.setContentSize(size)
         panel.contentMinSize = size
         panel.contentMaxSize = size

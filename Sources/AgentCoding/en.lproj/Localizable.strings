@@ -3984,3 +3984,41 @@
 "The workspaces %@ will be shut down." = "The workspaces %@ will be shut down.";
 "The workspace %@ will be suspended and resume where it left off." = "The workspace %@ will be suspended and resume where it left off.";
 "The workspaces %@ will be suspended and resume where they left off." = "The workspaces %@ will be suspended and resume where they left off.";
+
+/* QA round 4 */
+"“%@”" = "“%@”";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal.";
+"Open the terminal" = "Open the terminal";
+"Opt out" = "Opt out";
+"Opt in" = "Opt in";
+"Grok's own setting; you can change it later in Grok's /settings." = "Grok's own setting; you can change it later in Grok's /settings.";
+
+"Listing its tools" = "Listing its tools";
+"Looking up %@" = "Looking up %@";
+"Reading earlier output" = "Reading earlier output";
+"Reading earlier output #%@" = "Reading earlier output #%@";
+"tool lookup" = "tool lookup";
+"earlier output" = "earlier output";
+"Instructions for the agent" = "Instructions for the agent";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again.";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "1 review comment hasn't reached the agent yet — landing now merges without it.";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "%d review comments haven't reached the agent yet — landing now merges without them.";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "Waiting — a menu is open in the agent's terminal; answer it there or dismiss it";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "Waiting — a menu is open in %@'s terminal; answer it there or dismiss it";
+"Open terminal" = "Open terminal";
+"Dismiss (Esc)" = "Dismiss (Esc)";
+"Conversation compacted" = "Conversation compacted";
+"The agent's work is its report above — there is no diff to read." = "The agent's work is its report above — there is no diff to read.";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "The sign-in machine didn't become ready, so the %@ sign-in couldn't start.";
+"The %@ sign-in command didn't start in the sign-in machine." = "The %@ sign-in command didn't start in the sign-in machine.";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "The sign-in machine stayed busy (%1$@), so the %2$@ sign-in couldn't start.";
+"Couldn't start the %@ sign-in" = "Couldn't start the %@ sign-in";
+"Retry types the sign-in command into the sign-in machine again." = "Retry types the sign-in command into the sign-in machine again.";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "%@ subscription not signed in";
+"using API key" = "using API key";

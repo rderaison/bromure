@@ -19,6 +19,9 @@ import Foundation
 struct LoginOption: Equatable, Identifiable {
     let index: Int
     let label: String
+    /// The option's description, when the dialog draws one under it (omp's
+    /// ask: "○ Red" + "      A warm color").
+    var detail: String? = nil
     var id: Int { index }
 }
 
@@ -132,9 +135,55 @@ enum AgentScreen {
             return true
         }
         if low.range(of: #"^[0-9]+/[0-9]+\s*:"#, options: .regularExpression) != nil { return true }
+        // Arrow-key hints: Grok's "← → narrow scope" under its approval
+        // title, "↑/↓ to move". A line opening on ←/↑/↓, or on two arrows
+        // ("→" alone is also Kimi's cursor glyph).
+        if t.range(of: #"^[←↑↓⇅⇄]"#, options: .regularExpression) != nil
+            || t.range(of: #"^[←→↑↓]\s*/?\s*[←→↑↓]"#, options: .regularExpression) != nil { return true }
         // Hints separated by a bar inside the line ("a:b │ c:d").
         let inner = t.dropFirst().dropLast()
         return inner.contains("│") && t.contains(":")
+    }
+
+    /// A dialog that is up but doesn't fit the pane: a selection footer
+    /// ("1/4:select │ Tab:next option") at the bottom, with fewer option rows
+    /// above it than a menu needs — Grok's approval at 52x20 showed only
+    /// "1 (●) Yes, and don't ask again for anything (". Returns where the
+    /// visible rows start and where the footer is; nil when no such footer
+    /// is up (an idle prompt's own hints never say "select").
+    static func partialDialog(_ lines: [String]) -> (firstRow: Int, footer: Int)? {
+        guard let last = lines.indices.last(where: { !unboxed(lines[$0]).trimmingCharacters(in: .whitespaces).isEmpty })
+        else { return nil }
+        // The footer may wrap over a couple of lines at a narrow width.
+        var footer: Int?
+        var i = last
+        while i >= 0, i >= last - 2, isKeyHintLine(lines[i]) || isRule(lines[i])
+                || unboxed(lines[i]).trimmingCharacters(in: .whitespaces).isEmpty {
+            if isSelectionHint(lines[i]) { footer = i }
+            i -= 1
+        }
+        guard let footer else { return nil }
+        var rows: [Int] = []
+        var j = footer - 1
+        while j >= 0, j >= footer - 8 {
+            let t = unboxed(lines[j]).trimmingCharacters(in: .whitespaces)
+            if numberedRow(lines[j]) != nil || cursorColumn(lines[j]) != nil { rows.append(j) }
+            else if !rows.isEmpty, t.isEmpty || isRule(lines[j]) { break }
+            else if rows.isEmpty, !t.isEmpty, !isKeyHintLine(lines[j]), !isRule(lines[j]),
+                    j < footer - 3 { break }
+            j -= 1
+        }
+        guard let first = rows.min() else { return nil }
+        return (first, footer)
+    }
+
+    /// A footer hint about picking among options: "1/4:select",
+    /// "enter select", "Tab:next option", "↑/↓ to move".
+    static func isSelectionHint(_ line: String) -> Bool {
+        let low = line.lowercased()
+        guard isKeyHintLine(line) else { return false }
+        return low.range(of: #"[0-9]+/[0-9]+\s*:"#, options: .regularExpression) != nil
+            || low.contains("select") || low.contains("next option") || low.contains("to move")
     }
 
     /// "❯ No, exit" + "  Yes, I trust this folder": the cursor row and the
@@ -146,7 +195,9 @@ enum AgentScreen {
     private static func unnumberedMenu(_ lines: [String], after from: Int) -> Menu? {
         guard let cursorAt = lines.indices.last(where: { $0 > from && cursorColumn(lines[$0]) != nil }),
               let col = cursorColumn(lines[cursorAt]) else { return nil }
-        let label = { (l: String) in String(unboxed(l).dropFirst(col)).trimmingCharacters(in: .whitespaces) }
+        let label = { (l: String) in
+            optionMarkerStripped(String(unboxed(l).dropFirst(col)).trimmingCharacters(in: .whitespaces))
+        }
         guard !label(lines[cursorAt]).isEmpty else { return nil }
         if let above = lines[..<cursorAt].last(where: { !unboxed($0).isEmpty }), isRule(above) { return nil }
         let sentence = { (s: String) in s.hasSuffix(".") || s.hasSuffix("。") }
@@ -164,7 +215,18 @@ enum AgentScreen {
         while last + 1 < lines.count, isOption(last + 1) != nil { last += 1 }
         let rows = (first...last).filter { $0 == cursorAt || isOption($0) == true }
         guard rows.count >= 2, tailIsFooter(lines, after: last) else { return nil }
-        let options = rows.enumerated().map { LoginOption(index: $0.offset + 1, label: label(lines[$0.element])) }
+        // The lines indented under a row are its description.
+        func detail(_ k: Int) -> String? {
+            let end = k + 1 < rows.count ? rows[k + 1] : last + 1
+            let text = ((rows[k] + 1)..<end).filter { isOption($0) == false }
+                .map { unboxed(lines[$0]).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            return text.isEmpty ? nil : text
+        }
+        let options = rows.enumerated().map {
+            LoginOption(index: $0.offset + 1, label: label(lines[$0.element]), detail: detail($0.offset))
+        }
         let selected = rows.firstIndex(of: cursorAt).map { $0 + 1 }
         return Menu(options: options, selected: selected,
                     firstOffset: rows.first ?? cursorAt, lastOffset: last, numbered: false)
@@ -261,6 +323,21 @@ enum AgentScreen {
         return keys
     }
 
+    /// A row's label without the radio / check mark drawn before it
+    /// ("○ Red", "◉ Blue" — omp's ask).
+    static func optionMarkerStripped(_ label: String) -> String {
+        guard let m = label.first, "○◉●◯◎".contains(m),
+              label.dropFirst().first.map({ $0 == " " || $0 == "\u{00a0}" }) == true else { return label }
+        return String(label.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// A box's titled top edge or inner divider ("╭─ Ask ──╮", "├────┤").
+    static func isBoxEdge(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard let c = t.first, "╭┌├╞".contains(c) else { return false }
+        return t.contains("──")
+    }
+
     /// Below the list: at most a few footer lines, blanks and box edges.
     private static func tailIsFooter(_ lines: [String], after last: Int) -> Bool {
         guard last + 1 < lines.count else { return true }
@@ -337,6 +414,7 @@ enum AgentScreen {
         func prose(_ l: String) -> String? {
             let t = deglyphed(unboxed(l).trimmingCharacters(in: .whitespaces))
             guard !t.isEmpty, t.count <= 90, t.contains(where: \.isLetter), !isStatusChrome(l),
+                  !isKeyHintLine(unboxed(l)),
                   !(banner.map { r in lines[r].contains(l) } ?? false),
                   !t.hasPrefix("·"), !t.hasPrefix("•"), !t.hasPrefix("-"), !t.hasPrefix("—")
             else { return nil }
@@ -351,8 +429,17 @@ enum AgentScreen {
         // A line carrying a link is the dialog's fine print ("Release
         // notes: https://…" under Codex's "Update available!"), not its
         // heading — unless there is nothing else.
-        let lines = above.compactMap(prose)
-        return lines.first(where: { !$0.contains("://") }) ?? lines.first ?? ""
+        // The nearest prose line, taken back to the top of its paragraph: a
+        // heading over a wrapped explanation ("Select model / Switch between
+        // Claude models. … For / other/previous model names, specify with
+        // --model.") is titled by its heading, never by the wrap's tail.
+        let rows = Array(above)   // nearest first
+        guard let pick = rows.firstIndex(where: { prose($0).map { !$0.contains("://") } ?? false })
+                ?? rows.firstIndex(where: { prose($0) != nil })
+        else { return "" }
+        var top = pick
+        while top + 1 < rows.count, prose(rows[top + 1]) != nil { top += 1 }
+        return prose(rows[top]) ?? ""
     }
 
     /// What the dialog is about: its lines between the box's top edge (or 12
@@ -363,7 +450,7 @@ enum AgentScreen {
     /// ("• Ran …", "11:50 AM"): the body is the title's own paragraph (a
     /// "Bash command: …" line right above it) and what follows it.
     static func context(_ lines: [String], before first: Int, title: String) -> String {
-        let edge = { (l: String) in isRule(l) && !l.contains("╌") && !l.contains("┄") }
+        let edge = { (l: String) in (isRule(l) || isBoxEdge(l)) && !l.contains("╌") && !l.contains("┄") }
         let floor = max(0, first - 12)
         var start = lines[..<first].lastIndex(where: edge).map { $0 + 1 } ?? floor
         if start <= floor, !title.isEmpty,
@@ -378,7 +465,8 @@ enum AgentScreen {
         // data-retention banner (a card of its own — see `TerminalPrompt`).
         let banner = dataRetentionRange(lines)
         return lines.indices[max(start, floor)..<first]
-            .filter { !(banner?.contains($0) ?? false) && !isStatusChrome(lines[$0]) }
+            .filter { !(banner?.contains($0) ?? false) && !isStatusChrome(lines[$0])
+                && !isKeyHintLine(unboxed(lines[$0])) }
             .map { deglyphed(unboxed(lines[$0]).trimmingCharacters(in: .whitespaces)) }
             .filter { !$0.isEmpty && $0 != title && $0.contains(where: \.isLetter) }
             .joined(separator: "\n")
@@ -435,6 +523,36 @@ enum AgentScreen {
                 .trimmingCharacters(in: .whitespaces)
         }.filter { $0.contains(where: \.isLetter) }.joined(separator: " ")
         return text.isEmpty ? "" : text
+    }
+
+    /// The banner's buttons as Grok draws them. Grok's TUI takes no key for
+    /// them (Tab, arrows and Enter all go to its input box): they answer a
+    /// mouse click, which Grok asks the terminal to report.
+    static let optOutButton = "[Opt out]"
+    static let optInButton = "[Opt in]"
+
+    /// A guest shell snippet that clicks `label` where it sits on screen in
+    /// tmux pane "$_bt": finds its row/column in a fresh capture (pane
+    /// rows, 1-based) and types an SGR mouse press + release there — what a
+    /// terminal sends for a click once the app turned mouse reporting on.
+    /// Nothing is sent when the label isn't on screen. Columns count
+    /// characters (the banner's line is plain text).
+    static func clickLabelCommand(_ label: String) -> String {
+        let finder = """
+        import sys
+        b = sys.argv[1]
+        for n, l in enumerate(sys.stdin.read().split("\\n"), 1):
+            i = l.find(b)
+            if i >= 0:
+                print(n, i + 2)
+                break
+        """
+        let b64 = Data(finder.utf8).base64EncodedString()
+        let quoted = "'" + label.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "set -- $(tmux capture-pane -p -t \"$_bt\" 2>/dev/null"
+            + " | python3 -c \"$(echo \(b64) | base64 -d)\" \(quoted))"
+            + "; [ -n \"$1\" ] && tmux send-keys -t \"$_bt\" -l"
+            + " \"$(printf '\\033[<0;%d;%dM\\033[<0;%d;%dm' \"$2\" \"$1\" \"$2\" \"$1\")\""
     }
 
     /// A heading without the marker some agents draw before it — Kimi 2.1
@@ -803,6 +921,7 @@ enum AgentInputBox {
         }
         guard !rows.isEmpty else { return .unknown }
         let low = max(0, rows.count - 20)
+        if let band = ompBand(rows, low: low) { return band }
         func isRule(_ i: Int) -> Bool {
             rows.indices.contains(i) && AgentScreen.isRule(rows[i].text)
         }
@@ -815,6 +934,8 @@ enum AgentInputBox {
                 idx = text.index(after: idx); off += 1
             }
             guard idx < text.endIndex, promptGlyphs.contains(text[idx]) else { continue }
+            // A status bar whose segments are split by `>` (omp's) is chrome.
+            guard !isStatusBar(text) else { continue }
             let after = text.index(after: idx)
             guard after == text.endIndex || text[after] == " " || text[after] == "\u{00a0}" else { continue }
             // An input box, not an echoed message: a rule hugs it.
@@ -830,7 +951,7 @@ enum AgentInputBox {
             }
             var t = typed.trimmingCharacters(in: .whitespaces)
             // Continuation rows of a multi-line draft below the prompt row.
-            if t.isEmpty, i + 1 < rows.count, !isRule(i + 1) {
+            if t.isEmpty, i + 1 < rows.count, !isRule(i + 1), !isStatusBar(rows[i + 1].text) {
                 let next = AgentScreen.unboxed(rows[i + 1].text).trimmingCharacters(in: .whitespaces)
                 let nextContent = rows[i + 1].content.contains(true) && !next.isEmpty
                 if nextContent, rows.indices.contains(i + 2), isRule(i + 2) {
@@ -840,6 +961,58 @@ enum AgentInputBox {
             return t.isEmpty ? .empty : .text(t)
         }
         return .unknown
+    }
+
+    /// omp's status bar: powerline segments split by `>` (or the nerd-font
+    /// separator), ending in a cap and a rule fill —
+    /// ` π > ⬢ GLM-5.3 > 📁 ~/app ▶──────`. Never a draft, never a prompt.
+    static func isStatusBar(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, !AgentScreen.isRule(t) else { return false }
+        if t.contains("▶─") || t.contains("\u{E0B0}─") { return true }
+        let fill = t.reversed().prefix(while: { "─━".contains($0) }).count
+        guard fill >= 3 else { return false }
+        return t.contains(" > ") || t.contains("\u{E0B1}") || t.hasPrefix("π")
+    }
+
+    /// omp's band composer: its status bar on top, then the input rows
+    /// behind a `╰─ ` gutter (continuation rows indented to match). What
+    /// sits ABOVE the bar — its queue ("╰─ Queued: …", "1. …") — is not the
+    /// input box. nil: no band composer on screen.
+    static func ompBand(_ rows: [Row], low: Int) -> Content? {
+        guard rows.count >= 2 else { return nil }
+        for b in stride(from: rows.count - 2, through: max(0, low), by: -1) where isStatusBar(rows[b].text) {
+            func gutterText(_ r: Row) -> (typed: String, gutter: Bool) {
+                let chars = Array(r.text)
+                var k = 0
+                while k < chars.count, chars[k] == " " { k += 1 }
+                var gutter = false
+                if k + 1 < chars.count, chars[k] == "╰", chars[k + 1] == "─" {
+                    gutter = true
+                    k += 2
+                }
+                var typed = ""
+                while k < chars.count {
+                    typed.append(k < r.content.count && r.content[k] ? chars[k] : " ")
+                    k += 1
+                }
+                return (typed.trimmingCharacters(in: .whitespaces), gutter)
+            }
+            let first = gutterText(rows[b + 1])
+            guard first.gutter else { continue }
+            if !first.typed.isEmpty { return .text(first.typed) }
+            // A draft that opens with a blank line: its text is on the rows below.
+            var j = b + 2
+            while j < min(rows.count, b + 5) {
+                if AgentScreen.isRule(rows[j].text) || isStatusBar(rows[j].text) { break }
+                let next = gutterText(rows[j])
+                if next.gutter { break }
+                if !next.typed.isEmpty { return .text(next.typed) }
+                j += 1
+            }
+            return .empty
+        }
+        return nil
     }
 
     /// The probe for TUIs that draw no ruled box but keep the terminal's
@@ -861,6 +1034,9 @@ enum AgentInputBox {
         guard head.count == 4, head[0] == 1 else { return .unknown }
         let (x, y, height) = (head[1], head[2], head[3])
         guard y >= max(0, height - 12), lines.indices.contains(y), x > 0 else { return .unknown }
+        // The cursor parked on a status bar (omp's, while its editor isn't
+        // focused) says nothing about the input.
+        guard !isStatusBar(lines[y]) else { return .unknown }
         // Columns → characters (wide glyphs take two columns).
         var left = ""
         var col = 0
@@ -873,7 +1049,8 @@ enum AgentInputBox {
                 || (0xFF00...0xFF60).contains($0.value) || (0xFFE0...0xFFE6).contains($0.value) } ? 2 : 1
         }
         guard let last = left.last else { return .unknown }
-        let promptEnds: Set<Character> = Set(promptGlyphs).union(["$", "#", "%", ":", "»", "✨", "💫", "▶"])
+        // `─`: omp's band gutter ("╰─ ").
+        let promptEnds: Set<Character> = Set(promptGlyphs).union(["$", "#", "%", ":", "»", "✨", "💫", "▶", "─"])
         if last.isWhitespace || promptEnds.contains(last) { return .empty }
         // The draft: back to the prompt (a glyph followed by a space).
         var draft = Substring(left)

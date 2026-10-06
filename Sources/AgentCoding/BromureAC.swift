@@ -2085,6 +2085,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // pane here, and dropping the report left every tab of it "Ready".
         let recorded = runningSessions[id]?.agentStatus[index]
         runningSessions[id]?.agentStatus[index] = status
+        // A new turn (hook activity) means no dialog is waiting any more;
+        // a chat still showing one re-asserts it on its next screen scan.
+        if status == .working,
+           let s = agentSessionStore.session(profileID: id, windowIndex: index), s.awaitingAnswer == true {
+            agentSessionStore.setAwaitingAnswer(s.id, false)
+        }
         if let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) {
             let previousStatus = tab.agentStatus
             tab.agentStatus = status
@@ -2666,6 +2672,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// model/credential change diffs against it to decide which agents to
     /// restart in place (LiveModelRefresh.swift).
     var lastStagedProfiles: [UUID: Profile] = [:]
+    /// Per workspace, at its last launch/restage: each subscription agent's
+    /// verdict (signed in / needs sign-in / running on the API key). The
+    /// session header, the workspace's Models settings and `/state` read it so
+    /// a fallback to the API key is never silent.
+    var subscriptionAuthNotes: [UUID: [Profile.Tool: Profile.SubscriptionResolution]] = [:]
     /// Debounced observer of the global Models settings (Combine).
     var modelSettingsObserver: Any?
 
@@ -2695,6 +2706,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if e.grokSubscriptionStore.hasCredential(for: profile.id)   { s.insert(.xai) }
         if e.kimiSubscriptionStore.hasCredential(for: profile.id)   { s.insert(.moonshot) }
         return s
+    }
+
+    /// Record how each subscription agent of `rawProfile` (the stored
+    /// workspace, BEFORE the model overlay) authenticates at this launch. A
+    /// workspace set to "subscription" that runs on the Settings › Models API
+    /// key instead is fine (the user's key, used on purpose) — it only gets a
+    /// neutral "using API key" note in the log / Security Timeline / `/state`.
+    func noteSubscriptionAuth(for rawProfile: Profile) {
+        let verdicts = rawProfile.subscriptionResolutions(
+            ModelSettingsStore.shared.effective(for: rawProfile),
+            subscribed: subscribedProviders(for: rawProfile))
+        subscriptionAuthNotes[rawProfile.id] = verdicts.isEmpty ? nil : verdicts
+        for (tool, verdict) in verdicts.sorted(by: { $0.key.rawValue < $1.key.rawValue })
+        where verdict == .apiKeyFallback {
+            NSLog("[bromure-ac] \(tool.rawValue): \(rawProfile.name) is set to its subscription but none is signed in — using the API key from Settings › Models")
+            BACEventEmitter.shared.emitDetached(
+                profileID: rawProfile.id, eventType: "credential.subscription_auth",
+                eventData: ["agent": .string(tool.rawValue),
+                            "verdict": .string("api_key_fallback")])
+        }
     }
 
     func applyRouting(_ engine: MitmEngine, for rawProfile: Profile) {
@@ -4535,16 +4566,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     let model = self.unifiedWindow?.listModel
                     return ["filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false,
                             "sessions": self.agentSessionStore.sessions.map { s -> [String: Any] in
-                        ["id": s.id.uuidString, "title": s.title, "tool": s.tool.rawValue,
+                        let bucket = model.map { SessionHome.bucket(for: s, in: $0) }
+                        // A Paused session has no agent process, whatever the
+                        // last probe (before the machine stopped) said.
+                        let paused = bucket == .asleep || bucket == .ended
+                        return ["id": s.id.uuidString, "title": s.title, "tool": s.tool.rawValue,
                          "cwd": s.cwd, "windowIndex": s.windowIndex ?? -1,
                          "ended": s.endedAt != nil, "launching": s.isLaunching,
                          "archived": s.isArchived, "deleted": s.isDeleted,
-                         "agentAlive": s.agentAlive ?? false,
+                         "agentAlive": !paused && (s.agentAlive ?? false),
                          "changes": s.changesSeenAt != nil,
                          "nickname": s.nickname ?? "",
                          "transcript": s.agentTranscriptID ?? "",
                          // What the sidebar shows (Ended is often computed, not stored).
-                         "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
+                         "bucket": bucket?.title ?? "",
                          "error": s.lastError ?? ""]
                     }]
                 case "nickname":
@@ -5748,6 +5783,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                  engine.kimiSubscriptionStore.reauthRequiredAt(for: pid),
                                  health: engine.kimiSubscriptionStore.health(for: pid),
                                  hasOwn: engine.kimiSubscriptionStore.hasProfileRecord) { out["kimi"] = e }
+                // How each subscription agent authenticated at the workspace's
+                // last launch — "api_key_fallback" / "sign_in_needed" make a
+                // signed-out subscription visible instead of silently billed.
+                if let pid, let notes = self.subscriptionAuthNotes[pid] {
+                    for (tool, verdict) in notes {
+                        var d = out[tool.rawValue] as? [String: Any] ?? [:]
+                        switch verdict {
+                        case .subscription:   d["launchAuth"] = "subscription"
+                        case .signInNeeded:   d["launchAuth"] = "sign_in_needed"
+                        case .apiKeyFallback: d["launchAuth"] = "api_key_fallback"
+                        }
+                        out[tool.rawValue] = d
+                    }
+                }
                 return out
             }
         }
@@ -7009,6 +7058,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "The workspaces %@ will be suspended and resume where they left off.",
                 comment: "quit confirmation: several running workspaces (a list of names) suspended at quit"),
                 list(suspended)))
+        }
+        // A machine's name ("connector") reads as a word of the sentence
+        // unless it's quoted — in each language's own quotation marks.
+        let machines = machines.map {
+            String(format: NSLocalizedString("“%@”", comment: "a name quoted inside a sentence (a machine's name in the quit confirmation); use your language's quotation marks"), $0)
         }
         if machines.count == 1 {
             parts.append(String(format: NSLocalizedString(
@@ -10521,7 +10575,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                          booted: Profile? = nil) -> [String] {
         let settings = ModelSettingsStore.shared.effective(for: new)
         let subscribed = subscribedProviders(for: new)
-        let project = { (p: Profile) in p.overlaidWithGlobalModels(settings, subscribed: subscribed) }
+        let project = { (p: Profile) in
+            p.overlaidWithGlobalModels(settings, subscribed: subscribed)
+        }
         return Self.restartChangesToPrompt(previous: project(old), new: project(new),
                                            booted: booted.map(project))
             .map { restartLabel(for: $0) }
@@ -10790,8 +10846,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var profile = new
         populateMCPBearerTokens(in: &profile)
         // Global model settings drive the restage too (see launch()).
+        noteSubscriptionAuth(for: profile)
         profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
-                                                                  subscribed: subscribedProviders(for: profile))
+                                                   subscribed: subscribedProviders(for: profile))
         lastStagedProfiles[profile.id] = profile
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
@@ -11303,8 +11360,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Project the global model settings onto the launch-time profile so the
         // whole staging pipeline (token plan, home dir, meta share, routing)
         // stages the models + credentials the user configured in "Models".
+        noteSubscriptionAuth(for: profile)
         profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
-                                                                  subscribed: subscribedProviders(for: profile))
+                                                   subscribed: subscribedProviders(for: profile))
         lastStagedProfiles[profile.id] = profile
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)

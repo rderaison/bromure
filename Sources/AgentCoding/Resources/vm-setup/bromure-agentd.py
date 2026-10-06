@@ -2121,9 +2121,7 @@ def _pretrust(tool, *dirs):
             projects = {}
             cfg["projects"] = projects
         changed = False
-        for d in dirs:
-            if not d:
-                continue
+        for d in _claude_trust_paths(*dirs):
             entry = projects.get(d)
             if not isinstance(entry, dict):
                 entry = {}
@@ -2139,6 +2137,46 @@ def _pretrust(tool, *dirs):
     except Exception as e:
         # Non-fatal: the run still starts, worst case Claude prompts.
         log("worktree", "pretrust failed:", e)
+
+
+def _claude_trust_paths(*dirs):
+    """Every key Claude Code may look a folder's trust up under: the path as
+    given (a ~/<share> symlink such as /home/ubuntu/cc-demo), its realpath
+    (Claude resolves the cwd — a Bromure share is keyed as
+    /mnt/bromure-share-N, so recording only the symlink left the dialog
+    up), and the enclosing git checkout's root in both forms (Claude walks
+    up to a trusted ancestor; a task worktree's own root and the main
+    checkout's root are both covered). $HOME and / are only recorded when
+    passed explicitly — never inferred, as an ancestor entry would trust
+    everything beneath it."""
+    out = []
+    home = os.path.realpath(HOME)
+
+    def add(p, explicit=False):
+        if p and p not in out and (explicit or p not in ("/", HOME, home)):
+            out.append(p)
+
+    for d in dirs:
+        if not d:
+            continue
+        add(d, explicit=True)
+        try:
+            real = os.path.realpath(d)
+        except OSError:
+            continue
+        add(real, explicit=True)
+        if not os.path.isdir(real):
+            continue
+        try:
+            top = subprocess.run(["git", "-C", real, "rev-parse", "--show-toplevel"],
+                                 capture_output=True, text=True, timeout=5)
+            if top.returncode == 0 and top.stdout.strip():
+                root = top.stdout.strip()
+                add(root)
+                add(os.path.realpath(root))
+        except Exception:
+            pass
+    return out
 
 
 def _preonboard(tool, cwd=None):

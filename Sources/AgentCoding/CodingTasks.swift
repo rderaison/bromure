@@ -725,6 +725,14 @@ struct TranscriptPin: Equatable, Sendable {
     /// session's (Grok), or a second session's live rollout (Codex).
     var grokSession: String? = nil
     var codexSession: String? = nil
+    /// omp's session (`~/.omp/agent/sessions/<cwd>/<ts>_<uuid>.jsonl`):
+    /// that file only, never the folder's newest (another session's).
+    var ompSession: String? = nil
+    /// Grok / Codex conversations (lowercased uuids) other sessions on the
+    /// machine own, for a session not pinned to its own yet: the folder's
+    /// newest is then never one of those — Codex A's header took B's token
+    /// total after B ran in the same folder (A's copy read B's rollout).
+    var foreignConversations: [String] = []
 
     /// The pin a session's own conversation id gives (`agentTranscriptID`),
     /// for the agents that key their store by folder or date.
@@ -735,6 +743,7 @@ struct TranscriptPin: Equatable, Sendable {
         case "kimi" where AgentSessionLocator.isKimiSessionID(id): p.kimiSession = id
         case "grok" where AgentSessionLocator.isConversationUUID(id): p.grokSession = id
         case "codex" where AgentSessionLocator.isConversationUUID(id): p.codexSession = id
+        case "omp" where AgentSessionLocator.isConversationUUID(id): p.ompSession = id
         default: break
         }
         return p
@@ -988,6 +997,12 @@ enum AgentSessionLocator {
         guard isConversationUUID(id) else { return "" }
         return "\(varName)=$(find \"$HOME/.codex/sessions\" -name 'rollout-*\(id).jsonl' 2>/dev/null "
             + "| xargs -r ls -t 2>/dev/null | head -1); "
+    }
+
+    /// `$varName` = omp session `id`'s file, whatever folder it's under.
+    nonisolated static func ompPinnedFragment(id: String, into varName: String) -> String {
+        guard isConversationUUID(id) else { return "" }
+        return "\(varName)=$(ls -t \"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}\"/sessions/*/*_\(id).jsonl 2>/dev/null | head -1); "
     }
 
     /// The Kimi session id in a journal's path, nil when it isn't one.
@@ -1547,25 +1562,132 @@ enum PaneTypeGuard {
                 + "if _bg; then \(send) && sleep 1 && "
                 + "if _bg; then \(enter); fi; fi"
         case .agent:
-            cmd = prelude(target) + menuFunction
+            cmd = prelude(target) + menuFunction + confirmFunctions
                 + "if _bg; then if _bm; then echo \(heldMarker); "
-                + "else \(send) && sleep 1 && "
-                + "if _bg; then if _bm; then echo \(heldMarker); else \(enter); fi; fi; fi; fi"
+                + "else \(send) && _bsettle && "
+                + "if _bg; then if _bm; then echo \(heldMarker); else \(confirmedEnter); fi; fi; fi; fi"
         }
         if let staged, isStagePath(staged) { cmd += "; rm -f \(quote(staged))" }
         return cmd
     }
+
+    /// What a guarded type prints when the text went in but its Enter never
+    /// took — the screen didn't move after it, even on a second Enter (omp
+    /// still folding a long paste into its "📄 #1 +182 lines" chip
+    /// swallowed it). The text is still in the agent's input box.
+    nonisolated static let unconfirmedMarker = "BROMURE_TYPE_UNCONFIRMED"
+
+    /// `_bcap`: "$_bt"'s whole screen (an inline TUI's input box sits right
+    /// under its content — near the top of a fresh pane). `_bsettle`: waits for the
+    /// screen to hold still after a paste (a TUI collapsing a long one into
+    /// a chip redraws for a while; an Enter sent into that is lost) — at
+    /// least 0.9 s, at most ~6.5 s. `_bok`: true once the screen moved
+    /// after the Enter (up to ~2.4 s) — an input box that took its message
+    /// clears.
+    nonisolated static var confirmFunctions: String {
+        "_bcap() { tmux capture-pane -p -t \"$_bt\" 2>/dev/null; }; "
+            + "_bsettle() { sleep 0.5; _bp=$(_bcap); _bi=0; while [ $_bi -lt 15 ]; do sleep 0.4; "
+            + "_bc=$(_bcap); [ \"$_bc\" = \"$_bp\" ] && return 0; _bp=$_bc; _bi=$((_bi+1)); done; return 0; }; "
+            + "_bok() { _bi=0; while [ $_bi -lt 8 ]; do sleep 0.3; [ \"$(_bcap)\" != \"$_b0\" ] && return 0; "
+            + "_bi=$((_bi+1)); done; return 1; }; "
+    }
+
+    /// Enter, confirmed by the screen moving; once more if it didn't (and
+    /// no menu came up meanwhile); `unconfirmedMarker` if it still didn't.
+    nonisolated static var confirmedEnter: String {
+        "_b0=$(_bcap); tmux send-keys -t \"$_bt\" Enter && "
+            + "if _bok; then echo \(typedMarker); "
+            + "elif _bg && ! _bm && _b0=$(_bcap) && tmux send-keys -t \"$_bt\" Enter && _bok; then echo \(typedMarker); "
+            + "else echo \(unconfirmedMarker); fi"
+    }
+
+    /// Whether a guarded type went in but its Enter never took.
+    nonisolated static func unconfirmed(in out: String) -> Bool { out.contains(unconfirmedMarker) }
 
     /// Whether a guarded type held off for an open menu or dialog.
     nonisolated static func held(in out: String) -> Bool { out.contains(heldMarker) }
     /// Whether a guarded type went all the way in (text and Enter).
     nonisolated static func typed(in out: String) -> Bool { out.contains(typedMarker) }
 
+    /// What `runType` prints in place of the guest's verdict when the
+    /// Enter didn't take but the agent's input box is EMPTY: the text never
+    /// stayed there (the TUI dropped it, or took it after all, late) —
+    /// never "in the input box".
+    nonisolated static let droppedMarker = "BROMURE_TYPE_DROPPED"
+
+    /// Whether a type's text isn't in the agent's box after its Enter
+    /// didn't take (`droppedMarker`).
+    nonisolated static func dropped(in out: String) -> Bool { out.contains(droppedMarker) }
+
+    /// The bottom of "$_bt"'s screen with its escapes, for `AgentInputBox`.
+    nonisolated static func boxProbeCommand(_ t: PaneTarget) -> String {
+        resolve(t) + "[ -n \"$_bt\" ] && tmux capture-pane -p -e -t \"$_bt\" 2>/dev/null | tail -n 30"
+    }
+
+    /// Enter (confirmed, `confirmedEnter`) for text already in the box —
+    /// unless a menu came up or the window stopped being the agent's.
+    nonisolated static func enterCommand(_ t: PaneTarget) -> String {
+        var t = t
+        t.foreground = .agent
+        return prelude(t) + menuFunction + confirmFunctions
+            + "if _bg; then if _bm; then echo \(heldMarker); else \(confirmedEnter); fi; fi"
+    }
+
+    /// Whether the agent's input box still holds something after an Enter:
+    /// a draft `AgentInputBox` reads, or omp's paste chip ("╰─ 📄 #1"),
+    /// which it may draw in a colour the reader takes for a placeholder.
+    nonisolated static func boxHolds(_ capture: String) -> Bool {
+        if case .text = AgentInputBox.content(capture) { return true }
+        // Escapes stripped: the band row's raw text.
+        let plain = capture.replacingOccurrences(of: "\u{1B}\\[[0-9;:?]*[ -/]*[@-~]", with: "",
+                                                 options: .regularExpression)
+        let rows = plain.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let bar = rows.lastIndex(where: AgentInputBox.isStatusBar), bar + 1 < rows.count else { return false }
+        let band = rows[(bar + 1)...].prefix(4).joined(separator: "\n")
+        return band.contains("📄") || band.range(of: "\\+[0-9]+ lines", options: .regularExpression) != nil
+    }
+
+    /// The Enter of a type that said it went in, checked against what
+    /// matters — the agent took the TURN: its input box is empty again. A
+    /// screen that merely moved (omp finishing its paste chip as the Enter
+    /// arrived, a status bar ticking) used to count as taken; the 21 KB
+    /// paste then sat in the box unsent, and went out bundled with the next
+    /// message. Text still there: Enter again (twice at most), then
+    /// `unconfirmedMarker`. The guest's own "unconfirmed" with an EMPTY
+    /// box: `droppedMarker` (nothing is waiting in the box). The box can't
+    /// be read (no answer, an unknown TUI): the guest's verdict stands.
+    nonisolated static func confirmTaken(target: PaneTarget, out: String,
+                                         exec: (String) async -> String?,
+                                         pause: UInt64 = 700_000_000) async -> String {
+        guard typed(in: out) || unconfirmed(in: out) else { return out }
+        var current = out
+        for round in 0..<3 {
+            if round > 0 || typed(in: current) { try? await Task.sleep(nanoseconds: pause) }
+            guard let screen = await exec(boxProbeCommand(target)), !screen.isEmpty else { return current }
+            guard boxHolds(screen) else {
+                return typed(in: current) ? current : droppedMarker
+            }
+            guard round < 2 else { break }
+            guard let again = await exec(enterCommand(target)) else { return current }
+            if refusal(in: again) != nil || held(in: again) { return again }
+            current = again
+        }
+        return unconfirmedMarker
+    }
+
     /// Run `typeCommand` through `exec`, staging a long text first. The
     /// command's output (nil when the machine couldn't be asked, or a
-    /// staging step failed — nothing typed then).
+    /// staging step failed — nothing typed then). For an agent, the Enter
+    /// is then confirmed by the input box (`confirmTaken`).
     nonisolated static func runType(target: PaneTarget, text: String,
                                     exec: (String) async -> String?) async -> String? {
+        guard let out = await typeOnce(target: target, text: text, exec: exec) else { return nil }
+        guard target.foreground == .agent else { return out }
+        return await confirmTaken(target: target, out: out, exec: exec)
+    }
+
+    private nonisolated static func typeOnce(target: PaneTarget, text: String,
+                                             exec: (String) async -> String?) async -> String? {
         guard needsStaging(text) else { return await exec(typeCommand(target: target, text: text)) }
         let text = target.foreground == .agent ? completionSafe(text) : text
         let path = newStagePath()
@@ -3295,6 +3417,8 @@ final class CodingTaskEngine {
             cmd += AgentSessionLocator.grokPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
         } else if agent == "codex", let id = pin.codexSession, AgentSessionLocator.isConversationUUID(id) {
             cmd += AgentSessionLocator.codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "omp", let id = pin.ompSession, AgentSessionLocator.isConversationUUID(id) {
+            cmd += AgentSessionLocator.ompPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
         } else if let w = pinnedWindow {
             // The transcript the tab's agent itself named (its hook records the
             // path per window — see agent-status.sh) wins over "the newest file
@@ -4335,6 +4459,10 @@ extension CodingTaskEngine {
         let deadline = Date().addingTimeInterval(patience)
         var last: TypeResult = .menuOpen
         let label = "\(target.ref)"
+        // Our text went in last round but its Enter never took: what the box
+        // shows now is ours, however the agent drew it (omp's paste chip).
+        var typedUnconfirmed = false
+        var unconfirmedRounds = 0
         while true {
             let screen = (try? await exec(inputProbeCommand(target: target))) ?? ""
             var command: String? = nil   // nil: the guarded type (staged when long)
@@ -4346,7 +4474,7 @@ extension CodingTaskEngine {
                 box = AgentInputBox.cursorContent(probe)
             }
             if case .text(let draft) = box {
-                if AgentInputBox.isOwn(draft, of: text) {
+                if typedUnconfirmed || AgentInputBox.isOwn(draft, of: text) {
                     BACDebug.log("type", "\(label): our text is already in the box — Enter only")
                     command = guardedEnterCommand(target: target)
                 } else {
@@ -4376,6 +4504,17 @@ extension CodingTaskEngine {
                     return .refused(r)
                 }
                 if PaneTypeGuard.typed(in: out) { return .typed }
+                if PaneTypeGuard.unconfirmed(in: out) {
+                    BACDebug.log("type", "\(label): the Enter didn't take — confirming again")
+                    typedUnconfirmed = true
+                    unconfirmedRounds += 1
+                    last = .draftInBox
+                    // Never Enter after Enter for long: twice more, then the
+                    // caller says it wasn't delivered.
+                    guard Date() < deadline, unconfirmedRounds < 3 else { return last }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    continue
+                }
                 if out.contains(typeHeldMarker) {
                     BACDebug.log("type", "held text for \(label): a menu or dialog is open")
                     last = .menuOpen
@@ -4398,8 +4537,8 @@ extension CodingTaskEngine {
     }
 
     nonisolated static func guardedEnterCommand(target: PaneTarget) -> String {
-        PaneTypeGuard.prelude(target) + menuFunction
-            + "if _bg; then if _bm; then echo \(typeHeldMarker); else tmux send-keys -t \"$_bt\" Enter && echo \(PaneTypeGuard.typedMarker); fi; fi"
+        PaneTypeGuard.prelude(target) + menuFunction + PaneTypeGuard.confirmFunctions
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); else \(PaneTypeGuard.confirmedEnter); fi; fi"
     }
 
     /// The user-facing reason a guarded send typed nothing.

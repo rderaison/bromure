@@ -2371,7 +2371,23 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         return try? await controller.guestFileOp(workspaceID, op: op, timeout: timeout)
     }
 
-    func isWorking() -> Bool { boundTab?.agentStatus == .working }
+    /// Working — unless the server says the session is asking the user
+    /// something (its card is up there): the mirror read "Scheming…" under
+    /// a hook status that never left "working" while the server said
+    /// "Needs you".
+    func isWorking() -> Bool {
+        guard let tab = boundTab, tab.agentStatus == .working else { return false }
+        return controller.sessionStore.session(profileID: workspaceID, windowIndex: tab.index)?
+            .awaitingAnswer != true
+    }
+
+    /// The server workspace's shared folders by their guest mounts, so the
+    /// mirror shows `~/cc-demo/NOTES.md` where the server's own chat does —
+    /// not `/mnt/bromure-share-1/NOTES.md`. Read from the mirrored profile.
+    var guestPathNames: [String: String] {
+        guard let p = controller.profile(for: workspaceID) else { return [:] }
+        return GuestSharePaths.names(mountNames: SessionDisk.sharedFolders(p.folderPaths).map(\.mountName))
+    }
 
     func isWorking(window w: Int) -> Bool? {
         guard let tab = controller.tabsModel(for: workspaceID)?.tabs.first(where: { $0.index == w })
@@ -6325,7 +6341,11 @@ final class RemoteHostWindow: NSWindow {
                 remoteHost: controller.host.id,
                 // Stage-side grid edits (✕, drop-add, swap, zoom) must reach
                 // the remote, or the next /state poll reverts them.
-                onEdited: { [weak self] in self?.controller.pushGridLayout() })
+                onEdited: { [weak self] in self?.controller.pushGridLayout() },
+                sessionTitle: { [weak self] pid, w in
+                    self?.controller.sessionStore.session(profileID: pid, windowIndex: w)
+                        .flatMap(AgentSession.liveTitle)
+                })
             let v = GridStageView(store: controller.gridStore, dataSource: ds)
             v.translatesAutoresizingMaskIntoConstraints = false
             gridView = v

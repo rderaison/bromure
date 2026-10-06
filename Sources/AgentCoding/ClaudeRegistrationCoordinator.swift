@@ -81,6 +81,11 @@ final class ClaudeRegistrationState {
     /// True once the host has kicked (or confirmed) the agent launch in the
     /// guest's tmux window, so the roster ticks don't retry it.
     var agentLaunchStarted = false
+    /// The login CLI was seen running (or its sign-in URL reached the host),
+    /// so the launch watchdog stands down.
+    var agentLaunchConfirmed = false
+    /// The launch watchdog (see `RegistrationLaunch`).
+    var launchTask: Task<Void, Never>?
     /// A sign-in card drives this flow: no explainer or completion alerts,
     /// the throwaway VM stays off screen, and progress goes here instead.
     var quiet = false
@@ -176,7 +181,18 @@ extension ACAppDelegate {
             return
         }
 
-        // Explainer.
+        // Explainer — a sheet (or a non-modal panel), never `runModal`: this
+        // is reached from main-actor tasks too, and a modal loop entered there
+        // holds the whole main queue (control socket, automation boots).
+        // Remote-initiated: nobody is sitting at this Mac to answer, and the
+        // client already showed its own confirmation before calling. A
+        // sign-in card explained itself already.
+        guard !remoteInitiated, !quiet else {
+            startSubscriptionRegistration(provider: provider, scope: scope, engine: engine,
+                                          remoteInitiated: remoteInitiated, quiet: quiet,
+                                          events: events)
+            return
+        }
         let explainer = NSAlert()
         explainer.messageText = String(format: NSLocalizedString("Register with %@", comment: ""),
                                        provider.displayName)
@@ -185,12 +201,28 @@ extension ACAppDelegate {
             comment: ""), provider.displayName)
         explainer.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         explainer.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        // Remote-initiated: nobody is sitting at this Mac to answer, and the
-        // client already showed its own confirmation before calling. A
-        // sign-in card explained itself already.
-        if !remoteInitiated, !quiet {
-            guard explainer.runModal() == .alertFirstButtonReturn else { return }
+        presentRegistrationAlert(explainer, on: nil,
+                                 fallback: .alertFirstButtonReturn) { [weak self] resp in
+            guard let self, resp == .alertFirstButtonReturn else { return }
+            // Re-check: another flow may have started while the sheet was up.
+            if let existing = self.claudeRegistration {
+                existing.window?.makeKeyAndOrderFront(nil)
+                return
+            }
+            guard let engine = self.mitmEngine else { return }
+            self.startSubscriptionRegistration(provider: provider, scope: scope, engine: engine,
+                                               remoteInitiated: false, quiet: false,
+                                               events: events)
         }
+    }
+
+    /// The flow proper, once the user (or the caller) said go.
+    private func startSubscriptionRegistration(provider: SubscriptionProvider,
+                                               scope: SubscriptionRegistrationScope,
+                                               engine: MitmEngine,
+                                               remoteInitiated: Bool,
+                                               quiet: Bool,
+                                               events: ((HostSignInEvent) -> Void)?) {
         if remoteInitiated { RemoteRegistrationBroker.shared.begin(provider: provider.displayName) }
 
         // Scratch profile: the right tool + subscription, no folders / SSH /
@@ -270,8 +302,9 @@ extension ACAppDelegate {
                 try await sandbox.start()
             } catch {
                 if !remoteInitiated, !quiet {
-                    self.showError(error, message: NSLocalizedString(
-                        "Couldn't start the registration VM.", comment: ""))
+                    self.registrationAlert(
+                        title: NSLocalizedString("Couldn't start the registration VM.", comment: ""),
+                        text: error.localizedDescription)
                 }
                 state.onEvent?(.finished(success: false, message: NSLocalizedString(
                     "Couldn't start the sign-in machine.", comment: "sign-in")))
@@ -346,6 +379,8 @@ extension ACAppDelegate {
         let providerName = self.claudeRegistration?.provider.displayName ?? "your account"
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
+                // The CLI got as far as its sign-in URL: it is running.
+                self?.claudeRegistration?.agentLaunchConfirmed = true
                 // Remote-initiated: the human is at the fat client, so hand
                 // it the URL + the VM's loopback port and let it open the page
                 // and tunnel the callback. Opening here would sign in on the
@@ -383,49 +418,93 @@ extension ACAppDelegate {
         }
     }
 
-    /// Directly start the login agent in the scratch VM's tmux window rather
-    /// than trusting the guest `.bashrc` auto-launch (which has proven
-    /// unreliable under the native-terminal boot — the window can land on a
-    /// bare shell). Idempotent: fires once, and only types the command if the
-    /// active pane is still a shell, so it can't fight or double the `.bashrc`
-    /// path if that one did run.
+    /// Make sure the login CLI actually runs in the scratch VM's tmux window,
+    /// rather than trusting the guest `.bashrc` auto-launch (which can land on
+    /// a bare shell — e.g. when agentd spawns window 0 before the virtiofs
+    /// home is mounted). A watchdog probes the guest every couple of seconds
+    /// (`RegistrationLaunch.Tracker`): it types the login command only once
+    /// the pane has been an idle shell for two probes in a row, re-sends a
+    /// bounded number of times, and stands down as soon as the login process
+    /// runs or its sign-in URL reaches the host. If it never starts, the
+    /// user gets a Retry / Cancel prompt (a sign-in card or a remote client
+    /// hears a failure instead) — no more silent four-minute timeout on a
+    /// bare `bash`. Idempotent: one watchdog per attempt.
     private func launchRegistrationAgentIfNeeded() {
         guard let state = claudeRegistration, !state.finished,
               !state.agentLaunchStarted else { return }
         state.agentLaunchStarted = true
-        // Each CLI's dedicated login subcommand: it goes straight to the
-        // browser hand-off with no wizard in between — Claude's TUI would
-        // otherwise sit at its prompt ("Not logged in · Run /login") once
-        // onboarding is pre-answered, and Codex's would wait on its
-        // "Sign in with ChatGPT" picker; nobody is at this terminal.
-        let tool: String
-        switch state.provider {
-        case .claude: tool = "'claude auth login --claudeai'"
-        case .codex:  tool = "'codex login'"
-        case .grok:   tool = "'grok login'"
-        case .kimi:   tool = "'kimi login'"
-        }
+        let provider = state.provider
         let pid = state.scratchProfile.id
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            // Let the guest .bashrc launch first (and the shell settle) so we
-            // only step in when it didn't. tmux send-keys buffers into the pty
-            // regardless, but gating on pane_current_command avoids a double
-            // start.
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            guard let live = self.claudeRegistration, live === state, !live.finished
-            else { return }
-            // If the active pane is already running the tool (or anything
-            // that isn't a shell), the .bashrc path won or the user started
-            // it — leave it alone. Otherwise type the command in.
-            let script = """
-            cur=$(tmux display-message -p -t bromure '#{pane_current_command}' 2>/dev/null); \
-            case "$cur" in \
-              bash|sh|zsh|dash|fish|-bash|-sh|-zsh) \
-                tmux send-keys -t bromure \(tool) Enter ;; \
-            esac
-            """
-            _ = try? await self.guestExec(profileID: pid, command: script, timeout: 10)
+        let probe = RegistrationLaunch.probeScript(for: provider)
+        let launch = RegistrationLaunch.launchScript(for: provider)
+        state.launchTask?.cancel()
+        state.launchTask = Task { @MainActor [weak self] in
+            var tracker = RegistrationLaunch.Tracker()
+            // Give the guest `.bashrc` auto-launch its head start.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            while !Task.isCancelled {
+                guard let self, let live = self.claudeRegistration, live === state,
+                      !live.finished else { return }
+                if live.agentLaunchConfirmed { return }
+                let out = try? await self.guestExec(profileID: pid, command: probe, timeout: 10)
+                guard !Task.isCancelled, !live.finished else { return }
+                if live.agentLaunchConfirmed { return }
+                switch tracker.next(RegistrationLaunch.Probe(output: out)) {
+                case .confirmed:
+                    live.agentLaunchConfirmed = true
+                    FileHandle.standardError.write(Data(
+                        "[registration] \(provider.rawValue) login running\n".utf8))
+                    return
+                case .send:
+                    FileHandle.standardError.write(Data(
+                        "[registration] typing \(provider.rawValue) login (attempt \(tracker.sends))\n".utf8))
+                    _ = try? await self.guestExec(profileID: pid, command: launch, timeout: 10)
+                case .wait:
+                    break
+                case .fail(let failure):
+                    self.registrationLaunchFailed(state: live, failure: failure)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    /// The login CLI never started. A local, visible flow asks Retry /
+    /// Cancel on the registration window (a sheet — never a modal run from
+    /// this main-actor task, which would wedge the control socket); a sign-in
+    /// card or a fat client hears the failure and the VM is torn down.
+    private func registrationLaunchFailed(state: ClaudeRegistrationState,
+                                          failure: RegistrationLaunch.Failure) {
+        let message = RegistrationLaunch.failureMessage(failure, provider: state.provider)
+        FileHandle.standardError.write(Data("[registration] launch failed: \(failure)\n".utf8))
+        let remote = RemoteRegistrationBroker.shared.pending != nil
+        if remote || state.quiet || headless {
+            state.onEvent?(.finished(success: false, message: message))
+            state.onEvent = nil
+            teardownClaudeRegistration(reason: .failure)
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(format: NSLocalizedString(
+            "Couldn't start the %@ sign-in", comment: "registration launch failure title"),
+            state.provider.displayName)
+        alert.informativeText = message + "\n\n" + NSLocalizedString(
+            "Retry types the sign-in command into the sign-in machine again.",
+            comment: "registration launch failure")
+        alert.addButton(withTitle: NSLocalizedString("Retry", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        presentRegistrationAlert(alert, on: state.window,
+                                 fallback: .alertSecondButtonReturn) { [weak self] resp in
+            guard let self, let live = self.claudeRegistration, live === state,
+                  !live.finished else { return }
+            if resp == .alertFirstButtonReturn {
+                live.agentLaunchStarted = false
+                self.launchRegistrationAgentIfNeeded()
+            } else {
+                self.teardownClaudeRegistration(reason: .cancelled)
+            }
         }
     }
 
@@ -650,11 +729,17 @@ extension ACAppDelegate {
                 guard !state.finished else { return }
                 sharedEverywhere = (choice == 0)
             } else {
+                // A sheet awaited async — `runModal` here (inside the poll
+                // task, on the main actor) froze the control socket until it
+                // was answered. Headless: the conservative choice.
                 let ask = NSAlert()
                 ask.messageText = title
                 ask.informativeText = body
                 for b in buttons { ask.addButton(withTitle: b) }
-                sharedEverywhere = (ask.runModal() == .alertFirstButtonReturn)
+                let resp = await presentRegistrationAlert(ask, on: state.window,
+                                                          fallback: .alertSecondButtonReturn)
+                guard !state.finished else { return }
+                sharedEverywhere = (resp == .alertFirstButtonReturn)
             }
             if !sharedEverywhere { overrideProfile = pid }
         }
@@ -695,8 +780,9 @@ extension ACAppDelegate {
             if sharedEverywhere { forgetProviderOverrides(state.provider) }
         } catch {
             if RemoteRegistrationBroker.shared.pending == nil {
-                showError(error, message: NSLocalizedString(
-                    "Couldn't save the captured credentials.", comment: ""))
+                registrationAlert(
+                    title: NSLocalizedString("Couldn't save the captured credentials.", comment: ""),
+                    text: error.localizedDescription)
             } else {
                 FileHandle.standardError.write(Data(
                     "[registration] couldn't save captured credentials: \(error)\n".utf8))
@@ -737,7 +823,7 @@ extension ACAppDelegate {
             done.informativeText = sharedEverywhere
                 ? NSLocalizedString("Saved for all workspaces. New workspaces will use it automatically.", comment: "")
                 : NSLocalizedString("Saved for this workspace.", comment: "")
-            done.runModal()
+            self.presentRegistrationAlert(done, on: nil, fallback: .alertFirstButtonReturn) { _ in }
         }
     }
 
@@ -761,6 +847,7 @@ extension ACAppDelegate {
         RemoteRegistrationBroker.shared.finish()
 
         state.pollTask?.cancel()
+        state.launchTask?.cancel()
         state.claudeBridge?.stop()
         state.codexBridge?.stop()
         shellBridges[state.scratchProfile.id]?.stop()
@@ -817,6 +904,76 @@ extension ACAppDelegate {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = text
-        alert.runModal()
+        presentRegistrationAlert(alert, on: nil, fallback: .alertFirstButtonReturn) { _ in }
+    }
+
+    /// Show a registration alert WITHOUT a modal loop: as a sheet on
+    /// `preferred` (or the home window) when one is on screen, otherwise as a
+    /// free-standing non-modal panel. `NSAlert.runModal()` reached from a
+    /// main-actor task holds every other main-queue job — the control socket
+    /// (`/state` and every debug call hang), automation boots — until someone
+    /// at this Mac clicks. Headless: nobody to ask, `fallback` at once.
+    func presentRegistrationAlert(_ alert: NSAlert, on preferred: NSWindow?,
+                                  fallback: NSApplication.ModalResponse,
+                                  completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        guard !headless else { completion(fallback); return }
+        let candidates: [NSWindow?] = [preferred, unifiedWindow, mainWindow]
+        if let host = candidates.compactMap({ $0 }).first(where: {
+            $0.isVisible && $0.attachedSheet == nil
+        }) {
+            alert.beginSheetModal(for: host, completionHandler: completion)
+            return
+        }
+        NonModalAlertPresenter.show(alert, completion: completion)
+    }
+
+    func presentRegistrationAlert(_ alert: NSAlert, on preferred: NSWindow?,
+                                  fallback: NSApplication.ModalResponse) async
+        -> NSApplication.ModalResponse {
+        await withCheckedContinuation { cont in
+            presentRegistrationAlert(alert, on: preferred, fallback: fallback) {
+                cont.resume(returning: $0)
+            }
+        }
+    }
+}
+
+/// An `NSAlert` shown as an ordinary floating window instead of through
+/// `runModal()`: its buttons are re-targeted at this presenter, which hides
+/// the window and reports the clicked button's response. Used when there is
+/// no window to hang a sheet on.
+@MainActor
+final class NonModalAlertPresenter: NSObject {
+    private static var live: Set<NonModalAlertPresenter> = []
+    private let alert: NSAlert
+    private let completion: (NSApplication.ModalResponse) -> Void
+
+    private init(alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        self.alert = alert
+        self.completion = completion
+    }
+
+    static func show(_ alert: NSAlert,
+                     completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        if alert.buttons.isEmpty { alert.addButton(withTitle: NSLocalizedString("OK", comment: "")) }
+        let p = NonModalAlertPresenter(alert: alert, completion: completion)
+        live.insert(p)
+        for (i, b) in alert.buttons.enumerated() {
+            b.tag = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + i
+            b.target = p
+            b.action = #selector(NonModalAlertPresenter.clicked(_:))
+        }
+        alert.layout()
+        let w = alert.window
+        w.level = .floating
+        w.center()
+        NSApp.activate(ignoringOtherApps: true)
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func clicked(_ sender: NSButton) {
+        alert.window.orderOut(nil)
+        Self.live.remove(self)
+        completion(NSApplication.ModalResponse(rawValue: sender.tag))
     }
 }

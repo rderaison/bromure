@@ -87,13 +87,25 @@ public extension Profile {
                 ompProvider = op
                 if op == .custom, let base = cred.baseURL, !base.isEmpty {
                     ompBaseURL = base
-                    ompContext = ref.capabilities.contextWindow
+                    ompContext = ref.capabilities.contextWindow.flatMap { $0 > 0 ? $0 : nil }
+                        ?? Self.contextWindow(ofModel: ref.modelID, in: settings)
                 }
                 if !ref.modelID.isEmpty { ompModel = ref.modelID }
             }
             if let ref, ref.isLocal {
                 authMode = .local
                 anyLocal = true
+                // omp's own ref carries the context window the Models pane
+                // shows on its row — stage exactly that (searching every
+                // assignment of the model id could pick another row's value).
+                // Its own row says nothing (a tier inheriting the model, the
+                // window set on another row of it): the window the Models
+                // pane shows for that model anywhere — never omp's 128K
+                // default under a "1M context" chip.
+                if tool == .omp {
+                    if let c = ref.capabilities.contextWindow, c > 0 { ompContext = c }
+                    else if let c = Self.contextWindow(ofModel: ref.modelID, in: settings) { ompContext = c }
+                }
                 if case .localServer = ref.source, let ls = settings.localServer {
                     localServerBackend = (ls.baseURL, ls.apiKey)
                 }
@@ -235,17 +247,35 @@ public extension Profile {
         return p
     }
 
-    /// Every provider in the settings omp could also use, besides the one
-    /// it's on: those it speaks natively (its key's env var), and the
-    /// OpenAI-compatible ones with a model assigned somewhere (an entry in
-    /// its models.yml). Subscriptions are left out — omp takes API keys only.
+    /// The context window an assignment of `modelID` carries (the Models
+    /// pane's chip), the first that has one.
+    static func contextWindow(ofModel modelID: String, in settings: ModelSettings) -> Int? {
+        let refs = Array(settings.tiers.values) + settings.agentTiers.values.flatMap { Array($0.values) }
+        return refs.first { $0.modelID == modelID && ($0.capabilities.contextWindow ?? 0) > 0 }?
+            .capabilities.contextWindow
+    }
+
+    /// The providers omp's OWN tiers (Settings → Models, omp's sizes, or the
+    /// defaults it inherits) use besides the one it's on: those it speaks
+    /// natively (its key's env var), and the OpenAI-compatible ones (an entry
+    /// in its models.yml). Subscriptions are left out — omp takes API keys
+    /// only. A provider merely registered (or used by another agent) is NOT
+    /// offered: its key would reach omp's env, omp would poll its catalog
+    /// with the real key on every launch, and a silent fallback to a paid
+    /// cloud model would be one resolution miss away (QA: a local-only omp
+    /// listed 83 cloud models).
     static func ompExtraProviders(_ settings: ModelSettings, besides omp: ToolSpec?) -> [OmpExtraProvider] {
         let current: ModelProvider? = omp.flatMap {
             $0.authMode == .token ? ModelProvider.from(omp: $0.effectiveOmpProvider) : nil
         }
-        let refs = Array(settings.tiers.values) + settings.agentTiers.values.flatMap { Array($0.values) }
+        let refs = ModelTier.allCases.compactMap { settings.ref(for: .omp, tier: $0) }
+        let used: Set<ModelProvider> = Set(refs.compactMap {
+            if case .provider(let p) = $0.source { return p }
+            return nil
+        })
         var out: [OmpExtraProvider] = []
-        for cred in settings.providers where cred.isUsable && cred.provider != current {
+        for cred in settings.providers where cred.isUsable && cred.provider != current
+            && used.contains(cred.provider) {
             let key = (cred.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             switch cred.provider {
             case .bedrock: continue
@@ -326,6 +356,62 @@ public extension Profile {
         if allToolSpecs.contains(where: { $0.authMode == .bedrock }) { return true }
         if let host = localEngineBaseURL?.host, Bedrock.isRuntimeHost(host) { return true }
         return false
+    }
+
+    /// How a workspace whose agent spec says SUBSCRIPTION actually
+    /// authenticates at launch. Informational only — it never changes what is
+    /// staged: a global API key keeps winning (the user configured it in
+    /// Settings › Models on purpose), it is just SAID in the session.
+    enum SubscriptionResolution: Equatable, Sendable {
+        /// Runs on the subscription (signed in, or the pane's flag).
+        case subscription
+        /// No login and no API key: the agent shows its own login screen.
+        case signInNeeded
+        /// The provider's API key from Settings › Models is used instead —
+        /// surfaced as a neutral "using API key" note, never blocked.
+        case apiKeyFallback
+    }
+
+    /// Providers the workspace's own Models override gives an API key to.
+    static func workspaceOwnKeyProviders(_ override: ModelOverride?) -> Set<ModelProvider> {
+        guard let override else { return [] }
+        return Set(override.settings.providers.filter {
+            !$0.useSubscription && !($0.apiKey ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        }.map(\.provider))
+    }
+
+    /// The subscription verdict for one agent, or nil when the workspace
+    /// doesn't run it on a subscription (API key, local, Bedrock, omp…) or
+    /// gave that provider its own API key. Mirrors `cloudAuth`'s precedence
+    /// (a pasted key wins) so the note always matches what is staged.
+    static func subscriptionResolution(tool: Tool, workspaceMode: AuthMode,
+                                       settings: ModelSettings,
+                                       subscribed: Set<ModelProvider>,
+                                       workspaceOwnKey: Set<ModelProvider> = []) -> SubscriptionResolution? {
+        guard workspaceMode == .subscription, tool != .omp else { return nil }
+        let provider = ModelProvider.native(for: tool)
+        guard provider.supportsSubscription, !workspaceOwnKey.contains(provider) else { return nil }
+        let cred = settings.credential(provider)
+        let hasKey = !(cred?.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if hasKey, cred?.useSubscription != true { return .apiKeyFallback }
+        if subscribed.contains(provider) || cred?.useSubscription == true { return .subscription }
+        return .signInNeeded
+    }
+
+    /// Every agent of this (stored, pre-overlay) workspace that runs on a
+    /// subscription, with how it will authenticate at launch.
+    func subscriptionResolutions(_ settings: ModelSettings,
+                                 subscribed: Set<ModelProvider>) -> [Tool: SubscriptionResolution] {
+        let own = Self.workspaceOwnKeyProviders(modelOverride)
+        var out: [Tool: SubscriptionResolution] = [:]
+        for spec in allToolSpecs {
+            if let r = Self.subscriptionResolution(tool: spec.tool, workspaceMode: spec.authMode,
+                                                   settings: settings, subscribed: subscribed,
+                                                   workspaceOwnKey: own) {
+                out[spec.tool] = r
+            }
+        }
+        return out
     }
 
     /// The auth to apply to one cloud agent from the global credential of the

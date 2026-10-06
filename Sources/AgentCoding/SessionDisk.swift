@@ -1190,7 +1190,7 @@ public final class SessionDisk {
                 yaml = Self.ompModelsYAML(
                     base: "https://\(InferenceService.localMitmHost)/v1",
                     model: modelName,
-                    contextWindow: Self.localModelContext(profile: profile),
+                    contextWindow: Self.ompLocalContext(profile: profile),
                     vision: meta?.vision == true,
                     reasoning: meta?.thinking == true || builtinThinking,
                     extras: profile.ompExtraProviders)
@@ -1237,6 +1237,11 @@ public final class SessionDisk {
                                                 extraProviders: profile.ompExtraProviders.map(\.ompSlug))
             try overlay.write(
                 to: tmp.appendingPathComponent("omp-config.yml"),
+                atomically: true, encoding: .utf8)
+            // Key env vars omp must not see (a sibling agent's / an unused
+            // provider's): the bashrc omp() wrapper unsets them per launch.
+            try Self.ompHiddenKeyEnvVars(profile: profile).map { $0 + "\n" }.joined().write(
+                to: tmp.appendingPathComponent(Self.ompEnvUnsetMetaFile),
                 atomically: true, encoding: .utf8)
         }
 
@@ -1920,12 +1925,78 @@ public final class SessionDisk {
             + extraProviders.filter { $0 != providerSlug }.map { "  - \"\($0)/*\"\n" }.joined()
             + "  - \"web/*\"\n"
             + "  - \"local/*\"\n"
+        // Every built-in provider omp isn't configured for is DISABLED: omp
+        // otherwise polls ~a dozen model catalogs on each launch (real keys
+        // swapped in for any provider whose env var it sees), and lists their
+        // models in /model. disabledProviders is the one switch that gates
+        // both discovery and selection (verified in omp 18.6.1's
+        // model-registry). The guest merge drops any name the user defined
+        // in omp's own models.yml from this list.
+        let keep = Set([providerSlug, "web", "local"] + extraProviders)
+        overlay += "disabledProviders:\n"
+            + ompBuiltInProviders.filter { !keep.contains($0) }.map { "  - \"\($0)\"\n" }.joined()
+        // No update / plugin-marketplace polling (npm) and no "Update
+        // Available" banner: omp is baked into the image and Bromure updates
+        // it, so `omp update` in a session is never the right advice.
+        overlay += "startup:\n  checkUpdate: false\n"
+            + "marketplace:\n  autoUpdate: \"off\"\n"
         if modelName != "default", !modelName.isEmpty {
             let qualify = local && !modelName.contains("/")
             let role = qualify ? "bromure/\(modelName)" : modelName
             overlay += "modelRoles:\n  default: \(role)\n"
         }
         return overlay
+    }
+
+    /// omp's built-in providers (omp 18.6.1: pi-catalog's model-manager
+    /// descriptors + bundled/models.dev catalog providers + the special
+    /// OAuth-discovered ones), minus `web`/`local` (its search and tts/stt
+    /// tools). An id a later omp drops is ignored; one it adds stays enabled
+    /// until listed here, but `enabledModels` still hides its models.
+    /// Meta-share file listing the env vars the omp() wrapper unsets.
+    static let ompEnvUnsetMetaFile = "omp-env-unset"
+
+    static let ompBuiltInProviders: [String] = [
+        "abliteration", "aiand", "aimlapi", "alibaba-coding-plan", "alibaba-token-plan",
+        "amazon-bedrock", "anthropic", "azure", "baseten", "bedrock-mantle", "cerebras",
+        "charm-hyper", "cline-pass", "cloudflare-ai-gateway", "commandcode", "coreweave",
+        "cursor", "deepinfra", "deepseek", "devin", "factory-droid", "firepass", "fireworks",
+        "github-copilot", "gitlab-duo", "gitlab-duo-agent", "gmi-cloud", "google",
+        "google-antigravity", "google-gemini-cli", "google-vertex", "groq", "helmcode",
+        "huggingface", "kilo", "kimi-code", "litellm", "lm-studio", "meta", "minimax",
+        "minimax-cn", "minimax-code", "minimax-code-cn", "mistral", "moonshot", "muse-code",
+        "nanogpt", "novita", "nvidia", "ollama", "ollama-cloud", "openai", "openai-codex",
+        "opencode-go", "opencode-zen", "openrouter", "qianfan", "qwen-portal", "sakana",
+        "siliconflow", "siliconflow-cn", "singularityapi-dev", "singularityapi-tech",
+        "stepfun", "synthetic", "together", "typesafe", "umans", "venice",
+        "vercel-ai-gateway", "vllm", "wafer-serverless", "xai", "xai-oauth", "xiaomi",
+        "xiaomi-token-plan-ams", "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp",
+        "yolo-auto", "zai", "zenmux", "zhipu-coding-plan",
+    ]
+
+    /// Provider key env vars present in the shared guest env (exported for a
+    /// sibling agent, or a registered provider) that omp must NOT see: every
+    /// agent/provider key var except the ones omp's configured providers
+    /// read. The bashrc `omp()` wrapper `env -u`s them, so omp can neither
+    /// poll those providers' catalogs with the real (swapped) key nor fall
+    /// back onto them. Pure — see `OmpAgentTests`.
+    static func ompHiddenKeyEnvVars(profile: Profile) -> [String] {
+        guard let omp = profile.allToolSpecs.first(where: { $0.tool == .omp }) else { return [] }
+        var used: Set<String> = []
+        if omp.authMode == .local || omp.effectiveOmpProvider == .custom {
+            used.insert("OPENAI_API_KEY")   // models.yml `bromure` apiKey
+        } else {
+            used.insert(omp.effectiveOmpProvider.apiKeyEnvVar)
+        }
+        for extra in profile.ompExtraProviders { used.insert(extra.envVar) }
+        var all: [String] = []
+        for v in Profile.Tool.allCases.map(\.apiKeyEnvVar)
+            + Profile.OmpProvider.allCases.map(\.apiKeyEnvVar)
+            + ["ANTHROPIC_AUTH_TOKEN", "MOONSHOT_API_KEY", "KIMI_API_KEY", "OPENROUTER_API_KEY"]
+        where !v.isEmpty && !all.contains(v) && !used.contains(v) {
+            all.append(v)
+        }
+        return all
     }
 
     /// The guest env exports that pin a Kimi **subscription** to the CLI's
@@ -2043,6 +2114,14 @@ public final class SessionDisk {
         if let m = EngineModelMeta.meta(base: base, model: id) { return m }
         return EngineModelMeta.refresh(base: base, apiKey: profile.localEngineAPIKey,
                                        model: id, waitUpTo: 1.5)
+    }
+
+    /// The context window staged in omp's models.yml on the local route: the
+    /// value on omp's own Models row (what Settings shows), else the shared
+    /// local model's. One source for both, so they never disagree.
+    static func ompLocalContext(profile: Profile) -> Int {
+        if let c = profile.ompContextWindow, c > 0 { return c }
+        return localModelContext(profile: profile)
     }
 
     /// Context window of the profile's active local model: the catalog's

@@ -3950,3 +3950,41 @@
 "The workspaces %@ will be shut down." = "ワークスペース %@ はシャットダウンされます。";
 "The workspace %@ will be suspended and resume where it left off." = "ワークスペース %@ はサスペンドされ、次回は中断したところから再開します。";
 "The workspaces %@ will be suspended and resume where they left off." = "ワークスペース %@ はサスペンドされ、次回は中断したところから再開します。";
+
+/* QA round 4 */
+"“%@”" = "「%@」";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "このダイアログはエージェントのターミナルに収まらないため、ここでは選択肢を表示できません。ターミナルで回答してください。";
+"Open the terminal" = "ターミナルを開く";
+"Opt out" = "オプトアウト";
+"Opt in" = "オプトイン";
+"Grok's own setting; you can change it later in Grok's /settings." = "Grok 自体の設定です。あとで Grok の /settings で変更できます。";
+
+"Listing its tools" = "ツールを一覧表示";
+"Looking up %@" = "%@ を確認中";
+"Reading earlier output" = "以前の出力を読み込み中";
+"Reading earlier output #%@" = "以前の出力 #%@ を読み込み中";
+"tool lookup" = "ツールの確認";
+"earlier output" = "以前の出力";
+"Instructions for the agent" = "エージェントへの指示";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "未送信 — エージェントの入力欄には入っていますが、Return が受け付けられませんでした。ターミナルで Return を押すか、入力欄を空にしてもう一度送信してください。";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "レビューコメント 1 件がまだエージェントに届いていません — 今マージすると、そのコメントは反映されません。";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "レビューコメント %d 件がまだエージェントに届いていません — 今マージすると、それらのコメントは反映されません。";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "待機中 — エージェントのターミナルでメニューが開いています。そこで回答するか閉じてください";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "待機中 — %@ のターミナルでメニューが開いています。そこで回答するか閉じてください";
+"Open terminal" = "ターミナルを開く";
+"Dismiss (Esc)" = "閉じる (Esc)";
+"Conversation compacted" = "会話を圧縮しました";
+"The agent's work is its report above — there is no diff to read." = "エージェントの成果は上のレポートです — 確認する差分はありません。";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "サインイン用マシンの準備が整わなかったため、%@ のサインインを開始できませんでした。";
+"The %@ sign-in command didn't start in the sign-in machine." = "サインイン用マシンで %@ のサインインコマンドが起動しませんでした。";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "サインイン用マシンが処理中のままだったため（%1$@）、%2$@ のサインインを開始できませんでした。";
+"Couldn't start the %@ sign-in" = "%@ のサインインを開始できませんでした";
+"Retry types the sign-in command into the sign-in machine again." = "「再試行」でサインイン用マシンにサインインコマンドをもう一度入力します。";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "%@ のサブスクリプションにサインインしていません";
+"using API key" = "API キーを使用";

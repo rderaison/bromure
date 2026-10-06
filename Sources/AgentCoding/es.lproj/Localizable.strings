@@ -3952,3 +3952,41 @@
 "The workspaces %@ will be shut down." = "Los espacios de trabajo %@ se apagarán.";
 "The workspace %@ will be suspended and resume where it left off." = "El espacio de trabajo %@ se suspenderá y continuará donde lo dejó.";
 "The workspaces %@ will be suspended and resume where they left off." = "Los espacios de trabajo %@ se suspenderán y continuarán donde los dejó.";
+
+/* QA round 4 */
+"“%@”" = "«%@»";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "Este diálogo no cabe en la terminal del agente, así que sus opciones no se pueden mostrar aquí. Respóndelo en la terminal.";
+"Open the terminal" = "Abrir la terminal";
+"Opt out" = "No participar";
+"Opt in" = "Participar";
+"Grok's own setting; you can change it later in Grok's /settings." = "Es un ajuste de Grok; puedes cambiarlo más tarde en /settings de Grok.";
+
+"Listing its tools" = "Listando sus herramientas";
+"Looking up %@" = "Consultando %@";
+"Reading earlier output" = "Leyendo una salida anterior";
+"Reading earlier output #%@" = "Leyendo la salida anterior n.º %@";
+"tool lookup" = "consulta de herramienta";
+"earlier output" = "salida anterior";
+"Instructions for the agent" = "Instrucciones para el agente";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "No entregado — está en el cuadro de entrada del agente, pero su Retorno no se aceptó. Pulsa Retorno en el terminal, o vacía el cuadro y vuelve a enviarlo.";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "1 comentario de revisión aún no ha llegado al agente — si fusionas ahora, se fusionará sin él.";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "%d comentarios de revisión aún no han llegado al agente — si fusionas ahora, se fusionará sin ellos.";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "Esperando — hay un menú abierto en el terminal del agente; respóndelo allí o ciérralo";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "Esperando — hay un menú abierto en el terminal de %@; respóndelo allí o ciérralo";
+"Open terminal" = "Abrir terminal";
+"Dismiss (Esc)" = "Cerrar (Esc)";
+"Conversation compacted" = "Conversación compactada";
+"The agent's work is its report above — there is no diff to read." = "El trabajo del agente es su informe de arriba — no hay diff que leer.";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "La máquina de inicio de sesión no llegó a estar lista, así que el inicio de sesión de %@ no pudo empezar.";
+"The %@ sign-in command didn't start in the sign-in machine." = "El comando de inicio de sesión de %@ no se inició en la máquina de inicio de sesión.";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "La máquina de inicio de sesión siguió ocupada (%1$@), así que el inicio de sesión de %2$@ no pudo empezar.";
+"Couldn't start the %@ sign-in" = "No se pudo iniciar el inicio de sesión de %@";
+"Retry types the sign-in command into the sign-in machine again." = "Reintentar vuelve a escribir el comando de inicio de sesión en la máquina de inicio de sesión.";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "Suscripción de %@ sin iniciar sesión";
+"using API key" = "usando la clave de API";

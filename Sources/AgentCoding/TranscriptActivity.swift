@@ -214,6 +214,21 @@ enum TranscriptRow: Identifiable {
     static let userLinesPerPiece = 40
     /// The lines a collapsed long message shows.
     static let userPreviewLines = 12
+    /// Most of a long message of yours an opened one shows; and how much
+    /// of a reply shows before its Show all.
+    static let expandedChars = 40_000
+
+    /// The first pieces up to about `chars` characters (at least one).
+    static func prefix(_ pieces: [TranscriptItem], chars: Int) -> [TranscriptItem] {
+        var kept = 0, size = 0
+        while kept < pieces.count {
+            let n = pieces[kept].approximateLength
+            if kept > 0, size + n > chars { break }
+            size += n
+            kept += 1
+        }
+        return Array(pieces.prefix(kept))
+    }
 
     /// A message of yours too long to show whole by default. A 20 KB paste
     /// was ONE row thousands of points tall (the reply cuts never applied
@@ -292,12 +307,23 @@ enum TranscriptRow: Identifiable {
                                                        expanded: false, controls: true)
             return [row]
         }
-        let pieces = userPieces(shown, limit: limit)
+        // Opened, up to `expandedChars` of it: the chat's rows are eager
+        // (no lazy stack), and a 200 KB paste laid out whole took seconds
+        // per resize. Copy still takes all of it.
+        let all = userPieces(shown, limit: limit)
+        var kept = 0, size = 0
+        while kept < all.count, kept == 0 || size + all[kept].utf16.count <= expandedChars {
+            size += all[kept].utf16.count
+            kept += 1
+        }
+        let partial = kept < all.count
+        let pieces = Array(all.prefix(kept))
         return pieces.enumerated().map { k, piece in
             let row = TranscriptItem(id: k == 0 ? item.id : chunkID(item.id, k), kind: .userText(piece),
                                      timestamp: item.timestamp)
             layout.longUsers[row.id] = LongUserMessage(itemID: item.id, whole: shown, total: total,
-                                                       expanded: true, controls: k == pieces.count - 1)
+                                                       expanded: true, controls: k == pieces.count - 1,
+                                                       partial: partial)
             return row
         }
     }
@@ -347,7 +373,18 @@ enum TranscriptRow: Identifiable {
                 if case .userText = item.kind { closeTurn() }
                 switch item.kind {
                 case .assistantText(let text):
-                    let pieces = chunked ? split(item, limit: chunkLimit) : [item]
+                    var pieces = chunked ? split(item, limit: chunkLimit) : [item]
+                    // A reply of many screens shows its start until opened
+                    // (Show all): the chat's rows are eager, and laying out
+                    // a 150 KB reply whole took seconds per resize.
+                    if chunked, pieces.count > 1, text.utf16.count > expandedChars {
+                        let open = expanded.contains(item.id)
+                        if !open { pieces = prefix(pieces, chars: expandedChars) }
+                        if let last = pieces.last {
+                            layout.longUsers[last.id] = LongUserMessage(itemID: item.id, whole: text, total: text.count,
+                                                                        expanded: open, controls: true)
+                        }
+                    }
                     for p in pieces where layout.replies[p.id] == nil { layout.replies[p.id] = text }
                     out += pieces.map { .item($0) }
                 case .userText(let text) where chunked:
@@ -386,6 +423,8 @@ struct LongUserMessage: Equatable {
     let expanded: Bool
     /// The row that carries Show all / Show less (the preview, or the last piece).
     let controls: Bool
+    /// Opened, but only its start shows (`TranscriptRow.expandedChars`).
+    var partial = false
 }
 
 /// Under a long message of yours: how much shows, Show all / Show less, Copy.
@@ -396,7 +435,7 @@ struct LongUserMessageBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(String(format: message.expanded
+            Text(String(format: message.expanded && !message.partial
                         ? NSLocalizedString("%@ characters", comment: "long message of yours: its length")
                         : NSLocalizedString("Showing the start of %@ characters", comment: "long message of yours, collapsed"),
                         Self.number(message.total)))
@@ -706,6 +745,13 @@ enum ActivitySummary {
     /// (B71): "mcp__browser__browser_evaluate" → "browser evaluate", not
     /// "browser browser evaluate".
     static func humanTool(_ name: String) -> String {
+        switch name {
+        case OmpTranscriptParser.toolLookupName:
+            return NSLocalizedString("tool lookup", comment: "activity line: omp read a tool's docs (xd://)")
+        case OmpTranscriptParser.readOutputName:
+            return NSLocalizedString("earlier output", comment: "activity line: omp read a spilled command output (artifact://)")
+        default: break
+        }
         guard name.hasPrefix("mcp__") else { return name }
         let rest = name.dropFirst(5)
         var words: [Substring]
@@ -793,8 +839,8 @@ enum ActivitySummary {
                 if counts[c] == nil { order.append(c) }
                 counts[c, default: 0] += 1
                 calls.append((name, summary))
-            case .toolResult(let tool, _, let isError):
-                if isError { failures += 1 }
+            case .toolResult(let tool, let content, let isError):
+                if isError, !isProbeExit(tool: tool, content: content) { failures += 1 }
                 results.append(tool)
             case .thinking:
                 thought = true
@@ -824,10 +870,12 @@ enum ActivitySummary {
         var parts: [String] = []
         if thought { parts.append(NSLocalizedString("Thought", comment: "activity line")) }
         if calls.count == 1, let c = calls.first {
-            // One step: say what it was.
+            // One step: say what it was. A summary that is already a phrase
+            // (omp's "Confirming the file exists") reads alone — "bash
+            // Confirming…" mixed a raw tool name into the sentence.
             let tool = humanTool(c.name)
-            parts.append(c.summary.isEmpty ? tool
-                         : tool + " " + c.summary.replacingOccurrences(of: "\n", with: " "))
+            let summary = c.summary.replacingOccurrences(of: "\n", with: " ")
+            parts.append(summary.isEmpty ? tool : isPhrase(summary) ? summary : tool + " " + summary)
         } else {
             parts += order.map { $0.count(counts[$0] ?? 0) }
         }
@@ -836,12 +884,48 @@ enum ActivitySummary {
                     failures: failures)
     }
 
+    /// A step summary written as a sentence (omp's tool `intent`, a Claude
+    /// Bash description), not a command line or a path: a capital first
+    /// letter, a second word, no shell or path punctuation up front.
+    static func isPhrase(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        guard let first = t.unicodeScalars.first, CharacterSet.uppercaseLetters.contains(first),
+              let space = t.firstIndex(of: " ") else { return false }
+        let head = t[..<space]
+        // "Makefile:12", "README.md", "/Users/x", "FOO=1 make", "Rscript x.R"
+        if head.contains(where: { "/.=:_$\\-".contains($0) }) { return false }
+        let words = t.split(separator: " ")
+        guard words.count >= 2 else { return false }
+        // A sentence's second word is lowercase or a short word; a command's
+        // is a flag or a path.
+        let second = words[1]
+        return !(second.hasPrefix("-") || second.contains("/"))
+    }
+
+    /// A shell step that only came back with exit status 1 — grep finding
+    /// nothing, `test`/`[ -f … ]` saying no: the agent probing, not a
+    /// failure worth a red "failed" on the line. Other codes still count.
+    static func isProbeExit(tool: String, content: String) -> Bool {
+        guard category(tool) == .command else { return false }
+        let tail = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isNewline).suffix(3).joined(separator: "\n").lowercased()
+        let head = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isNewline).first.map { $0.lowercased() } ?? ""
+        for s in [tail, head] {
+            if s.range(of: #"(exited with code|exit code:?|exit status:?|process exited with code) 1(?![0-9])"#,
+                       options: .regularExpression) != nil { return true }
+        }
+        return false
+    }
+
     /// What the last step of a run in progress is doing.
     static func current(_ items: [TranscriptItem]) -> String {
         for item in items.reversed() {
             switch item.kind {
             case .toolUse(let name, let summary, _):
                 let what = summary.isEmpty ? humanTool(name) : summary.replacingOccurrences(of: "\n", with: " ")
+                // "Running Confirming the file…" — a phrase says it already.
+                if isPhrase(what) { return what.hasSuffix("…") ? what : what + "…" }
                 return category(name).doing(what) + "…"
             case .toolResult:
                 return NSLocalizedString("Thinking…", comment: "activity line")

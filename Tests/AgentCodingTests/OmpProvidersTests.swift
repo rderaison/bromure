@@ -50,7 +50,7 @@ struct OmpProvidersTests {
         #expect(other.migratedLegacyOmpCustom(global: ModelSettings()) == nil)
     }
 
-    @Test("omp keeps the other configured providers on offer, its own one aside")
+    @Test("omp offers the other providers ITS tiers use, its own one aside — nothing else")
     func extraProviders() throws {
         var s = ModelSettings()
         s.providers = [
@@ -58,13 +58,18 @@ struct OmpProvidersTests {
             ProviderCredential(provider: .zai, apiKey: "zai-key"),
             ProviderCredential(provider: .openrouter, apiKey: "or-key"),
             ProviderCredential(provider: .anthropic, useSubscription: true),
+            ProviderCredential(provider: .xai, apiKey: "xai-key"),
         ]
-        s.agentTiers[.omp] = [.medium: ModelRef(source: .provider(.custom), modelID: "big-model")]
-        s.agentTiers[.codex] = [.medium: ModelRef(source: .provider(.openrouter), modelID: "openai/gpt-5")]
+        s.agentTiers[.omp] = [.medium: ModelRef(source: .provider(.custom), modelID: "big-model"),
+                              .small: ModelRef(source: .provider(.zai), modelID: "glm-5.3-flash"),
+                              .large: ModelRef(source: .provider(.openrouter), modelID: "openai/gpt-5")]
+        // Another agent's provider (xAI) is NOT omp's: its key stays out of
+        // omp's env and its catalog is never polled.
+        s.agentTiers[.codex] = [.medium: ModelRef(source: .provider(.xai), modelID: "grok-5")]
         let out = Profile(name: "t", tool: .omp, authMode: .token).overlaidWithGlobalModels(s)
         #expect(out.ompProvider == .custom)   // the assigned one stays the default
         let extras = out.ompExtraProviders
-        // Not its own (custom), not a subscription (API keys only).
+        // Not its own (custom), not a subscription (API keys only), not xAI.
         #expect(extras.map(\.provider) == [.zai, .openrouter])
         let zai = try #require(extras.first { $0.provider == .zai })
         #expect(zai.baseURL == nil && zai.envVar == "ZAI_API_KEY" && zai.host == "api.z.ai")
@@ -76,6 +81,12 @@ struct OmpProvidersTests {
         let zaiFake = try #require(plan.fakeForCloud(host: "api.z.ai"))
         #expect(zaiFake != "zai-key")
         #expect(plan.fakeForCloud(host: "openrouter.ai") != nil)
+        // A local-only omp (just a custom server) gets no cloud extras at all.
+        var local = s
+        local.agentTiers[.omp] = [.medium: ModelRef(source: .provider(.custom), modelID: "big-model")]
+        local.tiers = [:]
+        #expect(Profile(name: "l", tool: .omp, authMode: .token).overlaidWithGlobalModels(local)
+                .ompExtraProviders.isEmpty)
         // The OpenAI-compatible one is an entry in omp's models.yml, next to its own.
         let yaml = SessionDisk.ompModelsYAML(base: "http://10.0.0.5:8888/v1", model: "big-model", extras: extras)
         #expect(yaml.contains("  bromure:") && yaml.contains("  bromure-openrouter:"))

@@ -2329,8 +2329,8 @@ final class ACAutomationServer {
     private func handleStateSubscribe(fd: Int32) {
         let header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
         guard Self.writeAllStreaming(fd, Data(header.utf8)) else { Darwin.close(fd); return }
-        var lastSent = Data()
         var lastSentAt = Date.distantPast
+        var lastContent = Data()
         // Pool per wake: this loop never returns to the GCD worker while the
         // subscriber is connected, so the work item's pool never drains — and
         // every wake autoreleases a snapshot build + JSON encode (+ zlib on
@@ -2349,9 +2349,14 @@ final class ACAutomationServer {
             let alive = autoreleasepool { () -> Bool in
                 let snapshot = buildStateSnapshot()
                 let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
+                // "Changed" is judged without what moves on its own: a VM's
+                // uptime ticks every second and the generation follows any
+                // request — an idle mirror got ~2 snapshots a second.
+                let content = (try? JSONSerialization.data(
+                    withJSONObject: Self.pushComparable(snapshot), options: [.sortedKeys])) ?? json
                 let now = Date()
-                if json != lastSent || now.timeIntervalSince(lastSentAt) > 15 {
-                    lastSent = json
+                if content != lastContent || now.timeIntervalSince(lastSentAt) > 15 {
+                    lastContent = content
                     lastSentAt = now
                     var payload = json
                     var flag: UInt8 = 0
@@ -2370,6 +2375,23 @@ final class ACAutomationServer {
             Thread.sleep(forTimeInterval: 0.5)
         }
         Darwin.close(fd)
+    }
+
+    /// A snapshot as the push loop compares it: without the stamps that move
+    /// with every request (`generation`) and the VMs' ever-ticking uptime
+    /// (clients derive a boot time from it; a resend every 15 s keeps it).
+    nonisolated static func pushComparable(_ snapshot: [String: Any]) -> [String: Any] {
+        var d = snapshot
+        d["generation"] = nil
+        d["epoch"] = nil
+        if let vms = d["vms"] as? [[String: Any]] {
+            d["vms"] = vms.map { vm -> [String: Any] in
+                var v = vm
+                v["uptimeSeconds"] = nil
+                return v
+            }
+        }
+        return d
     }
 
     /// Write-all that reports success, so a streaming loop stops when the peer

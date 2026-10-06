@@ -33,6 +33,10 @@ final class GridStageView: NSView {
         /// to push the layout to the remote — without it, the next /state
         /// poll reverts the edit (the "✕ does nothing" bug).
         var onEdited: () -> Void = {}
+        /// The title of the live session on a workspace's window, when one
+        /// is bound: what a tile is called (the tab's own label is the
+        /// first prompt the session opened with).
+        var sessionTitle: (UUID, Int) -> String? = { _, _ in nil }
     }
     private let dataSource: DataSource
 
@@ -154,7 +158,7 @@ final class GridStageView: NSView {
             let tab = tabs?.first { $0.index == cell.windowIndex }
 
             view.update(
-                label: tab?.shownLabel ?? cell.label,
+                label: dataSource.sessionTitle(cell.profileID, cell.windowIndex) ?? tab?.shownLabel ?? cell.label,
                 workspaceName: profile?.name ?? "?",
                 accentHex: profile?.color.hexInUI ?? "#888888",
                 agentStatus: tab?.agentStatus,

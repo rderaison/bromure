@@ -114,18 +114,83 @@ struct DroppedFile {
     /// The host files the user is handing over right now: file URLs on the
     /// drag pasteboard (a drop onto a text field pastes their paths) and on
     /// the clipboard (a Finder copy, then ⌘V). Standardized paths.
+    ///
+    /// Asked on every change of the composer's text, so it's read again only
+    /// when a pasteboard changed (its `changeCount`): a pasteboard read is a
+    /// round trip to the pasteboard server, on the main thread, per keystroke.
     static func offeredHostPaths() -> Set<String> {
         #if canImport(AppKit)
-        var out: Set<String> = []
-        for pb in [NSPasteboard(name: .drag), NSPasteboard.general] {
-            let urls = pb.readObjects(forClasses: [NSURL.self],
-                                      options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-            for u in urls { out.insert(u.standardizedFileURL.path) }
+        let boards = [NSPasteboard(name: .drag), NSPasteboard.general]
+        return offeredPaths.get(counts: boards.map(\.changeCount)) {
+            var out: Set<String> = []
+            for pb in boards {
+                let urls = pb.readObjects(forClasses: [NSURL.self],
+                                          options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+                for u in urls { out.insert(u.standardizedFileURL.path) }
+            }
+            return out
         }
-        return out
         #else
         return []
         #endif
+    }
+    static let offeredPaths = OfferedPathsCache()
+
+    /// The offered paths as of the pasteboards' change counts: read again
+    /// only when one moved.
+    final class OfferedPathsCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var counts: [Int]?
+        private var paths: Set<String> = []
+
+        func get(counts now: [Int], read: () -> Set<String>) -> Set<String> {
+            lock.lock()
+            defer { lock.unlock() }
+            if counts == now { return paths }
+            paths = read()
+            counts = now
+            return paths
+        }
+    }
+
+    /// The longest token taken for a path (macOS's PATH_MAX, with room for
+    /// a `file://` scheme and percent escapes).
+    static let maxPathToken = 4096
+
+    /// The names of the `offered` files that `text` mentions. Every form a
+    /// path takes in text (as is, `~/…`, a `file://` URL) ends with its
+    /// file's name — percent-escaped in a URL — so a text naming none of
+    /// them holds none of them: the cheap test before any tokenizing (a
+    /// 200 KB paste is tens of thousands of tokens).
+    static func offeredNames(in text: String, offered: Set<String>) -> [String] {
+        var names: [String] = []
+        for p in offered {
+            let name = (p as NSString).lastPathComponent
+            guard !name.isEmpty else { continue }
+            if text.contains(name) { names.append(name); continue }
+            if let escaped = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+               escaped != name, text.contains(escaped) { names.append(escaped) }
+        }
+        return names
+    }
+
+    /// The pieces of `text` that may be one of the `offered` paths: the
+    /// whole text and each line (trimmed — a path with spaces is found
+    /// whole), then the whitespace-separated tokens; only those short enough
+    /// for a path that name an offered file, each once.
+    static func pathCandidates(in text: String, offered: Set<String>) -> [String] {
+        let names = offeredNames(in: text, offered: offered)
+        guard !names.isEmpty else { return [] }
+        var all: [String] = [text.trimmingCharacters(in: .whitespacesAndNewlines)]
+        all += text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        all += text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init)
+        var seen: Set<String> = []
+        return all.filter { tok in
+            guard !tok.isEmpty, tok.utf8.count <= maxPathToken,
+                  names.contains(where: { tok.contains($0) }), !seen.contains(tok) else { return false }
+            seen.insert(tok)
+            return true
+        }
     }
 
     /// A readable host FILE for `token` (absolute path, `~`, or `file://`)
@@ -162,12 +227,7 @@ struct DroppedFile {
         guard !offered.isEmpty else { return (text, []) }
         var out = text
         var files: [DroppedFile] = []
-        var candidates: [String] = [text.trimmingCharacters(in: .whitespacesAndNewlines)]
-        candidates += text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-        candidates += text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init)
-        var seen: Set<String> = []
-        for tok in candidates where !tok.isEmpty && !seen.contains(tok) {
-            seen.insert(tok)
+        for tok in pathCandidates(in: text, offered: offered) {
             guard out.contains(tok), let url = hostFileURL(tok, offered: offered),
                   let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= maxBytes else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
@@ -532,14 +592,24 @@ struct SessionHeaderView: View {
     }
 
     /// The quiet line under the title: @nick · status · agent · machine ·
-    /// folder · …, at a level of detail (5 = all; 4 drops the clone and the
-    /// tokens; 3 also the model; 2 also the folder; 1 also the machine,
-    /// branch and time; 0 keeps @nick · status · agent). One step at a
+    /// folder · …, at a level of detail (7 = all; 6 drops the clone; 5
+    /// shortens the folder to its last part; 4 drops it; 3 also the tokens;
+    /// 2 also the model; 1 also the machine, branch and time; 0 keeps
+    /// @nick · status · agent). The folder goes before the tokens and the
+    /// model: a task's long worktree path dropped all three at once while
+    /// the row had room for them. One step at a
     /// time: a nickname (or a longer status) used to push the row from
     /// "everything" straight to "no model, no folder, no tokens". The header picks the richest
     /// that fits (B14: an overflowing row was centred and spilled over the
     /// sidebar; B4: nothing in it truncates, so a status change never
     /// re-truncates the folder frame by frame).
+    /// A folder as its last part ("…/cc-demo"), for a tight header.
+    nonisolated static func shortFolder(_ path: String) -> String {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+        guard parts.count > 1, let last = parts.last else { return path }
+        return "…/" + last
+    }
+
     @ViewBuilder
     private func metaLine(_ s: AgentSession, bucket: SessionBucket, gone: Bool, detail: Int) -> some View {
         HStack(spacing: 7) {
@@ -567,7 +637,8 @@ struct SessionHeaderView: View {
                 AgentAvatar(tool: s.tool, size: 13)
                 Text(s.tool.displayName)
                 #if os(macOS)
-                if detail >= 4, let m = TranscriptSearchIndex.shared.model(for: s, among: store.sessions) {
+                if detail >= 3, let m = TranscriptSearchIndex.shared.model(for: s, among: store.sessions)
+                    ?? s.lastModel.map(TranscriptSearchIndex.prettyModel) {
                     Text(m)
                         .foregroundStyle(.tertiary)
                         .help(NSLocalizedString("The model the agent last answered with", comment: "session header"))
@@ -597,14 +668,15 @@ struct SessionHeaderView: View {
                     .help(NativeMachine.help(workspaceName(s.profileID)))
                 }
             }
-            if detail >= 3 {
+            if detail >= 5 {
                 metaDot
                 HStack(spacing: 4) {
                     Image(systemName: "folder").font(.system(size: 10.5))
-                    Text(prettyGuestPath(s.cwd))
+                    Text(detail >= 6 ? prettyGuestPath(s.cwd) : Self.shortFolder(prettyGuestPath(s.cwd)))
                         .font(.system(size: 11.5, design: .monospaced))
                 }
                 .fixedSize()
+                .help(prettyGuestPath(s.cwd))
             }
             if detail >= 2, let branch = s.worktreeBranch, !branch.isEmpty {
                 metaDot
@@ -621,7 +693,7 @@ struct SessionHeaderView: View {
                     String(format: NSLocalizedString("Its own git branch, off %@ — merge it back when it's ready", comment: "session header"), $0)
                 } ?? NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
             }
-            if detail >= 5, let url = s.cloneURL, !url.isEmpty {
+            if detail >= 7, let url = s.cloneURL, !url.isEmpty {
                 metaDot
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.down.circle").font(.system(size: 10.5))
@@ -644,7 +716,17 @@ struct SessionHeaderView: View {
                 Button { if timeline != nil { flameFor = s.id } } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "stopwatch").font(.system(size: 10.5))
-                        Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
+                        if bucket == .working, let since = timeline?.end {
+                            // Mid-turn the transcript only moves when a record
+                            // lands (omp writes whole messages): tick from the
+                            // last one so the counter doesn't jump 17s → 38s.
+                            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                                let extra = min(max(0, ctx.date.timeIntervalSince(since)), SessionTimeline.idleGap)
+                                Text(TranscriptSearchIndex.duration(busy + extra)).monospacedDigit()
+                            }
+                        } else {
+                            Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
+                        }
                     }
                     .contentShape(Rectangle())
                 }
@@ -675,7 +757,7 @@ struct SessionHeaderView: View {
                     }
                 }
             }
-            if detail >= 5, let t = TranscriptSearchIndex.shared.tokens(s.id) {
+            if detail >= 4, let t = TranscriptSearchIndex.shared.tokens(for: s) {
                 metaDot
                 HStack(spacing: 4) {
                     Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 10.5))
@@ -728,6 +810,8 @@ struct SessionHeaderView: View {
                         }
                         // One quiet line: @nick · status · agent · machine · folder.
                         ViewThatFits(in: .horizontal) {
+                            metaLine(s, bucket: bucket, gone: gone, detail: 7)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 6)
                             metaLine(s, bucket: bucket, gone: gone, detail: 5)
                             metaLine(s, bucket: bucket, gone: gone, detail: 4)
                             metaLine(s, bucket: bucket, gone: gone, detail: 3)
@@ -738,6 +822,11 @@ struct SessionHeaderView: View {
                         .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                         .clipped()
                     }
+                    // First claim on the row's width: the Spacer beside it is
+                    // flexible too, and an even split left the meta line half
+                    // the free room — the model name dropped out with space
+                    // to spare (Files pane open).
+                    .layoutPriority(1)
                     Spacer(minLength: 8)
                     if !gone, SessionHome.isBranch(s) {
                         BranchMergeControl(session: s, actions: actions)

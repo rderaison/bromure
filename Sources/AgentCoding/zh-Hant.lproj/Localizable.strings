@@ -3953,3 +3953,41 @@
 "The workspaces %@ will be shut down." = "工作區 %@ 將被關機。";
 "The workspace %@ will be suspended and resume where it left off." = "工作區 %@ 將被暫停，下次從中斷處繼續。";
 "The workspaces %@ will be suspended and resume where they left off." = "工作區 %@ 將被暫停，下次從中斷處繼續。";
+
+/* QA round 4 */
+"“%@”" = "「%@」";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "此對話框在代理程式的終端機中顯示不下，因此無法在此顯示其選項。請在終端機中回答。";
+"Open the terminal" = "開啟終端機";
+"Opt out" = "選擇退出";
+"Opt in" = "選擇加入";
+"Grok's own setting; you can change it later in Grok's /settings." = "這是 Grok 自己的設定；之後可在 Grok 的 /settings 中變更。";
+
+"Listing its tools" = "列出其工具";
+"Looking up %@" = "正在查看 %@";
+"Reading earlier output" = "正在讀取先前的輸出";
+"Reading earlier output #%@" = "正在讀取先前的輸出 #%@";
+"tool lookup" = "工具查詢";
+"earlier output" = "先前的輸出";
+"Instructions for the agent" = "給代理的指示";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "未送達 — 訊息已在代理的輸入框中，但 Return 未被接受。請在終端機中按 Return，或清空輸入框後重新傳送。";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "有 1 則審查評論尚未送達代理 — 現在合併將不包含它。";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "有 %d 則審查評論尚未送達代理 — 現在合併將不包含它們。";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "等待中 — 代理程式的終端機裡有一個選單開著；請在那裡回答或關閉它";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "等待中 — %@ 的終端機裡有一個選單開著；請在那裡回答或關閉它";
+"Open terminal" = "打開終端機";
+"Dismiss (Esc)" = "關閉 (Esc)";
+"Conversation compacted" = "對話已壓縮";
+"The agent's work is its report above — there is no diff to read." = "代理程式的工作就是上面的報告 — 沒有可查看的差異。";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "登入機器未能就緒，因此無法開始 %@ 登入。";
+"The %@ sign-in command didn't start in the sign-in machine." = "%@ 登入指令未在登入機器中啟動。";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "登入機器一直處於忙碌狀態（%1$@），因此無法開始 %2$@ 登入。";
+"Couldn't start the %@ sign-in" = "無法開始 %@ 登入";
+"Retry types the sign-in command into the sign-in machine again." = "「重試」會在登入機器中再次輸入登入指令。";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "%@ 訂閱未登入";
+"using API key" = "正在使用 API 金鑰";

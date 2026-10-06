@@ -101,7 +101,7 @@ final class RulesFileScanner: @unchecked Sendable {
     /// (source + a preview of its content) for the ask/block path, or nil.
     /// No dedup/logging — the caller decides what to do.
     func detect(systemPrompt: String?, extraSpans: [Span] = []) -> (source: String, preview: String)? {
-        for span in extraSpans {
+        for span in Self.scannable(extraSpans) {
             var findings = Self.scanHiddenUnicode(span.content)
             findings += Self.scanInstructionContent(span.content)
             if let f = findings.first(where: { $0.severity == .high }) {
@@ -112,7 +112,7 @@ final class RulesFileScanner: @unchecked Sendable {
         if let f = Self.scanHiddenUnicode(systemPrompt).first(where: { $0.severity == .high }) {
             return ("the system prompt", Self.preview(systemPrompt, finding: f))
         }
-        for span in Self.extractInstructionSpans(systemPrompt) {
+        for span in Self.scannable(Self.extractInstructionSpans(systemPrompt)) {
             var findings = Self.scanHiddenUnicode(span.content)
             findings += Self.scanInstructionContent(span.content)
             if let f = findings.first(where: { $0.severity == .high }) {
@@ -146,9 +146,22 @@ final class RulesFileScanner: @unchecked Sendable {
     /// input tuples (`id` = the cited path) — lets the ModernBERT model run a
     /// semantic pass over the same CLAUDE.md / AGENTS.md / GROK.md bodies the
     /// heuristics scan.
+    /// True when `content` alone trips the deterministic pass (a high
+    /// finding) — which span a `detect` hit came from, for redaction.
+    static func isHighRisk(_ content: String) -> Bool {
+        (scanHiddenUnicode(content) + scanInstructionContent(content)).contains { $0.severity == .high }
+    }
+
+    /// Instruction spans as the scanners should read them: a body Bromure
+    /// already withheld (`PromptInjectionRedactions.instructionsPlaceholder`)
+    /// has nothing left to scan.
+    static func scannable(_ spans: [Span]) -> [Span] {
+        spans.filter { !PromptInjectionRedactions.isWithheldInstructions($0.content) }
+    }
+
     static func classifierSpans(_ systemPrompt: String?,
                                 extraSpans: [Span] = []) -> [(id: String?, content: String)] {
-        let spans = (systemPrompt.map(extractInstructionSpans) ?? []) + extraSpans
+        let spans = scannable((systemPrompt.map(extractInstructionSpans) ?? []) + extraSpans)
         return spans.map { (id: $0.source, content: $0.content) }
     }
 
