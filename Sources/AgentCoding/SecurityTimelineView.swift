@@ -433,8 +433,10 @@ private struct FirewallRowMenuItems: View {
     let event: SecurityTimeline.Event
     /// The rules' change count: a new value re-evaluates against them.
     var rulesGeneration = 0
+    @ObservedObject private var ticker = FirewallRulesTicker.shared
 
     var body: some View {
+        let _ = ticker.generation   // re-evaluate against the current rules
         if let ctx = FirewallRowContext(event) {
             if ctx.isRemote {
                 Text(NSLocalizedString("Change this workspace's firewall rules in its settings on the Mac that runs it.",
@@ -533,6 +535,25 @@ private struct FirewallRowMenuItems: View {
     }
 }
 
+/// Counts firewall rule changes (any save path). Table cells observe it
+/// themselves: an NSTable-backed SwiftUI Table doesn't redraw a cell whose
+/// row value is unchanged, so a generation passed down from the window never
+/// reached already-drawn rows ("Allowed now" only after a reopen).
+@MainActor
+final class FirewallRulesTicker: ObservableObject {
+    static let shared = FirewallRulesTicker()
+    @Published private(set) var generation = 0
+    private var observers: [NSObjectProtocol] = []
+
+    private init() {
+        for name in [Notification.Name.bromureFirewallPolicyChanged, .bromureFirewallRulesChanged] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { FirewallRulesTicker.shared.generation &+= 1 }
+            })
+        }
+    }
+}
+
 /// The inline quick-action button in a firewall row's last column. A
 /// mirrored host's row shows it disabled, with why in the tooltip: the fat
 /// client doesn't edit a remote workspace's rules from here.
@@ -541,8 +562,10 @@ private struct FirewallRowActionButton: View {
     let event: SecurityTimeline.Event
     /// The rules' change count: a new value re-evaluates against them.
     var rulesGeneration = 0
+    @ObservedObject private var ticker = FirewallRulesTicker.shared
 
     var body: some View {
+        let _ = ticker.generation   // re-evaluate against the current rules
         if let ctx = FirewallRowContext(event) {
             if ctx.isRemote {
                 Text(ctx.buttonTitle)
