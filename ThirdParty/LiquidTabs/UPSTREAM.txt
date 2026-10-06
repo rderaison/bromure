@@ -1,0 +1,6 @@
+Source: https://github.com/maceip/liquid-tabs
+Revision: ed8e1f6d0d8c3b228ebe6c650eae20b246d565df
+Vendored Swift package because upstream package lives under swift/.
+Local changes: injected Metal preview image provider; replaced unavailable CGWindowListCreateImage with own-view caching fallback.
+Local changes: optional pin-menu visibility and browser reload label.
+Local changes: stable tab UUID accessibility identifiers.

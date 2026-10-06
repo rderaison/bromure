@@ -1,0 +1,60 @@
+{
+  "feature": "macOS27 existing-tab tear-off",
+  "baseCommit": "35fd0f17",
+  "library": {
+    "url": "https://github.com/maceip/liquid-tabs",
+    "revision": "ed8e1f6d0d8c3b228ebe6c650eae20b246d565df",
+    "license": "MIT"
+  },
+  "sourceSHA256": {
+    "Package.swift": "a82f76822e2f2fd6f44cd3ce4522d9522c104dd00cf1d64eba32d84ba833604c",
+    "Sources/Browser/LiquidBrowserTabs.swift": "70758c5da1ddc45376a5da0f98405111f9634e633902ba9b40ecaef5816c362c",
+    "Sources/Browser/NativeTabBarView.swift": "f5a68aa68e43a841f950a118305c42cc139b2e594f56608f8a204645fe988d30",
+    "Sources/Browser/SafariSandbox.swift": "b588b7fc03e7242bb96f465196f53b06d11583fc7093aece8ba477ee3b79ab02",
+    "Sources/SandboxEngine/HostGPUFrameView.swift": "d93e6ae74dd7246763c8a7fbe4dbabf45f891462127e9c7eced0a97c777fab91",
+    "Sources/SandboxEngine/SharedWindowControllerBridge.swift": "c8ea7eea59249c0472b692e973d3a69fdedaae42b0e2d0d42a5e72067554829e",
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/shared_windows.py": "65d3ed7165e47a62568f57153571e8dbc772cc151fb76ee31158e9cbc23cb1d9",
+    "tools/gpu/test-shared-windows.py": "69eacc9cc7932ec4a8b2798b7a056c49463506180b44995ed7e2928d4564e89f",
+    "tools/gpu/test-frame-handoff.swift": "97ce61da6dbb63e17cc8d1f84f04e214a7531215f578736e59513c70d601eb17"
+  },
+  "tests": {
+    "sharedWindows": 34,
+    "guestGraphics": 47,
+    "sharedShutdown": 9,
+    "totalPythonTests": 90,
+    "realMetalFrameHandoffAndPreview": "PASS; padding alpha 0/128/255, hidden-toolbar crop, vertical orientation, original handoff suite",
+    "nativeDebugBuild": "PASS"
+  },
+  "live": {
+    "final": {
+      "log": "/tmp/bromure-liquid-final-live.log",
+      "sha256": "8a2a6ce6c4b1c660f8e6f088487a76f32e1353b074ee8598dc7d7e7126aabe82",
+      "processExit": 0,
+      "sameOriginalTargetAndVM": true,
+      "escapeCancel": true,
+      "pageSentinelAndInputValuePreserved": true,
+      "sourceCloseSurvivor": true,
+      "GPURejectionMarkers": 0,
+      "MACReleaseCount": 1
+    },
+    "stoppedWorker": {
+      "log": "/tmp/bromure-liquid-worker-live2.log",
+      "sha256": "dc6230d7a6dc943d781bb026ad56608df05b80247d246cf3dbe2fae5f557ee20",
+      "processExit": 0,
+      "sameOriginalTargetAndVM": true,
+      "escapeCancel": true,
+      "pageSentinelAndInputValuePreserved": true,
+      "sourceCloseSurvivor": true,
+      "GPURejectionMarkers": 0,
+      "MACReleaseCount": 1,
+      "extensionWorkerExplicitlyStoppedBeforeDrag": true
+    }
+  },
+  "limitations": [
+    "AppKit handlers driven with synthetic events; no physical mouse/trackpad claim",
+    "Live browser is Chromium154; branded Google Chrome was not live-tested",
+    "Audio disabled for these tests",
+    "Private updated guest502, not a published image or notarized release",
+    "Only tear-off to new windows and local reorder; cross-window reattachment is not implemented"
+  ]
+}

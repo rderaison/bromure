@@ -49,6 +49,45 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         texture.map { NSSize(width: $0.width, height: $0.height) }
     }
 
+    /// Capture only this VM output, once at drag start; MTKView's ordinary
+    /// AppKit cache does not include its Metal drawable. No screen recording.
+    public func tabDragPreview() -> NSImage? {
+        guard let texture else { return nil }
+        let top = min(max(0, hiddenTopRows), texture.height - 1)
+        let visibleHeight = texture.height - top
+        let factor = min(1, min(640 / Double(texture.width), 480 / Double(visibleHeight)))
+        let width = max(1, Int(Double(texture.width) * factor))
+        let height = max(1, Int(Double(visibleHeight) * factor))
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                             isPlanar: false, colorSpaceName: .deviceRGB,
+                                             bytesPerRow: width * 4, bitsPerPixel: 32),
+              let pixels = bitmap.bitmapData else { return nil }
+        // Imported scanout textures have shared IOSurface storage and the
+        // producer completed its copy before publication. Sample one row at a
+        // time: bounded thumbnail memory, no display capture or full-size copy.
+        var row = [UInt8](repeating: 0, count: texture.width * 4)
+        for y in 0..<height {
+            let sourceY = top + min(visibleHeight - 1, y * visibleHeight / height)
+            row.withUnsafeMutableBytes {
+                texture.getBytes($0.baseAddress!, bytesPerRow: texture.width * 4,
+                                 from: MTLRegionMake2D(0, sourceY, texture.width, 1), mipmapLevel: 0)
+            }
+            for x in 0..<width {
+                let sourceX = min(texture.width - 1, x * texture.width / width) * 4
+                let destination = (y * width + x) * 4
+                pixels[destination] = row[sourceX + 2]
+                pixels[destination + 1] = row[sourceX + 1]
+                pixels[destination + 2] = row[sourceX]
+                // XRGB padding is not meaningful alpha.
+                pixels[destination + 3] = 255
+            }
+        }
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.addRepresentation(bitmap)
+        return image
+    }
+
     public init(gpuFrame frame: NSRect) throws {
         guard let gpu = MTLCreateSystemDefaultDevice(), let commands = gpu.makeCommandQueue() else {
             throw Self.failure("Host Metal device unavailable")

@@ -582,6 +582,56 @@ class CDPTests(unittest.TestCase):
                 thread.join(timeout=2)
                 self.assertFalse(thread.is_alive())
 
+    def test_worker_domain_is_enabled_on_same_connection_before_start(self):
+        for denied in (False, True):
+            with self.subTest(denied=denied):
+                client, server = self.socket()
+                methods, failures = [], []
+                def read_exact(count):
+                    data = bytearray()
+                    while len(data) < count:
+                        part = server.recv(count - len(data))
+                        if not part: raise ConnectionError('client closed')
+                        data.extend(part)
+                    return bytes(data)
+                def read_json():
+                    first, second = read_exact(2)
+                    size = second & 127
+                    if size == 126: size = int.from_bytes(read_exact(2), 'big')
+                    mask = read_exact(4)
+                    raw = read_exact(size)
+                    return json.loads(bytes(byte ^ mask[i % 4] for i, byte in enumerate(raw)))
+                def answer(value):
+                    data = json.dumps(value).encode()
+                    server.sendall(bytes((129, len(data))) + data)
+                def serve():
+                    try:
+                        server.settimeout(2)
+                        header = bytearray()
+                        while not header.endswith(b'\r\n\r\n'): header.extend(read_exact(1))
+                        key = next(line.split(b':', 1)[1].strip() for line in header.split(b'\r\n') if line.startswith(b'Sec-WebSocket-Key:'))
+                        accept = base64.b64encode(hashlib.sha1(key + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest())
+                        server.sendall(b'HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: ' + accept + b'\r\n\r\n')
+                        methods.append(read_json())
+                        if denied:
+                            answer({'id': 0, 'error': {'code': -1, 'message': 'denied'}})
+                        else:
+                            answer({'id': 0, 'result': {}})
+                            methods.append(read_json())
+                            answer({'id': 1, 'result': {}})
+                    except Exception as error: failures.append(error)
+                thread = threading.Thread(target=serve); thread.start()
+                with patch.object(shared.socket, 'socket', return_value=client):
+                    if denied:
+                        with self.assertRaises(shared.CDPError) as failure:
+                            shared.cdp_call('ws://127.0.0.1:9222/devtools/page/test', 'ServiceWorker.startWorker', {'scopeURL': 'chrome-extension://test/'})
+                        self.assertEqual(failure.exception.method, 'ServiceWorker.enable')
+                    else:
+                        self.assertEqual(shared.cdp_call('ws://127.0.0.1:9222/devtools/page/test', 'ServiceWorker.startWorker', {'scopeURL': 'chrome-extension://test/'}), {})
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive()); self.assertEqual(failures, [])
+                self.assertEqual([item['method'] for item in methods], ['ServiceWorker.enable'] if denied else ['ServiceWorker.enable', 'ServiceWorker.startWorker'])
+
     def test_upgrade_has_wall_deadline_and_endpoint_is_local(self):
         client, server = self.socket()
         with patch.object(shared.socket, 'socket', return_value=client):
@@ -589,6 +639,90 @@ class CDPTests(unittest.TestCase):
                 shared.cdp_call('ws://127.0.0.1:9222/devtools/browser/test', 'Browser.getWindowForTarget', {}, timeout=.02)
         with self.assertRaises(ValueError):
             shared.cdp_call('ws://example.com:9222/devtools/browser/test', 'Browser.getWindowForTarget', {})
+
+
+class TabDetachTests(unittest.TestCase):
+    attach = ControllerTests.attach
+    layout = ControllerTests.layout
+    command = ControllerTests.command
+
+    def setUp(self):
+        ControllerTests.setUp(self)
+        self.extension_mutations = 0
+        self.worker_available = True
+        self.fail_after_move = False
+        self.attach()
+        self.targets = {'A' * 32: 10, 'B' * 32: 10}
+
+    def call(self, method, params):
+        if method == 'Target.getTargets':
+            return {'targetInfos': [dict(type='service_worker', targetId='C' * 32,
+                    url='chrome-extension://dllblhgbnjchoipknlflefkgfjlblkmf/background.js')] if self.worker_available else []}
+        return ControllerTests.call(self, method, params)
+
+    def page_call(self, url, method, params, timeout):
+        if method == 'ServiceWorker.startWorker':
+            self.assertEqual(params['scopeURL'], 'chrome-extension://dllblhgbnjchoipknlflefkgfjlblkmf/')
+            self.worker_available = True
+            return {}
+        if method != 'Runtime.evaluate':
+            return ControllerTests.page_call(self, url, method, params, timeout)
+        self.assertEqual(url, 'ws://127.0.0.1:9222/devtools/page/' + 'C' * 32)
+        self.assertIn('chrome.windows.create({tabId: tab.id', params['expression'])
+        self.assertIn('tab.windowId !== 10', params['expression'])
+        self.extension_mutations += 1
+        self.targets['A' * 32] = 20
+        self.bounds[20] = dict(left=0, top=0, width=500, height=300, windowState='normal')
+        if self.fail_after_move:
+            raise OSError('reply lost')
+        return {'result': {'value': {'windowId': 20}}}
+
+    def request(self, **updates):
+        rows = self.layout()
+        rows[0]['windowId'] = 10
+        return dict(id=3, cmd='detach', windowId=10, targetId='A' * 32,
+                    scanout=1, topology=rows, **updates)
+
+    def test_detach_preserves_target_and_source_and_deduplicates(self):
+        request = self.request()
+        answer = self.controller.handle(request)
+        self.assertTrue(answer['ok'], answer)
+        self.assertEqual(answer['targetId'], 'A' * 32)
+        self.assertEqual(answer['windowId'], 20)
+        self.assertEqual(self.targets['B' * 32], 10)
+        self.assertEqual(self.controller.bindings, {0: 10, 1: 20})
+        self.assertEqual(self.controller.handle(request), answer)
+        self.assertEqual(self.extension_mutations, 1)
+        self.assertFalse(any(method in ('Target.createTarget', 'Target.closeTarget') for method, _ in self.calls))
+
+    def test_lost_mutation_reply_observes_existing_target_without_replay(self):
+        self.fail_after_move = True
+        answer = self.controller.handle(self.request())
+        self.assertTrue(answer['ok'], answer)
+        self.assertEqual(self.extension_mutations, 1)
+
+    def test_sleeping_worker_restarts_without_creating_page(self):
+        self.worker_available = False
+        answer = self.controller.handle(self.request())
+        self.assertTrue(answer['ok'], answer)
+        self.assertEqual(self.extension_mutations, 1)
+
+    def test_invalid_detach_has_no_mutation(self):
+        for change in ({'targetId': 'D' * 32}, {'targetId': 'bad'}, {'windowId': 20}, {'scanout': 0}):
+            request = self.request(); request.update(change)
+            before = len(self.mutations)
+            answer = self.controller.handle(request)
+            self.assertFalse(answer['ok'], answer)
+            self.assertEqual(len(self.mutations), before)
+            self.assertEqual(self.extension_mutations, 0)
+            self.controller.last_id = 2
+            self.controller.replies.clear()
+
+    def test_last_tab_cannot_remove_source_owner(self):
+        self.targets.pop('B' * 32)
+        answer = self.controller.handle(self.request())
+        self.assertFalse(answer['ok'], answer)
+        self.assertEqual(self.extension_mutations, 0)
 
 
 if __name__ == '__main__':
