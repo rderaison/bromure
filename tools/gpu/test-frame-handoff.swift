@@ -23,6 +23,28 @@ public struct HostGPUCursor { public var width, height, hotX, hotY: Int; public 
     @MainActor static func wait(_ seconds: Double) { RunLoop.main.run(until: Date(timeIntervalSinceNow: seconds)) }
     @MainActor static func main() throws {
         _ = NSApplication.shared
+        let previewView = try HostGPUFrameView(gpuFrame: NSRect(x: 0, y: 0, width: 32, height: 32))
+        previewView.hiddenTopRows = 8
+        for alpha: UInt8 in [0, 128, 255] {
+            let padding = UInt32(alpha) << 24
+            let previewSurface = surface(32, 32, padding | 0x00ff0000)
+            for y in 8..<32 {
+                let row = IOSurfaceGetBaseAddress(previewSurface).advanced(by: y * IOSurfaceGetBytesPerRow(previewSurface)).assumingMemoryBound(to: UInt32.self)
+                for x in 0..<32 { row[x] = padding | (y < 16 ? 0x0000ff00 : 0x000000ff) }
+            }
+            try previewView.present(previewSurface)
+            let preview = previewView.tabDragPreview()!
+            let bitmap = NSBitmapImageRep(data: preview.tiffRepresentation!)!
+            precondition(bitmap.colorAt(x: 0, y: 0)!.usingColorSpace(.deviceRGB)!.greenComponent > 0.9,
+                         "preview first row must be the visible page top")
+            precondition(bitmap.colorAt(x: 0, y: 23)!.usingColorSpace(.deviceRGB)!.blueComponent > 0.9,
+                         "preview must preserve vertical orientation")
+            for y in 0..<24 {
+                let color = bitmap.colorAt(x: 0, y: y)!.usingColorSpace(.deviceRGB)!
+                precondition(color.redComponent < 0.1, "drag preview must exclude hidden native chrome")
+            }
+            precondition(bitmap.pixelsWide == 32 && bitmap.pixelsHigh == 24)
+        }
         let startup = try HostGPUFrameView(gpuFrame: NSRect(x:0,y:0,width:200,height:120))
         startup.guestDisplayScale = 2
         startup.limitsStartupScale = true

@@ -29,6 +29,7 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var sharedLifecycleCheck = false
     @Flag(name: .long) var sharedQuitCheck = false
     @Flag(name: .long) var sharedMenuCheck = false
+    @Flag(name: .long) var liquidTabDetachCheck = false
     @Flag(name: .long) var sharedMenuRootCloseCheck = false
     @Flag(name: .long) var historyCompletionCheck = false
     @Flag(name: .long) var resizeCheck = false
@@ -60,6 +61,9 @@ struct GPUBrowser: ParsableCommand {
         }
         if historyCompletionCheck && (!sharedNativeWindows || !nativeChrome || seconds < 60) {
             throw ValidationError("History completion check requires shared native chrome and 60 seconds")
+        }
+        if liquidTabDetachCheck && (!sharedNativeWindows || !nativeChrome || sharedScanouts < 2 || sharedNativeWindowCount != 1 || seconds < 60) {
+            throw ValidationError("Liquid tab check needs native shared windows, one initial window, two scanouts and 60 seconds")
         }
         if sharedMenuRootCloseCheck && (!sharedMenuCheck || seconds < 60) {
             throw ValidationError("Root-close menu check requires menu check and at least 60 seconds")
@@ -262,6 +266,28 @@ struct GPUBrowser: ParsableCommand {
             warm.serialInput.fileHandleForWriting.write(Data(diagnostic.utf8))
         }
         defer { diagnosticTask.cancel() }
+        let liquidTask: Task<Void, Error>? = liquidTabDetachCheck ? Task { @MainActor in
+            try await Task.sleep(for: .seconds(22))
+            let original = try await session.checkLiquidTabDrag(title: "LIQUID DETACH SENTINEL", cancel: true)
+            try await Task.sleep(for: .milliseconds(400))
+            guard sharedChildren.isEmpty else { throw ValidationError("Escape unexpectedly detached tab") }
+            let target = try await session.checkLiquidTabDrag(title: "LIQUID DETACH SENTINEL")
+            guard target == original else { throw ValidationError("Cancel changed target identity") }
+            let deadline = ProcessInfo.processInfo.systemUptime + 20
+            while sharedChildren.first?.hasDetachedTab(target, from: session) != true {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw ValidationError("Native tab detach did not converge") }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            guard let child = sharedChildren.first else { throw ValidationError("Missing detached window") }
+            print("BROMURE_LIQUID_TAB_DETACH_PASS target=\(target) sameVM=true libraryDrag=true escapeCancel=true")
+            session.window.performClose(nil)
+            try await Task.sleep(for: .seconds(2))
+            guard child.window.isVisible, warm.vm.state == .running, child.graphicsPresentedFrameCount > 0 else {
+                throw ValidationError("Closing source stopped detached window")
+            }
+            print("BROMURE_LIQUID_SOURCE_CLOSE_PASS")
+        } : nil
+        defer { liquidTask?.cancel() }
         let historyTask: Task<Void, Error>? = historyCompletionCheck ? Task { @MainActor in
             try await Task.sleep(for: .seconds(25))
             guard let child = sharedChildren.first else { throw ValidationError("Missing history test child") }
@@ -432,6 +458,7 @@ struct GPUBrowser: ParsableCommand {
             try await Task.sleep(for: .milliseconds(2))
         }
         do {
+            try await liquidTask?.value
             try await historyTask?.value
             let sharedMenuDelegate = try await sharedMenuTask?.value
             withExtendedLifetime(sharedMenuDelegate) {}

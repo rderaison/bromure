@@ -126,7 +126,11 @@ def cdp_call(ws_url, method, params, timeout=3):
                    (line.split(':', 1) for line in lines[1:] if ':' in line)}
         if lines[0].split()[:2] != ['HTTP/1.1', '101'] or headers.get('sec-websocket-accept') != accept:
             raise ConnectionError('CDP websocket upgrade rejected')
-        send(json.dumps({'id': 1, 'method': method, 'params': params}).encode())
+        needs_worker_domain = method in ('ServiceWorker.startWorker', 'ServiceWorker.stopAllWorkers')
+        if needs_worker_domain:
+            send(json.dumps({'id': 0, 'method': 'ServiceWorker.enable', 'params': {}}).encode())
+        else:
+            send(json.dumps({'id': 1, 'method': method, 'params': params}).encode())
         chunks = bytearray()
         for _ in range(64):
             first, second = read(2)
@@ -155,6 +159,12 @@ def cdp_call(ws_url, method, params, timeout=3):
                 chunks.clear()
                 if not isinstance(response, dict):
                     raise ValueError('invalid CDP response')
+                if needs_worker_domain and response.get('id') == 0:
+                    if 'error' in response:
+                        raise CDPError('ServiceWorker.enable', response['error'])
+                    needs_worker_domain = False
+                    send(json.dumps({'id': 1, 'method': method, 'params': params}).encode())
+                    continue
                 if response.get('id') == 1:
                     if 'error' in response:
                         raise CDPError(method, response['error'])
@@ -674,7 +684,7 @@ class Controller:
                 item.update(scanout=index, output=output.get('output'), rect=output.get('rect'))
             windows.append(item)
         active = [row['rect'] for row in self.last_outputs if row.get('rect')]
-        return {'epoch': self.epoch, 'shutdownProtocolVersion': 1,
+        return {'epoch': self.epoch, 'shutdownProtocolVersion': 1, 'tabDetachProtocolVersion': 1,
                 'topologyVersion': self.version, 'windows': windows,
                 'outputs': self.last_outputs, 'rootPixelLimit': self.root_pixel_limit or MAX_ROOT_PIXELS,
                 'root': {'width': max((r['x'] + r['width'] for r in active), default=0),
@@ -814,12 +824,87 @@ class Controller:
         self.refresh()
         return tid
 
+    def detach_tab(self, wid, tid, index, topology):
+        """Move the actual tab through the already trusted file-picker extension.
+
+        No new permissions, URL navigation or page cloning. The extension's
+        debugger API maps the opaque CDP target to its exact Chromium tab ID.
+        Only read-only ownership observation can be retried after the mutation.
+        """
+        if not isinstance(tid, str) or not re.fullmatch(r'[0-9A-Fa-f]{32}', tid):
+            raise ValueError('invalid targetId')
+        integer(wid, 1, SAFE_INTEGER, 'windowId')
+        integer(index, 0, 15, 'scanout')
+        if self.target_windows.get(tid) != wid or len(self.groups.get(wid, [])) < 2:
+            raise ValueError('detach requires an existing tab and a surviving source tab')
+        if wid not in self.bindings.values() or index in self.bindings:
+            raise ValueError('detach requires a bound source and unused scanout')
+        rows, _ = validate_topology(topology, self.root_pixel_limit or MAX_ROOT_PIXELS)
+        if not any(row['scanout'] == index and row['enabled'] and 'windowId' not in row for row in rows):
+            raise ValueError('detach output must be enabled and unbound')
+        worker_url = 'chrome-extension://dllblhgbnjchoipknlflefkgfjlblkmf/background.js'
+        workers = self.call('Target.getTargets', {}).get('targetInfos', [])
+        worker = next((item for item in workers if item.get('type') == 'service_worker' and item.get('url') == worker_url), None)
+        if worker is None:
+            # MV3 workers can sleep. Chromium can start the existing registered
+            # extension worker; it does not install code or open a page/window.
+            page = next(item for item in self.groups[wid] if item['id'] == tid)
+            self.page_call(page['webSocketDebuggerUrl'], 'ServiceWorker.startWorker',
+                           {'scopeURL': worker_url.rsplit('/', 1)[0] + '/'}, timeout=3)
+            started_deadline = time.monotonic() + 2
+            while True:
+                workers = self.call('Target.getTargets', {}).get('targetInfos', [])
+                worker = next((item for item in workers if item.get('type') == 'service_worker' and item.get('url') == worker_url), None)
+                if worker is not None or time.monotonic() >= started_deadline:
+                    break
+                time.sleep(.025)
+        worker_id = worker.get('targetId') if worker else None
+        if not isinstance(worker_id, str) or not re.fullmatch(r'[0-9A-Fa-f]{32}', worker_id):
+            raise RuntimeError('Bromure tab-control extension is unavailable')
+        active = self.apply_topology(topology)
+        expression = """(async () => {
+            const targets = await chrome.debugger.getTargets();
+            const target = targets.find(t => t.id === %s);
+            if (!target || !Number.isInteger(target.tabId)) throw Error('Target has no Chromium tab');
+            const tab = await chrome.tabs.get(target.tabId);
+            if (tab.windowId !== %s) throw Error('Tab ownership changed');
+            const siblings = await chrome.tabs.query({windowId: tab.windowId});
+            if (siblings.length < 2) throw Error('Source window must retain a tab');
+            const window = await chrome.windows.create({tabId: tab.id, focused: false});
+            return {windowId: window.id};
+        })()""" % (json.dumps(tid), json.dumps(wid))
+        error = None
+        try:
+            answer = self.page_call('ws://127.0.0.1:9222/devtools/page/' + worker_id,
+                                    'Runtime.evaluate', {'expression': expression, 'awaitPromise': True,
+                                                         'returnByValue': True}, timeout=5)
+            if not isinstance(answer, dict) or 'exceptionDetails' in answer:
+                raise RuntimeError('Chromium refused tab detach')
+        except (OSError, ValueError, RuntimeError) as failure:
+            error = failure
+        deadline = time.monotonic() + 3
+        while True:
+            self.refresh()
+            new_wid = self.target_windows.get(tid)
+            if new_wid is not None and new_wid != wid and new_wid not in self.bindings.values():
+                if wid not in self.groups:
+                    raise RuntimeError('source window unexpectedly disappeared')
+                self.bindings[index] = new_wid
+                self.active[new_wid] = tid
+                self.place(new_wid, active[index])
+                return {'windowId': new_wid, 'targetId': tid}
+            if error is not None or time.monotonic() >= deadline:
+                raise RuntimeError('Tab detach did not produce a new window') from error
+            time.sleep(.025)
+
     def execute(self, request):
         cmd = request['cmd']
         if cmd == 'list':
             return {}
         self.refresh()
         wid = request.get('windowId')
+        if cmd == 'detach':
+            return self.detach_tab(wid, request.get('targetId'), request.get('scanout'), request.get('topology'))
         if cmd in ('attachPrimary', 'create', 'resize'):
             index = integer(request.get('scanout'), 0, 15, 'scanout')
             rows, _ = validate_topology(request.get('topology'), self.root_pixel_limit or MAX_ROOT_PIXELS)
@@ -902,6 +987,7 @@ class Controller:
                 common = {'id', 'cmd', 'expectedScanouts', 'rootPixelLimit'}
                 fields = {'list': set(), 'attachPrimary': {'scanout', 'windowId', 'topology'},
                           'create': {'scanout', 'url', 'topology'},
+                          'detach': {'scanout', 'windowId', 'targetId', 'topology'},
                           'resize': {'scanout', 'windowId', 'topology'},
                           'close': {'windowId', 'topology'}, 'focus': {'windowId'}}
                 if not isinstance(request.get('cmd'), str) or request['cmd'] not in fields or request.keys() - (common | fields[request['cmd']]):

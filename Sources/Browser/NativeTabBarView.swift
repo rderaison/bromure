@@ -10,6 +10,18 @@ import SwiftUI
 @MainActor @Observable
 final class NativeTabBarModel {
     var tabs: [TabInfo] = []
+    var liquidTabsEnabled = false
+    var onDetach: ((String, NSPoint) -> Void)?
+    var dragPreview: (() -> NSImage?)?
+    private var visualTabOrder: [String] = []
+
+    func moveTab(_ id: String, to destination: Int) {
+        guard let source = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let tab = tabs.remove(at: source)
+        tabs.insert(tab, at: min(max(0, destination), tabs.count))
+        visualTabOrder = tabs.map(\.id)
+    }
+
     var pendingAddress: String = ""
     var editingAddress: Bool = false
 
@@ -167,7 +179,18 @@ final class NativeTabBarModel {
     /// detection in tab-agent can miss on title-empty or during navigation
     /// transitions, and without this override the URL bar would point at
     /// nothing and the user would lose their navigation target.
-    func setTabs(_ newTabs: [TabInfo]) {
+    func setTabs(_ reportedTabs: [TabInfo]) {
+        var newTabs = reportedTabs
+        if liquidTabsEnabled {
+            let live = Set(reportedTabs.map(\.id))
+            visualTabOrder = visualTabOrder.filter { live.contains($0) }
+            let known = Set(visualTabOrder)
+            visualTabOrder += reportedTabs.map(\.id).filter { !known.contains($0) }
+            let byID = Dictionary(reportedTabs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+            newTabs = visualTabOrder.compactMap { byID[$0] }
+        } else {
+            visualTabOrder = reportedTabs.map(\.id)
+        }
         let wasEditing = editingAddress
         let oldActiveID = activeTab?.id
         let oldActiveURL = activeTab?.url
@@ -305,17 +328,25 @@ struct NativeCompactBarView: View {
             Spacer(minLength: 0)
 
             HStack(spacing: 1) {
-                ForEach(model.tabs) { tab in
-                    if tab.active {
+                if model.liquidTabsEnabled {
+                    if let tab = model.activeTab {
                         ActiveTabPill(model: model, tab: tab)
-                            .frame(minWidth: 100, idealWidth: 280, maxWidth: 320)
-                            .layoutPriority(2)
+                            .frame(minWidth: 100, idealWidth: 400, maxWidth: 520)
                             .id(tab.id)
-                    } else {
-                        InactiveTabPill(model: model, tab: tab)
-                            .frame(minWidth: 36, idealWidth: 180, maxWidth: 240)
-                            .layoutPriority(1)
-                            .id(tab.id)
+                    }
+                } else {
+                    ForEach(model.tabs) { tab in
+                        if tab.active {
+                            ActiveTabPill(model: model, tab: tab)
+                                .frame(minWidth: 100, idealWidth: 280, maxWidth: 320)
+                                .layoutPriority(2)
+                                .id(tab.id)
+                        } else {
+                            InactiveTabPill(model: model, tab: tab)
+                                .frame(minWidth: 36, idealWidth: 180, maxWidth: 240)
+                                .layoutPriority(1)
+                                .id(tab.id)
+                        }
                     }
                 }
             }
@@ -1272,6 +1303,7 @@ final class NativeTabBarChrome {
     let model: NativeTabBarModel
     let toolbar: NSToolbar
     private let toolbarDelegate: CompactBarToolbarDelegate
+    private var liquidAccessory: NSTitlebarAccessoryViewController?
 
     init(model: NativeTabBarModel) {
         self.model = model
@@ -1286,6 +1318,18 @@ final class NativeTabBarChrome {
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
         self.toolbar = toolbar
+    }
+
+    func enableLiquidTabs(on window: NSWindow) {
+        guard #available(macOS 27.0, *), liquidAccessory == nil else { return }
+        model.liquidTabsEnabled = true
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.layoutAttribute = .bottom
+        accessory.view = NSHostingView(rootView: LiquidBrowserTabs(model: model))
+        accessory.view.frame = NSRect(x: 0, y: 0, width: window.frame.width, height: 36)
+        accessory.view.autoresizingMask = [.width]
+        window.addTitlebarAccessoryViewController(accessory)
+        liquidAccessory = accessory
     }
 
     /// Install the native tabs chrome onto `window`. Hides the window title

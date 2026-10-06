@@ -38,6 +38,12 @@ Native Tabs is turned off automatically when you enable browser extensions for a
 
 The rest of this chapter describes windows with Native Tabs on.
 
+## Drag a tab into a new window
+
+On macOS 27, with Metal, Native Tabs and an updated shared-window image, the draggable tab strip appears below the address toolbar. Drag a tab away from the strip and release it to open that tab in a new Mac window. Its page state stays intact, and both windows use the same profile, browser process and VM. Press Escape during a drag to cancel, or drag within the strip to reorder tabs.
+
+The source window must retain at least one tab. Closing either window keeps the other running. Older macOS versions and images retain the existing compact tab bar.
+
 ## Address completion
 
 As you type a URL, Bromure uses the current profile's Chromium history to complete a matching address. The suggested suffix is selected: keep typing to replace it, or press Return to use the completed URL. Backspace does not immediately put a deleted suffix back. History remains inside that profile's VM; another profile's history is never used.

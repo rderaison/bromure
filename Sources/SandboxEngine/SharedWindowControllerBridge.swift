@@ -18,7 +18,7 @@ public final class SharedWindowControllerBridge {
     }
 
     public func request(_ command: String, fields: [String: Any] = [:]) async throws -> [String: Any] {
-        guard ["attachPrimary", "list", "create", "resize", "close", "focus", "shutdown"].contains(command),
+        guard ["attachPrimary", "list", "create", "detach", "resize", "close", "focus", "shutdown"].contains(command),
               !busy, nextID <= 9_007_199_254_740_991, fields["id"] == nil, fields["cmd"] == nil else {
             throw Self.failure("Invalid or overlapping shared-window request")
         }

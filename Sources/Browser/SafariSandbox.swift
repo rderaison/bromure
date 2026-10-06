@@ -2453,6 +2453,7 @@ final class SharedBrowserVMOwner {
     private var draining = false
     private var prepared = false
     private var supportsTerminalShutdown = false
+    private var supportsTabDetach = false
     private var focusedID: Int?
     private var resizeTask: Task<Void, Never>?
     private var terminated = false
@@ -2526,6 +2527,7 @@ final class SharedBrowserVMOwner {
         } while ProcessInfo.processInfo.systemUptime < deadline
         try requireOK(listing)
         supportsTerminalShutdown = listing["shutdownProtocolVersion"] as? Int == 1
+        supportsTabDetach = listing["tabDetachProtocolVersion"] as? Int == 1
         guard listing["rootPixelLimit"] as? Int == 67108864 else { throw NSError(domain: "BromureSharedWindows", code: 10) }
         guard let connectors = listing["outputs"] as? [[String: Any]], connectors.count == capacity,
               let rows = listing["windows"] as? [[String: Any]], rows.count == 1,
@@ -2585,7 +2587,49 @@ final class SharedBrowserVMOwner {
         return topology
     }
 
-    func createWindow(url: String = "about:blank") {
+    private func detachReply(target: String, sourceID: Int, index: Int,
+                             topology: [[String: Any]]) async throws -> [String: Any] {
+        do {
+            let reply = try await controller.request("detach", fields: ["windowId": sourceID, "targetId": target,
+                                                                        "scanout": index, "topology": topology])
+            if reply["ok"] as? Bool == true { return reply }
+            print("[Liquid tabs] guest detach refused: \(String(describing: reply["error"] ?? "Unknown refusal"))")
+        } catch {
+            print("[Liquid tabs] detach transport failed: \(error)")
+            // A broken connection may follow an executed move. Never replay it.
+        }
+        let observed = try await controller.request("list")
+        try requireOK(observed)
+        guard let rows = observed["windows"] as? [[String: Any]],
+              rows.contains(where: { $0["windowId"] as? Int == sourceID }),
+              let destination = rows.first(where: {
+                  $0["windowId"] as? Int != sourceID && ($0["targetIds"] as? [String])?.contains(target) == true
+              }), let id = destination["windowId"] as? Int else {
+            // Ownership observation confirms the tab did not move. Return the
+            // unused output to the original topology before reporting failure.
+            sizes[index] = nil
+            let restored = try await publishTopology()
+            if let sourceIndex = windows.first(where: { $0.value.sharedWindowID == sourceID })?.key {
+                try requireOK(try await controller.request("resize", fields: ["windowId": sourceID,
+                                                                             "scanout": sourceIndex, "topology": restored]))
+            }
+            throw NSError(domain: "BromureSharedWindows", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "Chromium could not move this tab into a new window"])
+        }
+        if destination["scanout"] as? Int == index {
+            return ["ok": true, "windowId": id, "targetId": target]
+        }
+        guard destination["scanout"] == nil else {
+            throw NSError(domain: "BromureSharedWindows", code: 13)
+        }
+        let attached = try await controller.request("attachPrimary", fields: ["windowId": id,
+                                                                             "scanout": index, "topology": topology])
+        try requireOK(attached)
+        return ["ok": true, "windowId": id, "targetId": target]
+    }
+
+    func createWindow(url: String = "about:blank", detaching target: String? = nil,
+                      from source: BrowserSession? = nil, at point: NSPoint? = nil) {
         enqueue { [self] in
             guard !terminated else { return }
             do {
@@ -2593,9 +2637,22 @@ final class SharedBrowserVMOwner {
                 guard !terminated, let index = (0..<outputs.count).first(where: { windows[$0] == nil }) else {
                     throw NSError(domain: "BromureSharedWindows", code: 7, userInfo: [NSLocalizedDescriptionKey: "No free display output"])
                 }
-                sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
+                if let target {
+                    guard supportsTabDetach, let source, !source.closing,
+                          source.nativeTabBar?.model.tabs.contains(where: { $0.id == target }) == true,
+                          (source.nativeTabBar?.model.tabs.count ?? 0) > 1,
+                          source.sharedWindowID != nil else {
+                        throw NSError(domain: "BromureSharedWindows", code: 11,
+                                      userInfo: [NSLocalizedDescriptionKey: "This tab cannot be detached from its source window"])
+                    }
+                }
+                let sourceIndex = source.flatMap { source in windows.first(where: { $0.value === source })?.key } ?? 0
+                sizes[index] = sizes[sourceIndex] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
                 let reply = try await whileSharedDesktopResizes {
                     let topology = try await publishTopology()
+                    if let target, let sourceID = source?.sharedWindowID {
+                        return try await detachReply(target: target, sourceID: sourceID, index: index, topology: topology)
+                    }
                     return try await controller.request("create", fields: ["scanout": index, "url": url, "topology": topology])
                 }
                 try requireOK(reply)
@@ -2613,12 +2670,27 @@ final class SharedBrowserVMOwner {
                 installInput(child, index: index)
                 onWindowCreated?(child)
                 child.show()
+                if let point {
+                    let origin = NSPoint(x: point.x - min(140, child.window.frame.width / 2),
+                                         y: point.y - child.window.frame.height + 24)
+                    let candidate = NSRect(origin: origin, size: child.window.frame.size)
+                    let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? child.window.screen
+                    child.window.setFrame(child.window.constrainFrameRect(candidate, to: screen), display: true)
+                }
             } catch { report(error) }
         }
     }
 
     private func installInput(_ session: BrowserSession, index: Int) {
         guard let view = session.vmView as? PrecisionScrollVMView else { return }
+        if supportsTabDetach, #available(macOS 27.0, *), let chrome = session.nativeTabBar {
+            chrome.model.onDetach = { [weak self, weak session] target, point in
+                guard let self, let session else { return }
+                self.createWindow(detaching: target, from: session, at: point)
+            }
+            chrome.model.dragPreview = { [weak view] in view?.gpuFrameView?.tabDragPreview() }
+            chrome.enableLiquidTabs(on: session.window)
+        }
         view.gpuFrameView?.displayHeightAlignment = max(VMConfig.resolvedDisplayScale(), 1)
         view.gpuFrameView?.displaySizeChanged = { [weak self] width, height in self?.resize(index: index, width: width, height: height) }
         if let frame = view.gpuFrameView {
@@ -3929,6 +4001,62 @@ final class BrowserSession {
         self.delegateHelper = helper
         if serviceRoot == nil { warmVM.vm.delegate = helper }
         window.delegate = helper
+    }
+
+    /// Diagnostic exercises the library's actual AppKit drag state machine.
+    @MainActor func checkLiquidTabDrag(title: String, cancel: Bool = false) async throws -> String {
+        print("[Liquid check] enabled=\(nativeTabBar?.model.liquidTabsEnabled ?? false) tabs=\(nativeTabBar?.model.tabs.map { $0.title } ?? [])")
+        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        while nativeTabBar?.model.liquidTabsEnabled != true ||
+              nativeTabBar?.model.tabs.contains(where: { $0.title == title }) != true {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw NSError(domain: "BromureLiquidTabs", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Liquid tab fixture did not become ready"])
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let target = nativeTabBar?.model.tabs.first(where: { $0.title == title })?.id else {
+            throw NSError(domain: "BromureLiquidTabs", code: 2)
+        }
+        func find(_ view: NSView) -> NSView? {
+            if NSStringFromClass(type(of: view)).contains("CompactTabCell"), view.accessibilityIdentifier().replacingOccurrences(of: "-", with: "").caseInsensitiveCompare(target) == .orderedSame { return view }
+            for child in view.subviews { if let cell = find(child) { return cell } }
+            return nil
+        }
+        window.makeKeyAndOrderFront(nil)
+        for accessory in window.titlebarAccessoryViewControllers {
+            accessory.view.layoutSubtreeIfNeeded()
+            accessory.view.displayIfNeeded()
+        }
+        window.displayIfNeeded()
+        guard let cell = window.titlebarAccessoryViewControllers.compactMap({ find($0.view) }).first else {
+            throw NSError(domain: "BromureLiquidTabs", code: 3)
+        }
+        let start = cell.convert(NSPoint(x: cell.bounds.midX, y: cell.bounds.midY), to: nil)
+        let end = NSPoint(x: start.x + 20, y: start.y - 180)
+        func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        cell.mouseDown(with: event(.leftMouseDown, start))
+        cell.mouseDragged(with: event(.leftMouseDragged, end))
+        if cancel {
+            let escape = NSEvent.keyEvent(with: .keyDown, location: end, modifierFlags: [],
+                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                          context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                          isARepeat: false, keyCode: 53)!
+            NSApp.sendEvent(escape)
+        } else {
+            cell.mouseUp(with: event(.leftMouseUp, end))
+        }
+        return target
+    }
+
+    @MainActor func hasDetachedTab(_ target: String, from source: BrowserSession) -> Bool {
+        sharedOwner === source.sharedOwner && warmVM?.vm === source.warmVM?.vm &&
+        sharedWindowID != source.sharedWindowID && nativeTabBar?.model.tabs.contains(where: { $0.id == target }) == true &&
+        source.nativeTabBar?.model.tabs.contains(where: { $0.id == target }) == false && graphicsPresentedFrameCount > 0
     }
 
     @MainActor func createSharedWindow() { sharedOwner?.createWindow() }
