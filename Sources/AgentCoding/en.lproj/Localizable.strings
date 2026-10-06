@@ -4104,3 +4104,24 @@
 "The rules changed outside the editor while you have unsaved edits." = "The rules changed outside the editor while you have unsaved edits.";
 "Reload" = "Reload";
 "Keep my edits" = "Keep my edits";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "connection closed (proxy) — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "connection closed (direct) — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "Also seen as: %@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "Move rule up";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "Move rule down";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "Delete rule";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "List allowed connections in the Security Timeline too";

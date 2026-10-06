@@ -95,6 +95,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private var activeUpstreamSession: URLSession?
     private var fdClosed = false
     private var firewallCut = false
+    /// The guest-side vsock port of a proxy-route connection (the bridge in
+    /// bromure-agentd that relays the guest's HTTPS_PROXY socket). Set by the
+    /// vsock listener; nil on the transparent route, where the switch resets
+    /// the guest's TCP flow itself.
+    var guestVsockPort: UInt32?
+    /// A firewall cut asked agentd to reset the guest's socket: `fd` is shut
+    /// / closed only once that's done (or `abortGrace` passed), so the guest
+    /// sees a reset rather than a clean end of stream first.
+    private var abortDone: DispatchSemaphore?
+    private var fdShutDown = false
+    static let abortGrace: TimeInterval = 1.5
 
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
@@ -254,13 +265,50 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// The firewall now denies this connection: close the guest side (every
     /// blocked read/write on it fails, which ends the relay) and cancel the
     /// upstream request in flight.
+    ///
+    /// Proxy route: the guest's client talks to agentd's bridge, which only
+    /// sees the vsock close as an end of stream and would close its client
+    /// socket gracefully (the client drains what's buffered and reports a
+    /// short transfer, curl rc=18). So agentd is asked first to RESET that
+    /// socket (`EgressConnectionRegistry.guestAbort`), like the switch resets
+    /// a cut transparent flow (rc=56); `fd` is shut once agentd confirms or
+    /// after `abortGrace`.
     private func cutForFirewall() {
         cutLock.lock()
-        defer { cutLock.unlock() }
-        guard !fdClosed, !firewallCut else { return }
+        guard !fdClosed, !firewallCut else { cutLock.unlock(); return }
         firewallCut = true
+        let session = activeUpstreamSession
+        let abort = guestVsockPort.flatMap { port in
+            EgressConnectionRegistry.shared.guestAbort.map { (port, $0) }
+        }
+        let done = abort != nil ? DispatchSemaphore(value: 0) : nil
+        abortDone = done
+        if abort == nil {
+            fdShutDown = true
+            Darwin.shutdown(fd, SHUT_RDWR)
+        } else {
+            // Abortive on the host end too: no graceful FIN after close.
+            var lg = linger(l_onoff: 1, l_linger: 0)
+            setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, socklen_t(MemoryLayout<linger>.size))
+        }
+        cutLock.unlock()
+        session?.invalidateAndCancel()
+        guard let (port, guestAbort) = abort, let done else { return }
+        guestAbort(profileID, port) { [weak self] in
+            done.signal()
+            self?.shutdownAfterAbort()
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.abortGrace) { [weak self] in
+            self?.shutdownAfterAbort()
+        }
+    }
+
+    /// The guest's socket was reset (or the grace passed): end the relay.
+    private func shutdownAfterAbort() {
+        cutLock.lock(); defer { cutLock.unlock() }
+        guard !fdClosed, !fdShutDown else { return }
+        fdShutDown = true
         Darwin.shutdown(fd, SHUT_RDWR)
-        activeUpstreamSession?.invalidateAndCancel()
     }
 
     /// Remember the upstream session in flight (cancelled at once if the
@@ -275,6 +323,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
     /// Close `fd` — after which a firewall cut must leave it alone.
     private func closeFD() {
+        // A cut waiting on agentd to reset the guest's socket: let that land
+        // first, so closing here can't reach the guest as a clean end.
+        cutLock.lock()
+        let pendingAbort = abortDone
+        cutLock.unlock()
+        if let pendingAbort {
+            _ = pendingAbort.wait(timeout: .now() + Self.abortGrace)
+            pendingAbort.signal()
+        }
         cutLock.lock()
         fdClosed = true
         activeUpstreamSession = nil
@@ -289,18 +346,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// reported (it never leaves this Mac).
     private func reportProxyAllowed(host: String, port: Int) {
         guard let policy = guardrailsProvider()?.egressPolicy, policy.reportsAllowed,
-              host.lowercased() != InferenceService.localMitmHost,
-              EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
-                                                      port: port, denied: false) else { return }
+              host.lowercased() != InferenceService.localMitmHost else { return }
         let rule = policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
                                      port: UInt16(truncatingIfNeeded: port))?.text
+        let data: [String: AnyJSON] = ["action": .string("allow"), "proto": .string("tcp"),
+                                       "host": .string(host), "port": .int(port), "layer": .string("proxy"),
+                                       "rule": .of(rule), "by_policy": .bool(true)]
+        guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
+                                                      port: port, denied: false) else {
+            // A repeat within the dedupe window: counted on the folded row.
+            EgressReportDeduper.countRepeat(profileID: profileID, eventData: data)
+            return
+        }
         SupplyChainLog.shared.record(
             "[firewall] → allow tcp \(host):\(port) (\(profileID.uuidString.prefix(8)))")
-        BACEventEmitter.shared.emitDetached(
-            profileID: profileID, eventType: "egress.firewall",
-            eventData: ["action": .string("allow"), "proto": .string("tcp"),
-                        "host": .string(host), "port": .int(port), "layer": .string("proxy"),
-                        "rule": .of(rule), "by_policy": .bool(true)])
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: data)
     }
 
     /// Connection-layer egress check for proxied flows: true when the profile's

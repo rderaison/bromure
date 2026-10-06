@@ -129,8 +129,9 @@ struct FirewallLiveQATests {
     @Test("CDN / shared hosting: the exact names only, never 'all of cloudflare.net'")
     func cdnTargets() {
         let iana = FirewallRuleActions.targets(for: fw(host: "www.iana.org", aliases: ["www.iana.org.cdn.cloudflare.net"], denied: true))
-        #expect(iana.map(\.name) == ["www.iana.org", "iana.org", "www.iana.org.cdn.cloudflare.net"])
-        #expect(iana.map(\.wholeDomain) == [false, true, false])
+        // The CDN's server name is never an Allow target (only in the tooltip).
+        #expect(iana.map(\.name) == ["www.iana.org", "iana.org"])
+        #expect(iana.map(\.wholeDomain) == [false, true])
         #expect(!iana.contains { $0.wholeDomain && $0.name == "cloudflare.net" })
         for host in ["d1234.cloudfront.net", "foo.s3.amazonaws.com", "me.github.io", "app.herokuapp.com",
                      "x.akamaiedge.net", "y.fastly.net", "z.azureedge.net", "lh3.googleusercontent.com"] {
@@ -228,13 +229,20 @@ struct FirewallLiveQATests {
             "rule": .null, "by_policy": .bool(true),
         ], now: Date()))
         #expect(e.kind == .blocked)
-        #expect(e.decision == "connection closed — “allow tcp example.com:443” no longer allows it")
+        #expect(e.decision == "connection closed (proxy) — “allow tcp example.com:443” no longer allows it")
         #expect(e.firewall?.denied == true && e.coalesceKey == nil)
         let d = try #require(SecurityTimeline.map(profileID: UUID(), eventType: "egress.firewall", eventData: [
             "action": .string("deny"), "proto": .string("tcp"), "host": .string("pastebin.com"), "port": .int(443),
             "closed": .bool(true), "rule": .string("deny any pastebin.com"), "by_policy": .bool(true),
         ], now: Date()))
         #expect(d.decision == "connection closed — deny — deny any pastebin.com")
+        // The direct (transparent) route says so.
+        let t = try #require(SecurityTimeline.map(profileID: UUID(), eventType: "egress.firewall", eventData: [
+            "action": .string("deny"), "proto": .string("tcp"), "host": .string("example.com"), "port": .int(443),
+            "layer": .string("transparent"), "closed": .bool(true), "previous_rule": .string("allow tcp example.com:443"),
+            "rule": .null, "by_policy": .bool(true),
+        ], now: Date()))
+        #expect(t.decision == "connection closed (direct) — “allow tcp example.com:443” no longer allows it")
     }
 
     @Test("Default-policy rows use the localized decision word")
@@ -267,6 +275,134 @@ struct FirewallLiveQATests {
         let ex = try #require(FirewallRuleActions.existing(rule, in: "deny any a.com\nallow tcp a.com:443 #@until=4000000000\ndefault deny"))
         #expect(ex.expiresAt == Date(timeIntervalSince1970: 4_000_000_000))
         #expect(FirewallRuleActions.existing(rule, in: "default deny") == nil)
+    }
+
+    // MARK: Follow-up QA (#38 round 2)
+
+    /// Live QA run 1: a download started right after a CLI `vm edit` save
+    /// outlived its timed rule — the CLI path pushes the policy without
+    /// arming the app's expiry timer, so enforcement waited for the 15 s
+    /// sweep to save + re-push the switched-off rule, and the transfer ended
+    /// first. The registry now cuts at the expiry instant by itself.
+    @Test("A timed rule's expiry cuts an open tunnel at that instant with no save")
+    func expiryCutsWithoutSave() async throws {
+        let cap = Captured()
+        let reg = registry(cap)
+        let pid = UUID()
+        let now = Date()
+        let until = Int(now.timeIntervalSince1970.rounded(.down)) + 2
+        let timed = try policy("allow tcp speed.cloudflare.com:443 #@until=\(until)\ndefault deny")
+        // The policy in force when the download opens…
+        reg.applyPolicy(profileID: pid, policy: timed)
+        reg.register(profileID: pid, host: "speed.cloudflare.com", port: 443, route: "proxy",
+                     rule: "allow tcp speed.cloudflare.com:443") { cap.cut("dl") }
+        // …a CLI-style save re-pushes the same rules (no timer of the app's
+        // armed), and nothing saves the switched-off rule afterwards.
+        #expect(reg.applyPolicy(profileID: pid, policy: timed).isEmpty)
+        #expect(reg.armedExpiry(profileID: pid) == Date(timeIntervalSince1970: TimeInterval(until)))
+        #expect(cap.cuts.isEmpty)
+        var waited = 0.0
+        while cap.cuts.isEmpty, waited < 5 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            waited += 0.05
+        }
+        #expect(cap.cuts == ["dl"])
+        #expect(Date().timeIntervalSince1970 >= TimeInterval(until))
+        #expect(cap.closures.first?.previousRule == "allow tcp speed.cloudflare.com:443")
+        // The expired rule is past: nothing left to arm.
+        #expect(reg.armedExpiry(profileID: pid) == nil)
+        // A later save of the switched-off rule finds nothing more to cut.
+        #expect(reg.applyPolicy(profileID: pid, policy: try policy("#@off allow tcp speed.cloudflare.com:443\ndefault deny")).isEmpty)
+    }
+
+    @Test("A new policy re-arms the expiry; a forgotten workspace has none")
+    func expiryRearm() throws {
+        let reg = registry(Captured())
+        let pid = UUID()
+        let t0 = Date()
+        let soon = Int(t0.timeIntervalSince1970) + 600, later = soon + 600
+        reg.applyPolicy(profileID: pid, policy: try policy("allow tcp a.com:443 #@until=\(later)\nallow tcp b.com:443 #@until=\(soon)\ndefault deny"), now: t0)
+        #expect(reg.armedExpiry(profileID: pid, now: t0) == Date(timeIntervalSince1970: TimeInterval(soon)))
+        // b.com switched off (the sweep): the next expiry is a.com's.
+        reg.applyPolicy(profileID: pid, policy: try policy("allow tcp a.com:443 #@until=\(later)\n#@off allow tcp b.com:443\ndefault deny"), now: t0)
+        #expect(reg.armedExpiry(profileID: pid, now: t0) == Date(timeIntervalSince1970: TimeInterval(later)))
+        reg.forget(profileID: pid)
+        #expect(reg.armedExpiry(profileID: pid, now: t0) == nil)
+    }
+
+    @Test("The trailing packets of a cut connection are recognised as that connection")
+    func recentlyCut() throws {
+        let reg = registry(Captured())
+        let pid = UUID()
+        reg.register(profileID: pid, host: "www.wikipedia.org", port: 443, route: "transparent",
+                     rule: "allow tcp www.wikipedia.org:443") {}
+        let t = Date()
+        #expect(reg.reevaluate(profileID: pid, policy: try policy("default deny"), now: t).count == 1)
+        #expect(reg.recentlyCut(profileID: pid, hostnames: ["www.wikipedia.org", "dyna.wikimedia.org"],
+                                ip: "185.15.59.224", port: 443, now: t.addingTimeInterval(1)))
+        #expect(!reg.recentlyCut(profileID: pid, hostnames: ["www.wikipedia.org"], ip: nil, port: 80,
+                                 now: t.addingTimeInterval(1)))
+        #expect(!reg.recentlyCut(profileID: UUID(), hostnames: ["www.wikipedia.org"], ip: nil, port: 443,
+                                 now: t.addingTimeInterval(1)))
+        #expect(!reg.recentlyCut(profileID: pid, hostnames: ["www.wikipedia.org"], ip: nil, port: 443,
+                                 now: t.addingTimeInterval(EgressConnectionRegistry.recentCutWindow + 1)))
+    }
+
+    @Test("An allowed transparent row names the site, not the CDN server, first")
+    func allowedRowNamesSite() throws {
+        // The switch's snooped names, the CDN server first.
+        let e = try #require(SecurityTimeline.map(profileID: UUID(), eventType: "egress.firewall", eventData: [
+            "action": .string("allow"), "proto": .string("tcp"), "host": .string("dyna.wikimedia.org"),
+            "hostnames": .array([.string("dyna.wikimedia.org"), .string("www.wikipedia.org")]),
+            "ip": .string("185.15.59.224"), "port": .int(443), "rule": .null, "by_policy": .bool(true),
+            "layer": .string("l4"),
+        ], now: Date()))
+        #expect(e.condition.hasPrefix("www.wikipedia.org:443"))
+        #expect(e.firewall?.host == "www.wikipedia.org")
+        #expect(e.firewall?.aliases == ["dyna.wikimedia.org"])
+        // A host that's a server name with no better alias stays as is.
+        let cdn = try #require(SecurityTimeline.map(profileID: UUID(), eventType: "egress.firewall", eventData: [
+            "action": .string("allow"), "proto": .string("tcp"), "host": .string("d1.cloudfront.net"),
+            "hostnames": .array([.string("d1.cloudfront.net")]), "port": .int(443), "by_policy": .bool(true),
+        ], now: Date()))
+        #expect(cdn.firewall?.host == "d1.cloudfront.net")
+    }
+
+    @Test("The Allow menu hides CDN / server aliases; an old row is offered under the site")
+    func serverAliasesHidden() {
+        let wiki = FirewallRuleActions.targets(for: fw(host: "www.wikipedia.org", aliases: ["dyna.wikimedia.org"], denied: true))
+        #expect(wiki.map(\.name) == ["www.wikipedia.org", "wikipedia.org"])
+        // A row written before the fix (host = the CDN server).
+        let old = FirewallRuleActions.targets(for: fw(host: "dyna.wikimedia.org", aliases: ["www.wikipedia.org"], denied: true))
+        #expect(old.first?.name == "www.wikipedia.org")
+        #expect(!old.contains { $0.name == "dyna.wikimedia.org" })
+        for name in ["www.iana.org.cdn.cloudflare.net", "e1234.a.akamaiedge.net", "e9.dscx.akamaiedge.net",
+                     "part-0012.t-0009.t-msedge.net", "foo.edgekey.net", "x.cdn.example.net", "dyna.wikimedia.org"] {
+            #expect(FirewallRuleActions.isServerName(name), "\(name)")
+        }
+        for name in ["www.wikipedia.org", "api.github.com", "registry.npmjs.org", "pypi.org"] {
+            #expect(!FirewallRuleActions.isServerName(name), "\(name)")
+        }
+        // A non-server alias stays offered.
+        let gh = FirewallRuleActions.targets(for: fw(host: "github.com", aliases: ["lb-140-82-112-3-iad.github.com", "gh.example.org"], denied: true))
+        #expect(gh.map(\.name) == ["github.com", "gh.example.org"])
+    }
+
+    @MainActor
+    @Test("Every folded connection counts on the allowed row")
+    func repeatsCount() throws {
+        let pid = UUID()
+        let data: [String: AnyJSON] = ["action": .string("allow"), "proto": .string("tcp"), "host": .string("github.com"),
+                                       "port": .int(443), "rule": .null, "by_policy": .bool(true), "layer": .string("proxy")]
+        let tl = SecurityTimeline(directory: nil)
+        // One reported row + five deduped repeats (counted, not listed).
+        for i in 0..<6 {
+            let e = try #require(SecurityTimeline.map(profileID: pid, eventType: "egress.firewall", eventData: data,
+                                                      now: Date().addingTimeInterval(Double(i))))
+            tl.append(e)
+        }
+        #expect(tl.events.count == 1)
+        #expect(tl.events.first?.repeats == 6)
     }
 
     // MARK: 5 — the editor keeps unsaved edits

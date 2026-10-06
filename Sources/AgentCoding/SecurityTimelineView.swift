@@ -78,6 +78,10 @@ struct SecurityTimelineView: View {
     @State private var machineFilter: String?
     /// Selected rows (the context menu acts on the clicked one).
     @State private var selection = Set<SecurityTimeline.Event.ID>()
+    /// Bumped whenever a workspace's firewall rules change, so the firewall
+    /// rows re-evaluate "Allowed now" / "Blocked now" against the new rules
+    /// while the window stays open.
+    @State private var rulesGeneration = 0
 
     private var machines: [String] { timeline.remote.keys.sorted() }
 
@@ -131,6 +135,12 @@ struct SecurityTimelineView: View {
         .frame(minWidth: 760, minHeight: 400)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { if startOnTimeline { tab = .timeline } }
+        .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallPolicyChanged)) { _ in
+            rulesGeneration &+= 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallRulesChanged)) { _ in
+            rulesGeneration &+= 1
+        }
         .onDisappear(perform: onClose)
     }
 
@@ -288,7 +298,7 @@ struct SecurityTimelineView: View {
                     .lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
-                    .help(e.condition)
+                    .help(Self.conditionHelp(e))
             }
             .width(min: 140, ideal: 240)
 
@@ -316,15 +326,24 @@ struct SecurityTimelineView: View {
             // Firewall rows: allow a block / block an allow / switch the
             // deciding rule off — applied live to the running workspace.
             TableColumn("") { e in
-                FirewallRowActionButton(event: e)
+                FirewallRowActionButton(event: e, rulesGeneration: rulesGeneration)
             }
             .width(min: 64, ideal: 80, max: 110)
         }
         .contextMenu(forSelectionType: SecurityTimeline.Event.ID.self) { ids in
             if let id = ids.first, let e = rows.first(where: { $0.id == id }), e.firewall != nil {
-                FirewallRowMenuItems(event: e)
+                FirewallRowMenuItems(event: e, rulesGeneration: rulesGeneration)
             }
         }
+    }
+
+    /// The condition in full, plus — for a firewall row — the destination's
+    /// other names (CDN / server names the quick actions don't offer).
+    static func conditionHelp(_ e: SecurityTimeline.Event) -> String {
+        guard let aliases = e.firewall?.aliases, !aliases.isEmpty else { return e.condition }
+        return e.condition + "\n" + String(
+            format: NSLocalizedString("Also seen as: %@", comment: "security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated"),
+            aliases.joined(separator: ", "))
     }
 
     private func color(_ kind: SecurityTimeline.Decision) -> Color {
@@ -412,6 +431,8 @@ private struct FirewallRowContext {
 @MainActor
 private struct FirewallRowMenuItems: View {
     let event: SecurityTimeline.Event
+    /// The rules' change count: a new value re-evaluates against them.
+    var rulesGeneration = 0
 
     var body: some View {
         if let ctx = FirewallRowContext(event) {
@@ -518,6 +539,8 @@ private struct FirewallRowMenuItems: View {
 @MainActor
 private struct FirewallRowActionButton: View {
     let event: SecurityTimeline.Event
+    /// The rules' change count: a new value re-evaluates against them.
+    var rulesGeneration = 0
 
     var body: some View {
         if let ctx = FirewallRowContext(event) {
@@ -528,7 +551,7 @@ private struct FirewallRowActionButton: View {
                                             comment: "security timeline: firewall quick actions, remote row"))
             } else if ctx.profile != nil {
                 Menu {
-                    FirewallRowMenuItems(event: event)
+                    FirewallRowMenuItems(event: event, rulesGeneration: rulesGeneration)
                 } label: {
                     Text(ctx.buttonTitle).font(.caption)
                 }

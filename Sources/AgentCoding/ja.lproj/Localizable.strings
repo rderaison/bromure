@@ -4070,3 +4070,24 @@
 "The rules changed outside the editor while you have unsaved edits." = "未保存の編集内容がある間に、エディタの外でルールが変更されました。";
 "Reload" = "再読み込み";
 "Keep my edits" = "編集内容を保持";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "接続を切断（プロキシ） — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "接続を切断（直接） — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "別名: %@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "ルールを上へ移動";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "ルールを下へ移動";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "ルールを削除";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "許可された接続もセキュリティタイムラインに表示";

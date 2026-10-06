@@ -90,14 +90,28 @@ enum FirewallRuleActions {
     /// CDN / hosting suffix (never "all of cloudflare.net"); then the other
     /// names seen for the address (CNAME targets), exact only. A bare IP for a
     /// flow with no hostname.
+    ///
+    /// Aliases that name the provider's server rather than the site — CDN /
+    /// shared-hosting names (`www.iana.org.cdn.cloudflare.net`) and
+    /// infrastructure-looking ones (`dyna.wikimedia.org`, `…t-msedge.net`) —
+    /// are not offered (the row's tooltip still lists them): a rule on one
+    /// would be about the CDN, not the destination. A row whose host is such
+    /// a name (older rows) is offered under the site's name instead, when an
+    /// alias has it.
     static func targets(for fw: SecurityTimeline.Firewall) -> [Target] {
-        if let host = fw.host?.lowercased(), !host.isEmpty, EgressPolicy.parseIPv4(host) == nil {
+        if var host = fw.host?.lowercased(), !host.isEmpty, EgressPolicy.parseIPv4(host) == nil {
+            var aliases = fw.aliases.map { $0.lowercased() }
+                .filter { !$0.isEmpty && EgressPolicy.parseIPv4($0) == nil && $0 != host }
+            if isServerName(host), let site = aliases.first(where: { !isServerName($0) }) {
+                aliases.removeAll { $0 == site }
+                aliases.insert(host, at: 0)
+                host = site
+            }
             var out = [Target(host)]
             if let domain = registrableDomain(of: host), domain != host, !isSharedHosting(host) {
                 out.append(Target(domain, wholeDomain: true))
             }
-            for alias in fw.aliases.map({ $0.lowercased() })
-            where !alias.isEmpty && EgressPolicy.parseIPv4(alias) == nil && !out.contains(Target(alias)) {
+            for alias in aliases where !isServerName(alias) && !out.contains(Target(alias)) {
                 out.append(Target(alias))
             }
             return out
@@ -135,6 +149,29 @@ enum FirewallRuleActions {
     static func isSharedHosting(_ host: String) -> Bool {
         let h = host.lowercased()
         return sharedHostingSuffixes.contains { h == $0 || h.hasSuffix("." + $0) }
+    }
+
+    /// Labels (split on "." and "-") that mark a CDN / load-balancer server
+    /// name rather than a site: `x.cdn.example.net`, `e123.edgekey.net`,
+    /// `dyna.wikimedia.org`, `part-0012.t-0009.t-msedge.net`.
+    static let infrastructureLabels: Set<String> = [
+        "cdn", "edgekey", "edgesuite", "edge", "dyna", "dyn", "geo", "geodns", "anycast",
+        "lb", "elb", "glb", "gslb", "msedge", "fastly", "fastlylb", "cloudfront",
+        "trafficmanager", "edgecast", "llnwd", "footprint",
+    ]
+
+    /// Whether `name` looks like a CDN / load-balancer server name.
+    static func looksLikeInfrastructure(_ name: String) -> Bool {
+        let labels = name.lowercased().split(whereSeparator: { $0 == "." || $0 == "-" })
+        return labels.contains { l in
+            infrastructureLabels.contains(String(l)) || l.contains("cdn") || l.contains("akamai")
+        }
+    }
+
+    /// A name for the provider's server, not the site: never offered as a
+    /// rule target (only shown in the row's details).
+    static func isServerName(_ name: String) -> Bool {
+        isSharedHosting(name) || looksLikeInfrastructure(name)
     }
 
     /// What the workspace's CURRENT rules decide for this row's destination
@@ -244,6 +281,11 @@ extension Notification.Name {
     /// quick action, an expiry): `object` is the profile id, `userInfo["rules"]`
     /// the new pf text. An open editor reloads its rule table from it.
     static let bromureFirewallRulesChanged = Notification.Name("io.bromure.firewallRulesChanged")
+    /// A workspace's saved firewall rules changed by ANY path (editor, CLI /
+    /// automation, quick action, expiry): `object` is the profile id. What
+    /// shows the rules' current verdict (the Security Timeline's "Allowed
+    /// now" / "Blocked now") re-evaluates.
+    static let bromureFirewallPolicyChanged = Notification.Name("io.bromure.firewallPolicyChanged")
 }
 
 /// The expiry sweep's timers (an extension can't hold stored properties).
@@ -351,6 +393,31 @@ extension ACAppDelegate {
         }
         // A timed rule saved from the editor arms its expiry timer here.
         scheduleNextFirewallExpiry(now: now)
+    }
+
+    /// `profiles` was reassigned: for each workspace whose rules differ from
+    /// `old`, re-arm the expiry timer (a timed rule saved by the CLI or the
+    /// editor gets its instant switch-off too) and tell observers.
+    @MainActor func firewallProfilesChanged(from old: [Profile]) {
+        let before = Dictionary(old.map { ($0.id, $0.egressRules) }, uniquingKeysWith: { a, _ in a })
+        let changed = profiles.filter { before[$0.id] != $0.egressRules }.map(\.id)
+        guard !changed.isEmpty else { return }
+        scheduleNextFirewallExpiry()
+        for id in changed {
+            NotificationCenter.default.post(name: .bromureFirewallPolicyChanged, object: id)
+        }
+    }
+
+    /// Wire the firewall's proxy-route cut to the guest: reset agentd's bridge
+    /// socket for that connection (see `HTTPMitmConnection.cutForFirewall`).
+    @MainActor func installFirewallGuestAbort() {
+        EgressConnectionRegistry.shared.guestAbort = { [weak self] pid, port, done in
+            Task { @MainActor in
+                defer { done() }
+                _ = try? await self?.guestJSONRequest(
+                    profileID: pid, request: ["bridge_abort": ["port": Int(port)], "timeout": 5])
+            }
+        }
     }
 
     /// The workspace stopped: its "until the workspace stops" rules end.

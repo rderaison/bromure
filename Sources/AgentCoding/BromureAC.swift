@@ -1336,6 +1336,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // session window's streaming indicator stay in lockstep
             // with the latest store state.
             refreshStreamingState()
+            // A workspace's firewall rules changed (any save path: editor,
+            // CLI / automation, a timeline action, an expiry): re-arm the
+            // expiry timer and refresh what's listening (the timeline).
+            firewallProfilesChanged(from: oldValue)
         }
     }
 
@@ -3244,6 +3248,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// itself failed; returns the raw response dict otherwise.
     func guestFileOp(profileID: Profile.ID, op: [String: Any],
                      timeout: Int = 30) async throws -> [String: Any] {
+        try await guestJSONRequest(profileID: profileID, request: ["file": op, "timeout": timeout])
+    }
+
+    /// One JSON request on the guest's vsock shell channel (a file op, a
+    /// bridge abort…), with `guestExec`'s pooled-connection + stale-retry
+    /// dance. Throws `commandFailed` when the guest reports an error.
+    func guestJSONRequest(profileID: Profile.ID, request: [String: Any]) async throws -> [String: Any] {
         var connection: VZVirtioSocketConnection?
         for _ in 0..<30 {
             guard let bridge = shellBridges[profileID] else { throw guestUnavailableError(profileID) }
@@ -3253,7 +3264,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for attempt in 0..<4 {
             guard let conn = connection else { throw GuestExecError.connectionFailed }
             let fd = conn.fileDescriptor
-            let request: [String: Any] = ["file": op, "timeout": timeout]
             let outcome = await Task.detached(priority: .userInitiated) {
                 ACAutomationServer.exchangeJSON(fd: fd, request: request)
             }.value
@@ -3435,6 +3445,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Temporary firewall rules: switch off (and save) the expired ones,
         // and end the previous run's "until the workspace stops" rules.
         startFirewallExpirySweep()
+        // A firewall cut on the proxy route resets the guest's socket too
+        // (agentd's bridge), so the client sees a reset, not a clean end.
+        installFirewallGuestAbort()
 
         // Egress firewall: each new off-subnet flow (allowed or denied by the
         // profile's rules) is surfaced in the Security Log window and, for
@@ -3448,23 +3461,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let dst = ev.port > 0 ? "\(host):\(ev.port)" : host
             let action = ev.denied ? "deny" : "allow"
             let who = ev.profileID.map { String($0.uuidString.prefix(8)) } ?? "-"
+            let ipString = UtunPacket.ipString(ev.dstIP)
+            // The trailing segments of a connection the MiTM just cut (and
+            // reported as "connection closed"): not a second, "deny" row.
+            if ev.denied, ev.midFlow, let pid = ev.profileID,
+               EgressConnectionRegistry.shared.recentlyCut(profileID: pid, hostnames: ev.hostnames,
+                                                           ip: ipString, port: Int(ev.port)) {
+                return
+            }
+            let eventData: [String: AnyJSON] = [
+                "action": .string(action),
+                "layer": .string("l4"),
+                "proto": .string(proto),
+                "host": .of(ev.hostnames.first),
+                "ip": .string(ipString),
+                "port": .int(Int(ev.port)),
+                "hostnames": .array(ev.hostnames.map { .string($0) }),
+                // Which rule decided (nil: the default action, or a
+                // transport drop) — the timeline names it and offers to
+                // switch it off / remove it.
+                "rule": .of(ev.rule),
+                "by_policy": .bool(ev.byPolicy),
+            ]
+            // One more connection to a destination already listed: count it
+            // on the timeline's folded row (local only — no log line, no
+            // cloud event per connection).
+            if ev.isRepeat {
+                if let pid = ev.profileID {
+                    EgressReportDeduper.countRepeat(profileID: pid, eventData: eventData)
+                }
+                return
+            }
             // ✗ colors blocks red, → colors allows blue in the Security Log view.
             SupplyChainLog.shared.record("[firewall] \(ev.denied ? "✗" : "→") \(action) \(proto) \(dst) (\(who))")
             if let pid = ev.profileID {
-                BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
-                    "action": .string(action),
-                    "layer": .string("l4"),
-                    "proto": .string(proto),
-                    "host": .of(ev.hostnames.first),
-                    "ip": .string(UtunPacket.ipString(ev.dstIP)),
-                    "port": .int(Int(ev.port)),
-                    "hostnames": .array(ev.hostnames.map { .string($0) }),
-                    // Which rule decided (nil: the default action, or a
-                    // transport drop) — the timeline names it and offers to
-                    // switch it off / remove it.
-                    "rule": .of(ev.rule),
-                    "by_policy": .bool(ev.byPolicy),
-                ])
+                BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: eventData)
             }
         }
 
@@ -8076,7 +8107,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// credential use — colour-coded by outcome. Local + always-on (see
     /// `SecurityTimeline`). One window app-wide; reopening brings it forward.
     @objc func openSecurityTimelineAction(_ sender: Any?) {
-        if let win = securityTimelineWindow {
+        // The tracked window, or one still on screen whose reference was
+        // dropped — never a second "Security" window.
+        let id = NSUserInterfaceItemIdentifier("io.bromure.security-timeline")
+        if let win = securityTimelineWindow
+            ?? NSApp.windows.first(where: { $0.identifier == id && $0.isVisible }) {
+            securityTimelineWindow = win
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -8086,11 +8122,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false)
         win.title = NSLocalizedString("Security", comment: "security window title")
+        win.identifier = id
         win.center()
         win.delegate = self
         win.isReleasedWhenClosed = false
         win.contentView = NSHostingView(rootView: SecurityTimelineView(
-            onClose: { [weak self] in self?.securityTimelineWindow = nil },
+            // The reference is dropped in windowWillClose — not when SwiftUI
+            // reports the view gone (it can while the window stays open),
+            // which let the next open (`ui-shot which=timeline`) make a
+            // second window.
+            onClose: {},
             postures: { [weak self] in
                 (self?.profiles ?? []).map { SecurityPosture(profile: $0) }
             },

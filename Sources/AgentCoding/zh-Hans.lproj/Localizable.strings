@@ -4070,3 +4070,24 @@
 "The rules changed outside the editor while you have unsaved edits." = "你有未保存的编辑时，规则在编辑器之外被更改。";
 "Reload" = "重新载入";
 "Keep my edits" = "保留我的编辑";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "连接已关闭（代理） — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "连接已关闭（直连） — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "也显示为：%@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "上移规则";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "下移规则";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "删除规则";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "在安全时间线中也列出允许的连接";

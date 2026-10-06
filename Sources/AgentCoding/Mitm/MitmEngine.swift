@@ -117,17 +117,22 @@ public final class MitmEngine {
         // not left running until it ends on its own (the proxy route never
         // crosses the switch, which re-checks the transparent route per
         // frame). Every call re-checks — also the expiry pass, which arrives
-        // here once a timed rule lapses.
+        // here once a timed rule lapses. The registry also arms its own
+        // timer at the policy's soonest expiry, so a timed rule's end cuts
+        // its connections at that instant whether or not the host's sweep
+        // saves (and re-pushes) the switched-off rule.
         if prior != config.egressPolicy { EgressReportDeduper.shared.reset(profileID: profileID) }
-        EgressConnectionRegistry.shared.reevaluate(profileID: profileID, policy: config.egressPolicy)
+        EgressConnectionRegistry.shared.applyPolicy(profileID: profileID, policy: config.egressPolicy)
     }
     public nonisolated func guardrailsConfig(for profileID: UUID) -> GuardrailsConfig? {
         guardrailsLock.lock(); defer { guardrailsLock.unlock() }
         return guardrailsConfigs[profileID]
     }
     public nonisolated func clearGuardrailsConfig(for profileID: UUID) {
-        guardrailsLock.lock(); defer { guardrailsLock.unlock() }
+        guardrailsLock.lock()
         guardrailsConfigs.removeValue(forKey: profileID)
+        guardrailsLock.unlock()
+        EgressConnectionRegistry.shared.forget(profileID: profileID)
     }
 
     // Same shape for supply-chain policy. Looked up per-request
@@ -854,6 +859,9 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             guardrailsProvider: guardrailsCopy,
             supplyChainProvider: supplyChainCopy
         )
+        // The guest end's vsock port — how agentd's bridge for this socket is
+        // found when a firewall cut must reset it.
+        conn.guestVsockPort = connection.sourcePort
         // Off the cooperative pool: the connection blocks on its sockets.
         MitmTasks.spawn { await conn.run() }
         return true

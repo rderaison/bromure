@@ -120,6 +120,14 @@ public final class VMNetSwitch: @unchecked Sendable {
         /// False for the drops that aren't a ruleset decision (IPv6, QUIC,
         /// IP fragments on an inspected VM).
         public var byPolicy: Bool = true
+        /// A denied TCP segment of a flow that was already open (not a fresh
+        /// SYN): the rules changed under an established connection. The app
+        /// folds it into the "connection closed" row the MiTM's cut wrote.
+        public var midFlow: Bool = false
+        /// A further new connection (TCP SYN) to a destination already
+        /// reported within the dedupe window: not a new row, just one more
+        /// to count on the allowed row it folds into.
+        public var isRepeat: Bool = false
     }
     public typealias EgressObserver = @Sendable (EgressEvent) -> Void
     private var egressObserver: EgressObserver?
@@ -1145,11 +1153,15 @@ public final class VMNetSwitch: @unchecked Sendable {
         let now = Date()
         let verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport, now: now) ?? .allow
 
+        let tcpFlags = proto == 6 ? Self.tcpFlags(buf, n) : nil
         if verdict == .deny {
+            // Any TCP segment but a fresh SYN belongs to a flow that was open.
+            let midFlow = tcpFlags.map { Self.denyReset(tcpFlags: $0) != .syn } ?? false
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                       proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now)
+                       proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now,
+                       midFlow: midFlow)
             if proto == 6 {
-                switch Self.denyReset(tcpFlags: Self.tcpFlags(buf, n)) {
+                switch Self.denyReset(tcpFlags: tcpFlags) {
                 case .syn:                                     // fail the connect fast
                     injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n))
                 case .established:
@@ -1174,7 +1186,8 @@ public final class VMNetSwitch: @unchecked Sendable {
         // otherwise be reported as "allowed" by a firewall that's off (B25).
         if Self.reportsAllowedFlows(g.policy) {
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                       proto: proto, port: dport, denied: false, policy: g.policy, ep: ep, now: now)
+                       proto: proto, port: dport, denied: false, policy: g.policy, ep: ep, now: now,
+                       newConnection: Self.denyReset(tcpFlags: tcpFlags) == .syn)
         }
 
         // Allowed: divert intercepted TCP into the MiTM (the SNI layer re-checks
@@ -1232,17 +1245,35 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// separately for allow vs deny so a state change re-logs.
     /// `policy` (nil for a transport drop) names the deciding rule; it's only
     /// looked up for a flow that actually gets reported.
+    /// `newConnection` (an allowed TCP SYN): a deduped repeat is still passed
+    /// on, flagged `isRepeat`, so the allowed row's ×N counts every
+    /// connection rather than one per dedupe window.
     private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
                             proto: UInt8, port: UInt16, denied: Bool,
-                            policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date()) {
+                            policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
+                            midFlow: Bool = false, newConnection: Bool = false) {
         let name = hostnames.first ?? ""
         let key = EgressKey(portID: portID, name: name, dstIP: name.isEmpty ? dstIP : 0,
-                            dstPort: port, proto: denied ? proto | 0x80 : proto)
+                            // A dying flow's trailing segments dedupe apart from
+                            // fresh connections: the app may fold them into the
+                            // "connection closed" row, and a new connect after
+                            // that must still get its own "deny" row.
+                            dstPort: port, proto: (denied ? proto | 0x80 : proto) | (midFlow ? 0x40 : 0))
         lock.lock()
         let now = Date()
-        guard let observer = egressObserver,
-              now.timeIntervalSince(egressSeen[key] ?? .distantPast) >= Self.egressReportEvery
-        else { lock.unlock(); return }
+        guard let observer = egressObserver else { lock.unlock(); return }
+        guard now.timeIntervalSince(egressSeen[key] ?? .distantPast) >= Self.egressReportEvery else {
+            lock.unlock()
+            if newConnection, !denied {
+                var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
+                                        proto: proto, port: port, denied: false)
+                event.rule = policy?.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep,
+                                                port: port, now: now)?.text
+                event.isRepeat = true
+                observer(event)
+            }
+            return
+        }
         if egressSeen.count > 8192 {
             egressSeen = egressSeen.filter { now.timeIntervalSince($0.value) < Self.egressReportEvery }
         }
@@ -1250,6 +1281,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         lock.unlock()
         var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
                                 proto: proto, port: port, denied: denied)
+        event.midFlow = midFlow
         if let policy {
             event.rule = policy.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep,
                                            port: port, now: now)?.text

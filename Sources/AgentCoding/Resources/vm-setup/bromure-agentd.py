@@ -653,6 +653,17 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         workdir = req.get("workdir")
         version_exit = _version_mismatch(req)
 
+        # The host's firewall cut a proxied connection: reset its bridge.
+        abort = req.get("bridge_abort")
+        if isinstance(abort, dict):
+            try:
+                resp = _bridge_abort(int(abort.get("port", -1)))
+            except (TypeError, ValueError):
+                resp = {"error": "bad port", "exit_code": 1}
+            resp_data = json.dumps(resp).encode("utf-8")
+            vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
+            return  # finally: close + replenish
+
         # Native file op (host file browser) — no shell involved.
         fileop = req.get("file")
         if isinstance(fileop, dict):
@@ -823,7 +834,24 @@ def _bridge_log(msg):
         pass
 
 
-def _bridge_pump(src, dst):
+class _BridgeConn(object):
+    """One bridged client connection; `aborted` once the host asked to reset
+    it (the firewall cut it), so the pumps don't close it gracefully."""
+
+    def __init__(self, client, host):
+        self.client = client
+        self.host = host
+        self.aborted = False
+
+
+# Open bridges by their guest-side vsock port (what the host sees as the
+# connection's source port), so the host can abort one: {"bridge_abort":
+# {"port": N}} on the shell channel.
+_BRIDGES = {}
+_BRIDGES_LOCK = threading.Lock()
+
+
+def _bridge_pump(src, dst, conn=None, to_client=False):
     """Copy bytes from src to dst until either side closes."""
     try:
         while True:
@@ -834,10 +862,38 @@ def _bridge_pump(src, dst):
     except (OSError, ConnectionError):
         pass
     finally:
+        # An aborted connection must reach the client as a reset, never as
+        # a clean end of stream (a cut download would otherwise drain what
+        # is buffered and end like a short, "successful" transfer).
+        if not (to_client and conn is not None and conn.aborted):
+            try:
+                dst.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+
+def _bridge_abort(port):
+    """Reset the client side of the bridge whose vsock port is `port` (the
+    host's firewall cut that connection): RST, not FIN."""
+    with _BRIDGES_LOCK:
+        conn = _BRIDGES.get(port)
+    if conn is None:
+        return {"aborted": False, "exit_code": 0}
+    conn.aborted = True
+    try:
+        conn.client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                               struct.pack("ii", 1, 0))
+    except OSError:
+        pass
+    # Wake both pumps without sending anything to the client: SHUT_RD on the
+    # client (no FIN for TCP), and the host side fully. _bridge then closes
+    # the client with linger 0 — a reset.
+    for sock, how in ((conn.client, socket.SHUT_RD), (conn.host, socket.SHUT_RDWR)):
         try:
-            dst.shutdown(socket.SHUT_WR)
+            sock.shutdown(how)
         except OSError:
             pass
+    return {"aborted": True, "exit_code": 0}
 
 
 def _bridge(client, vsock_port, label):
@@ -851,13 +907,25 @@ def _bridge(client, vsock_port, label):
         client.close()
         return
 
+    conn = _BridgeConn(client, host)
+    try:
+        local_port = host.getsockname()[1]
+    except (OSError, IndexError, TypeError):
+        local_port = None
+    if local_port is not None:
+        with _BRIDGES_LOCK:
+            _BRIDGES[local_port] = conn
     _bridge_log("[%s] bridging client → host:%d" % (label, vsock_port))
-    t1 = threading.Thread(target=_bridge_pump, args=(client, host), daemon=True)
-    t2 = threading.Thread(target=_bridge_pump, args=(host, client), daemon=True)
+    t1 = threading.Thread(target=_bridge_pump, args=(client, host, conn, False), daemon=True)
+    t2 = threading.Thread(target=_bridge_pump, args=(host, client, conn, True), daemon=True)
     t1.start()
     t2.start()
     t1.join()
     t2.join()
+    if local_port is not None:
+        with _BRIDGES_LOCK:
+            if _BRIDGES.get(local_port) is conn:
+                del _BRIDGES[local_port]
     client.close()
     host.close()
 

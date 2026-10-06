@@ -4070,3 +4070,24 @@
 "The rules changed outside the editor while you have unsaved edits." = "Les règles ont changé en dehors de l’éditeur alors que vous avez des modifications non enregistrées.";
 "Reload" = "Recharger";
 "Keep my edits" = "Garder mes modifications";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "connexion fermée (proxy) — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "connexion fermée (directe) — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "Également vu comme : %@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "Monter la règle";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "Descendre la règle";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "Supprimer la règle";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "Lister aussi les connexions autorisées dans la chronologie de sécurité";

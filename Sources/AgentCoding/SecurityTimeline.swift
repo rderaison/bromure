@@ -508,7 +508,23 @@ public final class SecurityTimeline {
             return row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
 
         case "egress.firewall":
-            let host = str(d, "host") ?? str(d, "ip") ?? "?"
+            // The destination as the guest asked for it. The switch names a
+            // flow by its DNS-snooped names (the queried name first); should
+            // that first name still be a CDN / load-balancer server
+            // (`dyna.wikimedia.org`) while another is the site
+            // (`www.wikipedia.org`), the site is the row's host and the
+            // server an alias — the same requested-name-first the blocked
+            // rows (SNI / CONNECT host) get.
+            var snooped: [String] = []
+            if case .array(let names)? = d["hostnames"] {
+                for case .string(let n) in names where !snooped.contains(n) { snooped.append(n) }
+            }
+            var primary = str(d, "host")
+            if let p = primary, FirewallRuleActions.isServerName(p),
+               let site = snooped.first(where: { !FirewallRuleActions.isServerName($0) }) {
+                primary = site
+            }
+            let host = primary ?? str(d, "ip") ?? "?"
             let action = (str(d, "action") ?? "allowed").lowercased()
             let kind: Decision = action.contains("allow") ? .allowed : .blocked
             // The verdict word, localized (the event carries English
@@ -547,16 +563,28 @@ public final class SecurityTimeline {
                     String(format: NSLocalizedString("“%@” no longer allows it",
                                                      comment: "Security Timeline: why an open connection was closed; %@ = the rule that had allowed it"), $0)
                 } ?? decision
-                decision = String(format: NSLocalizedString("connection closed — %@",
-                                                            comment: "Security Timeline decision: an open connection cut by a firewall change; %@ = why"),
-                                  why)
+                // Which route the cut connection took: the guest's proxy
+                // (HTTPS_PROXY, via vsock) or direct (the transparent route).
+                switch str(d, "layer") {
+                case "proxy"?:
+                    decision = String(format: NSLocalizedString("connection closed (proxy) — %@",
+                                                                comment: "Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why"),
+                                      why)
+                case .some:
+                    decision = String(format: NSLocalizedString("connection closed (direct) — %@",
+                                                                comment: "Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why"),
+                                      why)
+                case nil:
+                    decision = String(format: NSLocalizedString("connection closed — %@",
+                                                                comment: "Security Timeline decision: an open connection cut by a firewall change; %@ = why"),
+                                      why)
+                }
             }
             var e = row(NSLocalizedString("Firewall", comment: "Security Timeline engine"),
                         "\(host)\(port)\(proto)", decision, kind)
-            let primary = str(d, "host")
-            var aliases: [String] = []
-            if case .array(let names)? = d["hostnames"] {
-                for case .string(let n) in names where n != primary && !aliases.contains(n) { aliases.append(n) }
+            var aliases: [String] = snooped.filter { $0 != primary }
+            if let original = str(d, "host"), original != primary, !aliases.contains(original) {
+                aliases.insert(original, at: 0)
             }
             e.firewall = Firewall(host: primary, ip: str(d, "ip"), port: int(d, "port"),
                                   proto: str(d, "proto"), rule: rule,

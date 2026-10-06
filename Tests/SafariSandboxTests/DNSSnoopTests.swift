@@ -73,4 +73,21 @@ struct DNSSnoopTests {
         c.record(ip: 1, name: "www.wikipedia.org", ttl: 300, query: false, now: t.addingTimeInterval(7))
         #expect(c.names(for: 1, now: t.addingTimeInterval(8)).prefix(2).contains("www.wikipedia.org"))
     }
+
+    @Test("A CDN name once queried directly doesn't outrank the site every later answer is for (#38)")
+    func queriedRecencyBeatsStickyAlias() {
+        let c = DNSSnoopCache()
+        let t = Date()
+        // Once, something asked for the CDN server by name…
+        c.record(ip: 7, name: "dyna.wikimedia.org", ttl: 300, query: true, now: t)
+        // …then each answer for the site lists both at the same instant
+        // (www asked for, dyna as the CNAME target). Both are "queried"
+        // names; the one asked for in THIS answer leads — not the
+        // alphabetically first.
+        for dt in [10.0, 20.0] {
+            c.record(ip: 7, name: "www.wikipedia.org", ttl: 300, query: true, now: t.addingTimeInterval(dt))
+            c.record(ip: 7, name: "dyna.wikimedia.org", ttl: 300, query: false, now: t.addingTimeInterval(dt))
+            #expect(c.names(for: 7, now: t.addingTimeInterval(dt)) == ["www.wikipedia.org", "dyna.wikimedia.org"])
+        }
+    }
 }

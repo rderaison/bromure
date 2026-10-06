@@ -91,7 +91,13 @@ enum DNSSnoop {
 /// snoop path (uplink→VM frames) and the verdict path (VM→uplink frames) — on
 /// different threads — don't contend the switch's forwarding lock.
 final class DNSSnoopCache: @unchecked Sendable {
-    private struct Name { var query: Bool; var seen: Date }
+    /// `queriedAt`: the last time this name was the QUESTION of an answer
+    /// (the guest asked for it). An answer also refreshes its CNAME targets'
+    /// `seen`, but not their `queriedAt` — so a CDN name the guest once
+    /// looked up directly (`dyna.wikimedia.org`) doesn't tie with, and
+    /// alphabetically beat, the site just asked for (`www.wikipedia.org`)
+    /// every time that site's answer lists it.
+    private struct Name { var query: Bool; var seen: Date; var queriedAt: Date? }
     private let lock = NSLock()
     private var map: [UInt32: (names: [String: Name], expiry: Date)] = [:]
     /// Cap a record's lifetime so a huge TTL can't pin a stale mapping forever,
@@ -106,12 +112,13 @@ final class DNSSnoopCache: @unchecked Sendable {
         let expiry = now.addingTimeInterval(life)
         lock.lock(); defer { lock.unlock() }
         if var e = map[ip], e.expiry > now {
-            let wasQuery = e.names[name]?.query ?? false
-            e.names[name] = Name(query: query || wasQuery, seen: now)
+            let old = e.names[name]
+            e.names[name] = Name(query: query || (old?.query ?? false), seen: now,
+                                 queriedAt: query ? now : old?.queriedAt)
             e.expiry = max(e.expiry, expiry)
             map[ip] = e
         } else {
-            map[ip] = ([name: Name(query: query, seen: now)], expiry)
+            map[ip] = ([name: Name(query: query, seen: now, queriedAt: query ? now : nil)], expiry)
             if map.count > 8192 { pruneLocked(now) }
         }
     }
@@ -125,6 +132,8 @@ final class DNSSnoopCache: @unchecked Sendable {
         guard let e = map[ip], e.expiry > now else { return [] }
         return e.names.sorted { a, b in
             if a.value.query != b.value.query { return a.value.query }
+            let qa = a.value.queriedAt ?? .distantPast, qb = b.value.queriedAt ?? .distantPast
+            if qa != qb { return qa > qb }
             if a.value.seen != b.value.seen { return a.value.seen > b.value.seen }
             return a.key < b.key
         }.map(\.key)

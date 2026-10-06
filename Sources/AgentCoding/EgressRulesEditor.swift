@@ -77,12 +77,19 @@ struct EgressRulesEditor: View {
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 320)
+            .accessibilityLabel(Text("Unmatched traffic"))
 
             if let logAllowed {
                 VStack(alignment: .leading, spacing: 2) {
-                    Toggle(NSLocalizedString("Log allowed connections", comment: "firewall pane toggle"),
-                           isOn: Binding(get: { logAllowed.wrappedValue ?? autoLogsAllowed },
-                                         set: { logAllowed.wrappedValue = $0 }))
+                    // AppKit checkbox (like the rule checkboxes): its title is
+                    // the AX name out-of-process tools see — SwiftUI's Toggle
+                    // exposed none.
+                    RuleCheckbox(isOn: Binding(get: { logAllowed.wrappedValue ?? autoLogsAllowed },
+                                               set: { logAllowed.wrappedValue = $0 }),
+                                 label: NSLocalizedString("Log allowed connections", comment: "firewall pane toggle"),
+                                 help: NSLocalizedString("List allowed connections in the Security Timeline too", comment: "firewall pane: Log allowed connections tooltip"),
+                                 title: NSLocalizedString("Log allowed connections", comment: "firewall pane toggle"))
+                        .fixedSize()
                     Text(NSLocalizedString("Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules.",
                                            comment: "firewall pane: Log allowed connections explanation"))
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -124,27 +131,35 @@ struct EgressRulesEditor: View {
                                      : NSLocalizedString("Off — this rule is ignored until you tick it", comment: "firewall rule toggle"))
                         .frame(width: Col.toggle)
                     Group {
-                    Picker("", selection: $row.action) { ForEach(actions, id: \.self) { Text($0).tag($0) } }
+                    Picker("Action", selection: $row.action) { ForEach(actions, id: \.self) { Text($0).tag($0) } }
                         .labelsHidden().frame(width: Col.action)
-                    Picker("", selection: $row.proto) { ForEach(protos, id: \.self) { Text($0).tag($0) } }
+                        .accessibilityLabel(Text("Action"))
+                    Picker("Proto", selection: $row.proto) { ForEach(protos, id: \.self) { Text($0).tag($0) } }
                         .labelsHidden().frame(width: Col.proto)
+                        .accessibilityLabel(Text("Proto"))
                     TextField("any / example.com / 10.0.0.0/8", text: $row.host)
                         .frame(minWidth: Col.hostMin, maxWidth: .infinity)
                         .layoutPriority(1)
                         .help(row.host)
+                        .accessibilityLabel(Text("Host / CIDR"))
                     TextField("any", text: $row.ports).frame(width: Col.ports)
+                        .accessibilityLabel(Text("Ports"))
                     if showMethods {
                         TextField(methodsPlaceholder(row), text: $row.methods)
                             .frame(width: Col.methods).disabled(row.proto != "web")
                             .help(row.methods)
+                            .accessibilityLabel(Text("Methods"))
                     }
                     }
                     .opacity(row.enabled ? 1 : 0.45)
                     temporaryMenu($row).frame(width: Col.timer, alignment: .leading)
                     HStack(spacing: 0) {
                         Button { move(row, by: -1) } label: { Image(systemName: "chevron.up") }.buttonStyle(.borderless)
+                            .accessibilityLabel(Text(NSLocalizedString("Move rule up", comment: "firewall rule button accessibility label")))
                         Button { move(row, by: 1) } label: { Image(systemName: "chevron.down") }.buttonStyle(.borderless)
+                            .accessibilityLabel(Text(NSLocalizedString("Move rule down", comment: "firewall rule button accessibility label")))
                         Button(role: .destructive) { rows.removeAll { $0.id == row.id } } label: { Image(systemName: "trash") }.buttonStyle(.borderless)
+                            .accessibilityLabel(Text(NSLocalizedString("Delete rule", comment: "firewall rule button accessibility label")))
                     }.frame(width: Col.buttons)
                 }
                 .textFieldStyle(.roundedBorder)
@@ -245,6 +260,7 @@ struct EgressRulesEditor: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .accessibilityLabel(Text(NSLocalizedString("Time limit", comment: "")))
         if temporary {
             // The countdown lives outside the menu (a menu label is drawn
             // once by AppKit and wouldn't tick).
@@ -407,11 +423,13 @@ private struct RuleCheckbox: NSViewRepresentable {
     @Binding var isOn: Bool
     let label: String
     let help: String
+    /// The visible title (none for a rule row's checkbox).
+    var title: String = ""
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSButton {
-        let b = NSButton(checkboxWithTitle: "", target: context.coordinator,
+        let b = NSButton(checkboxWithTitle: title, target: context.coordinator,
                          action: #selector(Coordinator.toggled(_:)))
         b.setContentHuggingPriority(.required, for: .horizontal)
         update(b)
@@ -426,6 +444,7 @@ private struct RuleCheckbox: NSViewRepresentable {
     private func update(_ b: NSButton) {
         let state: NSControl.StateValue = isOn ? .on : .off
         if b.state != state { b.state = state }
+        if b.title != title { b.title = title }
         if b.accessibilityLabel() != label { b.setAccessibilityLabel(label) }
         if b.toolTip != help { b.toolTip = help }
     }
