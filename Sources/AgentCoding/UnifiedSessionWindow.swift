@@ -4070,7 +4070,7 @@ struct SessionSidebar: View {
     @ViewBuilder
     private var kubeSection: some View {
         // Only once there is something to list: an empty category is noise
-        // (File › Infrastructure creates the first cluster or registry).
+        // (Workspaces › Infrastructure creates the first cluster or registry).
         if let kubeStore {
             if !kubeStore.clusters.isEmpty {
                 KubeClustersSection(store: kubeStore, model: model,

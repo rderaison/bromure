@@ -878,34 +878,27 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                    keyEquivalent: "q")
     quitItem.target = delegate
 
-    // File menu — the standard first menu: start things, close the window.
-    let fileMenuItem = NSMenuItem()
-    main.addItem(fileMenuItem)
-    let fileMenu = NSMenu(title: L("File"))
-    fileMenuItem.submenu = fileMenu
+    // Workspaces menu — before Edit. Acts on the unified window's selected
+    // workspace + active tab. (No File menu: starting things and closing the
+    // window live here.)
+    let wsMenuItem = NSMenuItem()
+    main.addItem(wsMenuItem)
+    let wsMenu = NSMenu(title: L("Workspaces"))
+    wsMenuItem.submenu = wsMenu
+
     // Sessions first: the thing a user does most — start an agent — leads.
     let newSessionItem = NSMenuItem(title: L("New Session…"),
                                     action: #selector(ACAppDelegate.newSessionAction(_:)),
                                     keyEquivalent: "n")
     newSessionItem.target = delegate
-    fileMenu.addItem(newSessionItem)
+    wsMenu.addItem(newSessionItem)
     // Rooms: sessions grouped, side by side, with their own Switchboard.
     let newRoomItem = NSMenuItem(title: L("New Room…"),
                                  action: #selector(ACAppDelegate.newRoomAction(_:)),
                                  keyEquivalent: "")
     newRoomItem.target = delegate
-    fileMenu.addItem(newRoomItem)
-    fileMenu.addItem(NSMenuItem.separator())
-    fileMenu.addItem(withTitle: L("Close Window"),
-                     action: #selector(NSWindow.performClose(_:)),
-                     keyEquivalent: "w")
-
-    // Workspaces menu — before Edit. Acts on the unified window's selected
-    // workspace + active tab.
-    let wsMenuItem = NSMenuItem()
-    main.addItem(wsMenuItem)
-    let wsMenu = NSMenu(title: L("Workspaces"))
-    wsMenuItem.submenu = wsMenu
+    wsMenu.addItem(newRoomItem)
+    wsMenu.addItem(NSMenuItem.separator())
 
     let paletteItem = NSMenuItem(title: L("Go to…"),
                                  action: #selector(ACAppDelegate.commandPaletteAction(_:)),
@@ -1062,6 +1055,10 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                   keyEquivalent: "")
     openExt4Item.target = delegate
     wsMenu.addItem(openExt4Item)
+    wsMenu.addItem(NSMenuItem.separator())
+    wsMenu.addItem(withTitle: L("Close Window"),
+                   action: #selector(NSWindow.performClose(_:)),
+                   keyEquivalent: "w")
 
     // Edit menu — without these items, the responder chain has no
     // Cut/Copy/Paste/Select-All hooks and ⌘V silently fails inside
