@@ -838,6 +838,8 @@ struct SessionHeaderView: View {
                         } label: {
                             Label(NSLocalizedString("Resume", comment: "session header"), systemImage: "play.fill")
                                 .font(.system(size: 12.5, weight: .semibold))
+                                .lineLimit(1)
+                                .fixedSize()
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                                 .foregroundStyle(.white)
@@ -845,6 +847,11 @@ struct SessionHeaderView: View {
                                 .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
                         }
                         .buttonStyle(.plain)
+                        // Never squeezed: the meta line beside it takes the
+                        // row's width first and steps its own detail down —
+                        // without this it wrapped the label to "Resum/e".
+                        .fixedSize()
+                        .layoutPriority(2)
                         .help(bucket == .asleep
                               ? NSLocalizedString("Wake up and continue where it left off", comment: "session header")
                               : NSLocalizedString("Resume where it left off", comment: "session header"))
