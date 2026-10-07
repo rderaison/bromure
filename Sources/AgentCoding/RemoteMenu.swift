@@ -1016,13 +1016,35 @@ final class RemoteMenuApp {
                                             defaultAuth: "basic") { changed = true }
             case 13: if editDatabaseSection(&doc, title: "Elasticsearch", engine: "elasticsearch",
                                             defaultAuth: "basic") { changed = true }
-            case 14: if editCredList(&doc, key: "manualTokens", title: "Other API keys",
+            case 14:
+                // The menu edits one text field; the profile stores a list.
+                // Show the list as "a.com, b.com" and store it back split —
+                // a written `hostFilter` was ignored once `hostFilters` existed.
+                if var list = doc["manualTokens"] as? [[String: Any]] {
+                    for i in list.indices {
+                        let hosts = list[i]["hostFilters"] as? [String] ?? []
+                        if (list[i]["hostFilter"] as? String ?? "").isEmpty, !hosts.isEmpty {
+                            list[i]["hostFilter"] = hosts.joined(separator: ", ")
+                        }
+                    }
+                    doc["manualTokens"] = list
+                }
+                defer {
+                    if var list = doc["manualTokens"] as? [[String: Any]] {
+                        for i in list.indices {
+                            let typed = list[i].removeValue(forKey: "hostFilter") as? String ?? ""
+                            list[i]["hostFilters"] = HostListField.parse(typed)
+                        }
+                        doc["manualTokens"] = list
+                    }
+                }
+                if editCredList(&doc, key: "manualTokens", title: "Other API keys",
                                     summary: { "\($0["name"] as? String ?? "?")  → $\($0["envVarName"] as? String ?? "")" },
                                     blank: { ["id": UUID().uuidString, "name": "", "realValue": "", "envVarName": "", "hostFilter": "", "requireApproval": false] },
                                     fields: [("name", "Name", .text(secret: false)),
                                              ("realValue", "Real secret", .text(secret: true)),
                                              ("envVarName", "Environment variable", .text(secret: false)),
-                                             ("hostFilter", "API host (optional)", .text(secret: false)),
+                                             ("hostFilter", "API host(s), comma-separated (optional)", .text(secret: false)),
                                              ("requireApproval", "Require approval to use", .bool)]) { changed = true }
             default: return changed
             }

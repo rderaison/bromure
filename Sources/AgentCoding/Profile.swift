@@ -309,7 +309,10 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         if let list = try c.decodeIfPresent([String].self, forKey: .hostFilters) {
             hostFilters = list
         } else if let single = try c.decodeIfPresent(String.self, forKey: .hostFilter), !single.isEmpty {
-            hostFilters = [single]           // migrate legacy single-host profiles
+            // Migrate legacy single-host profiles — a list typed into that
+            // one field ("a.com, b.com") becomes its hosts.
+            hostFilters = single.split(whereSeparator: { $0 == "," || $0 == " " })
+                .map { String($0) }.filter { !$0.isEmpty }
         } else {
             hostFilters = []
         }

@@ -5383,15 +5383,8 @@ private struct ManualTokenRow: View {
             // Hosts — restrict where the fake is swapped back to the real key.
             VStack(alignment: .leading, spacing: 3) {
                 credFieldLabel("API host(s) (optional)")
-                TextField("", text: Binding(
-                    get: { token.hostFilters.joined(separator: ", ") },
-                    set: { token.hostFilters = $0
-                        .split(whereSeparator: { $0 == "," || $0 == " " })
-                        .map { String($0) }
-                        .filter { !$0.isEmpty } }),
-                    prompt: Text("api.stripe.com, api.example.com"))
-                    .textFieldStyle(.roundedBorder)
-                    .labelsHidden()
+                HostListField(hosts: $token.hostFilters,
+                              prompt: "api.stripe.com, api.example.com")
                 credFieldHint("Hostnames only, comma-separated, no https:// or path. The real key is substituted only on requests to these hosts and their subdomains. Leave blank to allow any host.")
             }
 
@@ -6926,3 +6919,34 @@ extension ProfileEditorView {
     }
 }
 #endif
+
+/// A comma/space-separated host list typed as free text. The text is the
+/// field's own state — parsed into `hosts` as you type, never re-formatted
+/// under the cursor (a computed join/split binding ate the "," and " " the
+/// moment they were typed, so a second host ran into the first: #39).
+struct HostListField: View {
+    @Binding var hosts: [String]
+    var prompt: String
+    @State private var text: String = ""
+
+    static func parse(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" })
+            .map { String($0) }
+            .filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        TextField("", text: $text, prompt: Text(prompt))
+            .textFieldStyle(.roundedBorder)
+            .labelsHidden()
+            .onAppear { text = hosts.joined(separator: ", ") }
+            .onChange(of: text) { _, new in
+                let parsed = Self.parse(new)
+                if parsed != hosts { hosts = parsed }
+            }
+            .onChange(of: hosts) { _, new in
+                // Changed elsewhere (not by typing here): show it.
+                if Self.parse(text) != new { text = new.joined(separator: ", ") }
+            }
+    }
+}
