@@ -697,21 +697,124 @@ def write_chrome_env(cfg):
         f.write("\n".join(lines) + "\n")
 
 
-def write_ikev2_config(cfg):
-    """Write strongSwan swanctl.conf for IKEv2 VPN."""
-    server = cfg.get("ikev2Server", "")
+def swanctl_quote(value):
+    """Quote a swanctl.conf value so it cannot break out of the setting.
+
+    strongSwan ends an unquoted value at space, tab, '#', '}' or newline,
+    and runs the child SA's updown value through a root shell
+    (``process_start_shell`` with format ``2>&1 %s``). A profile string
+    interpolated raw can close the setting and inject another updown
+    command (CWE-78).
+
+    Inside double quotes the lexer treats backslash as an escape. Escape
+    backslash, quote, newline, CR and tab. Refuse a NUL: the C parser
+    would truncate the file there.
+    """
+    text = "" if value is None else str(value)
+    if "\x00" in text:
+        raise ValueError("IKEv2 setting contains a NUL")
+    escaped = (
+        text.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+    )
+    return '"' + escaped + '"'
+
+
+def pkcs12_openssl_invocation(p12_path, cert_pass, extra_args, dest):
+    """argv and stdin for ``openssl pkcs12`` without a shell.
+
+    The passphrase is the line openssl reads for ``-passin stdin``. It is
+    not an argv element, so a value such as ``x; id #`` cannot be parsed
+    as a second command. A newline, CR or NUL cannot be one passphrase
+    line and is refused rather than truncated or passed through a shell.
+    """
+    cert_pass = "" if cert_pass is None else str(cert_pass)
+    if "\n" in cert_pass or "\r" in cert_pass or "\x00" in cert_pass:
+        raise ValueError("PKCS#12 passphrase contains a newline or NUL")
+    argv = ["openssl", "pkcs12", "-in", p12_path, *list(extra_args),
+            "-passin", "stdin", "-out", dest]
+    return argv, (cert_pass + "\n").encode()
+
+
+def run_pkcs12_extract(p12_path, cert_pass, extra_args, dest):
+    """Extract one PEM object from a PKCS#12. The passphrase stays on stdin."""
+    argv, stdin_bytes = pkcs12_openssl_invocation(
+        p12_path, cert_pass, extra_args, dest)
+    # shell stays at the default (False). A list argv must never be joined
+    # into a command string.
+    return subprocess.run(argv, input=stdin_bytes, capture_output=True)
+
+
+def ikev2_squid_peer_snippet(host, port, user, password):
+    """Squid directives for the IKEv2 parent proxy, or None to skip it.
+
+    The updown script appends this text with ``cat`` and must not expand
+    the fields in a shell. CR, LF or NUL in any field would inject extra
+    squid.conf lines and is rejected. A login= line is written only when
+    both username and password are set, matching the previous script.
+    """
+    host = "" if host is None else str(host)
+    user = "" if user is None else str(user)
+    password = "" if password is None else str(password)
+    if not host:
+        return None
+    try:
+        port_n = int(port)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(port, bool) or port_n <= 0 or port_n > 65535:
+        return None
+    for field in (host, user, password):
+        if field and any(ch in field for ch in ("\n", "\r", "\x00")):
+            return None
+    if user and password:
+        peer = (
+            f"cache_peer {host} parent {port_n} 0 no-query default "
+            f"login={user}:{password}\n"
+        )
+    else:
+        peer = f"cache_peer {host} parent {port_n} 0 no-query default\n"
+    return peer + "never_direct allow all\n"
+
+
+def write_ikev2_config(cfg, swanctl_dir="/etc/swanctl", state_dir="/tmp/bromure"):
+    """Write strongSwan swanctl.conf for IKEv2 VPN.
+
+    ``swanctl_dir`` and ``state_dir`` exist so tests can point the same
+    writer at a temporary directory. Production callers use the defaults,
+    which are the guest paths strongSwan and the updown script share.
+    """
+    server = cfg.get("ikev2Server", "") or ""
     remote_id = cfg.get("ikev2RemoteID", server)
-    method = cfg.get("ikev2AuthMethod", "eap")
+    if remote_id is None:
+        remote_id = server
+    method = cfg.get("ikev2AuthMethod", "eap") or "eap"
     use_dns = cfg.get("ikev2UseDNS", True)
 
     # macOS-compatible cipher proposals
     proposals = "aes256gcm16-sha384-ecp384,aes256gcm16-sha256-ecp256,aes256gcm16-sha256-modp2048,aes256-sha256-ecp256"
     esp_proposals = "aes256gcm16-ecp384,aes256gcm16-ecp256,aes256gcm16-modp2048,aes256-sha256-ecp256"
 
-    # Build connection section based on auth method
-    username = cfg.get("ikev2Username", "")
+    # Build connection section based on auth method. Every profile string
+    # is quoted: strongSwan shells out to the updown path.
+    username = cfg.get("ikev2Username", "") or ""
+    password = cfg.get("ikev2Password", "") or ""
+    psk = cfg.get("ikev2PSK", "") or ""
+    try:
+        q_server = swanctl_quote(server)
+        q_remote = swanctl_quote(remote_id)
+        q_user = swanctl_quote(username) if method == "eap" else ""
+        q_pass = swanctl_quote(password) if method == "eap" else ""
+        q_psk = swanctl_quote(psk) if method == "psk" else ""
+    except ValueError as e:
+        print(f"config-agent: refusing IKEv2 config: {e}", file=sys.stderr)
+        return
+
     if method == "eap":
-        local_auth = "auth = eap-mschapv2\n            id = {}\n            eap_id = {}".format(username, username)
+        local_auth = "auth = eap-mschapv2\n            id = {}\n            eap_id = {}".format(q_user, q_user)
         remote_auth = "auth = pubkey"
     elif method == "certificate":
         local_auth = "auth = pubkey\n            certs = client.crt"
@@ -723,7 +826,8 @@ def write_ikev2_config(cfg):
         local_auth = "auth = eap-mschapv2"
         remote_auth = "auth = pubkey"
 
-    updown_line = '                updown = /etc/swanctl/updown.sh'
+    updown_path = os.path.join(swanctl_dir, "updown.sh")
+    updown_line = "                updown = {}".format(updown_path)
 
     conf = """connections {{
     bromure-vpn {{
@@ -757,79 +861,101 @@ def write_ikev2_config(cfg):
 """.format(
         proposals=proposals,
         esp_proposals=esp_proposals,
-        server=server,
+        server=q_server,
         local_auth=local_auth,
         remote_auth=remote_auth,
-        remote_id=remote_id,
+        remote_id=q_remote,
         updown_line=updown_line,
     )
 
-    # Build secrets section
+    # Build secrets section. Values are already swanctl-quoted.
     secrets = ""
     if method == "eap":
-        password = cfg.get("ikev2Password", "")
         # id must match eap_id so strongSwan finds the secret during EAP exchange.
         # Use both the username and the server identity to cover all lookup patterns.
         secrets = """secrets {{
     eap-bromure {{
         id0 = {username}
         id1 = {remote_id}
-        secret = "{password}"
+        secret = {password}
     }}
 }}
-""".format(username=username, remote_id=remote_id,
-           password=password.replace('"', '\\"'))
+""".format(username=q_user, remote_id=q_remote, password=q_pass)
     elif method == "psk":
-        psk = cfg.get("ikev2PSK", "")
         secrets = """secrets {{
     ike-bromure {{
-        secret = "{psk}"
+        secret = {psk}
     }}
 }}
-""".format(psk=psk.replace('"', '\\"'))
+""".format(psk=q_psk)
 
-    os.makedirs("/etc/swanctl/conf.d", exist_ok=True)
-    with open("/etc/swanctl/conf.d/bromure.conf", "w") as f:
+    os.makedirs(state_dir, exist_ok=True)
+    conf_dir = os.path.join(swanctl_dir, "conf.d")
+    os.makedirs(conf_dir, exist_ok=True)
+    conf_path = os.path.join(conf_dir, "bromure.conf")
+    with open(conf_path, "w") as f:
         f.write(conf)
         if secrets:
             f.write(secrets)
-    os.chmod("/etc/swanctl/conf.d/bromure.conf", 0o600)
+    os.chmod(conf_path, 0o600)
 
-    # For certificate auth, decode PKCS#12 and extract cert/key
+    # For certificate auth, decode PKCS#12 and extract cert/key.
+    # The passphrase is passed on openssl's stdin, never on a shell command line.
     if method == "certificate":
         cert_b64 = cfg.get("ikev2ClientCert", "")
-        cert_pass = cfg.get("ikev2CertPassphrase", "")
+        cert_pass = cfg.get("ikev2CertPassphrase", "") or ""
         if cert_b64:
             import base64
             p12_data = base64.b64decode(cert_b64)
-            p12_path = "/tmp/bromure/client.p12"
+            p12_path = os.path.join(state_dir, "client.p12")
             with open(p12_path, "wb") as f:
                 f.write(p12_data)
             os.chmod(p12_path, 0o600)
 
-            # Extract client cert and private key using openssl
-            pass_arg = "-passin pass:{}".format(cert_pass) if cert_pass else "-passin pass:"
-            os.makedirs("/etc/swanctl/x509", exist_ok=True)
-            os.makedirs("/etc/swanctl/private", exist_ok=True)
-            subprocess.run(
-                "openssl pkcs12 -in {p12} -clcerts -nokeys {pw} -out /etc/swanctl/x509/client.crt 2>/dev/null".format(
-                    p12=p12_path, pw=pass_arg),
-                shell=True)
-            subprocess.run(
-                "openssl pkcs12 -in {p12} -nocerts -nodes {pw} -out /etc/swanctl/private/client.key 2>/dev/null".format(
-                    p12=p12_path, pw=pass_arg),
-                shell=True)
-            os.chmod("/etc/swanctl/private/client.key", 0o600)
-            os.unlink(p12_path)
+            cert_out = os.path.join(swanctl_dir, "x509", "client.crt")
+            key_out = os.path.join(swanctl_dir, "private", "client.key")
+            os.makedirs(os.path.dirname(cert_out), exist_ok=True)
+            os.makedirs(os.path.dirname(key_out), exist_ok=True)
+            try:
+                run_pkcs12_extract(
+                    p12_path, cert_pass, ["-clcerts", "-nokeys"], cert_out)
+                run_pkcs12_extract(
+                    p12_path, cert_pass, ["-nocerts", "-nodes"], key_out)
+            except ValueError as e:
+                print(f"config-agent: refusing IKEv2 PKCS#12 passphrase: {e}",
+                      file=sys.stderr)
+            else:
+                try:
+                    os.chmod(key_out, 0o600)
+                except OSError:
+                    pass
+            finally:
+                try:
+                    os.unlink(p12_path)
+                except OSError:
+                    pass
 
-    # Write IKEv2 proxy config for the updown script to use
-    ikev2_proxy_host = cfg.get("ikev2ProxyHost", "")
-    ikev2_proxy_port = cfg.get("ikev2ProxyPort", 0)
-    ikev2_proxy_user = cfg.get("ikev2ProxyUsername", "")
-    ikev2_proxy_pass = cfg.get("ikev2ProxyPassword", "")
-    if ikev2_proxy_host and ikev2_proxy_port:
-        with open("/tmp/bromure/ikev2-proxy.conf", "w") as f:
-            f.write(f"{ikev2_proxy_host}\n{ikev2_proxy_port}\n{ikev2_proxy_user}\n{ikev2_proxy_pass}\n")
+    # Squid parent-proxy line. Written here so the updown shell only cats
+    # the file — proxy username and password are never expanded by sh.
+    snippet_path = os.path.join(state_dir, "ikev2-squid-peer.conf")
+    snippet = ikev2_squid_peer_snippet(
+        cfg.get("ikev2ProxyHost", ""),
+        cfg.get("ikev2ProxyPort", 0),
+        cfg.get("ikev2ProxyUsername", ""),
+        cfg.get("ikev2ProxyPassword", ""),
+    )
+    if snippet:
+        with open(snippet_path, "w") as f:
+            f.write(snippet)
+        os.chmod(snippet_path, 0o600)
+    else:
+        if cfg.get("ikev2ProxyHost"):
+            print("config-agent: refusing IKEv2 proxy settings that cannot "
+                  "be encoded as a single squid.conf line", file=sys.stderr)
+        try:
+            os.unlink(snippet_path)
+        except FileNotFoundError:
+            pass
 
     # Write updown script for routing and DNS integration
     use_dns_sh = "true" if use_dns else "false"
@@ -877,25 +1003,21 @@ case "$PLUTO_VERB" in
             fi
         fi
 
-        # Configure squid cache_peer if an IKEv2 proxy is set
-        PROXY_CONF="/tmp/bromure/ikev2-proxy.conf"
-        SQUID_CONF="/etc/squid/squid.conf"
-        if [ -f "$PROXY_CONF" ]; then
-            PHOST=$(sed -n '1p' "$PROXY_CONF")
-            PPORT=$(sed -n '2p' "$PROXY_CONF")
-            PUSER=$(sed -n '3p' "$PROXY_CONF")
-            PPASS=$(sed -n '4p' "$PROXY_CONF")
-            # Remove any existing cache_peer/login lines
+        # Configure squid cache_peer if an IKEv2 proxy is set.
+        # config-agent writes the exact directives. cat them so a proxy
+        # username or password is never expanded by this shell (CWE-78).
+        # BEGIN ikev2-proxy-apply
+        # Assignment (not a double-quoted expansion) so the single-quoted
+        # default path is quote-removed. The default is a literal path;
+        # the file's contents are never parsed as shell.
+        PROXY_SNIPPET=${{IKEV2_PROXY_SNIPPET:-{snippet}}}
+        SQUID_CONF=${{IKEV2_SQUID_CONF:-/etc/squid/squid.conf}}
+        if [ -f "$PROXY_SNIPPET" ]; then
             sed -i '/^cache_peer /d' "$SQUID_CONF"
             sed -i '/^never_direct /d' "$SQUID_CONF"
-            # Add parent proxy
-            if [ -n "$PUSER" ] && [ -n "$PPASS" ]; then
-                echo "cache_peer $PHOST parent $PPORT 0 no-query default login=$PUSER:$PPASS" >> "$SQUID_CONF"
-            else
-                echo "cache_peer $PHOST parent $PPORT 0 no-query default" >> "$SQUID_CONF"
-            fi
-            echo "never_direct allow all" >> "$SQUID_CONF"
+            cat "$PROXY_SNIPPET" >> "$SQUID_CONF"
         fi
+        # END ikev2-proxy-apply
 
         # Kill Squid so resilient-launch.sh restarts it with new routes/DNS
         pkill -f "squid -N" 2>/dev/null
@@ -964,11 +1086,11 @@ case "$PLUTO_VERB" in
         fi
         ;;
 esac
-""".format(use_dns=use_dns_sh)
-    os.makedirs("/etc/swanctl", exist_ok=True)
-    with open("/etc/swanctl/updown.sh", "w") as f:
+""".format(use_dns=use_dns_sh, snippet=sh_escape(snippet_path))
+    os.makedirs(swanctl_dir, exist_ok=True)
+    with open(updown_path, "w") as f:
         f.write(updown_script)
-    os.chmod("/etc/swanctl/updown.sh", 0o755)
+    os.chmod(updown_path, 0o755)
 
 
 OPENVPN_CONFIG_PATH = "/etc/openvpn/bromure.conf"
