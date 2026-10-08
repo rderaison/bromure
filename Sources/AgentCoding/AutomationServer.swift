@@ -2407,7 +2407,10 @@ final class ACAutomationServer {
                 else if n < 0 && errno == EINTR { continue }
                 else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
                     var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                    if poll(&pfd, 1, 5000) <= 0 { ok = false; return }   // 5s unwritable → peer gone
+                    // 30 s unwritable → peer gone. (A slow WAN client behind
+                    // the SSH bridge's backpressure can hold a frame for
+                    // seconds; a vanished one fails the write outright.)
+                    if poll(&pfd, 1, 30_000) <= 0 { ok = false; return }
                 } else { ok = false; return }   // hard error / peer hung up
             }
         }
@@ -2465,9 +2468,12 @@ final class ACAutomationServer {
 
     /// Loop a payload out over short writes; on EAGAIN wait for the fd to
     /// drain (poll, bounded) instead of dropping the remainder. Gives up
-    /// after ~60s or on a hard error — the peer is gone either way.
+    /// after ~60s WITHOUT PROGRESS or on a hard error — the peer is gone
+    /// either way. (Not 60 s total: the SSH bridge now applies backpressure,
+    /// so a 30 MB transcript to a fat client on a slow WAN link drains at the
+    /// link's pace and legitimately takes minutes.)
     private static func writeAllData(_ fd: Int32, _ data: Data) {
-        let deadline = Date().addingTimeInterval(60)
+        var deadline = Date().addingTimeInterval(60)
         data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
             guard var base = ptr.baseAddress else { return }
             var remaining = ptr.count
@@ -2476,6 +2482,7 @@ final class ACAutomationServer {
                 if n > 0 {
                     base += n
                     remaining -= n
+                    deadline = Date().addingTimeInterval(60)
                 } else if n < 0 && errno == EINTR {
                     continue
                 } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {

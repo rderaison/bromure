@@ -25,6 +25,7 @@ SHARED = [
     # Transport + protocol
     "FatClient.swift",
     "FatClientTypes.swift",
+    "FatClientLinkHealth.swift",  # adaptive timeouts + reconnect hysteresis + link simulation
     "FatClientSSHDial.swift",
     "FatClientNIOSSH.swift",
     "FatClientFleet.swift",

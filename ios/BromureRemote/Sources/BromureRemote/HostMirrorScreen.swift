@@ -91,7 +91,7 @@ struct HostMirrorScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if !controller.connected { reconnectBanner }
+                if !controller.connected { reconnectBanner } else if controller.linkSlow { slowBanner }
 
                 if controller.supportsSessions {
                     MobileSessionsSection(controller: controller,
@@ -230,6 +230,9 @@ struct HostMirrorScreen: View {
                 if let err = controller.lastError, controller.hasSnapshot {
                     Text(err).font(.caption)
                 }
+                if controller.hasSnapshot, !controller.linkReadout.isEmpty {
+                    Text(controller.linkReadout).font(.caption2.monospacedDigit())
+                }
             }
             Spacer()
         }
@@ -238,6 +241,26 @@ struct HostMirrorScreen: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(Color.orange.opacity(0.14)))
+    }
+
+    /// The link is up but slow (high latency, or polls struggling): a calm
+    /// note with the measured numbers — content stays live.
+    private var slowBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tortoise")
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Slow connection").font(.footnote.weight(.semibold))
+                if !controller.linkReadout.isEmpty {
+                    Text(controller.linkReadout).font(.caption2.monospacedDigit())
+                }
+            }
+            Spacer()
+        }
+        .foregroundStyle(.secondary)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color.secondary.opacity(0.10)))
     }
 
     private var boardsRow: some View {

@@ -343,10 +343,33 @@ enum RemoteTransport {
         // connection the mirror poll rides — sharing one let a wedged terminal
         // freeze the whole mirror on "Connecting…".
         let lane = interactive ? "term" : ""
-        return ControlClient(socketPath: "ssh://\(host.connectLabel)") {
+        var c = ControlClient(socketPath: "ssh://\(host.connectLabel)") {
             SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: lane)
         }
+        c.linkStats = LinkStats.shared(for: rawHost.id)
+        return c
     }
+
+    /// A control client on the BULK lane — its own pooled SSH connection
+    /// (own TCP flow) for the calls that move megabytes or run long: transcript
+    /// fetches (up to ~33 MB of base64), guest execs and file ops, trace
+    /// bodies, delegation file transfers. On the control connection they sat
+    /// ahead of the next `/state` poll (an SSH channel window is 16 MB), so on
+    /// a slow link one transcript read starved the poll past its timeout and
+    /// the mirror showed "Reconnecting…" with nothing wrong.
+    static func bulkClient(for rawHost: RemoteHost) -> ControlClient {
+        _ = bootstrap
+        ensureClientKey()
+        let host = resolved(rawHost)
+        var c = ControlClient(socketPath: "ssh://\(host.connectLabel)") {
+            SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: bulkLane)
+        }
+        c.linkStats = LinkStats.shared(for: rawHost.id)
+        return c
+    }
+
+    /// The pooled SSH connection bulk control calls ride (see `bulkClient`).
+    static let bulkLane = "bulk"
 
     /// Resolve a remote client by host id (used by the `__attach-window
     /// --remote <hostID>` subprocess).

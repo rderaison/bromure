@@ -419,6 +419,119 @@ final class HandshakeStallWatchdog: ChannelInboundHandler, RemovableChannelHandl
     }
 }
 
+/// Last-inbound-byte clock for one SSH connection, shared between the pipeline
+/// handler (event loop) and the dial path (any thread).
+final class InboundActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = Date()
+
+    func touch() { lock.lock(); last = Date(); lock.unlock() }
+
+    func secondsSinceLastInbound() -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        return Date().timeIntervalSince(last)
+    }
+}
+
+/// Pass-through inbound handler that stamps `InboundActivity` on every read.
+final class InboundActivityHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+    private let activity: InboundActivity
+    init(_ activity: InboundActivity) { self.activity = activity }
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        activity.touch()
+        context.fireChannelRead(data)
+    }
+}
+
+/// A one-shot timeout that may re-arm itself; only touched on one event loop.
+final class RescheduledTimeout: @unchecked Sendable {
+    var task: Scheduled<Void>?
+    var done = false
+}
+
+/// Debug/test knob (`LinkSimulation`): sits at the head of an SSH connection's
+/// pipeline and makes the socket behave like a slow WAN — each inbound read
+/// and outbound write is delivered half an RTT (+ jitter) later, in order,
+/// and inbound is paced to a bandwidth cap. Everything above it (KEX, auth,
+/// channel opens, every request) sees the simulated link.
+final class SimulatedLinkHandler: ChannelDuplexHandler, RemovableChannelHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    private let oneWayNanos: Int64
+    private let jitterNanos: Int64
+    private let bytesPerSecond: Int64
+    /// Delivery clocks, so jitter never reorders and pacing queues.
+    private var inboundAt = NIODeadline.uptimeNanoseconds(0)
+    private var outboundAt = NIODeadline.uptimeNanoseconds(0)
+    private var inboundWireFree = NIODeadline.uptimeNanoseconds(0)
+
+    init(_ sim: LinkSimulation) {
+        oneWayNanos = Int64(sim.rttMs) * 1_000_000 / 2
+        jitterNanos = Int64(sim.jitterMs) * 1_000_000
+        bytesPerSecond = Int64(sim.kbps) * 1024
+    }
+
+    private func jitter() -> Int64 { jitterNanos > 0 ? Int64.random(in: 0...jitterNanos) : 0 }
+
+    /// When an inbound chunk of `bytes` that arrives `now` is handed up.
+    func inboundDeadline(now: NIODeadline, bytes: Int) -> NIODeadline {
+        var leaves = now
+        if bytesPerSecond > 0 {
+            let start = max(now, inboundWireFree)
+            inboundWireFree = start + .nanoseconds(Int64(bytes) * 1_000_000_000 / bytesPerSecond)
+            leaves = inboundWireFree
+        }
+        let at = max(leaves + .nanoseconds(oneWayNanos + jitter()), inboundAt + .nanoseconds(1))
+        inboundAt = at
+        return at
+    }
+
+    func outboundDeadline(now: NIODeadline) -> NIODeadline {
+        let at = max(now + .nanoseconds(oneWayNanos + jitter()), outboundAt + .nanoseconds(1))
+        outboundAt = at
+        return at
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let buf = unwrapInboundIn(data)
+        let at = inboundDeadline(now: context.eventLoop.now, bytes: buf.readableBytes)
+        let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
+        context.eventLoop.scheduleTask(deadline: at) {
+            let (ctx, me) = bound.value
+            ctx.fireChannelRead(me.wrapInboundOut(buf))
+            ctx.fireChannelReadComplete()
+        }
+    }
+
+    /// Read-complete is fired per delayed read instead.
+    func channelReadComplete(context: ChannelHandlerContext) {}
+
+    /// EOF follows the data still in flight.
+    func channelInactive(context: ChannelHandlerContext) {
+        let at = max(context.eventLoop.now, inboundAt + .nanoseconds(1))
+        let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+        context.eventLoop.scheduleTask(deadline: at) { bound.value.fireChannelInactive() }
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let buf = unwrapOutboundIn(data)
+        let at = outboundDeadline(now: context.eventLoop.now)
+        let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
+        context.eventLoop.scheduleTask(deadline: at) {
+            let (ctx, me) = bound.value
+            ctx.writeAndFlush(me.wrapOutboundOut(buf), promise: promise)
+        }
+    }
+
+    /// Each delayed write flushes itself when it's delivered.
+    func flush(context: ChannelHandlerContext) {}
+}
+
 // MARK: - One SSH connection
 
 /// A single authenticated SSH connection; `openVerbChannel` multiplexes exec
@@ -437,6 +550,10 @@ final class SSHConnection: @unchecked Sendable {
     let channel: Channel
     private let host: RemoteHost
     var isAlive: Bool { channel.isActive }
+    /// When the connection last received bytes (any channel). A channel open
+    /// that's slow while bytes keep arriving is a busy slow link, not a
+    /// wedged connection — see `openVerbChannel`.
+    let activity: InboundActivity
 
     /// Synchronous connect + handshake + auth. Throws `SSHDialError`.
     init(host: RemoteHost, group: EventLoopGroup, strictHostKey: Bool,
@@ -456,9 +573,20 @@ final class SSHConnection: @unchecked Sendable {
             outcome.flag(.hostKeyChanged)
         }
         let connLabel = host.connectLabel
+        let activity = InboundActivity()
+        self.activity = activity
+        let sim = LinkSimulation.current
+        if sim.isActive {
+            FatClientLog.log("nio-conn: SIMULATED slow link (\(sim.label)) \(connLabel)")
+        }
         let bootstrap = ClientBootstrap(group: group)
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
+                    // Test knob: a simulated WAN between the socket and SSH.
+                    if sim.isActive {
+                        try channel.pipeline.syncOperations.addHandler(SimulatedLinkHandler(sim))
+                    }
+                    try channel.pipeline.syncOperations.addHandler(InboundActivityHandler(activity))
                     // Stall watchdog FIRST (head of the pipeline) so it sees
                     // every inbound packet during KEX/auth and only aborts on a
                     // genuine silence, not a slow link.
@@ -476,6 +604,16 @@ final class SSHConnection: @unchecked Sendable {
             }
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
+            // Keepalive tolerant of a jittery WAN (the OS default waits two
+            // hours idle): first probe after 30 s idle, then every 15 s, drop
+            // after 4 unanswered — ~90 s for a silently dead direct path. The
+            // poll keeps a live mirror from ever being idle that long, so
+            // this only reaps connections nothing is using. (A peer host's
+            // connection is loopback to the P2P shim; its network leg is
+            // tuned in P2PTransport.)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPALIVE), value: 30)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPINTVL), value: 15)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPCNT), value: 4)
             .connectTimeout(.seconds(30))
 
         do {
@@ -573,11 +711,35 @@ final class SSHConnection: @unchecked Sendable {
         // Bound the channel open: on timeout, EOF the app side (the request fails
         // like any dropped connection) and tear the connection down so the NEXT
         // request re-establishes a fresh one instead of reusing the corpse.
-        let timeout = ch.eventLoop.scheduleTask(in: .seconds(15)) { [weak self] in
-            FatClientLog.log("nio-dial: channel open timed out — dropping wedged connection")
-            closePump()
-            self?.close()
+        //
+        // "Wedged" means SILENT: on a slow link a big transfer on another
+        // channel of this connection (up to a 16 MB window of it) can sit
+        // ahead of the open confirmation for longer than 15 s while bytes
+        // keep flowing. Killing the connection then took that transfer, the
+        // poll and every other channel down with it — on a trans-Pacific link
+        // that WAS the "Reconnecting…" loop. So the stall timer re-arms while
+        // the connection is receiving, up to a hard ceiling.
+        let activity = self.activity
+        let opened = Date()
+        let stall = LinkTimeouts.channelOpenStall
+        let timeout = RescheduledTimeout()
+        func armOpenTimeout(after: TimeInterval) {
+            timeout.task = ch.eventLoop.scheduleTask(in: .milliseconds(Int64(after * 1000))) { [weak self] in
+                guard !timeout.done else { return }
+                let quiet = activity.secondsSinceLastInbound()
+                let waited = Date().timeIntervalSince(opened)
+                if quiet < stall, waited < LinkTimeouts.channelOpenCeiling {
+                    // Busy, not dead: wait until it's been `stall` quiet.
+                    armOpenTimeout(after: max(1, stall - quiet))
+                    return
+                }
+                FatClientLog.log("nio-dial: channel open timed out after \(Int(waited))s "
+                    + "(connection quiet \(Int(quiet))s) — dropping wedged connection")
+                closePump()
+                self?.close()
+            }
         }
+        armOpenTimeout(after: stall)
         // `syncOperations` (handler lookup + child addHandler) MUST run on the
         // event loop, not this caller's background thread — off-loop it trips
         // NIO's preconditionInEventLoop and crashes.
@@ -595,7 +757,8 @@ final class SSHConnection: @unchecked Sendable {
             }
         }
         promise.futureResult.whenComplete { result in
-            timeout.cancel()
+            timeout.done = true
+            timeout.task?.cancel()
             // Channel never opened — close the pump side so the app side EOFs.
             if case .failure = result { closePump() }
         }

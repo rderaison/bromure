@@ -345,6 +345,50 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         lastPumpWrite = p.futureResult
         channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)),
                               promise: p)
+        // Backpressure: stop reading the fd while the channel can't take more
+        // (the client's window is full, or the connection's socket is backed
+        // up). Without it a 30 MB transcript was read off the control socket
+        // at once and queued in the connection ahead of everything else, so
+        // the next `/state` reply on another channel waited behind all of it —
+        // on a slow WAN link, long enough for the client to call it a drop.
+        // Paused, every channel's pump resumes together when the socket
+        // drains, so their replies interleave a chunk at a time.
+        if !channel.isWritable { pauseReadPump(channel) }
+    }
+
+    /// The read pump is suspended for backpressure (ioQueue only).
+    private var pumpPaused = false
+
+    private func pauseReadPump(_ channel: Channel) {
+        guard !pumpPaused, !terminated, let src = readSource else { return }
+        pumpPaused = true
+        src.suspend()
+        // Writability may have come back between the check and the suspend
+        // (its event only fires on a change): look again from the loop.
+        channel.eventLoop.execute { [weak self] in
+            if channel.isWritable { self?.ioQueue.async { self?.resumeReadPump() } }
+        }
+    }
+
+    private func resumeReadPump() {
+        guard pumpPaused else { return }
+        pumpPaused = false
+        readSource?.resume()
+    }
+
+    /// A suspended source must be resumed before it's cancelled/released
+    /// (libdispatch traps on releasing a suspended object).
+    private func cancelReadSource() {
+        if pumpPaused { pumpPaused = false; readSource?.resume() }
+        readSource?.cancel()
+        readSource = nil
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable {
+            ioQueue.async { [weak self] in self?.resumeReadPump() }
+        }
+        context.fireChannelWritabilityChanged()
     }
 
     /// finish() only after every queued pump write has actually left the
@@ -838,8 +882,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     private func finish(channel: Channel, pid: pid_t, master: Int32) {
         guard !terminated else { return }
         terminated = true
-        readSource?.cancel()
-        readSource = nil
+        cancelReadSource()
         Darwin.close(master)
         var status: Int32 = 0
         if pid > 0 { waitpid(pid, &status, 0) }
@@ -854,8 +897,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     private func teardown(pid: pid_t, master: Int32) {
         guard !terminated else { return }
         terminated = true
-        readSource?.cancel()
-        readSource = nil
+        cancelReadSource()
         writeSource?.cancel()
         writeSource = nil
         if master >= 0 { Darwin.close(master) }

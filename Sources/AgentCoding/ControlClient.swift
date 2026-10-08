@@ -36,6 +36,20 @@ struct ControlClient {
         self.dial = dial
     }
 
+    /// The remote link this client's requests ride, when it's a fat-client
+    /// tunnel: requests feed it timings (RTT from cheap calls, throughput from
+    /// big replies, progress from every read) and take their read timeout
+    /// from it, so a slow WAN link stretches timeouts instead of failing. Nil
+    /// for the local control socket (fixed, LAN-tuned timeouts).
+    var linkStats: LinkStats?
+
+    /// Calls whose time-to-first-byte is a fair round-trip sample: cheap,
+    /// answered from memory. Anything that runs work server-side (an exec,
+    /// a transcript read) would read as a slow link.
+    static func samplesLatency(_ method: String, _ path: String) -> Bool {
+        method == "GET" && (path == "/state" || path == "/health")
+    }
+
     struct Response { let status: Int; let json: [String: Any] }
 
     enum ClientError: LocalizedError {
@@ -72,8 +86,15 @@ struct ControlClient {
         // the read returns -1, the response is incomplete, and this throws — the
         // poll then fails and the reconnect path takes over. Generous so a slow
         // but alive response over a WAN relay is never truncated.
-        var rcvTimeout = timeval(tv_sec: max(1, recvTimeoutSeconds), tv_usec: 0)
+        // Over a measured remote link the bound adapts (never below the
+        // caller's): a 200 ms+ WAN path with a relay's loss recovery can go
+        // quiet for longer than a LAN ever does, without being down.
+        let idle = linkStats?.recvIdleTimeout(base: TimeInterval(max(1, recvTimeoutSeconds)))
+            ?? TimeInterval(max(1, recvTimeoutSeconds))
+        var rcvTimeout = timeval(tv_sec: Int(idle), tv_usec: Int32((idle - idle.rounded(.down)) * 1_000_000))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+        let started = Date()
+        var firstByteAt: Date?
 
         let bodyData = try body.map { try JSONSerialization.data(withJSONObject: $0) } ?? Data()
         var head = "\(method) \(path) HTTP/1.1\r\n"
@@ -95,6 +116,11 @@ struct ControlClient {
         while true {
             let n = buf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
             if n <= 0 { break }
+            if let stats = linkStats {
+                let now = Date()
+                if firstByteAt == nil { firstByteAt = now }
+                stats.noteProgress(at: now)
+            }
             resp.append(contentsOf: buf[0..<n])
             if expected == nil, let sep = resp.range(of: Data([13, 10, 13, 10])) {
                 let header = String(decoding: resp[..<sep.lowerBound], as: UTF8.self)
@@ -108,6 +134,12 @@ struct ControlClient {
                 if expected == nil { expected = -1 }   // none stated: to EOF
             }
             if let e = expected, e >= 0, resp.count >= e { break }
+        }
+        if let stats = linkStats, let first = firstByteAt {
+            if Self.samplesLatency(method, path) {
+                stats.recordLatency(first.timeIntervalSince(started))
+            }
+            stats.recordTransfer(bytes: resp.count, seconds: Date().timeIntervalSince(first))
         }
         // Split header/body on the RAW bytes: the body may be BINARY (a
         // zlib-compressed response, negotiated via X-Bromure-Gzip) and a
@@ -173,7 +205,8 @@ struct ControlClient {
         // doesn't hang a terminal forever on connect ("some terminals don't
         // connect"). Cleared once the header lands, so an idle terminal — no
         // output for a while — is never dropped by a read timeout on the live fd.
-        var hsTimeout = timeval(tv_sec: 12, tv_usec: 0)
+        let hs = linkStats?.recvIdleTimeout(base: 12) ?? 12
+        var hsTimeout = timeval(tv_sec: Int(hs), tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &hsTimeout, socklen_t(MemoryLayout<timeval>.size))
 
         // Read exactly up to the end of the response header (\r\n\r\n) one byte

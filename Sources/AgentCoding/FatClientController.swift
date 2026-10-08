@@ -47,8 +47,19 @@ final class RemoteHostController {
     /// Mirror of the server's delegations between sessions.
     let delegationStore = DelegationStore(mirror: true)
 
-    /// Connection health, surfaced in the window chrome.
+    /// Connection health, surfaced in the window chrome. True while the link
+    /// is up OR merely struggling (`linkSlow`); false only once the hysteresis
+    /// in `LinkHealthMonitor` calls it down — one slow or failed poll on a
+    /// high-latency link no longer flips the window to "Reconnecting…".
     var connected = false
+    /// The link is up but slow (high request RTT, or recent polls failing
+    /// without the link having gone quiet long enough to call it down): a
+    /// calm indicator, content stays live.
+    private(set) var linkSlow = false
+    /// The measured link, one line ("request RTT 820 ms (min 610, ±90) ·
+    /// 1.4 MB/s · P2P relay"), for the slow-link indicator's tooltip and the
+    /// debug state. Refreshed on every poll outcome.
+    private(set) var linkReadout = ""
     var lastError: String?
     /// Why the link is down, when SSH said so (nil while connected, or when
     /// the server answered but not with a snapshot). Only an auth/host-key
@@ -392,6 +403,14 @@ final class RemoteHostController {
     /// after a few straight failures we tear it down so the next poll
     /// re-establishes end to end (fresh grant, fresh relay if needed).
     private var peerFailStreak = 0
+    /// Hysteresis between failed polls and "the link is down".
+    private var health = LinkHealthMonitor()
+    /// Measured RTT / throughput / progress for this host (fed by every
+    /// control request over its tunnel).
+    var linkStats: LinkStats { LinkStats.shared(for: host.id) }
+    /// When the last fast poll started, to space polls by the link's RTT.
+    private var lastPollStart = Date.distantPast
+    private var lastLinkLog = Date.distantPast
     /// Bumped every apply; the window observes it to refresh the stage.
     private(set) var revision = 0
     /// The newest snapshot applied (server run + generation). The push
@@ -467,7 +486,7 @@ final class RemoteHostController {
         guard pollTimerBox.timer == nil else { return }
         pollOnce()
         let t = Timer(timeInterval: 0.75, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollOnce() }
+            Task { @MainActor in self?.pollOnce(force: false) }
         }
         RunLoop.main.add(t, forMode: .common)
         pollTimerBox.timer = t
@@ -478,7 +497,7 @@ final class RemoteHostController {
         if pathObserver == nil {
             pathObserver = NotificationCenter.default.addObserver(
                 forName: .bromureP2PPathChanged, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.pollOnce() }
+                Task { @MainActor in self?.pollOnce(force: true) }
             }
         }
 #if os(macOS)
@@ -530,7 +549,7 @@ final class RemoteHostController {
 
     /// Refresh immediately instead of waiting up to a poll interval — used when
     /// the app returns to the foreground so the mirror catches up at once.
-    func foregroundKick() { pollOnce() }
+    func foregroundKick() { pollOnce(force: true) }
 
     // MARK: - Push subscription
 
@@ -538,7 +557,7 @@ final class RemoteHostController {
     private func setPollInterval(_ seconds: TimeInterval) {
         pollTimerBox.timer?.invalidate()
         let t = Timer(timeInterval: seconds, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollOnce() }
+            Task { @MainActor in self?.pollOnce(force: false) }
         }
         RunLoop.main.add(t, forMode: .common)
         pollTimerBox.timer = t
@@ -559,11 +578,87 @@ final class RemoteHostController {
     /// degenerate guard etc. still apply).
     func applyPushedSnapshot(_ snapshot: [String: Any]) {
         if !connected { FatClientLog.log("push: first snapshot") }
-        connected = true
+        noteLinkSuccess()
+        apply(snapshot)
+    }
+
+    // MARK: - Link health
+
+    /// What the measured path is, for the readout.
+    private var linkPathLabel: String {
+        guard let pid = host.peerDeviceID else { return "direct SSH" }
+        switch P2PBroker.shared.cachedEndpoint(forPeer: pid)?.path {
+        case .lan?: return "P2P LAN"
+        case .direct?: return "P2P direct"
+        case .relay?: return "P2P relay (bromure.io)"
+        case nil: return "P2P (establishing)"
+        }
+    }
+
+    /// One-line readout of the link (see `linkReadout`).
+    func describeLink() -> String {
+        LinkStats.describe(linkStats.snapshot(), path: linkPathLabel)
+    }
+
+    /// The debug/automation view of the link.
+    func linkDebugState() -> [String: Any] {
+        let s = linkStats.snapshot()
+        var d: [String: Any] = [
+            "connected": connected, "slow": linkSlow,
+            "consecutiveFailures": health.consecutiveFailures,
+            "readout": describeLink(), "path": linkPathLabel,
+            "recvIdleTimeoutSec": s.recvIdleTimeout,
+            "pollGapSec": LinkTimeouts.pollGap(srtt: s.srtt),
+            "samples": s.samples,
+        ]
+        if let v = s.srtt { d["srttMs"] = Int(v * 1000) }
+        d["rttvarMs"] = Int(s.rttvar * 1000)
+        if let v = s.minRTT { d["minRttMs"] = Int(v * 1000) }
+        if let v = s.lastRTT { d["lastRttMs"] = Int(v * 1000) }
+        if let v = s.bytesPerSecond { d["bytesPerSecond"] = Int(v) }
+        if let at = health.lastSuccessAt { d["sinceLastSuccessSec"] = Date().timeIntervalSince(at) }
+        let sim = LinkSimulation.current
+        if sim.isActive { d["simulated"] = sim.label }
+        return d
+    }
+
+    private func noteLinkSuccess() {
+        health.recordSuccess(at: Date())
         lastError = nil
         linkVerdict = nil
         peerFailStreak = 0
-        apply(snapshot)
+        refreshLinkHealth()
+    }
+
+    /// Re-derive `connected` / `linkSlow` from the monitor. Called on every
+    /// poll outcome and every poll-timer tick (so a link goes down while a
+    /// slow poll is still hanging, not only when it finally fails).
+    private func refreshLinkHealth() {
+        let now = Date()
+        let snap = linkStats.snapshot()
+        // An auth or host-key verdict is an answer, not a slow link.
+        let verdictDown = linkVerdict == .authFailed || linkVerdict == .hostKeyChanged
+        let state = verdictDown ? .down
+            : health.state(at: now, lastProgressAt: snap.lastProgressAt, srtt: snap.srtt)
+        let up = state == .live || state == .slow
+        let slow = state == .slow
+        if up != connected {
+            FatClientLog.log("link: \(up ? "UP" : "DOWN") (\(health.consecutiveFailures) failed poll(s)) — "
+                + LinkStats.describe(snap, path: linkPathLabel))
+            connected = up
+        }
+        if slow != linkSlow {
+            FatClientLog.log("link: \(slow ? "slow" : "normal") — " + LinkStats.describe(snap, path: linkPathLabel))
+            linkSlow = slow
+        }
+        let readout = LinkStats.describe(snap, path: linkPathLabel)
+        if readout != linkReadout { linkReadout = readout }
+        // A periodic line in the fat-client log, so a user's report carries
+        // the path's actual numbers.
+        if now.timeIntervalSince(lastLinkLog) > 60, snap.samples > 0 {
+            lastLinkLog = now
+            FatClientLog.log("link: \(readout)")
+        }
     }
 
     /// Upgrade from polling to push once a snapshot advertises `supportsPush`.
@@ -576,8 +671,17 @@ final class RemoteHostController {
         FatClientLog.log("push: subscribing (server advertised supportsPush)")
     }
 
-    private func pollOnce() {
+    private func pollOnce(force: Bool = true) {
+        // Every tick re-evaluates the link, so a poll hanging on a dead link
+        // still takes the mirror down once the hysteresis says so.
+        if revision > 0 || health.consecutiveFailures > 0 { refreshLinkHealth() }
         if polling { return }   // don't stack requests if the link is slow
+        // On a slow link, space polls by its RTT (a poll is ~3 round trips);
+        // the timer ticks every 0.75 s. Explicit kicks (an action's refresh,
+        // a network change, foregrounding) go at once.
+        let gap = LinkTimeouts.pollGap(srtt: linkStats.snapshot().srtt)
+        if !force, Date().timeIntervalSince(lastPollStart) < gap - 0.05 { return }
+        lastPollStart = Date()
         polling = true
         let host = self.host
         pollQueue.async { [weak self] in
@@ -597,21 +701,21 @@ final class RemoteHostController {
                 self.polling = false
                 if let resp, resp.status == 200 {
                     if !self.connected { FatClientLog.log("poll: connected, status 200") }
-                    self.connected = true
-                    self.lastError = nil
-                    self.linkVerdict = nil
-                    self.peerFailStreak = 0
+                    self.noteLinkSuccess()
                     self.apply(resp.json)
                 } else {
-                    if self.connected || self.revision == 0 {
-                        FatClientLog.log("poll: FAILED status=\(resp?.status ?? -1)")
-                    }
-                    self.connected = false
+                    self.health.recordFailure()
+                    FatClientLog.log("poll: FAILED status=\(resp?.status ?? -1) "
+                        + "(\(self.health.consecutiveFailures) in a row) — \(self.describeLink())")
                     self.lastError = "not reachable"
                     if self.linkVerdict != verdict { self.linkVerdict = verdict }
+                    self.refreshLinkHealth()
                     if let pid = host.peerDeviceID {
                         self.peerFailStreak += 1
-                        if self.peerFailStreak >= 3 {
+                        // Only a link the hysteresis calls DOWN gets its P2P
+                        // path torn down: that teardown kills every terminal
+                        // riding it, so a slow-but-alive relay must not get it.
+                        if self.peerFailStreak >= 3, !self.connected {
                             if P2PBroker.shared.isEstablishing(pid) {
                                 // A single-flight establish is still running
                                 // (slow relay path). Don't reap the peer now —
@@ -1413,7 +1517,7 @@ final class RemoteHostController {
         // (its own exec bound is 20 s) and ships the whole conversation:
         // well past the 12 s default a control call gets.
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("GET", path, recvTimeoutSeconds: 60)
+            try RemoteTransport.bulkClient(for: host).request("GET", path, recvTimeoutSeconds: 60)
         }.value
         guard let resp, resp.status == 200,
               let b64 = resp.json["transcript"] as? String, !b64.isEmpty,
@@ -1720,7 +1824,7 @@ final class RemoteHostController {
         var path = "/trace/records"
         if let profileID { path += "?profile=\(seg(profileID))" }
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("GET", path)
+            try RemoteTransport.bulkClient(for: host).request("GET", path)
         }.value
         guard let resp, resp.status == 200,
               let raw = resp.json["records"] as? [[String: Any]] else { return [] }
@@ -1739,7 +1843,7 @@ final class RemoteHostController {
         let host = self.host
         let path = "/trace/body?id=\(id.uuidString)&kind=\(kind.rawValue)"
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("GET", path)
+            try RemoteTransport.bulkClient(for: host).request("GET", path)
         }.value
         guard let resp, resp.status == 200,
               let b64 = resp.json["body"] as? String, !b64.isEmpty else { return nil }
@@ -2020,7 +2124,7 @@ final class RemoteHostController {
         // default lost any exec slower than that — a first transcript load
         // over a WAN, say).
         let resp = try await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host)
+            try RemoteTransport.bulkClient(for: host)
                 .request("POST", path, body: ["command": command, "timeout": timeout],
                          recvTimeoutSeconds: timeout + 15)
         }.value
@@ -2043,7 +2147,7 @@ final class RemoteHostController {
         let host = self.host
         let path = "/vms/\(seg(id))/file"
         let resp = try await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host)
+            try RemoteTransport.bulkClient(for: host)
                 .request("POST", path, body: ["op": op, "timeout": timeout],
                          recvTimeoutSeconds: timeout + 5)
         }.value
@@ -2097,7 +2201,7 @@ final class RemoteHostController {
         let host = self.host
         let path = "/automation-runs/\(ControlClient.encodeSegment(id.uuidString))/transcript"
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("GET", path)
+            try RemoteTransport.bulkClient(for: host).request("GET", path)
         }.value
         guard let resp, resp.status == 200,
               let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
@@ -2111,7 +2215,7 @@ final class RemoteHostController {
         let host = self.host
         let path = "/tasks/\(ControlClient.encodeSegment(id.uuidString))/transcript"
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("GET", path)
+            try RemoteTransport.bulkClient(for: host).request("GET", path)
         }.value
         guard let resp, resp.status == 200,
               let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
@@ -2265,9 +2369,14 @@ struct RemoteConnectionStatusView: View {
 }
 
 /// Over the last mirrored content while an established link is down for a
-/// transport reason: the sidebar and the stage stay readable (dimmed a touch),
-/// input is held off, and a small banner says it's coming back. The mirror
-/// redials on its own; nothing here needs the user.
+/// transport reason: the sidebar and the stage stay readable (dimmed a touch)
+/// and a small banner says it's coming back. The mirror redials on its own;
+/// nothing here needs the user. NON-BLOCKING: the window keeps taking clicks
+/// and keys (its hosting view passes every event through), so a link that
+/// recovers in a few seconds never made the user click back into their work.
+/// When the link is merely slow (high latency, or polls struggling without
+/// the link having gone quiet), it shows only a calm "Slow connection" pill
+/// with the measured numbers — no dim.
 struct RemoteReconnectingView: View {
     @Bindable var controller: RemoteHostController
 
@@ -2277,34 +2386,45 @@ struct RemoteReconnectingView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            // Holds the clicks: the controls under it would talk to a remote
-            // that isn't there.
-            Color.platformWindowBackground.opacity(0.35)
-                .contentShape(Rectangle())
-                .onTapGesture {}
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(format: NSLocalizedString("Reconnecting to %@…", comment: "fat client link"),
-                                hostLabel))
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(NSLocalizedString("The connection dropped. What you see is from just before; it picks up again on its own.", comment: "fat client link"))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+            if controller.linkPresentation == .reconnecting {
+                Color.platformWindowBackground.opacity(0.25)
+                    .allowsHitTesting(false)
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(format: NSLocalizedString("Reconnecting to %@…", comment: "fat client link"),
+                                    hostLabel))
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(NSLocalizedString("The connection dropped. What you see is from just before; it picks up again on its own.", comment: "fat client link"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !controller.linkReadout.isEmpty {
+                            Text(controller.linkReadout)
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: 420)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08)))
+                .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+                .padding(.top, 18)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: 420)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08)))
-            .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
-            .padding(.top, 18)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
     }
+}
+
+/// An overlay hosting view that never takes an event: everything under it
+/// (the mirrored sidebar, terminals, composers) keeps working.
+final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - Remote window toolbar (per-selected-VM controls + IP)
@@ -2688,7 +2808,7 @@ final class RemoteHostWindow: NSWindow {
     private var sidebarHost: NSHostingView<SessionSidebar>!
     private var statusHost: NSHostingView<RemoteConnectionStatusView>!
     /// The "Reconnecting…" layer over sidebar + stage (see RemoteReconnectingView).
-    private var reconnectHost: NSHostingView<RemoteReconnectingView>!
+    private var reconnectHost: PassthroughHostingView<RemoteReconnectingView>!
     private var gridView: GridStageView?
     private var termControllers: [Profile.ID: TerminalSessionController] = [:]
     private var mountedTermView: TerminalSurfaceView?
@@ -2849,6 +2969,22 @@ final class RemoteHostWindow: NSWindow {
     /// headlessly for E2E.
     private let autoActions = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_ACTION"]
 
+    /// A slow link is said in the title bar ("Slow connection · request RTT
+    /// …") — an overlay pill sat on the session header. Re-armed on every
+    /// change of the controller's link state.
+    private func observeLinkSubtitle() {
+        withObservationTracking {
+            let slow = controller.linkSlow && controller.linkPresentation != .reconnecting
+            let readout = controller.linkReadout
+            subtitle = slow
+                ? NSLocalizedString("Slow connection", comment: "fat client link")
+                    + (readout.isEmpty ? "" : " · " + readout)
+                : ""
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.observeLinkSubtitle() }
+        }
+    }
+
     init(controller: RemoteHostController) {
         self.controller = controller
         super.init(
@@ -2857,6 +2993,7 @@ final class RemoteHostWindow: NSWindow {
             backing: .buffered, defer: false)
         title = "Remote — \(controller.host.name)"
         isReleasedWhenClosed = false
+        observeLinkSubtitle()
         buildLayout()
         buildToolbar()
         showGrid()
@@ -3376,7 +3513,7 @@ final class RemoteHostWindow: NSWindow {
         ])
         // Last, so it sits over everything: the whole window's content (the
         // sidebar too) while an established link reconnects.
-        reconnectHost = NSHostingView(rootView: RemoteReconnectingView(controller: controller))
+        reconnectHost = PassthroughHostingView(rootView: RemoteReconnectingView(controller: controller))
         reconnectHost.translatesAutoresizingMaskIntoConstraints = false
         reconnectHost.sizingOptions = []
         reconnectHost.isHidden = true
@@ -4273,7 +4410,7 @@ final class RemoteHostWindow: NSWindow {
                 let host = self.controller.host
                 let path = "/tasks/\(ControlClient.encodeSegment(task.id.uuidString))/transcript"
                 let resp = try? await Task.detached(priority: .userInitiated) {
-                    try RemoteTransport.client(for: host).request("GET", path)
+                    try RemoteTransport.bulkClient(for: host).request("GET", path)
                 }.value
                 guard let resp, resp.status == 200,
                       let b64 = resp.json["transcript"] as? String,
@@ -5501,6 +5638,7 @@ final class RemoteHostWindow: NSWindow {
         case "get-mirror-state":
             return [
                 "connected": controller.connected,
+                "link": controller.linkDebugState(),
                 "revision": controller.revision,
                 "vmnetSubnet": controller.vmnetSubnet ?? "",
                 // The native-machine view: which workspaces read as native
@@ -7164,11 +7302,12 @@ final class RemoteHostWindow: NSWindow {
         let contentShown = presentation == .live || reconnecting
         statusHost?.isHidden = contentShown
         stage.subviews.forEach { $0.isHidden = !contentShown }
-        if reconnectHost.isHidden == reconnecting {
-            reconnectHost.isHidden = !reconnecting
-            // Keystrokes must not land in a terminal or composer that can't
-            // reach the remote; the user clicks back in once it's up.
-            if reconnecting { makeFirstResponder(nil) }
+        // The banner (down) or the slow-link pill. Non-blocking either way:
+        // focus stays where the user left it — a terminal has its own
+        // reconnect, and a blip shouldn't cost them a click back in.
+        let showOverlay = reconnecting || (presentation == .live && controller.linkSlow)
+        if reconnectHost.isHidden == showOverlay {
+            reconnectHost.isHidden = !showOverlay
         }
         guard controller.revision != lastRevision else { return }
         lastRevision = controller.revision
@@ -7307,6 +7446,12 @@ final class StateStream: @unchecked Sendable {
         do { fd = try client.openStream("GET", "/state/subscribe", body: [:]) }
         catch { return false }
         lock.lock(); currentFD = fd; lock.unlock()
+        // The server re-pushes at least every 15 s even when nothing changed,
+        // so a push stream silent for 45 s is a dead path (a half-open
+        // connection would otherwise hold this read forever while the mirror
+        // sits on its slow 5 s heartbeat poll). Drop it and resubscribe.
+        var idle = timeval(tv_sec: 45, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &idle, socklen_t(MemoryLayout<timeval>.size))
         // Close via currentFD so stop() and this defer never double-close (stop()
         // clears it after closing; then this defer sees -1 and skips).
         defer {
@@ -7452,7 +7597,7 @@ extension RemoteHostController: RemoteDelegationLink {
                                 timeout: Int = 90) async throws -> [String: Any] {
         let host = self.host
         let resp = try await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request(method, path, body: body, recvTimeoutSeconds: timeout)
+            try RemoteTransport.bulkClient(for: host).request(method, path, body: body, recvTimeoutSeconds: timeout)
         }.value
         if let err = resp.json["error"] as? String { throw RemoteLinkError(err) }
         guard resp.status == 200 else { throw RemoteLinkError("HTTP \(resp.status) from \(host.name)") }
