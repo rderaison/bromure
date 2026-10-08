@@ -4201,8 +4201,8 @@ final class RemoteHostWindow: NSWindow {
                                    app: .merge)
             },
             sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
-            land: { [weak self] id, mode, target, keep in
-                var body: [String: Any] = ["mode": mode.rawValue, "keepBranch": keep]
+            land: { [weak self] id, mode, target, keep, push in
+                var body: [String: Any] = ["mode": mode.rawValue, "keepBranch": keep, "push": push]
                 if let target { body["target"] = target }
                 self?.controller.taskCommand(id, "land", body: body)
             },

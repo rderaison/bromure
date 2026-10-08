@@ -5571,13 +5571,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "send-back":
                     Task { @MainActor in await self.codingTaskEngine.sendBack(id) }
                 case "merge", "land":
-                    // {mode: merge|squash|pr, target?, keepBranch?}; the
+                    // {mode: merge|squash|pr, target?, keepBranch?, push?}; the
                     // legacy merge body ({squash, cleanup}) still works.
                     let mode = (body["mode"] as? String).flatMap(TaskLanding.Mode.init(rawValue:))
                         ?? ((body["squash"] as? Bool ?? false) ? .squash : .merge)
                     let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
                     self.codingTaskEngine.land(id, mode: mode, target: body["target"] as? String,
-                                               keepBranch: keep)
+                                               keepBranch: keep, push: body["push"] as? Bool ?? false)
                 case "open-pr":
                     self.codingTaskEngine.land(id, mode: .pr, target: body["target"] as? String)
                 case "retry-landing":
@@ -12927,8 +12927,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return }
                 Task { @MainActor in await self.codingTaskEngine.sendBack(taskID) }
             },
-            land: { [weak self] taskID, mode, target, keep in
-                self?.codingTaskEngine.land(taskID, mode: mode, target: target, keepBranch: keep)
+            land: { [weak self] taskID, mode, target, keep, push in
+                self?.codingTaskEngine.land(taskID, mode: mode, target: target, keepBranch: keep, push: push)
             },
             retryLanding: { [weak self] in self?.codingTaskEngine.retryLanding($0) },
             cancelLanding: { [weak self] in self?.codingTaskEngine.cancelLanding($0) },

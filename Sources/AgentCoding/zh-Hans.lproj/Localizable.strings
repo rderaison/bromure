@@ -4109,3 +4109,10 @@
 "Show the findings for %@" = "显示 %@ 的发现项";
 "Sent to %@ to fix" = "已发送给 %@ 修复";
 "Sent to %@ — it works on the fix in its own session." = "已发送给 %@ — 它会在自己的会话中进行修复。";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "仓库没有可推送的远程——请合并但不推送。";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "已合并到 %@，但无法连接工作区进行推送——它在运行吗？";
+"Merge & Push" = "合并并推送";
+"Push %1$@ to %2$@" = "将 %1$@ 推送到 %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ 包含它即完成。如果 %1$@ 已有新提交，%3$@ 会拉取、解决冲突并推送。";

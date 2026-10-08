@@ -4109,3 +4109,10 @@
 "Show the findings for %@" = "%@ の検出事項を表示";
 "Sent to %@ to fix" = "修正のため %@ に送信しました";
 "Sent to %@ — it works on the fix in its own session." = "%@ に送信しました — 修正はそのセッション内で行われます。";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "リポジトリにプッシュ先のリモートがありません — プッシュせずにマージしてください。";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "%@ にマージしましたが、プッシュのためにワークスペースに接続できません — 起動していますか？";
+"Merge & Push" = "マージしてプッシュ";
+"Push %1$@ to %2$@" = "%1$@ を %2$@ にプッシュ";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ に反映された時点で完了です。%1$@ が先に進んでいる場合は、%3$@ がプルしてコンフリクトを解決し、プッシュします。";

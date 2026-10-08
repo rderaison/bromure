@@ -345,6 +345,12 @@ struct TaskLanding: Codable, Equatable, Sendable {
     var verified: Bool = false
     /// Keep the branch (and its checkout) once it has landed.
     var keepBranch: Bool = false
+    /// Merge landings: push the target to its remote afterwards — done only
+    /// once the remote has it. nil/false = a local merge.
+    var push: Bool?
+    /// The remote it goes to ("origin"), resolved when the landing starts.
+    var remote: String?
+    var pushes: Bool { push == true && mode != .pr }
     /// The agent's latest line while it lands, for the card — only ever
     /// from after the brief reached it.
     var agentLine: String?

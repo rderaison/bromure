@@ -4111,3 +4111,10 @@
 "Show the findings for %@" = "Mostrar los hallazgos de %@";
 "Sent to %@ to fix" = "Enviado a %@ para corregirlo";
 "Sent to %@ — it works on the fix in its own session." = "Enviado a %@: trabaja en la corrección en su propia sesión.";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "El repositorio no tiene ningún remoto al que hacer push: fusiona sin hacer push.";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "Fusionado en %@, pero no se pudo contactar con el espacio de trabajo para hacer push: ¿está en marcha?";
+"Merge & Push" = "Fusionar y hacer push";
+"Push %1$@ to %2$@" = "Hacer push de %1$@ a %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Listo cuando %1$@/%2$@ lo tenga. Si %1$@ avanzó, %3$@ hace pull, resuelve los conflictos y hace push.";

@@ -238,6 +238,61 @@ struct TaskLandingTests {
         #expect(CodingTaskEngine.parseLandingCheck(out4) == .dirtySource)
     }
 
+    @Test("merge & push prompts: fetch and pull the remote first, push, never force")
+    func pushPrompts() {
+        let p = CodingTaskEngine.landingPrompt(mode: .merge, branch: "wt/fix", target: "main",
+                                               rootRepo: "/r", title: "Fix", remote: "origin",
+                                               viaBoard: true, push: true)
+        #expect(p.contains("git fetch origin"))
+        #expect(p.contains("git pull --rebase origin main"))
+        #expect(p.contains("git push origin main"))
+        #expect(p.contains("Never force-push"))
+        #expect(p.contains("'origin/main'"))
+        let local = CodingTaskEngine.landingPrompt(mode: .merge, branch: "wt/fix", target: "main",
+                                                   rootRepo: "/r", title: "Fix", remote: "origin", viaBoard: true)
+        #expect(!local.contains("git push"))
+        let sync = CodingTaskEngine.pushPrompt(branch: "wt/fix", target: "main", remote: "origin", viaBoard: false)
+        #expect(sync.contains("git pull --rebase origin main") && sync.contains("git push origin main"))
+        #expect(sync.contains("`deliver`"))
+    }
+
+    @Test("pushing the target after a local merge, against a real remote", .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/git")))
+    func pushLive() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("push-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func sh(_ c: String) -> String {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/bash")
+            p.arguments = ["-c", c]
+            p.currentDirectoryURL = dir
+            var env = ProcessInfo.processInfo.environment
+            env["GIT_AUTHOR_NAME"] = "t"; env["GIT_AUTHOR_EMAIL"] = "t@t"
+            env["GIT_COMMITTER_NAME"] = "t"; env["GIT_COMMITTER_EMAIL"] = "t@t"
+            p.environment = env
+            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+            try? p.run(); p.waitUntilExit()
+            return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        }
+        let r = dir.appendingPathComponent("work").path
+        _ = sh("git init -q --bare -b main remote.git && git clone -q remote.git work 2>/dev/null; cd work "
+               + "&& git checkout -q -b main && echo a > a && git add a && git commit -qm a && git push -q origin main "
+               + "&& git branch wt/x && git checkout -q wt/x && echo b > b && git add b && git commit -qm b "
+               + "&& git checkout -q main && git merge -q --ff-only wt/x")
+        // Merged locally, not pushed yet: not landed on the remote.
+        #expect(sh(CodingTaskEngine.landingVerifyCommand(root: r, branch: "wt/x", target: "main",
+                                                         sourceDir: nil, remote: "origin")).contains("PENDING"))
+        #expect(sh(CodingTaskEngine.pushTargetCommand(root: r, target: "main", remote: "origin"))
+            .contains("pushed"))
+        #expect(sh(CodingTaskEngine.landingVerifyCommand(root: r, branch: "wt/x", target: "main",
+                                                         sourceDir: nil, remote: "origin")).contains("LANDED"))
+        // Someone else pushed meanwhile: not a fast-forward — the agent's job.
+        _ = sh("git clone -q remote.git other && cd other && echo c > c && git add c && git commit -qm c && git push -q origin main")
+        _ = sh("cd work && echo d > d && git add d && git commit -qm d")
+        #expect(sh(CodingTaskEngine.pushTargetCommand(root: r, target: "main", remote: "origin"))
+            .contains("behind"))
+    }
+
     @Test("the agent's latest message line is read off its pane")
     func agentLine() {
         let pane = "⏺ Rebasing onto main…\n  ⎿  ok\n⏺ Running the tests\n\n> \n"

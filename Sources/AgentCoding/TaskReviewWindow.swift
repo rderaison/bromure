@@ -281,7 +281,8 @@ final class TaskReviewWindowManager {
         /// In Progress.
         var sendBack: (UUID) -> Void
         /// Land it: merge / squash / pull request into `target` (nil = parent).
-        var land: (_ taskID: UUID, _ mode: TaskLanding.Mode, _ target: String?, _ keepBranch: Bool) -> Void
+        var land: (_ taskID: UUID, _ mode: TaskLanding.Mode, _ target: String?, _ keepBranch: Bool,
+                   _ push: Bool) -> Void
         var retryLanding: (UUID) -> Void
         var cancelLanding: (UUID) -> Void
         /// Review → Done as it stands, nothing merged or removed.
@@ -783,9 +784,9 @@ struct TaskReviewBanner: View {
             confirm: c, task: t, summary: summary, agentName: agentName,
             branches: branches.filter { $0 != t.branch && !$0.hasPrefix("wt/") },
             onCancel: { confirming = nil },
-            onConfirm: { target, keep in
+            onConfirm: { target, keep, push in
                 confirming = nil
-                context.land(t.id, c.mode, target.isEmpty ? nil : target, keep)
+                context.land(t.id, c.mode, target.isEmpty ? nil : target, keep, push)
             })
     }
 }
@@ -798,13 +799,20 @@ struct LandingConfirmSheet: View {
     let agentName: String
     let branches: [String]
     let onCancel: () -> Void
-    let onConfirm: (_ target: String, _ keepBranch: Bool) -> Void
+    let onConfirm: (_ target: String, _ keepBranch: Bool, _ push: Bool) -> Void
 
     @State private var target = ""
     @State private var keepBranch = false
+    /// Push the target afterwards — remembered between landings.
+    @AppStorage("tasks.landing.push") private var push = false
+
+    /// The remote a merge can push to (none known: no option).
+    private var pushRemote: String? { confirm.mode == .pr ? nil : summary?.remote }
 
     private var confirmTitle: String {
-        confirm.mode == .pr ? NSLocalizedString("Open Pull Request", comment: "review")
+        if confirm.mode == .pr { return NSLocalizedString("Open Pull Request", comment: "review") }
+        return pushRemote != nil && push
+            ? NSLocalizedString("Merge & Push", comment: "landing confirm")
             : NSLocalizedString("Merge", comment: "landing confirm")
     }
 
@@ -923,6 +931,20 @@ struct LandingConfirmSheet: View {
                 Toggle(NSLocalizedString("Keep branch", comment: "landing confirm"), isOn: $keepBranch)
                     .toggleStyle(.checkbox)
             }
+            if let remote = pushRemote {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(String(format: NSLocalizedString("Push %1$@ to %2$@", comment: "landing confirm: target, remote"),
+                                  target, remote), isOn: $push)
+                        .toggleStyle(.checkbox)
+                    if push {
+                        Text(String(format: NSLocalizedString(
+                            "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes.",
+                            comment: "landing confirm: remote, target, agent"), remote, target, agentName))
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
             HStack {
                 Spacer()
                 Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
@@ -930,7 +952,7 @@ struct LandingConfirmSheet: View {
                     .accessibilityLabel(NSLocalizedString("Cancel", comment: ""))
                     .accessibilityHint(NSLocalizedString("Close without landing", comment: "landing confirm"))
                 Button(confirmTitle) {
-                    onConfirm(target, keepBranch)
+                    onConfirm(target, keepBranch, pushRemote != nil && push)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(target.isEmpty)

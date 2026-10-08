@@ -3951,8 +3951,8 @@ struct SessionSidebar: View {
         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
     }
 
-    /// Sessions-first: the search field, the new-session button, one
-    /// Sessions list, the Kanban and Automations rows, and the machines
+    /// Sessions-first: the search field, the new-session button, the
+    /// Coding Tasks and Automations rows, one Sessions list, and the machines
     /// folded away at the bottom.
     @ViewBuilder
     private func sessionsFirstContent(_ sessionStore: AgentSessionStore, _ taskStore: CodingTaskStore) -> some View {
@@ -3988,12 +3988,8 @@ struct SessionSidebar: View {
 
         ScrollView {
             VStack(alignment: .leading, spacing: 3) {
-                SessionSectionsView(store: sessionStore, model: model,
-                                    filter: sessionFilter, onSelect: onSelectSession,
-                                    actions: sessionActions,
-                                    rooms: roomStore?.rooms ?? [],
-                                    contentSearch: contentSearch,
-                                    lastReply: lastReply)
+                // The boards first, right under New session — then the
+                // sessions.
                 CodingTasksSection(
                     store: taskStore,
                     model: model,
@@ -4006,6 +4002,12 @@ struct SessionSidebar: View {
                     openFindings: openFindingCount,
                     onNew: onNewAutomation,
                     onShowBoard: onShowAutomationBoard)
+                SessionSectionsView(store: sessionStore, model: model,
+                                    filter: sessionFilter, onSelect: onSelectSession,
+                                    actions: sessionActions,
+                                    rooms: roomStore?.rooms ?? [],
+                                    contentSearch: contentSearch,
+                                    lastReply: lastReply)
                 machinesSection
                 nativeSection
             }

@@ -4143,3 +4143,10 @@
 "Show the findings for %@" = "Show the findings for %@";
 "Sent to %@ to fix" = "Sent to %@ to fix";
 "Sent to %@ — it works on the fix in its own session." = "Sent to %@ — it works on the fix in its own session.";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "The repository has no remote to push to — merge it without pushing.";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "Merged into %@, but couldn't reach the workspace to push it — is it running?";
+"Merge & Push" = "Merge & Push";
+"Push %1$@ to %2$@" = "Push %1$@ to %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes.";
