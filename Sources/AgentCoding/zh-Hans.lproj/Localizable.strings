@@ -4101,3 +4101,11 @@
 "Couldn't load this conversation — the machine didn't answer in time." = "无法加载此对话——机器未及时响应。";
 /* beautified: the agent works but no transcript file is found */
 "This session's conversation wasn't found on its machine." = "在其机器上找不到此会话的对话。";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "让某个会话修复";
+"Ask a Session Instead…" = "改为询问某个会话…";
+"Ask a Session or the Switchboard…" = "询问某个会话或总机…";
+"Show the findings for %@" = "显示 %@ 的发现项";
+"Sent to %@ to fix" = "已发送给 %@ 修复";
+"Sent to %@ — it works on the fix in its own session." = "已发送给 %@ — 它会在自己的会话中进行修复。";

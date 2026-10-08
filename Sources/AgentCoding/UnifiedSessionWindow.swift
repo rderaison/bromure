@@ -3306,6 +3306,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         self?.acDelegate?.routeFindingToSwitchboard(id, room: room)
                     },
                     switchboardRooms: { [weak self] in self?.acDelegate?.switchboardRoomChoices() ?? [] },
+                    askSession: { [weak self] id, sid in
+                        self?.acDelegate?.routeFindingToSession(id, session: sid)
+                    },
+                    sessionChoices: { [weak self] in self?.acDelegate?.findingSessionChoices() ?? [] },
                     openTask: { [weak self] id in self?.acDelegate?.openFixTask(id) },
                     setStatus: { [weak self] id, status, note in
                         self?.acDelegate?.findingStore.setStatus(id, status, note: note)

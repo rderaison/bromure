@@ -4101,3 +4101,11 @@
 "Couldn't load this conversation — the machine didn't answer in time." = "この会話を読み込めませんでした。マシンが時間内に応答しませんでした。";
 /* beautified: the agent works but no transcript file is found */
 "This session's conversation wasn't found on its machine." = "このセッションの会話がマシン上に見つかりませんでした。";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "セッションに修正を依頼";
+"Ask a Session Instead…" = "代わりにセッションに依頼…";
+"Ask a Session or the Switchboard…" = "セッションまたはスイッチボードに依頼…";
+"Show the findings for %@" = "%@ の検出事項を表示";
+"Sent to %@ to fix" = "修正のため %@ に送信しました";
+"Sent to %@ — it works on the fix in its own session." = "%@ に送信しました — 修正はそのセッション内で行われます。";

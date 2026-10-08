@@ -100,7 +100,12 @@ enum AutomationHubPreview {
         let view = AutomationHubView(
             automationStore: autoStore, findingStore: findingStore, taskStore: taskStore,
             model: model, hub: hub, workspaces: { choices },
-            promptGuardInstalled: { true }, actions: AutomationHubView.Actions())
+            promptGuardInstalled: { true }, actions: AutomationHubView.Actions(
+                askSession: { _, _ in },
+                sessionChoices: {
+                    [PeerMention(sessionID: UUID(), nick: "hotfixes", title: "Checkout hotfixes", workspace: "Platform"),
+                     PeerMention(sessionID: UUID(), nick: "refunds", title: "Refund flow", workspace: "Payments")]
+                }))
         return (AnyView(view), size)
     }
 

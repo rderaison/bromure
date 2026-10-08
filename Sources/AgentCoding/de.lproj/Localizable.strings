@@ -4101,3 +4101,11 @@
 "Couldn't load this conversation — the machine didn't answer in time." = "Diese Unterhaltung konnte nicht geladen werden – die Maschine hat nicht rechtzeitig geantwortet.";
 /* beautified: the agent works but no transcript file is found */
 "This session's conversation wasn't found on its machine." = "Die Unterhaltung dieser Sitzung wurde auf ihrer Maschine nicht gefunden.";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "Eine Sitzung mit der Behebung beauftragen";
+"Ask a Session Instead…" = "Stattdessen eine Sitzung fragen…";
+"Ask a Session or the Switchboard…" = "Eine Sitzung oder die Schaltzentrale fragen…";
+"Show the findings for %@" = "Befunde für %@ anzeigen";
+"Sent to %@ to fix" = "Zur Behebung an %@ gesendet";
+"Sent to %@ — it works on the fix in its own session." = "An %@ gesendet – die Behebung läuft in ihrer eigenen Sitzung.";
