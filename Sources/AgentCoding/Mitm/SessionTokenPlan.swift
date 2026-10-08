@@ -688,14 +688,28 @@ public extension Profile {
             }
             let credConsentID: String? = cred.requireApproval
                 ? ConsentCredentialID.gitHTTPS(cred.id) : nil
+            let fake = SessionTokenPlan.deriveFake(prefix: prefix,
+                                                   real: real, salt: salt,
+                                                   targetLength: target)
+            let user = cred.effectiveUsername
             entries.append(.init(
                 realValue: real,
-                fakeValue: SessionTokenPlan.deriveFake(prefix: prefix,
-                                                       real: real, salt: salt,
-                                                       targetLength: target),
-                purpose: .gitHTTPS(host: cred.host, username: cred.effectiveUsername),
+                fakeValue: fake,
+                purpose: .gitHTTPS(host: cred.host, username: user),
                 consentCredentialID: credConsentID,
-                consentDisplayName: "git token (\(cred.effectiveUsername)@\(cred.host))"))
+                consentDisplayName: "git token (\(user)@\(cred.host))"))
+            // git itself (the `store` helper's credential) authenticates
+            // with `Authorization: Basic base64("<user>:<token>")` — the
+            // fake never appears in clear, so the entry above never fired
+            // and every HTTPS clone/push sent the fake ("Invalid username
+            // or token"). Swap the whole Basic blob too. Appended after the
+            // raw entry so `fakeForGitHTTPS` keeps returning the raw fake.
+            entries.append(.init(
+                realValue: Data("\(user):\(real)".utf8).base64EncodedString(),
+                fakeValue: Data("\(user):\(fake)".utf8).base64EncodedString(),
+                purpose: .gitHTTPS(host: cred.host, username: user),
+                consentCredentialID: credConsentID,
+                consentDisplayName: "git token (\(user)@\(cred.host))"))
         }
 
         for db in httpDatabases where db.isUsable {
