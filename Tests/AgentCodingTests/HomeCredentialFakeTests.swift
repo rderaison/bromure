@@ -106,7 +106,7 @@ struct HomeCredentialFakeTests {
         #expect(!gitCreds.contains("REALreal"))
         let gitconfig = try String(
             contentsOf: home.appendingPathComponent(".gitconfig"), encoding: .utf8)
-        #expect(gitconfig.contains("helper = store"))
+        #expect(gitconfig.contains("credential-store --file"))
     }
 
     @Test("With a plan the home carries the fakes, never the reals")

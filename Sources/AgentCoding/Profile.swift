@@ -4205,8 +4205,15 @@ public final class ProfileStore {
                 if !email.isEmpty { lines.append("    email = \(email)") }
             }
             if !usableCreds.isEmpty {
+                // Read-only use of the store file: git's `store` helper ERASES
+                // a credential the server rejects, so one rejected request
+                // (e.g. before the proxy swap worked) left ~/.git-credentials
+                // empty for the rest of the VM's life and every later clone
+                // failed with "could not read Username". Only `get` is
+                // forwarded; `store` / `erase` are ignored — the file is
+                // Bromure's, rewritten from the workspace at each boot.
                 lines.append("[credential]")
-                lines.append("    helper = store")
+                lines.append("    helper = \"!f() { [ \\\"$1\\\" = get ] || return 0; exec git credential-store --file \\\"$HOME/.git-credentials\\\" get; }; f\"")
             }
             try lines.joined(separator: "\n")
                 .appending("\n")
