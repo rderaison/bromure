@@ -358,9 +358,8 @@ if [ -d "$FRAMEWORKS_DIR" ]; then
     done
 fi
 
-# The browser's sandboxed GPU renderer — Bromure (web) only: Agentic Coding's
-# workspace browser runs without GPU acceleration and Sidecar draws no VM.
-if [ "$TARGET" = "bromure" ]; then
+# The browser's sandboxed GPU renderer; Sidecar draws no VM and doesn't carry it.
+if [ "$TARGET" != "sidecar" ]; then
     bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$DEVELOPER_ID"
 fi
 
