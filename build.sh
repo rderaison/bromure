@@ -335,9 +335,10 @@ if [ "$TARGET" = "sidecar" ]; then
     codesign --force --sign "$SIGN_ID" --options runtime "$MACOS_DIR/tmux"
     echo "Bundled tmux $(cat "$SCRIPT_DIR/vendor/tmux/VERSION" 2>/dev/null)."
 fi
-# The browser's sandboxed GPU renderer (a no-op unless built on SDK 27);
-# Sidecar draws no VM and doesn't carry it.
-if [ "$TARGET" != "sidecar" ]; then
+# The browser's sandboxed GPU renderer (a no-op unless built on SDK 27) —
+# Bromure (web) only: Agentic Coding's workspace browser runs without GPU
+# acceleration and Sidecar draws no VM, so neither carries it.
+if [ "$TARGET" = "bromure" ]; then
     bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$SIGN_ID"
 fi
 
