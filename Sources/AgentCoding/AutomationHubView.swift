@@ -145,6 +145,10 @@ struct AutomationHubView: View {
         var routeToSwitchboard: ((UUID, UUID?) -> Void)?
         /// Rooms with a Switchboard to ask.
         var switchboardRooms: () -> [FindingRouting.Room] = { [] }
+        /// Hand a finding straight to a session ("Ask @foo to fix it").
+        var askSession: ((UUID, UUID) -> Void)?
+        /// The sessions it can go to.
+        var sessionChoices: () -> [PeerMention] = { [] }
         var openTask: (UUID) -> Void = { _ in }
         var setStatus: (UUID, RepoFinding.Status, String?) -> Void = { _, _, _ in }
         var markDuplicate: (UUID, UUID) -> Void = { _, _ in }
@@ -286,6 +290,15 @@ struct AutomationHubView: View {
                         "Asked the Switchboard — it will propose a session and wait for your OK.",
                         comment: "hub flash"))
                 }
+            },
+            sessions: actions.askSession == nil ? [] : actions.sessionChoices(),
+            ask: actions.askSession.map { ask in
+                { id, peer in
+                    ask(id, peer.sessionID)
+                    hub.showFlash(String(format: NSLocalizedString(
+                        "Sent to %@ — it works on the fix in its own session.", comment: "hub flash"),
+                        peer.assigned ? "@" + peer.nick : "“\(peer.title)”"))
+                }
             }))
         .sheet(item: $hub.editingWatch) { draft in
             WatchEditorSheet(
@@ -388,6 +401,7 @@ struct AutomationHubView: View {
             .controlSize(.small)
         }
         .padding(.horizontal, 16)
+        .padding(.top, 8)
         .padding(.bottom, 8)
     }
 
@@ -1166,6 +1180,12 @@ struct FindingRouting {
     var rooms: [Room] = []
     /// (finding, room — nil = the global Switchboard). nil = unavailable.
     var route: ((UUID, UUID?) -> Void)?
+    /// Sessions a finding can be handed to directly.
+    var sessions: [PeerMention] = []
+    var ask: ((UUID, PeerMention) -> Void)?
+
+    /// Anything to offer besides a new fix session.
+    var isAvailable: Bool { route != nil || (ask != nil && !sessions.isEmpty) }
 }
 
 private struct FindingRoutingKey: EnvironmentKey {
@@ -1179,12 +1199,27 @@ extension EnvironmentValues {
     }
 }
 
-/// "Ask the Switchboard" / "Ask a room's Switchboard ▸" menu items.
+/// "Ask the Switchboard" / "Ask a room's Switchboard ▸" / "Ask a session
+/// ▸" menu items.
 struct SwitchboardRouteItems: View {
     let finding: RepoFinding
     @Environment(\.findingRouting) private var routing
 
     var body: some View {
+        if let ask = routing.ask, !routing.sessions.isEmpty {
+            Menu {
+                ForEach(routing.sessions) { peer in
+                    Button {
+                        ask(finding.id, peer)
+                    } label: {
+                        Text(Self.label(peer))
+                    }
+                }
+            } label: {
+                Label(NSLocalizedString("Ask a Session to Fix It", comment: "finding menu"),
+                      systemImage: "at")
+            }
+        }
         if let route = routing.route {
             Button {
                 route(finding.id, nil)
@@ -1204,6 +1239,13 @@ struct SwitchboardRouteItems: View {
             }
         }
     }
+
+    /// "@nick — title · workspace"; a session with no nickname yet goes by
+    /// its title.
+    static func label(_ p: PeerMention) -> String {
+        let place = p.workspace.isEmpty ? "" : " · " + p.workspace
+        return p.assigned ? "@\(p.nick) — \(p.title)\(place)" : p.title + place
+    }
 }
 
 /// Triage verbs for a finding — the rows' ⋯ menu and right-click menu.
@@ -1211,13 +1253,14 @@ struct FindingTriageItems: View {
     let finding: RepoFinding
     var onStatus: (RepoFinding.Status, String?) -> Void
     var onOpen: (() -> Void)? = nil
+    @Environment(\.findingRouting) private var routing
 
     var body: some View {
         if let onOpen {
             Button(NSLocalizedString("Show Details", comment: "finding menu"), action: onOpen)
             Divider()
         }
-        if finding.status.isOpen && finding.taskID == nil {
+        if finding.status.isOpen && finding.taskID == nil && routing.isAvailable {
             SwitchboardRouteItems(finding: finding)
             Divider()
         }
@@ -1283,7 +1326,7 @@ struct FixButton: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                } else if routing.route != nil && finding.taskID == nil {
+                } else if routing.isAvailable && finding.taskID == nil {
                     // Split button: click = a new fix session; the arrow
                     // offers the Switchboards.
                     Menu {
@@ -1927,11 +1970,13 @@ struct FindingDetailPanel: View {
         } else if finding.status.isOpen {
             VStack(alignment: .leading, spacing: 6) {
                 FixButton(finding: finding, prominent: true) { actions.fix(finding.id) }
-                if routing.route != nil {
+                if routing.isAvailable {
                     Menu {
                         SwitchboardRouteItems(finding: finding)
                     } label: {
-                        Label(NSLocalizedString("Ask the Switchboard Instead…", comment: "finding detail"),
+                        Label(routing.route == nil
+                              ? NSLocalizedString("Ask a Session Instead…", comment: "finding detail")
+                              : NSLocalizedString("Ask a Session or the Switchboard…", comment: "finding detail"),
                               systemImage: "person.2.wave.2")
                             .frame(maxWidth: .infinity)
                     }
@@ -2133,6 +2178,7 @@ struct WatchCard: View {
     var onEdit: () -> Void
     var onShowFindings: () -> Void
     @State private var confirmDelete = false
+    @State private var hovering = false
 
     var body: some View {
         let stats = FindingStats(findings)
@@ -2222,6 +2268,15 @@ struct WatchCard: View {
                 }
             }
         }
+        // The whole card opens its findings; its own buttons, link and menu
+        // still take their clicks.
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .fill(Color.primary.opacity(hovering ? 0.03 : 0))
+            .allowsHitTesting(false))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture(perform: onShowFindings)
+        .onHover { hovering = $0 }
+        .help(String(format: NSLocalizedString("Show the findings for %@", comment: "watch card"), watch.repo))
         .alert(String(format: NSLocalizedString("Stop watching %@?", comment: ""), watch.repo),
                isPresented: $confirmDelete) {
             Button(NSLocalizedString("Stop Watching", comment: ""), role: .destructive) {

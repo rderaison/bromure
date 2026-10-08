@@ -4120,6 +4120,14 @@ final class RemoteHostWindow: NSWindow {
                     routeToSwitchboard: { id, room in
                         c.findingCommand(id, "switchboard", body: room.map { ["room": $0.uuidString] } ?? [:])
                     },
+                    askSession: { [weak self] id, sid in
+                        c.findingCommand(id, "session", body: ["session": sid.uuidString])
+                        self?.selectSession(sid)
+                    },
+                    sessionChoices: {
+                        PeerMention.candidates(c.sessionStore.sessions.filter { !$0.isSwitchboard },
+                                               excluding: nil, workspace: { c.profile(for: $0)?.name ?? "" })
+                    },
                     openTask: { [weak self] id in self?.taskReviewWindows.open(taskID: id) },
                     setStatus: { id, status, note in
                         var body: [String: Any] = ["status": status.rawValue]

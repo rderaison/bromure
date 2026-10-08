@@ -85,6 +85,40 @@ extension ACAppDelegate {
         return true
     }
 
+    /// The sessions a finding can be handed to directly ("Ask @foo").
+    func findingSessionChoices() -> [PeerMention] {
+        PeerMention.candidates(allSessionRecords.filter { !$0.isSwitchboard }, excluding: nil,
+                               workspace: { [weak self] pid in
+            self?.profile(for: pid)?.name ?? self?.attachedMachines[pid]?.name ?? ""
+        })
+    }
+
+    /// "Ask @foo to fix it": hand the finding to that session. Shows it
+    /// when `show`.
+    @discardableResult
+    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, show: Bool = true) -> Bool {
+        guard let f = findingStore.finding(findingID),
+              let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else { return false }
+        let brief = RepoWatchPrompts.fixTask(f)
+        let engine = switchboardEngine
+        Task {
+            do {
+                try await engine.handFinding(
+                    id: f.id, severity: f.severity.rawValue, repo: f.repo,
+                    brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)", to: s)
+            } catch {
+                BACDebug.log("switchboard", "finding \(findingID) → session \(sessionID) failed — \(error)")
+            }
+        }
+        let name = s.nickname.map { "@" + $0 } ?? "“\(s.title)”"
+        findingStore.mutate(findingID) {
+            if $0.status == .new { $0.status = .triaged }
+            $0.statusNote = String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name)
+        }
+        if show { ensureUnifiedWindow().selectSession(sessionID) }
+        return true
+    }
+
     /// Bring up the hub — on a finding when given one.
     func showAutomationHub(finding: UUID?) {
         let w = ensureUnifiedWindow()
@@ -108,6 +142,7 @@ extension ACAppDelegate {
     ///   POST   /findings/{id}/status       {"status": …, "note": …}
     ///   POST   /findings/{id}/duplicate    {"of": id}
     ///   POST   /findings/{id}/switchboard  {"room": id?} — ask a Switchboard
+    ///   POST   /findings/{id}/session      {"session": id} — ask that session
     ///   DELETE /findings/{id}
     ///   POST   /findings/report            {"profileID", "repo", "branch"?,
     ///                                       "commit"?, "findings": [...]} —
@@ -171,6 +206,11 @@ extension ACAppDelegate {
                 let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
                 guard routeFindingToSwitchboard(id, room: room, show: false) else {
                     return ["error": "no Switchboard could be started"]
+                }
+            case ("POST", "session"):
+                guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)),
+                      routeFindingToSession(id, session: sid, show: false) else {
+                    return ["error": "unknown session"]
                 }
             case ("POST", "duplicate"):
                 guard let of = (body["of"] as? String).flatMap(UUID.init(uuidString:)) else {

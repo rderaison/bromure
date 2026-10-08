@@ -4104,3 +4104,11 @@
 "Couldn't load this conversation — the machine didn't answer in time." = "無法載入此對話——機器未及時回應。";
 /* beautified: the agent works but no transcript file is found */
 "This session's conversation wasn't found on its machine." = "在其機器上找不到此工作階段的對話。";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "請某個工作階段修正";
+"Ask a Session Instead…" = "改為詢問某個工作階段…";
+"Ask a Session or the Switchboard…" = "詢問某個工作階段或總機…";
+"Show the findings for %@" = "顯示 %@ 的發現項目";
+"Sent to %@ to fix" = "已傳送給 %@ 修正";
+"Sent to %@ — it works on the fix in its own session." = "已傳送給 %@ — 它會在自己的工作階段中進行修正。";

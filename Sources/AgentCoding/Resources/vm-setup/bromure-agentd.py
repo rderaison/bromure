@@ -2088,6 +2088,9 @@ _YOLO_FLAGS = {
     # omp: --auto-approve skips every tool-approval prompt (verified accepted
     # alongside its positional message; also has --approval-mode yolo).
     "omp": "--auto-approve",
+    # grok: without it a fix/automation run asks before every command (the
+    # .bashrc wrapper's Ask default) — it passes --always-approve through.
+    "grok": "--always-approve",
 }
 
 

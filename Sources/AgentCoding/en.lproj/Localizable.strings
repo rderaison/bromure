@@ -4135,3 +4135,11 @@
 "Couldn't load this conversation — the machine didn't answer in time." = "Couldn't load this conversation — the machine didn't answer in time.";
 /* beautified: the agent works but no transcript file is found */
 "This session's conversation wasn't found on its machine." = "This session's conversation wasn't found on its machine.";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "Ask a Session to Fix It";
+"Ask a Session Instead…" = "Ask a Session Instead…";
+"Ask a Session or the Switchboard…" = "Ask a Session or the Switchboard…";
+"Show the findings for %@" = "Show the findings for %@";
+"Sent to %@ to fix" = "Sent to %@ to fix";
+"Sent to %@ — it works on the fix in its own session." = "Sent to %@ — it works on the fix in its own session.";
