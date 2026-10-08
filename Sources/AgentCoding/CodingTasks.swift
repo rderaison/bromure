@@ -771,6 +771,16 @@ struct TranscriptPin: Equatable, Sendable {
 /// on-disk store. Shared by the macOS engine and the fat client's iOS shim
 /// (both tail live transcripts over their respective transports).
 enum AgentSessionLocator {
+    /// The epoch a `find -newermt @<epoch>` floor is written as. "No floor"
+    /// (0: a resumed agent, an unknown foreground process) and anything else
+    /// in 1970's first day become 1970-01-02 UTC — still older than any real
+    /// file, but a date BSD find parses in every time zone. A Bromure Sidecar
+    /// runs these commands through a `find` shim that turns `@0` into a LOCAL
+    /// date ("1969-12-31 19:00:00" west of Greenwich), which macOS find
+    /// rejects ("Can't parse date/time"): every lookup printed nothing, and a
+    /// resumed session's chat never found its transcript.
+    nonisolated static func findEpoch(_ since: Int) -> Int { max(since, 86_400) }
+
     /// The cwd as it may be spliced between single quotes in a shell line:
     /// trailing slashes stripped, nil when it has characters we won't quote.
     /// Letters of any script pass (a folder named "请用…-1004-2143" read no
@@ -842,7 +852,7 @@ enum AgentSessionLocator {
         return "e1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
             + "e2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
             + "\(varName)=$(find \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
-            + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
+            + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(AgentSessionLocator.findEpoch(since)) "
             + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
     }
 
@@ -853,7 +863,7 @@ enum AgentSessionLocator {
     /// anyway (`since` already floors the search).
     nonisolated static func codexFragment(since: Int, into varName: String) -> String {
         "\(varName)=\"\"; for c in $(find \"$HOME/.codex/sessions\" "
-            + "-name 'rollout-*.jsonl' -newermt @\(since) 2>/dev/null "
+            + "-name 'rollout-*.jsonl' -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null "
             + "| xargs -r ls -t 2>/dev/null | head -24); do "
             + "head -c 8192 \"$c\" 2>/dev/null "
             + "| grep -qF -e \"\\\"cwd\\\":\\\"$d\\\"\" -e \"\\\"cwd\\\":\\\"$r\\\"\" "
@@ -872,7 +882,7 @@ enum AgentSessionLocator {
             + "print(urllib.parse.quote(sys.argv[1],safe=\"\"))' \"$r\" 2>/dev/null); "
             + "[ -n \"$ge\" ] && g2=\"$HOME/.grok/sessions/$ge\"; fi; "
             + "\(varName)=$(find \"$g1\" ${g2:+\"$g2\"} -maxdepth 2 -name updates.jsonl "
-            + "-newermt @\(since) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
+            + "-newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
             + "| head -1); "
     }
 
@@ -969,7 +979,7 @@ enum AgentSessionLocator {
             + "\"$HOME/.kimi-code/sessions/wd_${kb}_\"* "
             + "\\( -path '*/agents/main/wire.jsonl' "
             + "-o \\( -name wire.jsonl ! -path '*/agents/*' \\) \\) "
-            + "-newermt @\(since) 2>/dev/null | sort -u "
+            + "-newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null | sort -u "
             + "| xargs -r ls -t 2>/dev/null"
     }
 
@@ -1052,10 +1062,10 @@ enum AgentSessionLocator {
         return "ob=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; "
             + enc("d", into: "os1") + enc("r", into: "os2")
             + "\(varName)=$(find \"$ob/$os1\" \"$ob/$os2\" -maxdepth 1 -name '*.jsonl' "
-            + "-newermt @\(since) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
+            + "-newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
             + "| head -1); "
             + "[ -z \"$\(varName)\" ] && [ \(since) -gt 0 ] && \(varName)=$(find \"$ob\" -mindepth 2 -maxdepth 2 "
-            + "-name '*.jsonl' -newermt @\(since) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
+            + "-name '*.jsonl' -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
     }
 
     /// The tab's folder and the transcript floor for its agent, as the
@@ -1135,7 +1145,7 @@ enum AgentSessionLocator {
     nonisolated static func pinnedPick(window: Int, since: Int) -> String {
         pinnedTranscriptBlock(window: String(window), into: "c")
             + "pe=\"\"; if [ -n \"$c\" ]; then if [ -f \"$c\" ]; then "
-            + "[ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ] && f=\"$c\"; "
+            + "[ -n \"$(find \"$c\" -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null)\" ] && f=\"$c\"; "
             + "else pe=1; fi; fi; "
     }
 
@@ -3406,7 +3416,7 @@ final class CodingTaskEngine {
             let enc2 = path.replacingOccurrences(of: ".", with: "-")
                 .replacingOccurrences(of: "/", with: "-")
             let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
-            cmd += "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
+            cmd += "if [ -n \"$(find \(pq) -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null)\" ]; "
                 + "then echo; tr -d '\\n' < \(pq); echo; fi"
         }
         return cmd
@@ -3479,57 +3489,120 @@ final class CodingTaskEngine {
             let enc2 = path.replacingOccurrences(of: ".", with: "-")
                 .replacingOccurrences(of: "/", with: "-")
             let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
-            cmd += "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
+            cmd += "if [ -n \"$(find \(pq) -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null)\" ]; "
                 + "then tr -d '\\n' < \(pq); fi; "
         }
         cmd += "echo; "
-        let py = #"""
-        import sys, os
-        f, known, off, want, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
-        try:
-            size = os.path.getsize(f)
-        except OSError:
-            sys.exit(0)
-        with open(f, 'rb') as fh:
-            if mode == 'earlier':
-                end = min(max(off, 0), size)
-                start = max(0, end - want)
-                fh.seek(start)
-                b = fh.read(end - start)
-                if start > 0:
-                    i = b.find(b'\n')
-                    if i < 0:
-                        b = b''
-                        start = end
-                    else:
-                        b = b[i + 1:]
-                        start += i + 1
-            else:
-                fresh = (f != known) or off < 0 or off > size
-                start = max(0, size - want) if fresh else off
-                fh.seek(start)
-                b = fh.read(size - start)
-                if fresh and start > 0:
-                    # Begin at the line the window starts in — back to its
-                    # start, so a last line bigger than the window still shows.
-                    fh.seek(0)
-                    head = fh.read(start)
-                    j = head.rfind(b'\n')
-                    start = j + 1 if j >= 0 else 0
-                    fh.seek(start)
-                    b = fh.read(size - start)
-                i = b.rfind(b'\n')
-                b = b[:i + 1] if i >= 0 else b''
-                end = start + len(b)
-        sys.stdout.write('%d\n%d\n%d\n' % (size, start, end))
-        sys.stdout.flush()
-        sys.stdout.buffer.write(b)
-        """#
+        let py = transcriptReaderPython
         cmd += "python3 - \"$f\" \(shellQuote(knownPath ?? "")) \(knownOffset) \(bytes) "
             + (earlier ? "earlier" : "tail")
             + " <<'BROMURE_PY' | iconv -f UTF-8 -t UTF-8 -c\n" + py + "\nBROMURE_PY\nfi"
         return cmd
     }
+
+    /// The reader `transcriptChunkCommand` runs in the guest (argv: file,
+    /// known path, offset, window bytes, "tail"|"earlier"); prints
+    /// `size\nstart\nend\n` then the file's bytes [start, end) — whole
+    /// lines only, `start` always at a line's beginning.
+    ///
+    /// Bounded both ways, so one exec never ships (or reads) far more than
+    /// its window — what keeps a call over a slow tunnel inside its timeout:
+    /// - a first read aligns BACK to the start of the line the window opens
+    ///   in only within another window's worth; a longer line (a multi-MB
+    ///   tool result or screenshot) is skipped forward past instead — unless
+    ///   it is the last whole line, which must still show;
+    /// - a tail read more than `tailJumpFactor` windows behind the file
+    ///   (the chat was away while the agent wrote tens of MB) starts over
+    ///   from a fresh window at the end; "load earlier" fetches the gap;
+    /// - the line scans walk 64 KB blocks (the old first read loaded the
+    ///   whole file before the window to find one newline: 86 MB for a
+    ///   long Claude session).
+    /// "Earlier" always makes progress: a line longer than the window comes
+    /// back whole rather than as nothing (which stalled "load earlier").
+    nonisolated static let tailJumpFactor = 4
+    nonisolated static let transcriptReaderPython = #"""
+    import sys, os
+    f, known, off, want, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+    try:
+        size = os.path.getsize(f)
+    except OSError:
+        sys.exit(0)
+    want = max(want, 1)
+    BLK = 1 << 16
+    def line_start(fh, pos, limit):
+        # Start of the line holding byte `pos`; None when it begins more
+        # than `limit` bytes back (limit None: no bound).
+        p = pos
+        floor = 0 if limit is None else max(0, pos - limit)
+        while p > floor:
+            q = max(floor, p - BLK)
+            fh.seek(q)
+            b = fh.read(p - q)
+            j = b.rfind(b'\n')
+            if j >= 0:
+                return q + j + 1
+            p = q
+        return 0 if floor == 0 else None
+    def next_line(fh, pos, end):
+        # Offset just past the first newline in [pos, end); None if none.
+        p = pos
+        while p < end:
+            fh.seek(p)
+            b = fh.read(min(BLK, end - p))
+            if not b:
+                break
+            j = b.find(b'\n')
+            if j >= 0:
+                return p + j + 1
+            p += len(b)
+        return None
+    def whole_end(fh, start, end):
+        # Offset just past the last newline in [start, end); start if none.
+        p = end
+        while p > start:
+            q = max(start, p - BLK)
+            fh.seek(q)
+            b = fh.read(p - q)
+            j = b.rfind(b'\n')
+            if j >= 0:
+                return q + j + 1
+            p = q
+        return start
+    with open(f, 'rb') as fh:
+        if mode == 'earlier':
+            end = min(max(off, 0), size)
+            s0 = max(0, end - want)
+            start = 0
+            if s0 > 0:
+                nx = next_line(fh, s0, end)
+                start = nx if nx is not None and nx < end else line_start(fh, max(end - 1, 0), None)
+        else:
+            fresh = (f != known) or off < 0 or off > size or (size - off) > want * TAILJUMP
+            if fresh:
+                s0 = max(0, size - want)
+                start = 0
+                if s0 > 0:
+                    ls = line_start(fh, s0, want)
+                    if ls is not None:
+                        start = ls
+                    else:
+                        we = whole_end(fh, s0, size)
+                        nx = next_line(fh, s0, we)
+                        start = nx if nx is not None and nx < we else line_start(fh, s0, None)
+            else:
+                start = off
+            end = whole_end(fh, start, size)
+        sys.stdout.write('%d\n%d\n%d\n' % (size, start, end))
+        sys.stdout.flush()
+        fh.seek(start)
+        left = end - start
+        while left > 0:
+            b = fh.read(min(1 << 20, left))
+            if not b:
+                break
+            sys.stdout.buffer.write(b)
+            left -= len(b)
+    """#.replacingOccurrences(of: "TAILJUMP", with: String(tailJumpFactor))
 
     /// The guest command that dumps a task session's FULL transcript —
     /// session store keyed by worktree slug where the tool allows it
@@ -4642,7 +4715,7 @@ enum CodingTaskEngine {
                 + "if [ ! -f \"$q\" ]; then n=$(date +%s); "
                 + "q=$(find \"$HOME/.bromure\" -maxdepth 1 -name 'pq-*.json' "
                 + "-newermt @$((n-300)) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
-                + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(since) 2>/dev/null)\" ]; "
+                + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null)\" ]; "
                 + "then echo; tr -d '\\n' < \"$q\"; echo; fi"
         }
         return cmd

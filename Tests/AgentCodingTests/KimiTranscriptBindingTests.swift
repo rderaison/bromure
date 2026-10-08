@@ -124,7 +124,7 @@ struct KimiTranscriptBindingTests {
             let cmd = try #require(CodingTaskEngine.planTranscriptCommand(
                 guestCwd: cwd, since: 7, agent: "kimi", pin: pin))
             // GNU-isms the guest has and macOS's BSD tools don't.
-            return try run(cmd.replacingOccurrences(of: "-newermt @7 ", with: "")
+            return try run(cmd.replacingOccurrences(of: "-newermt @86400 ", with: "")
                 .replacingOccurrences(of: "xargs -r", with: "xargs"), home: home)
         }
         // mtime alone: the old conversation wins (the bug).
@@ -155,7 +155,7 @@ struct KimiTranscriptBindingTests {
         func located(_ pin: TranscriptPin) throws -> String {
             let cmd = try #require(CodingTaskEngine.planTranscriptCommand(
                 guestCwd: cwd, since: 7, agent: "kimi", pin: pin))
-            return try run(cmd.replacingOccurrences(of: "-newermt @7 ", with: "")
+            return try run(cmd.replacingOccurrences(of: "-newermt @86400 ", with: "")
                 .replacingOccurrences(of: "xargs -r", with: "xargs"), home: home)
         }
         #expect(try located(TranscriptPin()).contains("\"K2\""))          // by folder: K2's (the bug)

@@ -4091,3 +4091,13 @@
 
 /* firewall pane: Log allowed connections tooltip */
 "List allowed connections in the Security Timeline too" = "Listar também as conexões permitidas na linha do tempo de segurança";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "Carregando a conversa…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "Carregando a conversa anterior… (%@ de %@)";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "Não foi possível carregar esta conversa — a máquina não respondeu a tempo.";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "A conversa desta sessão não foi encontrada na máquina dela.";

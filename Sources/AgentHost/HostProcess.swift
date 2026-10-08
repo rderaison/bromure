@@ -166,7 +166,10 @@ enum HostEnvironment {
         // `-printf '%y%f\0'`): such calls go to our own `__find` (a readdir
         // walk, FindCommand). Nor can BSD's -newerXt parse GNU's "@<epoch>"
         // (the client floors transcripts with `-newermt @N`): turned into a
-        // date BSD reads.
+        // date BSD reads. An epoch in 1970's first day (`@0` = "no floor")
+        // goes in as 1970-01-02: as a LOCAL date west of Greenwich it was
+        // 1969, which BSD find rejects ("Can't parse date/time") — so every
+        // transcript lookup for a resumed agent printed nothing.
         let find = #"""
         #!/bin/bash
         # Bromure Sidecar: GNU find's -printf and `-newermt @<epoch>` on macOS.
@@ -176,7 +179,9 @@ enum HostEnvironment {
         args=(); conv=0
         for a in "$@"; do
           if [ $conv = 1 ] && [[ "$a" == @* ]]; then
-            a=$(/bin/date -r "${a#@}" '+%Y-%m-%d %H:%M:%S')
+            e="${a#@}"
+            [[ "$e" =~ ^[0-9]+$ ]] && [ "$e" -lt 86400 ] && e=86400
+            a=$(/bin/date -r "$e" '+%Y-%m-%d %H:%M:%S')
           fi
           conv=0
           case "$a" in -newer[amcB]t) conv=1 ;; esac

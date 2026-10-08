@@ -275,7 +275,7 @@ struct AgentTranscriptLocatorTests {
         }
         // Every store keeps the since-floor and the strict-decode guard.
         for cmd in [claude, codex, grok, kimi, union] {
-            #expect(cmd?.contains("-newermt @7") == true)
+            #expect(cmd?.contains("-newermt @86400") == true)
             #expect(cmd?.contains("iconv -f UTF-8 -t UTF-8 -c") == true)
             #expect(try shSyntaxOK(cmd ?? ""), "sh -n rejected: \(cmd ?? "nil")")
         }
@@ -384,7 +384,7 @@ struct OmpLocatorExecutionTests {
             // exist in macOS's BSD tools, so neutralize just those for the
             // local execution — the encoder under test runs verbatim.
             let localCmd = cmd
-                .replacingOccurrences(of: "-newermt @7 ", with: "")
+                .replacingOccurrences(of: "-newermt @86400 ", with: "")
                 .replacingOccurrences(of: "xargs -r", with: "xargs")
             let out = try run(localCmd, home: home)
             #expect(out.contains("\"marker\":\"\(dir)\""),

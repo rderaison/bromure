@@ -111,6 +111,56 @@ typealias TranscriptCursor = (path: String, offset: Int)
 
 enum TranscriptFetchMode { case tail, earlier }
 
+/// How one transcript read ended (`readTranscript`).
+enum TranscriptRead {
+    case fetched(TranscriptFetch)
+    /// The machine answered: there is no transcript for the tab (yet), or
+    /// the tab is gone.
+    case none
+    /// The machine couldn't be asked, or didn't answer in time.
+    case failed
+}
+
+/// When an empty chat stops waiting and says what went wrong (`loadIssue`).
+/// A populated chat never does: a failed poll there keeps what's on show.
+struct TranscriptLoadTracker {
+    enum Issue: Equatable {
+        /// Reads keep failing (timing out over the link, the machine not
+        /// answering).
+        case failed
+        /// The agent has been working a while and no transcript turns up.
+        case notFound
+    }
+    private(set) var failStreak = 0
+    private(set) var missingSince: Date?
+    /// Consecutive failed reads before an empty chat says so — each one
+    /// already waited out its timeout.
+    nonisolated static let failuresBeforeError = 2
+    /// How long a working agent may go without a transcript before the
+    /// chat says it can't find one (a fresh agent writes its first record
+    /// within seconds of the prompt).
+    nonisolated static let missingGrace: TimeInterval = 20
+
+    mutating func record(_ read: TranscriptRead, at now: Date, showing: Bool, working: Bool) -> Issue? {
+        switch read {
+        case .fetched:
+            failStreak = 0
+            missingSince = nil
+            return nil
+        case .failed:
+            failStreak += 1
+            missingSince = nil
+            return !showing && failStreak >= Self.failuresBeforeError ? .failed : nil
+        case .none:
+            failStreak = 0
+            guard !showing, working else { missingSince = nil; return nil }
+            let since = missingSince ?? now
+            missingSince = since
+            return now.timeIntervalSince(since) >= Self.missingGrace ? .notFound : nil
+        }
+    }
+}
+
 /// One answer from `CodingTaskEngine.transcriptChunkCommand`.
 struct TranscriptFetch {
     let path: String
@@ -170,9 +220,20 @@ extension BeautifiedTranscriptProvider {
     /// floor to 0 so the reattached transcript shows immediately.
     func fetchTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode,
                          agent: String?) async -> TranscriptFetch? {
-        guard let idx = activeTabIndex() else { return nil }
-        let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
-        guard let probe = AgentSessionLocator.parseFloorProbe(meta) else { return nil }
+        if case .fetched(let f) = await readTranscript(known: known, mode: mode, agent: agent) { return f }
+        return nil
+    }
+
+    /// `fetchTranscript`, telling apart "there is no transcript (yet)" from
+    /// "the machine couldn't be asked" — a read that failed or timed out.
+    /// The chat shows the second as an error with Retry rather than an
+    /// empty conversation under an endless thinking cue.
+    func readTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode,
+                        agent: String?) async -> TranscriptRead {
+        guard let idx = activeTabIndex() else { return .none }
+        guard let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
+        else { return .failed }
+        guard let probe = AgentSessionLocator.parseFloorProbe(meta) else { return .none }
         let cwd = probe.cwd
         let since = probe.since
         // Kimi keys its store by folder: until the session's own id is
@@ -198,17 +259,18 @@ extension BeautifiedTranscriptProvider {
                   knownPath: known?.path, knownOffset: known?.offset ?? -1,
                   bytes: mode == .earlier ? (historyBytesHint ?? BeautifiedSessionModel.earlierHistoryBytes)
                                           : (historyBytesHint ?? BeautifiedSessionModel.initialHistoryBytes),
-                  earlier: mode == .earlier),
-              let out = await execGuest(cmd, timeout: 30)
-        else { return nil }
-        var fetch = TranscriptFetch.parse(Data(out.utf8))
+                  earlier: mode == .earlier)
+        else { return .none }
+        guard let out = await execGuest(cmd, timeout: 30) else { return .failed }
+        // Empty output: no transcript file for this tab (yet).
+        guard var fetch = TranscriptFetch.parse(Data(out.utf8)) else { return .none }
         // The folder's newest was another session's conversation: show (and
         // copy, and count tokens from) nothing rather than its history.
-        if let f = fetch, AgentSessionEngine.isForeignConversation(path: f.path, agent: agent, pin: pin) {
-            return nil
+        if AgentSessionEngine.isForeignConversation(path: fetch.path, agent: agent, pin: pin) {
+            return .none
         }
-        fetch?.agentStarted = probe.started
-        return fetch
+        fetch.agentStarted = probe.started
+        return .fetched(fetch)
     }
 
     /// Type `text` into the running agent (base64 → tmux send-keys + Enter).
@@ -586,6 +648,19 @@ final class BeautifiedSessionModel: ObservableObject {
     @Published var sending = false
     /// True until the first transcript fetch resolves — drives the placeholder.
     @Published var loading = true
+    /// Why no conversation is on show, when reading it went wrong: an error
+    /// row with Retry instead of an empty chat under an endless thinking
+    /// cue (a long session over a slow tunnel, a machine that stopped
+    /// answering, a transcript the lookup can't find). nil once anything
+    /// shows.
+    @Published private(set) var loadIssue: TranscriptLoadTracker.Issue?
+    private var loadTracker = TranscriptLoadTracker()
+    /// The transcript file's size as last read: "n of m MB" while history
+    /// loads.
+    @Published private(set) var transcriptFileSize = 0
+    /// The live "working" cue shows — not over an empty chat that is
+    /// showing why its conversation couldn't be read.
+    var showsLiveCue: Bool { working && !(items.isEmpty && loadIssue != nil) }
     /// Bumped on every transcript mutation (poll replace + optimistic append),
     /// so the view scrolls to the tail even when the last item mutates in place
     /// (assistant streaming) without changing the item count.
@@ -1613,12 +1688,20 @@ final class BeautifiedSessionModel: ObservableObject {
         // re-renders the whole chat (transcript included), and a poll runs
         // every 0.4–1.2 s — five chats in a room re-laid out their text
         // continuously for nothing.
-        guard let fetch = await provider.fetchTranscript(known: known, mode: .tail, agent: agentKind) else {
-            setWorking(isWorking); if loading { loading = false }
+        let read = await provider.readTranscript(known: known, mode: .tail, agent: agentKind)
+        let issue = loadTracker.record(read, at: Date(), showing: !parsedItems.isEmpty, working: isWorking)
+        if issue != loadIssue { loadIssue = issue }
+        guard case .fetched(let fetch) = read else {
+            setWorking(isWorking)
+            // A failed read keeps "Loading…" up until it is called an error;
+            // "no transcript" settles the placeholder at once.
+            let failedRead: Bool = { if case .failed = read { return true }; return false }()
+            if loading, !failedRead || issue != nil { loading = false }
             reconcileQueued()
             return
         }
         if loading { loading = false }
+        if transcriptFileSize != fetch.size { transcriptFileSize = fetch.size }
         if fetch.agentStarted > 0 { agentStartedAt = fetch.agentStarted }
         ingest(fetch)
         flushSink(force: false)
@@ -1811,8 +1894,24 @@ final class BeautifiedSessionModel: ObservableObject {
                 "held": buf?.data.count ?? 0, "budget": buf?.budget ?? 0,
                 "canLoadEarlier": canLoadEarlier, "items": items.count,
                 "buffers": buffers.count, "lastParseMs": Int(lastParseDuration * 1000),
+                "fileSize": transcriptFileSize, "loading": loading,
+                "loadIssue": loadIssue.map { $0 == .failed ? "failed" : "notFound" } ?? "",
                 "geometry": debugGeometry]
     }
+
+    /// Read again now — the error row's Retry.
+    func retryLoad() {
+        loadTracker = TranscriptLoadTracker()
+        loadIssue = nil
+        if parsedItems.isEmpty { loading = true }
+        guard pollTask != nil else { return }
+        pollTask?.cancel()
+        pollTask = nil
+        start()
+    }
+
+    /// Held history / file size, for the "Load earlier" progress label.
+    var historyHeldBytes: Int { currentPath.flatMap { buffers[$0]?.data.count } ?? 0 }
 
     /// Fetch the conversation before what's held (`earlierHistoryBytes` at a
     /// time) and put it in front.
@@ -3468,6 +3567,44 @@ struct BeautifiedSessionView: View {
         return link
     }
 
+    /// "Loading conversation…", or why it couldn't be read with Retry —
+    /// for a chat with nothing on show yet.
+    @ViewBuilder
+    private var historyStatusRow: some View {
+        if let issue = model.loadIssue {
+            VStack(spacing: 8) {
+                Image(systemName: issue == .failed ? "exclamationmark.triangle" : "questionmark.folder")
+                    .font(.system(size: 22)).foregroundStyle(.secondary)
+                Text(issue == .failed
+                     ? NSLocalizedString("Couldn't load this conversation — the machine didn't answer in time.",
+                                         comment: "beautified: transcript reads keep failing or timing out")
+                     : NSLocalizedString("This session's conversation wasn't found on its machine.",
+                                         comment: "beautified: the agent works but no transcript file is found"))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button(NSLocalizedString("Retry", comment: "beautified: read the conversation again")) {
+                    model.retryLoad()
+                }
+                .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        } else {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(NSLocalizedString("Loading conversation…", comment: "beautified: first transcript read in flight"))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        }
+    }
+
+    /// "12.3 MB".
+    nonisolated static func megabytes(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
     @ViewBuilder
     private var taskBriefRow: some View {
         if let brief = taskBrief {
@@ -3479,7 +3616,9 @@ struct BeautifiedSessionView: View {
     private var transcript: some View {
         if model.items.isEmpty && !model.working && model.failure == nil && model.prompt == nil && taskBrief == nil {
             VStack(spacing: 10) {
-                if model.loading {
+                if model.loadIssue != nil {
+                    historyStatusRow
+                } else if model.loading {
                     ProgressView()
                     Text(NSLocalizedString("Loading transcript…", comment: "beautified"))
                         .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -3546,7 +3685,16 @@ struct BeautifiedSessionView: View {
                                     }
                                 } label: {
                                     if model.loadingEarlier {
-                                        ProgressView().controlSize(.small)
+                                        HStack(spacing: 6) {
+                                            ProgressView().controlSize(.small)
+                                            if model.transcriptFileSize > 0 {
+                                                Text(String(format: NSLocalizedString(
+                                                    "Loading earlier conversation… (%@ of %@)",
+                                                    comment: "beautified history: bytes held of the transcript file's size"),
+                                                    Self.megabytes(model.historyHeldBytes),
+                                                    Self.megabytes(model.transcriptFileSize)))
+                                            }
+                                        }
                                     } else if hidden > 0 {
                                         let n = max(1, Self.renderWindow(
                                             model.items,
@@ -3673,7 +3821,13 @@ struct BeautifiedSessionView: View {
                                         taskError: model.boardTask?()?.lastError ?? model.currentSession?()?.lastError)
                                 .id("beautified-failure")
                                 .transition(.opacity)
-                        } else if model.working, model.commandOutput == nil,
+                        } else if model.items.isEmpty, model.loadIssue != nil || model.loading {
+                            // Nothing on show yet: say so — loading, or why
+                            // it couldn't be read (with Retry) — rather than
+                            // a bare thinking cue over an empty chat.
+                            historyStatusRow.id("beautified-history-status")
+                            if model.showsLiveCue { liveCue.id("beautified-thinking") }
+                        } else if model.showsLiveCue, model.commandOutput == nil,
                                   !(model.items.last.map(TranscriptRow.isActivity) ?? false) {
                             // A run in progress shows its own step; otherwise the cue.
                             liveCue.id("beautified-thinking")

@@ -4094,3 +4094,13 @@
 
 /* firewall pane: Log allowed connections tooltip */
 "List allowed connections in the Security Timeline too" = "在安全時間軸中也列出允許的連線";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "正在載入對話…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "正在載入更早的對話…（%@ / %@）";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "無法載入此對話——機器未及時回應。";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "在其機器上找不到此工作階段的對話。";

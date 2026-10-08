@@ -21,6 +21,12 @@ final class MachineTranscriptProvider: BeautifiedTranscriptProvider {
     }
 
     var historyCacheKey: String? { "machine:\(machineID.uuidString):\(window)" }
+    /// The machine's link is SSH or a P2P relay, often over a WAN: a first
+    /// read of the default 24 MB (a long Claude session's tail) took seconds
+    /// to tens of seconds before anything showed. Same small first window
+    /// as the fat client; the continuity backfill and "load earlier" bring
+    /// the rest.
+    var historyBytesHint: Int? { 1_500_000 }
 
     /// The bound window while the machine still lists it.
     func activeTabIndex() -> Int? {

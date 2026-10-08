@@ -4125,3 +4125,13 @@
 
 /* firewall pane: Log allowed connections tooltip */
 "List allowed connections in the Security Timeline too" = "List allowed connections in the Security Timeline too";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "Loading conversation…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "Loading earlier conversation… (%@ of %@)";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "Couldn't load this conversation — the machine didn't answer in time.";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "This session's conversation wasn't found on its machine.";

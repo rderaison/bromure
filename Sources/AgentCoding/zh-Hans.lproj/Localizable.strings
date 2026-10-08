@@ -4091,3 +4091,13 @@
 
 /* firewall pane: Log allowed connections tooltip */
 "List allowed connections in the Security Timeline too" = "在安全时间线中也列出允许的连接";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "正在加载对话…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "正在加载更早的对话…（%@ / %@）";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "无法加载此对话——机器未及时响应。";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "在其机器上找不到此会话的对话。";

@@ -4091,3 +4091,13 @@
 
 /* firewall pane: Log allowed connections tooltip */
 "List allowed connections in the Security Timeline too" = "許可された接続もセキュリティタイムラインに表示";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "会話を読み込み中…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "以前の会話を読み込み中…（%@ / %@）";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "この会話を読み込めませんでした。マシンが時間内に応答しませんでした。";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "このセッションの会話がマシン上に見つかりませんでした。";
