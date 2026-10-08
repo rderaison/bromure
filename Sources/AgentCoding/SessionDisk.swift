@@ -723,7 +723,7 @@ public final class SessionDisk {
             if let plan = tokenPlan {
                 for cred in profile.gitHTTPSCredentials where cred.isUsable {
                     guard let fake = plan.fakeForGitHTTPS(host: cred.host,
-                                                          username: cred.username) else {
+                                                          username: cred.effectiveUsername) else {
                         continue
                     }
                     let h = cred.host.lowercased()

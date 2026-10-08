@@ -356,10 +356,24 @@ public struct GitHTTPSCredential: Codable, Equatable, Sendable, Identifiable {
     }
 
     /// True if this entry has enough to be written to ~/.git-credentials.
+    /// The username may be blank — forges take any name with a token, and a
+    /// GitHub token saved without one used to be skipped entirely (no
+    /// ~/.git-credentials line, so an in-VM clone of a private repo failed
+    /// with "could not read Username").
     public var isUsable: Bool {
         !host.trimmingCharacters(in: .whitespaces).isEmpty
-            && !username.trimmingCharacters(in: .whitespaces).isEmpty
             && !token.isEmpty
+    }
+
+    /// The name git sends with the token: the one set, else the forge's
+    /// convention for token auth.
+    public var effectiveUsername: String {
+        let u = username.trimmingCharacters(in: .whitespaces)
+        if !u.isEmpty { return u }
+        let h = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if h == "github.com" || h.hasSuffix(".github.com") { return "x-access-token" }
+        if h == "gitlab.com" || h.hasPrefix("gitlab.") { return "oauth2" }
+        return "git"
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -4140,9 +4154,9 @@ public final class ProfileStore {
         let gitCredsURL = home.appendingPathComponent(".git-credentials")
         let usableCreds = profile.gitHTTPSCredentials.filter { $0.isUsable }
         let gitLines = usableCreds.compactMap { c -> String? in
-            guard let fake = tokenPlan?.fakeForGitHTTPS(host: c.host, username: c.username)
+            guard let fake = tokenPlan?.fakeForGitHTTPS(host: c.host, username: c.effectiveUsername)
             else { return nil }
-            let user = Self.percentEncode(c.username)
+            let user = Self.percentEncode(c.effectiveUsername)
             let tok  = Self.percentEncode(fake)
             let host = c.host.trimmingCharacters(in: .whitespaces)
             return "https://\(user):\(tok)@\(host)"
@@ -5114,7 +5128,7 @@ public final class ProfileStore {
         var ghBlocks: [(cred: GitHTTPSCredential, token: String)] = []
         for cred in ghHosts {
             guard let fake = tokenPlan?.fakeForGitHTTPS(host: cred.host,
-                                                        username: cred.username) else { continue }
+                                                        username: cred.effectiveUsername) else { continue }
             ghBlocks.append((cred, fake))
         }
         guard !ghBlocks.isEmpty else { return }
@@ -5123,7 +5137,7 @@ public final class ProfileStore {
         var yaml = "# Managed by Bromure Agentic Coding.\n"
         for (cred, token) in ghBlocks {
             yaml += "\(cred.host):\n"
-            yaml += "    user: \(cred.username)\n"
+            yaml += "    user: \(cred.effectiveUsername)\n"
             yaml += "    oauth_token: \(token)\n"
             yaml += "    git_protocol: https\n"
         }
@@ -5145,7 +5159,7 @@ public final class ProfileStore {
         var glBlocks: [(cred: GitHTTPSCredential, token: String)] = []
         for cred in glHosts {
             guard let fake = tokenPlan?.fakeForGitHTTPS(host: cred.host,
-                                                        username: cred.username) else { continue }
+                                                        username: cred.effectiveUsername) else { continue }
             glBlocks.append((cred, fake))
         }
         guard !glBlocks.isEmpty else { return }
@@ -5156,7 +5170,7 @@ public final class ProfileStore {
         for (cred, token) in glBlocks {
             yaml += "    \(cred.host):\n"
             yaml += "        token: \(token)\n"
-            yaml += "        username: \(cred.username)\n"
+            yaml += "        username: \(cred.effectiveUsername)\n"
             yaml += "        api_protocol: https\n"
             yaml += "        api_host: \(cred.host)\n"
             yaml += "        git_protocol: https\n"

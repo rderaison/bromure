@@ -693,9 +693,9 @@ public extension Profile {
                 fakeValue: SessionTokenPlan.deriveFake(prefix: prefix,
                                                        real: real, salt: salt,
                                                        targetLength: target),
-                purpose: .gitHTTPS(host: cred.host, username: cred.username),
+                purpose: .gitHTTPS(host: cred.host, username: cred.effectiveUsername),
                 consentCredentialID: credConsentID,
-                consentDisplayName: "git token (\(cred.username)@\(cred.host))"))
+                consentDisplayName: "git token (\(cred.effectiveUsername)@\(cred.host))"))
         }
 
         for db in httpDatabases where db.isUsable {
