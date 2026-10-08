@@ -139,6 +139,10 @@ cp "$INFO_PLIST" "$CONTENTS/Info.plist"
 # none resolve to Contents/Frameworks. Add the standard macOS app rpath so
 # dyld finds Sparkle.framework and any other SPM framework we embed.
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$PRODUCT_NAME" 2>/dev/null || true
+# Swift back-deployment shims (libswiftCompatibilitySpan…) into the bundle, and
+# no absolute Xcode-toolchain rpath — else macOS 14/15 can't load the binary
+# and Gatekeeper refuses the app ("Bad Load Command").
+"$SCRIPT_DIR/scripts/embed-swift-backdeploy.sh" "$MACOS_DIR/$PRODUCT_NAME" "$CONTENTS/Frameworks" "$SIGN_ID"
 
 # Embed provisioning profile (required for iCloud and other entitlements)
 PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
