@@ -69,6 +69,7 @@ enum RemoteTransport {
     /// once, lazily, before anything dials (`_ = bootstrap`), mirroring iOS.
     private static let bootstrap: Void = {
         SSHDialer.shared.knownHostsURL = knownHostsPath
+        RequestLedger.shared.reportURL = dir.appendingPathComponent("link-report.json")
         SSHDialer.shared.loadClientKey = { loadClientKeyCrypto() }
         reapLegacyKeyAgent()
     }()

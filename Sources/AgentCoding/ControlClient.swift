@@ -74,8 +74,17 @@ struct ControlClient {
     func request(_ method: String, _ path: String, body: [String: Any]? = nil,
                  recvTimeoutSeconds: Int = 12,
                  extraHeaders: [(String, String)] = []) throws -> Response {
-        guard let fd = dial() else { throw ClientError.agentNotRunning }
+        let dialStart = Date()
+        guard let fd = dial() else {
+            if linkStats != nil {
+                RequestLedger.shared.record(method: method, path: path, bytesOut: 0, bytesIn: 0,
+                                            dial: Date().timeIntervalSince(dialStart), wait: nil,
+                                            total: Date().timeIntervalSince(dialStart), failed: true)
+            }
+            throw ClientError.agentNotRunning
+        }
         defer { Darwin.close(fd) }
+        let dialed = Date().timeIntervalSince(dialStart)
 
         // Bound the response read. A control call is small and answers in well
         // under a second on a live link; a wedged/half-dead connection (notably
@@ -140,6 +149,11 @@ struct ControlClient {
                 stats.recordLatency(first.timeIntervalSince(started))
             }
             stats.recordTransfer(bytes: resp.count, seconds: Date().timeIntervalSince(first))
+        }
+        if linkStats != nil {
+            RequestLedger.shared.record(method: method, path: path, bytesOut: out.count, bytesIn: resp.count,
+                                        dial: dialed, wait: firstByteAt.map { $0.timeIntervalSince(started) },
+                                        total: Date().timeIntervalSince(dialStart), failed: firstByteAt == nil)
         }
         // Split header/body on the RAW bytes: the body may be BINARY (a
         // zlib-compressed response, negotiated via X-Bromure-Gzip) and a

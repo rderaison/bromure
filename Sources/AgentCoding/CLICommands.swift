@@ -396,6 +396,8 @@ struct FatClientPost: ParsableCommand {
     var path: String
     @Option(name: .long, help: "Inline JSON request body.")
     var json: String?
+    @Option(name: .long, help: "Send it N times on one connection and print the timings (link measurements).")
+    var `repeat`: Int?
 
     func run() throws {
         guard let id = UUID(uuidString: hostID), let client = RemoteTransport.client(hostID: id) else {
@@ -404,6 +406,19 @@ struct FatClientPost: ParsableCommand {
         var body: [String: Any]?
         if let json, let data = json.data(using: .utf8) {
             body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        if let n = `repeat`, n > 0 {
+            for i in 1...n {
+                let t = Date()
+                let r = try client.request(method, path, body: body)
+                FileHandle.standardError.write(Data(String(format: "#%d HTTP %d %.0f ms\n", i, r.status,
+                                                           Date().timeIntervalSince(t) * 1000).utf8))
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: RequestLedger.shared.report(),
+                                                   options: [.prettyPrinted, .sortedKeys]) {
+                print(String(data: d, encoding: .utf8) ?? "")
+            }
+            return
         }
         let resp = try client.request(method, path, body: body)
         FileHandle.standardError.write(Data("HTTP \(resp.status)\n".utf8))

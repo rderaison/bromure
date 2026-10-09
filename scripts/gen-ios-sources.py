@@ -31,6 +31,7 @@ SHARED = [
     "FatClientFleet.swift",
     "FatClientPAC.swift",
     "ControlClient.swift",
+    "RequestLedger.swift",
     # Models + stores (the mirror reconciles /state into these)
     "SessionModels.swift",
     "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store

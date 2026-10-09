@@ -5458,6 +5458,7 @@ final class RemoteHostWindow: NSWindow {
 
     private static let debugReadBackActions: Set<String> = [
         "get-mirror-state", "window-info", "focused", "trace-records", "shot", "fc-drop-images",
+        "request-report",
     ]
 
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
@@ -5643,6 +5644,12 @@ final class RemoteHostWindow: NSWindow {
                      "bucket": SessionHome.bucket(for: $0, in: model).title] as [String: Any]
                 },
             ]
+        case "request-report":
+            // What the remote control requests cost, per route (RequestLedger);
+            // {"reset": true} starts a fresh window.
+            let r = RequestLedger.shared.report()
+            if (p["reset"] as? Bool) == true { RequestLedger.shared.reset() }
+            return r
         case "get-mirror-state":
             return [
                 "connected": controller.connected,
