@@ -34,6 +34,15 @@ struct ScratchTerminalTests {
         #expect(!BeautifiedSessionModel.isTerminalCommand("/term ls"))
     }
 
+    @Test("tmux leaves the mouse to the terminal: a drag selects natively and the selection stays")
+    func mouseOff() {
+        // tmux's mouse took a drag as its own copy-mode selection and
+        // dropped it on release — nothing left to ⌘C.
+        let cmd = VMAttachWindow.scratchCommand(session: "scratch-x", cwd: "~")
+        #expect(cmd.contains("set-option mouse off"))
+        #expect(!cmd.contains("mouse on"))
+    }
+
     @Test("the guest command lands in the folder, falls back to the home, and survives odd names")
     func guestCommand() throws {
         let name = TerminalSessionController.scratchSession("AB12cd34w3")

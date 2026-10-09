@@ -309,15 +309,18 @@ struct VMAttachWindow: ParsableCommand {
 
     /// The guest command behind a scratch terminal: attach to (or create)
     /// its own tmux session in `cwd` — the home when the folder is gone.
-    /// The wheel scrolls its history (mouse on: its one client is ours);
-    /// status off, the chat draws the chrome.
+    /// Mouse off, as in a session's own tabs: a drag is the terminal's
+    /// native selection, kept until ⌘C (tmux's mouse took the drag and
+    /// dropped it on release). The wheel still scrolls its history through
+    /// the guest's server-wide user-keys bridge. Status off: the chat draws
+    /// the chrome.
     static func scratchCommand(session: String, cwd: String) -> String {
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let name = String(session.filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(48))
         let dir = cwd == "~" ? "$HOME" : (cwd.hasPrefix("~/") ? "$HOME/" + q(String(cwd.dropFirst(2))) : q(cwd))
         return "d=\(dir); [ -d \"$d\" ] || d=\"$HOME\"; "
             + "exec tmux new-session -A -s \(q(name)) -c \"$d\" \\; set-option status off \\; "
-            + "set-option mouse on \\; set-option -s set-clipboard on"
+            + "set-option mouse off \\; set-option -s set-clipboard on"
     }
 
     private func attachLoop(client: ControlClient) throws {
