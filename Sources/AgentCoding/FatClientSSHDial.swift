@@ -661,6 +661,9 @@ final class SSHConnection: @unchecked Sendable {
             _ = ch.pipeline.removeHandler(name: Self.watchdogName)
             FatClientLog.log("nio-conn: handshake+auth OK \(host.connectLabel)")
             child.close(promise: nil)
+            // A dropped connection (peer reset, server exit) never goes
+            // through close(): its spare control channel's fd goes here.
+            ch.closeFuture.whenComplete { [weak self] _ in self?.releaseSpare() }
         } catch {
             let flagged = outcome.get()
             channel.close(promise: nil)
@@ -680,6 +683,9 @@ final class SSHConnection: @unchecked Sendable {
     /// (= per lane).
     private let spareLock = NSLock()
     private var spareControlFD: Int32?
+    /// Set once the connection is gone: a spare opened after that (a refill
+    /// racing the drop) is closed instead of kept.
+    private var spareReleased = false
 
     /// Open an exec child channel for `verb`, bridge it to a socketpair, and
     /// return the caller's fd. The control verb is served from the spare when
@@ -704,11 +710,33 @@ final class SSHConnection: @unchecked Sendable {
     private func refillSpare() {
         guard isAlive, let fd = openFreshChannel(FatClient.controlVerb) else { return }
         spareLock.lock()
-        let old = spareControlFD
-        spareControlFD = fd
+        let released = spareReleased
+        let old = released ? nil : spareControlFD
+        if !released { spareControlFD = fd }
         spareLock.unlock()
         if let old { Darwin.close(old) }
+        if released { Darwin.close(fd) }
     }
+
+    /// Close the spare control channel's fd, for good: from close(), the
+    /// pool's closeFuture handler (a dropped connection), and deinit.
+    func releaseSpare() {
+        spareLock.lock()
+        let spare = spareControlFD
+        spareControlFD = nil
+        spareReleased = true
+        spareLock.unlock()
+        if let spare { Darwin.close(spare) }
+    }
+
+    /// Spare fds currently held (tests).
+    var heldSpareCount: Int {
+        spareLock.lock()
+        defer { spareLock.unlock() }
+        return spareControlFD == nil ? 0 : 1
+    }
+
+    deinit { releaseSpare() }
 
     /// Test knobs (A/B on a simulated link): no spare channel / no pipelining.
     static let noPrewarm = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_NO_PREWARM"] != nil
@@ -734,6 +762,10 @@ final class SSHConnection: @unchecked Sendable {
             return nil
         }
         let appFD = fds[0], pumpFD = fds[1]
+        // Never inherited by a spawned child (forkpty, Process): a child
+        // holding either end would keep the bridge — and its channel — open.
+        _ = fcntl(appFD, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(pumpFD, F_SETFD, FD_CLOEXEC)
         // Without NOSIGPIPE a peer-closed write raises SIGPIPE and kills the
         // process (no ssh child process to absorb it in this transport).
         var one: Int32 = 1
@@ -816,11 +848,7 @@ final class SSHConnection: @unchecked Sendable {
     }
 
     func close() {
-        spareLock.lock()
-        let spare = spareControlFD
-        spareControlFD = nil
-        spareLock.unlock()
-        if let spare { Darwin.close(spare) }
+        releaseSpare()
         channel.close(promise: nil)
     }
 
@@ -944,6 +972,10 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
         // the write queue), so a fast producer can't balloon memory.
         _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
         _ = context.channel.setOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+        // A child channel of a connection that drops doesn't reliably get
+        // channelInactive (see SSHPTYSessionHandler): closeFuture always
+        // fires. Strong capture on purpose, like teardownFD's; it's idempotent.
+        context.channel.closeFuture.whenComplete { [self] _ in teardownFD() }
     }
 
     func channelActive(context: ChannelHandlerContext) {

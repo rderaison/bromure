@@ -188,6 +188,8 @@ let package = Package(
                 "bromure-ac", "GhosttyKit",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ],
             path: "Tests/AgentCodingTests",
             linkerSettings: [
