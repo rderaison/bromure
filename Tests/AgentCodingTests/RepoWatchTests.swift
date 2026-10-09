@@ -345,4 +345,58 @@ struct RepoWatchTests {
         a.watchID = UUID()
         #expect(AutomationDescriber.kind(of: a) == .security)
     }
+
+    // MARK: Hand-over to a session
+
+    private struct Boom: Error {}
+
+    @Test("A hand-over whose staging fails leaves the finding untouched and says why")
+    func handOverStageFailure() async {
+        let store = tempStore()
+        let f = store.ingest(report("SQL injection"), watchID: nil, profileID: UUID(),
+                             repo: "o/r", runID: nil, commit: nil).finding
+        var delivered = false
+        let why = await store.handOver(f.id, to: "@fixer", stage: { throw Boom() },
+                                       deliver: { (_: Void) in delivered = true },
+                                       why: { _ in "guest shell down" })
+        #expect(why == "guest shell down")
+        #expect(store.finding(f.id)?.status == .new)
+        #expect(store.finding(f.id)?.statusNote == nil)
+        #expect(!delivered)
+    }
+
+    @Test("A hand-over reads as sent once staged; a failed delivery puts it back")
+    func handOverDeliveryFailure() async throws {
+        let store = tempStore()
+        let f = store.ingest(report("SQL injection"), watchID: nil, profileID: UUID(),
+                             repo: "o/r", runID: nil, commit: nil).finding
+        var got = ""
+        let why = await store.handOver(f.id, to: "@fixer", stage: { "the line" },
+                                       deliver: { line in got = line; throw Boom() },
+                                       why: { _ in "typing refused" })
+        #expect(why == nil)
+        for _ in 0..<100 where store.finding(f.id)?.status != .new {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(got == "the line")
+        #expect(store.finding(f.id)?.status == .new)
+        #expect(store.finding(f.id)?.statusNote?.contains("@fixer") == true)
+        #expect(store.finding(f.id)?.statusNote?.contains("typing refused") == true)
+    }
+
+    @Test("A delivered hand-over leaves the finding triaged and sent")
+    func handOverDelivered() async throws {
+        let store = tempStore()
+        let f = store.ingest(report("SQL injection"), watchID: nil, profileID: UUID(),
+                             repo: "o/r", runID: nil, commit: nil).finding
+        var done = false
+        let why = await store.handOver(f.id, to: "@fixer", stage: { },
+                                       deliver: { done = true }, why: { _ in "x" })
+        #expect(why == nil)
+        #expect(store.finding(f.id)?.status == .triaged)
+        for _ in 0..<100 where !done { try await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(done)
+        #expect(store.finding(f.id)?.status == .triaged)
+        #expect(store.finding(f.id)?.statusNote?.contains("Sent to @fixer") == true)
+    }
 }

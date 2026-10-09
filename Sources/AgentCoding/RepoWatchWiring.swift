@@ -67,10 +67,20 @@ extension ACAppDelegate {
         guard let f = findingStore.finding(findingID) else { return false }
         let room = roomID.flatMap { agentRoomStore.room($0) }
         let brief = RepoWatchPrompts.fixTask(f)
+        let store = findingStore
+        let before = f.status
         guard let sid = switchboardEngine.routeFinding(
             id: f.id, severity: f.severity.rawValue, repo: f.repo,
             brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)",
-            preferredWorkspace: f.profileID, room: room) else { return false }
+            preferredWorkspace: f.profileID, room: room,
+            failed: { why in
+                // The note said "Sent to the Switchboard": say it didn't get there.
+                store.mutate(findingID) {
+                    if before == .new, $0.status == .triaged { $0.status = .new }
+                    $0.statusNote = String(format: NSLocalizedString("Couldn't hand it to the Switchboard: %@",
+                                                                     comment: "finding status note"), why)
+                }
+            }) else { return false }
         findingStore.mutate(findingID) {
             if $0.status == .new { $0.status = .triaged }
             $0.statusNote = room.map {
@@ -94,37 +104,29 @@ extension ACAppDelegate {
     }
 
     /// "Ask @foo to fix it": hand the finding to that session. Shows it
-    /// when `show`.
-    @discardableResult
-    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, show: Bool = true) -> Bool {
+    /// when `show`. Returns why it didn't get there (nil = staged and on
+    /// its way; a later typing failure rewrites the finding's note).
+    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, show: Bool = true) async -> String? {
         guard let f = findingStore.finding(findingID),
-              let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else { return false }
+              let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else {
+            return NSLocalizedString("that session is gone", comment: "finding → session failure")
+        }
         let brief = RepoWatchPrompts.fixTask(f)
         let engine = switchboardEngine
         let name = s.nickname.map { "@" + $0 } ?? "“\(s.title)”"
-        let store = findingStore
-        Task {
-            do {
-                try await engine.handFinding(
-                    id: f.id, severity: f.severity.rawValue, repo: f.repo,
-                    brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)", to: s)
-            } catch {
-                BACDebug.log("switchboard", "finding \(findingID) → session \(sessionID) failed — \(error)")
-                let why: String
-                if case SwitchboardEngine.ActError.refused(let r) = error { why = r } else { why = error.localizedDescription }
-                // The note said "Sent to …": say it didn't get there.
-                store.mutate(findingID) {
-                    $0.statusNote = String(format: NSLocalizedString("Couldn't hand it to %1$@: %2$@",
-                                                                     comment: "finding status note"), name, why)
-                }
-            }
-        }
-        findingStore.mutate(findingID) {
-            if $0.status == .new { $0.status = .triaged }
-            $0.statusNote = String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name)
-        }
-        if show { ensureUnifiedWindow().selectSession(sessionID) }
-        return true
+        let failure = await findingStore.handOver(findingID, to: name, stage: {
+            try await engine.stageFinding(
+                id: f.id, severity: f.severity.rawValue, repo: f.repo,
+                brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)", to: s)
+        }, deliver: { line in
+            try await engine.deliverFinding(line, findingID: findingID, to: s)
+        }, why: { error in
+            BACDebug.log("switchboard", "finding \(findingID) → session \(sessionID) failed — \(error)")
+            if case SwitchboardEngine.ActError.refused(let r) = error { return r }
+            return error.localizedDescription
+        })
+        if failure == nil, show { ensureUnifiedWindow().selectSession(sessionID) }
+        return failure
     }
 
     /// Bring up the hub — on a finding when given one.
@@ -216,9 +218,11 @@ extension ACAppDelegate {
                     return ["error": "no Switchboard could be started"]
                 }
             case ("POST", "session"):
-                guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)),
-                      routeFindingToSession(id, session: sid, show: false) else {
+                guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)) else {
                     return ["error": "unknown session"]
+                }
+                if let why = await routeFindingToSession(id, session: sid, show: false) {
+                    return ["error": why]
                 }
             case ("POST", "duplicate"):
                 guard let of = (body["of"] as? String).flatMap(UUID.init(uuidString:)) else {

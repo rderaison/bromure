@@ -1066,6 +1066,35 @@ final class FindingStore {
         }
     }
 
+    /// Hand a finding to a session ("Ask @foo"): it reads as sent only once
+    /// `stage` (its file written into the session) succeeds — a failure there
+    /// leaves the finding untouched and is returned. `deliver` (typing the
+    /// line, which can wait for a busy agent) runs on; if it fails, the note
+    /// says so and a status the hand-over moved goes back.
+    @discardableResult
+    func handOver<Staged>(_ id: UUID, to name: String,
+                          stage: () async throws -> Staged,
+                          deliver: @escaping @MainActor (Staged) async throws -> Void,
+                  why: @escaping (Error) -> String) async -> String? {
+        let staged: Staged
+        do { staged = try await stage() } catch { return why(error) }
+        guard let before = finding(id)?.status else { return nil }
+        mutate(id) {
+            if $0.status == .new { $0.status = .triaged }
+            $0.statusNote = String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name)
+        }
+        Task { @MainActor [weak self] in
+            do { try await deliver(staged) } catch {
+                self?.mutate(id) {
+                    if before == .new, $0.status == .triaged { $0.status = .new }
+                    $0.statusNote = String(format: NSLocalizedString("Couldn't hand it to %1$@: %2$@",
+                                                                     comment: "finding status note"), name, why(error))
+                }
+            }
+        }
+        return nil
+    }
+
     func markDuplicate(_ id: UUID, of original: UUID) {
         guard id != original, finding(original) != nil else { return }
         mutate(id) {

@@ -4131,3 +4131,7 @@
 "Couldn't hand it to %1$@: %2$@" = "無法交給 %1$@：%2$@";
 "a menu or dialog stayed open in that session" = "該工作階段中有選單或對話框一直開著";
 "something else was typed in that session's input box" = "該工作階段的輸入框中已有其他內容";
+"Couldn't hand it to the Switchboard: %@" = "無法交給總機：%@";
+"the Switchboard session is gone" = "總機工作階段已不存在";
+"the message couldn't be typed into the Switchboard" = "無法將訊息輸入到總機";
+"the Switchboard's agent never started" = "總機的代理程式始終未啟動";

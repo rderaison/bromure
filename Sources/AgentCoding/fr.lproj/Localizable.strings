@@ -4128,3 +4128,7 @@
 "Couldn't hand it to %1$@: %2$@" = "Impossible de le confier à %1$@ : %2$@";
 "a menu or dialog stayed open in that session" = "un menu ou une boîte de dialogue est resté ouvert dans cette session";
 "something else was typed in that session's input box" = "autre chose était saisi dans la zone de saisie de cette session";
+"Couldn't hand it to the Switchboard: %@" = "Impossible de le confier au Standard : %@";
+"the Switchboard session is gone" = "la session du Standard n’existe plus";
+"the message couldn't be typed into the Switchboard" = "le message n’a pas pu être saisi dans le Standard";
+"the Switchboard's agent never started" = "l’agent du Standard n’a jamais démarré";

@@ -4128,3 +4128,7 @@
 "Couldn't hand it to %1$@: %2$@" = "无法交给 %1$@：%2$@";
 "a menu or dialog stayed open in that session" = "该会话中有菜单或对话框一直打开";
 "something else was typed in that session's input box" = "该会话的输入框中已有其他内容";
+"Couldn't hand it to the Switchboard: %@" = "无法交给总机：%@";
+"the Switchboard session is gone" = "总机会话已不存在";
+"the message couldn't be typed into the Switchboard" = "无法将消息输入到总机";
+"the Switchboard's agent never started" = "总机的代理始终未启动";

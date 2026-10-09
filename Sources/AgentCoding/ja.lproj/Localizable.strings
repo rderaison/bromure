@@ -4128,3 +4128,7 @@
 "Couldn't hand it to %1$@: %2$@" = "%1$@ に渡せませんでした: %2$@";
 "a menu or dialog stayed open in that session" = "そのセッションでメニューまたはダイアログが開いたままでした";
 "something else was typed in that session's input box" = "そのセッションの入力欄に別の内容が入力されていました";
+"Couldn't hand it to the Switchboard: %@" = "スイッチボードに渡せませんでした: %@";
+"the Switchboard session is gone" = "スイッチボードのセッションはもうありません";
+"the message couldn't be typed into the Switchboard" = "メッセージをスイッチボードに入力できませんでした";
+"the Switchboard's agent never started" = "スイッチボードのエージェントが起動しませんでした";

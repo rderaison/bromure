@@ -4128,3 +4128,7 @@
 "Couldn't hand it to %1$@: %2$@" = "Não foi possível passar para %1$@: %2$@";
 "a menu or dialog stayed open in that session" = "um menu ou diálogo ficou aberto nessa sessão";
 "something else was typed in that session's input box" = "havia outra coisa digitada na caixa de entrada dessa sessão";
+"Couldn't hand it to the Switchboard: %@" = "Não foi possível passar para a Central: %@";
+"the Switchboard session is gone" = "a sessão da Central não existe mais";
+"the message couldn't be typed into the Switchboard" = "não foi possível digitar a mensagem na Central";
+"the Switchboard's agent never started" = "o agente da Central nunca iniciou";

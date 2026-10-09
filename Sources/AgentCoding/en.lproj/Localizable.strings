@@ -4162,3 +4162,7 @@
 "Couldn't hand it to %1$@: %2$@" = "Couldn't hand it to %1$@: %2$@";
 "a menu or dialog stayed open in that session" = "a menu or dialog stayed open in that session";
 "something else was typed in that session's input box" = "something else was typed in that session's input box";
+"Couldn't hand it to the Switchboard: %@" = "Couldn't hand it to the Switchboard: %@";
+"the Switchboard session is gone" = "the Switchboard session is gone";
+"the message couldn't be typed into the Switchboard" = "the message couldn't be typed into the Switchboard";
+"the Switchboard's agent never started" = "the Switchboard's agent never started";
