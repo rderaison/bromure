@@ -3185,10 +3185,10 @@ echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           // GET allowed (reaches upstream), POST blocked with OUR 403.
           assert(Number(grab(out, "GET443")) < 400, `GET https should be allowed, got ${grab(out, "GET443")}`);
           assertEq(grab(out, "POST443"), "403", `POST https should be blocked (403), got ${grab(out, "POST443")}`);
-          assertIncludes(grab(out, "BODY443"), "Bromure Guardrails", "443 POST 403 not from Bromure Guardrails");
+          assertIncludes(grab(out, "BODY443"), "Bromure firewall rule", "443 POST 403 not from the Bromure firewall");
           assert(Number(grab(out, "GET80")) < 400, `GET http:80 should be allowed, got ${grab(out, "GET80")}`);
           assertEq(grab(out, "POST80"), "403", `POST http:80 should be blocked (403), got ${grab(out, "POST80")}`);
-          assertIncludes(grab(out, "BODY80"), "Bromure Guardrails", "80 POST 403 not from Bromure Guardrails");
+          assertIncludes(grab(out, "BODY80"), "Bromure firewall rule", "80 POST 403 not from the Bromure firewall");
         });
       });
 
@@ -3890,8 +3890,8 @@ for n, c in enumerate(calls, 1):
             assert(r.ok === true && r.id, `start-session: ${JSON.stringify(r)}`);
             s2 = r.id;
             const rec = await waitBound(s2);
-            assert(/^~\/claude-\d{6}-\d{4}$/.test(rec.cwd),
-                   `expected a synthetic ~/claude-yyMMdd-HHmm folder, got ${rec.cwd}`);
+            assert(/^~\/claude-\d{4}-\d{4}$/.test(rec.cwd),
+                   `expected a synthetic ~/claude-MMdd-HHmm folder, got ${rec.cwd}`);
             await gx(vm.id, `test -d ${guestPath(rec.cwd)}`);
             assertEq(await tabDisplay(vm.id, rec.windowIndex), rec.launchDisplay, "@display mismatch");
             const other = s1 && (await sessionRec(s1));
@@ -4232,17 +4232,25 @@ for n, c in enumerate(calls, 1):
             assert(hits.length > 0, "the request's notice was never typed into any tab");
             assert(hits.every((l) => l.startsWith(`line w${B.w} `)),
                    `the notice went to the wrong tab (B is w${B.w}): ${hits.join(" | ")}`);
+            // A short request is typed whole, with its file — it counts as read
+            // (no read_inbox round trip for the peer).
+            assert(hits.some((l) => l.includes("that is the whole request") && l.includes("payload.txt")),
+                   `the notice doesn't carry the whole request and its file: ${hits.join(" | ")}`);
             assert(!(await sessionTranscript(A.id)).includes("asks you (request"), "the requester got its own notice");
           });
 
           await test("31.3 peer read_inbox → deliver with a file; requester gets the notice, the reply, and the file", async () => {
             assert(reqID, "no request from 31.2");
+            // The notice carried the request whole, so it counts as read: the
+            // inbox needn't serve it again (it may, if read_inbox beats the
+            // notice's bookkeeping — then it must be the request).
             const [inbox] = await mcp(vm.id, B.w, [{ name: "read_inbox" }]);
-            assert(!inbox.isError && inbox.json, `read_inbox: ${inbox.text.slice(0, 300)}`);
-            const brief = (inbox.json.messages || []).find((m) => sameID(m.delegation_id, reqID));
-            assert(brief && brief.kind === "brief" && brief.text.includes(`ace2e request ${n}`),
-                   `the request isn't in B's inbox: ${inbox.text.slice(0, 300)}`);
-            assert(brief.request === true, "inbox item not flagged as a request");
+            assert(!inbox.isError, `read_inbox: ${inbox.text.slice(0, 300)}`);
+            const brief = ((inbox.json && inbox.json.messages) || []).find((m) => sameID(m.delegation_id, reqID));
+            if (brief) {
+              assert(brief.kind === "brief" && brief.text.includes(`ace2e request ${n}`) && brief.request === true,
+                     `B's inbox serves something else for the request: ${inbox.text.slice(0, 300)}`);
+            }
             const reply = `ace2e reply ${n}`;
             await gx(vm.id, `printf '%s\\n' '${reply} file' > ${guestPath(FB)}/reply.txt`);
             const from = (await stubLog(vm.id)).length;
@@ -4255,15 +4263,18 @@ for n, c in enumerate(calls, 1):
             assert(hits.length > 0, "the reply's notice never reached the requester");
             assert(hits.every((l) => l.startsWith(`line w${A.w} `)),
                    `the reply's notice went to the wrong tab (A is w${A.w}): ${hits.join(" | ")}`);
-            const [aIn] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
-            const got = ((aIn.json && aIn.json.messages) || []).find((m) => m.kind === "deliver");
-            assert(got && got.text.includes(reply), `the reply isn't in A's inbox: ${aIn.text.slice(0, 300)}`);
+            // A short reply is typed whole, with where its file landed.
+            assert(hits.some((l) => l.includes(reply) && l.includes("reply.txt")),
+                   `the reply's notice doesn't carry the reply and its file: ${hits.join(" | ")}`);
+            const d = await delegationRec(reqID);
+            assertEq(d.status, "delivered", "the request isn't marked delivered");
+            const got = (d.messages || []).find((m) => m.kind === "deliver");
+            assert(got && got.text.includes(reply), `no deliver message on the record: ${JSON.stringify(d.messages || []).slice(0, 300)}`);
             const f = (got.files || [])[0];
             assert(f && f.includes(`/.bromure/inbox/${reqID.slice(0, 8).toLowerCase()}/reply.txt`), `reply file not landed: ${JSON.stringify(got.files)}`);
             assertEq((await gx(vm.id, `cat ${JSON.stringify(f)}`)).trim(), `${reply} file`, "landed reply differs");
-            const d = await delegationRec(reqID);
-            assertEq(d.status, "delivered", "the request isn't marked delivered");
-            // Reading takes it: a second look is empty.
+            // Reading takes whatever was left: a second look is empty.
+            await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
             const [again] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
             assertIncludes(again.text, "Nothing waiting", "read_inbox didn't take the messages");
           });
@@ -4311,9 +4322,10 @@ for n, c in enumerate(calls, 1):
             const hits = lines.filter((l) => l.includes(`ace2e done ${n}`));
             assert(hits.length > 0 && hits.every((l) => l.startsWith(`line w${A.w} `)),
                    `the delivery notice didn't go (only) to the parent's tab w${A.w}: ${hits.join(" | ")}`);
-            const [inb] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: did } }]);
-            const kinds = ((inb.json && inb.json.messages) || []).map((m) => m.kind);
-            assert(kinds.includes("report") && kinds.includes("deliver"), `parent inbox kinds: ${JSON.stringify(kinds)}`);
+            // On the record (a deliver typed whole counts as read, so the
+            // inbox may no longer hold it).
+            const kinds = ((await delegationRec(did)).messages || []).filter((m) => m.to === "parent").map((m) => m.kind);
+            assert(kinds.includes("report") && kinds.includes("deliver"), `messages to the parent: ${JSON.stringify(kinds)}`);
             const [cl] = await mcp(vm.id, A.w, [{ name: "close_delegation", arguments: { delegation_id: did, verdict: "accepted" } }]);
             assert(!cl.isError, `close_delegation: ${cl.text.slice(0, 200)}`);
             const retired = await waitRec(cid, (x) => !!x.archivedAt, 20);
