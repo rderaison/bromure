@@ -143,6 +143,46 @@ private final class WindowColorBackingView: NSView {
     }
 }
 
+// MARK: - Stage split (chat | browser | files)
+
+/// The widths rules the chat stage and its right-hand panes share — the
+/// local window and a fat-client mirror both lay out chat | browser | files
+/// and must protect the chat the same way (B15/B19, WS-E). `area` is the
+/// width the three share (the window minus the sidebar).
+enum StageSplit {
+    /// The chat's floor: below ~360 pt a prompt wraps to a word a line and
+    /// the header can't fit, so the side panes give way instead.
+    static let chatMinWidth: CGFloat = 360
+    /// Chromium's minimum window width (B18). A window too narrow for chat +
+    /// browser squeezes it further (the chat's floor wins) and the browser
+    /// overscans its display to keep the page whole.
+    static let browserMinWidth: CGFloat = BrowserDisplaySizing.minPaneWidth
+    static let browserMaxWidth: CGFloat = 1400
+
+    /// The widest the browser may be: never so wide the chat drops under its
+    /// floor, nor past the hard max — never under the browser's own floor
+    /// either (the 999 chat floor then squeezes it, see `chatFloor`).
+    static func clampBrowser(_ desired: CGFloat, area: CGFloat, fileWidth: CGFloat) -> CGFloat {
+        let available = area - fileWidth - chatMinWidth
+        return max(browserMinWidth, min(desired, min(browserMaxWidth, available)))
+    }
+
+    /// Opening the browser where chat + browser + files can't all fit folds
+    /// the Files pane in the same move.
+    static func foldsFiles(area: CGFloat, fileWidth: CGFloat) -> Bool {
+        area > 0 && fileWidth > 0 && area - fileWidth - chatMinWidth < browserMinWidth
+    }
+
+    /// The chat's floor as a constraint: beats the pane widths (which are
+    /// high-but-not-required), yields last.
+    @MainActor
+    static func chatFloor(_ view: NSView) -> NSLayoutConstraint {
+        let c = view.widthAnchor.constraint(greaterThanOrEqualToConstant: chatMinWidth)
+        c.priority = .init(999)
+        return c
+    }
+}
+
 // MARK: - Unified window
 
 /// The shared, unpeel-style window: a left source-list of every running VM with
@@ -168,6 +208,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 guard let self else { return }
                 self.effectiveAppearance.performAsCurrentDrawingAppearance {
                     for w in self.canvasViews { w.view?.layer?.backgroundColor = NSColor.acCanvas.cgColor }
+                    // A session's page paints the stage the canvas colour too
+                    // (setSessionHeader) — only while one is shown, and opaque.
+                    if self.sessionHeaderHost?.isHidden == false, self.isOpaque {
+                        self.stage.layer?.backgroundColor = NSColor.acCanvas.cgColor
+                    }
                 }
             }
         }
@@ -218,7 +263,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var automationHosting: NSHostingView<AutomationEditorView>?
     /// Automation kanban board overlay — same full-bleed slot pattern.
     private let kanbanSlot = NSView()
-    private var kanbanHosting: NSHostingView<AutomationKanbanView>?
+    private var kanbanHosting: NSHostingView<AutomationHubView>?
+    /// The Automations hub's navigation (tab, selected finding, filters).
+    let automationHub = AutomationHubModel()
     /// Coding-task kanban board overlay.
     private let taskBoardSlot = NSView()
     private var taskBoardHosting: NSHostingView<CodingKanbanView>?
@@ -235,6 +282,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// only when this changes keeps the surface's state alive.
     private var sessionPresentationKey: String?
     /// Manual screenshots: the fixture chat on stage (DemoMode).
+    /// The chat on stage for a session on an attached machine, and the
+    /// terminal controllers of those machines (MachineChat.swift).
+    private var machineChat: BeautifiedSessionModel?
+    private var machineTerms: [UUID: TerminalSessionController] = [:]
     private var demoChat: BeautifiedSessionModel?
     /// Set once the home selection ran, so reopening the window doesn't
     /// yank the user off a machine they picked on purpose.
@@ -325,8 +376,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// browser (asleep, it has no toolbar globe to close one with).
     private var liveSessionOnStage: AgentSession? {
         guard let sid = selectedSessionID, !listModel.newSessionSelected,
-              let s = acDelegate?.agentSessionStore.session(sid),
-              pane(s.profileID) != nil,
+              let s = acDelegate?.sessionRecord(sid) else { return nil }
+        // Demo fixture (doc/video captures): its live sessions have no VM.
+        if DemoMode.isLive(s.id) { return s }
+        guard pane(s.profileID) != nil,
               SessionHome.liveTabPosition(for: s, in: listModel) != nil else { return nil }
         return s
     }
@@ -343,12 +396,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         return browserPaneOpenWorkspaces.contains(id)
     }
     private var expandedBrowserPaneWidth: CGFloat = 640
-    private static let browserPaneMinWidth: CGFloat = 380
-    private static let browserPaneMaxWidth: CGFloat = 1400
+    /// The pane's floor: Chromium's minimum window width (B18) — narrower,
+    /// the page used to be clipped on the right. Only a window too narrow to
+    /// hold chat + browser squeezes it further (the chat's floor wins); the
+    /// browser then overscans its display to keep the page whole.
+    static let browserPaneMinWidth: CGFloat = StageSplit.browserMinWidth
+    /// Dragging the pane under this closes it; between this and the floor
+    /// the drag just holds at the floor.
+    private static let browserPaneCloseWidth: CGFloat = 380
     private static let browserPaneDefaultWidth: CGFloat = 640
     /// Floor the terminal/pane slot keeps when the browser pane is open —
     /// the clamp that stops the pane from growing the window off-screen.
-    private static let terminalSlotMinWidth: CGFloat = 240
+    /// It is also the chat's floor: below ~360 pt a prompt wraps to a word
+    /// a line and the header can't fit (B15), so the side panes give way
+    /// (the Files pane doesn't pop open, the browser closes it) instead.
+    static let terminalSlotMinWidth: CGFloat = StageSplit.chatMinWidth
     private static let browserPaneWidthKey = "ac.browserPaneWidth"
 
     init(acDelegate: ACAppDelegate) {
@@ -396,6 +458,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSelect:    { [weak self] id in self?.selectWorkspaceName(id) },
             onSelectTab: { [weak self] id, idx in
                 guard let self else { return }
+                if let m = self.acDelegate?.attachedMachines[id] {
+                    self.showMachineTab(m, position: idx)
+                    return
+                }
                 // A tab from the Machines list is a plain terminal, even one
                 // that hosts a session — the toolbar's Session pill leads back.
                 self.clearSessionStage()
@@ -424,6 +490,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     withWizard: NSEvent.modifierFlags.contains(.option))
             },
             automationStore: acDelegate.scheduledAutomationStore,
+            findingStore: acDelegate.findingStore,
             onNewAutomation:    { [weak self] in self?.showAutomationEditor(nil) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: acDelegate.codingTaskStore,
@@ -433,7 +500,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.showTaskBoard()
                 self.listModel.newTaskRequested = true
             },
-            sessionStore: acDelegate.agentSessionStore,
+            sessionStore: acDelegate.homeSessionStore,
             roomStore: acDelegate.agentRoomStore,
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
@@ -449,7 +516,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) },
             onSelectConnector: { _ in ConnectorWindowController.show() },
             onConnectorAction: { id, action in ConnectorWindowController.perform(id, action) },
-            onRewindHome: { [weak self] id in self?.showRewindHome(id) })
+            onRewindHome: { [weak self] id in self?.showRewindHome(id) },
+            onFleet: { [weak self] id, action in self?.acDelegate?.fleetAction(id, action, on: self) })
+        // Native machines asking to join this Mac's fleet.
+        fleetPrompter = FleetAdmissionPrompter(
+            model: listModel, hostName: { nil }, window: { [weak self] in self },
+            act: { [weak self] id, action in self?.acDelegate?.fleetAction(id, action, on: self) })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -467,6 +539,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         stage.translatesAutoresizingMaskIntoConstraints = false
         stage.wantsLayer = true
         stage.layer?.backgroundColor = NSColor.black.cgColor
+        // B14: nothing on the stage ever draws over the sidebar (a header
+        // wider than its slot was centred and spilled left across it).
+        stage.clipsToBounds = true
+        paneSlot.clipsToBounds = true
         paneSlot.translatesAutoresizingMaskIntoConstraints = false
         emptyStateHost.translatesAutoresizingMaskIntoConstraints = false
         stage.addSubview(paneSlot)
@@ -474,13 +550,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // Tasks-first: the header strip above a live session's pane. Height 0
         // and hidden until a task is on stage.
         let headerHost = NSHostingView(rootView: SessionHeaderView(
-            store: acDelegate.agentSessionStore, model: listModel, actions: sessionStageActions))
+            store: acDelegate.homeSessionStore, model: listModel, actions: sessionStageActions))
         headerHost.translatesAutoresizingMaskIntoConstraints = false
         headerHost.sizingOptions = []
         // Opaque, window-colored: the stage behind it is black (terminal
         // backing), and any slack between the header's content and its slot
         // must read as window, never as a black bar.
         headerHost.wantsLayer = true
+        headerHost.clipsToBounds = true
         paintCanvas(headerHost)
         headerHost.isHidden = true
         self.sessionHeaderHost = headerHost
@@ -580,6 +657,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // Tasks-first stage overlay (task detail / inline review / composer).
         sessionSlot.translatesAutoresizingMaskIntoConstraints = false
         sessionSlot.wantsLayer = true
+        sessionSlot.clipsToBounds = true
         paintCanvas(sessionSlot)
         sessionSlot.isHidden = true
         stage.addSubview(sessionSlot)
@@ -654,7 +732,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             // right edge before measuring.
             let fileW = self.filePaneOpen ? (self.filePaneWidthConstraint?.constant ?? 0) : 0
             let width = self.stage.bounds.width - fileW - x
-            if width < Self.browserPaneMinWidth {
+            if width < Self.browserPaneCloseWidth {
                 self.setBrowserPaneOpen(false, animated: true)
             } else {
                 self.browserPaneWidthConstraint?.constant = self.clampedBrowserPaneWidth(width)
@@ -667,8 +745,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self.expandedBrowserPaneWidth = w
             UserDefaults.standard.set(w, forKey: Self.browserPaneWidthKey)
         }
-        let paneSlotMin = paneSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.terminalSlotMinWidth)
-        paneSlotMin.priority = .init(999)   // beats the pane width, yields last
+        let paneSlotMin = StageSplit.chatFloor(paneSlot)   // beats the pane width, yields last
         NSLayoutConstraint.activate([
             // The task header sits above the pane, spanning the pane's width
             // (never the right-hand browser/file splits).
@@ -840,7 +917,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onToggleLinux: { [weak self] in self?.toggleLinux() },
             onDetails: { [weak self] id in self?.showVMDashboard(id) },
             sessionForTab: { [weak self] id, window in
-                self?.acDelegate?.agentSessionStore.session(profileID: id, windowIndex: window)?.id
+                self?.acDelegate?.sessionRecord(profileID: id, windowIndex: window)?.id
             })
         let tbDelegate = UnifiedToolbarDelegate(rootView: toolbarBar)
         self.toolbarDelegate = tbDelegate
@@ -871,6 +948,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
         updateEmptyState()
         startSessionReconcile()
+        TranscriptSearchIndex.shared.onUpdate = { [weak self] ids in
+            // Sessions still called "<Agent> in <folder>" take the agent's
+            // own title for the conversation, or its first request.
+            guard let store = self?.acDelegate?.agentSessionStore else { return }
+            let index = TranscriptSearchIndex.shared
+            store.adoptTranscriptTitles(ids) { id in
+                index.entries[id].map { ($0.agentTitle, $0.firstPrompt) }
+            }
+        }
         TranscriptSearchIndex.shared.start()
         // Holding ⌘ shows each session's ⌘1–9 number in the sidebar.
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
@@ -884,11 +970,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] note in
             let files = note.object as? [String]
             let from = note.userInfo?["session"] as? UUID
+            let since = note.userInfo?["since"] as? Date
             MainActor.assumeIsolated {
                 guard let self, self.isKeyWindow else { return }
                 if let id = from ?? self.selectedSessionID, let delegate = self.acDelegate,
-                   let s = delegate.agentSessionStore.session(id), SessionHome.hasFolder(s) {
-                    delegate.sessionReviews.open(sessionID: id, files: files)
+                   let s = delegate.sessionRecord(id), SessionHome.hasFolder(s) {
+                    delegate.sessionReviews.open(sessionID: id, files: files, since: since)
                 } else {
                     self.setFilePaneOpen(true, animated: true)
                 }
@@ -906,14 +993,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Open/close the right file pane. Closed = width 0 and hidden (no rail);
     /// drag-to-close under the min width lands here too. Open state persists
     /// so the pane comes back after an app restart.
-    func setFilePaneOpen(_ open: Bool, animated: Bool) {
+    func setFilePaneOpen(_ open: Bool, animated: Bool, width: CGFloat? = nil) {
         guard open != filePaneOpen else { return }
         filePaneOpen = open
         listModel.filePaneOpen = open
         UserDefaults.standard.set(open, forKey: Self.filePaneOpenKey)
         filePaneResizeHandle?.isHidden = !open
         if open { filePaneHost.isHidden = false }
-        let target = open ? expandedFilePaneWidth : 0
+        let target = open ? (width ?? expandedFilePaneWidth) : 0
         // @Sendable for runAnimationGroup's completion handler; it always fires
         // on the main thread, so the isolation assumption holds.
         let hideWhenClosed: @Sendable () -> Void = { [weak self] in
@@ -983,6 +1070,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// fight the user's choice.
     func ensureBrowserForMCP(_ id: Profile.ID) {
         let controller = browserController(for: id)
+        browserRouteLog("server ensure \(id.uuidString.prefix(8)) onStage=\((liveSessionOnStage?.profileID ?? selectedID) == id) paneOpen=\(browserPaneOpen) state=\(controller.state)")
         if (liveSessionOnStage?.profileID ?? selectedID) == id, !browserPaneOpen, controller.state == .idle {
             // Opens the pane AND boots via showBrowser → setVisible(true).
             setBrowserPaneOpen(true, animated: true)
@@ -1040,21 +1128,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserPaneOpenSessions.removeAll()
         shownBrowser = nil
         guard !controllers.isEmpty else { return }
-        // Bounded, like stopSession's suspend/shutdown watchdogs: `vm.stop()`
-        // can hang against a wedged guest, and quit is parked in
-        // `.terminateLater` until we return — an unbounded wait would trade the
-        // orphaned-VM bug for an app that never exits. Best effort, then go.
-        await withTaskGroup(of: Void.self) { race in
-            race.addTask { @MainActor in
-                await withTaskGroup(of: Void.self) { group in
-                    for c in controllers {
-                        group.addTask { @MainActor in await c.stopAndWait() }
-                    }
-                }
+        // NOT bounded here: the caller (AppDelegate.teardownAllBrowserVMs)
+        // wraps every window's teardown in one QuitDeadline. A task-group race
+        // against a sleep can't bound this — the group awaits the stop child
+        // regardless (QH-1).
+        await withTaskGroup(of: Void.self) { group in
+            for c in controllers {
+                group.addTask { @MainActor in await c.stopAndWait() }
             }
-            race.addTask { try? await Task.sleep(nanoseconds: 15_000_000_000) }
-            _ = await race.next()
-            race.cancelAll()
         }
     }
 
@@ -1125,11 +1206,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// off-screen — the pane-width constraint outranks NSWindow's
     /// windowSizeStayPut, so an over-wide value pushes the window edge
     /// past the screen instead of squeezing the terminal.
-    private func clampedBrowserPaneWidth(_ desired: CGFloat) -> CGFloat {
-        let fileW = filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0
-        let available = stage.bounds.width - fileW - Self.terminalSlotMinWidth
-        return max(Self.browserPaneMinWidth,
-                   min(desired, min(Self.browserPaneMaxWidth, available)))
+    private func clampedBrowserPaneWidth(_ desired: CGFloat, fileWidth: CGFloat? = nil) -> CGFloat {
+        let fileW = fileWidth ?? (filePaneOpen ? (filePaneWidthConstraint?.constant ?? 0) : 0)
+        return StageSplit.clampBrowser(desired, area: stage.bounds.width, fileWidth: fileW)
     }
 
     /// Reconcile the pane UI + browser visibility to the SELECTED
@@ -1144,7 +1223,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             browserPaneHost.isHidden = false
             // Boots/resumes id and suspends (never tears down) the
             // previously shown one — it stays alive on its own pane state.
-            showBrowser(for: id)
+            // The demo fixture has no VM to boot a browser in.
+            if !DemoMode.isOn { showBrowser(for: id) }
         } else if let prev = shownBrowser {
             // Pane collapsed for the selected workspace: hide the shown
             // browser. Arm teardown ONLY when the user explicitly closed
@@ -1154,21 +1234,39 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             shownBrowser = nil
         }
 
-        let target = open ? clampedBrowserPaneWidth(expandedBrowserPaneWidth) : 0
+        // B15/B19: the browser and the Files pane together can't leave the
+        // chat under its floor. Opening the browser where they wouldn't fit
+        // folds the Files pane away in the SAME move — one animation to the
+        // final widths, not a browser slide followed by a squeeze.
+        var foldFiles = false
+        let stageW = stage.bounds.width
+        if open, filePaneOpen, stageW > 0, browserPaneWidthConstraint?.constant == 0 {
+            foldFiles = StageSplit.foldsFiles(area: stageW, fileWidth: filePaneWidthConstraint?.constant ?? 0)
+        }
+        if foldFiles {
+            filePaneOpen = false
+            listModel.filePaneOpen = false
+            UserDefaults.standard.set(false, forKey: Self.filePaneOpenKey)
+            filePaneResizeHandle?.isHidden = true
+        }
+        let target = open ? clampedBrowserPaneWidth(expandedBrowserPaneWidth, fileWidth: foldFiles ? 0 : nil) : 0
         let hideWhenClosed: @Sendable () -> Void = { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, !self.browserPaneOpen else { return }
-                self.browserPaneHost.isHidden = true
+                guard let self else { return }
+                if !self.browserPaneOpen { self.browserPaneHost.isHidden = true }
+                if !self.filePaneOpen { self.filePaneHost.isHidden = true }
             }
         }
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.18
                 ctx.allowsImplicitAnimation = true
+                if foldFiles { self.filePaneWidthConstraint?.animator().constant = 0 }
                 self.browserPaneWidthConstraint?.animator().constant = target
                 self.contentView?.layoutSubtreeIfNeeded()
             }, completionHandler: hideWhenClosed)
         } else {
+            if foldFiles { filePaneWidthConstraint?.constant = 0 }
             browserPaneWidthConstraint?.constant = target
             hideWhenClosed()
         }
@@ -1201,10 +1299,24 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             model: pane.model))
         acDelegate?.registerPane(pane)
         acDelegate?.refreshSidebar()
-        if selectIt || selectedID == nil {
+        // Nothing picked yet: the first machine takes the stage — unless the
+        // stage already shows something that isn't a machine (a session's
+        // rest page, a room, a board…). A quiet add (a fat client's or an
+        // agent's start) then mounted its raw terminal over the user's
+        // session: `selectedID` is nil while an off machine's session rests.
+        if selectIt || (selectedID == nil && !stageShowsNonMachineSurface) {
             select(profileID: pane.profile.id)
         }
         updateEmptyState()
+    }
+
+    /// The stage holds a session, the new-session screen, a room, a board, a
+    /// dashboard, the grid or the automation editor — not a bare machine.
+    var stageShowsNonMachineSurface: Bool {
+        selectedSessionID != nil || listModel.newSessionSelected || listModel.selectedRoomID != nil
+            || listModel.automationBoardSelected || listModel.taskBoardSelected || listModel.gridSelected
+            || vmDashboardSelectedID != nil || dockerSelectedID != nil
+            || kubeSelectedID != nil || registrySelectedID != nil || automationEditorVisible
     }
 
     /// Remove a profile's pane from the sidebar + stage. Does NOT touch the VM.
@@ -1237,7 +1349,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// automation editor) — `selectedID` may be a stale pick then.
     var machineOnStage: Profile.ID? {
         if let sid = selectedSessionID {
-            return acDelegate?.agentSessionStore.session(sid)?.profileID
+            return acDelegate?.sessionRecord(sid)?.profileID
         }
         if let id = vmDashboardSelectedID ?? dockerSelectedID { return id }
         if listModel.selectedRoomID != nil || listModel.newSessionSelected
@@ -1251,6 +1363,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Select a VM: show its framebuffer in the stage and focus it.
     func select(profileID id: Profile.ID) {
         guard let pane = pane(id) else { return }
+        // Mounting another machine's pane under a session's header left the
+        // stage incoherent (header of the session, body of the other
+        // machine's raw terminal): that session is no longer what's shown.
+        if let sid = selectedSessionID, acDelegate?.sessionRecord(sid)?.profileID != id {
+            clearSessionStage()
+        }
         selectedID = id
         listModel.selectedID = id
         mountSelected(pane)
@@ -1317,6 +1435,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 onStart: { [weak self] pid in self?.acDelegate?.startProfile(pid) },
                 onJump: { [weak self] pid, windowIndex in
                     self?.jumpFromGrid(profileID: pid, windowIndex: windowIndex)
+                },
+                sessionTitle: { [weak self] pid, w in
+                    self?.acDelegate?.agentSessionStore.session(profileID: pid, windowIndex: w)
+                        .flatMap(AgentSession.liveTitle)
                 })
             let v = GridStageView(store: gridStore, dataSource: dataSource)
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -1417,6 +1539,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
     }
 
+    /// `id`'s pane is the one in the stage's slot.
+    func isMounted(_ id: Profile.ID) -> Bool {
+        guard let pane = pane(id) else { return false }
+        return mountedPane === pane && pane.containerView.superview === paneSlot
+    }
+
     private func mountSelected(_ pane: SessionPane?) {
         for sub in paneSlot.subviews where sub !== emptyStateHost { sub.removeFromSuperview() }
         mountedPane = pane
@@ -1460,15 +1588,41 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// The session actions, for windows of their own (the review).
     var stageActions: SessionStageActions { sessionStageActions }
 
+    /// A session on an attached machine (Bromure Agent Host) is commanded
+    /// there, not by this app's engine; true when `id` was one.
+    private func routeToMachine(_ id: UUID, _ action: String, _ body: [String: Any] = [:]) -> Bool {
+        guard let m = acDelegate?.machine(forSession: id) else { return false }
+        m.hostSessionCommand(id, action, body)
+        return true
+    }
+
     private var sessionStageActions: SessionStageActions {
+        var a = baseSessionStageActions
+        // A board task's session: its brief, and the board's Restart Session.
+        a.boardTask = { [weak self] id in
+            guard let d = self?.acDelegate, let s = d.agentSessionStore.session(id),
+                  let t = d.codingTaskEngine.task(profileID: s.profileID, sessionID: id, branch: nil)
+            else { return nil }
+            let engine = d.codingTaskEngine
+            let tid = t.id
+            return BoardTaskLink(title: t.title, brief: t.details,
+                                 restart: t.stage == .inProgress ? { engine.resumeSession(tid) } : nil,
+                                 lastError: t.lastError)
+        }
+        return a
+    }
+
+    private var baseSessionStageActions: SessionStageActions {
         SessionStageActions(
             resume: { [weak self] id in
+                if self?.routeToMachine(id, "resume") == true { return }
                 self?.acDelegate?.agentSessionEngine.resume(id)
                 self?.sessionStageDidChange()
             },
             close: { [weak self] id in
                 guard let self, let delegate = self.acDelegate else { return }
-                let title = delegate.agentSessionStore.session(id)?.title ?? ""
+                if self.routeToMachine(id, "close") { return }
+                let title = delegate.sessionRecord(id)?.title ?? ""
                 delegate.agentSessionEngine.close(id)
                 self.sessionStageDidChange()
                 self.toasts.show(String(format: NSLocalizedString("Ended %@", comment: "undo toast"),
@@ -1478,20 +1632,27 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 }
             },
             rename: { [weak self] id, title in
+                if self?.routeToMachine(id, "rename", ["title": title]) == true { return }
                 self?.acDelegate?.agentSessionEngine.rename(id, to: title)
             },
             setNickname: { [weak self] id, nick, reclaim in
-                self?.acDelegate?.agentSessionStore.setNickname(id, nick, reclaim: reclaim)
+                if self?.routeToMachine(id, "nickname", ["nickname": nick, "reclaim": reclaim]) == true { return nil }
+                return self?.acDelegate?.agentSessionStore.setNickname(id, nick, reclaim: reclaim)
             },
             checkNickname: { [weak self] id, nick in
                 self?.acDelegate?.agentSessionStore.checkNickname(id, nick) ?? .ok
             },
             resumeWith: { [weak self] id, text in
+                if self?.routeToMachine(id, "resume", ["message": text]) == true { return }
                 self?.acDelegate?.agentSessionEngine.resume(id, message: text)
                 self?.sessionStageDidChange()
             },
             forget: { [weak self] id in
                 guard let self else { return }
+                if self.routeToMachine(id, "forget") {
+                    if self.selectedSessionID == id { self.clearSessionStage(); self.selectInitialSession() }
+                    return
+                }
                 self.acDelegate?.agentSessionEngine.transcripts.remove(id)
                 self.acDelegate?.agentSessionStore.remove(id)
                 if self.selectedSessionID == id {
@@ -1502,11 +1663,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             archive: { [weak self] id in
                 guard let self, let delegate = self.acDelegate else { return }
                 // A branch with work on it: keep it or throw it away?
-                if let s = delegate.agentSessionStore.session(id), SessionHome.branchNeedsWord(s) {
+                if let s = delegate.sessionRecord(id), SessionHome.branchNeedsWord(s) {
                     self.askBranchFate(s, deleting: false)
                     return
                 }
-                let title = delegate.agentSessionStore.session(id)?.title ?? ""
+                if self.routeToMachine(id, "archive") { return }
+                let title = delegate.sessionRecord(id)?.title ?? ""
                 delegate.agentSessionEngine.archive(id)
                 self.sessionStageDidChange()
                 self.toasts.show(String(format: NSLocalizedString("Archived %@", comment: "undo toast"),
@@ -1516,11 +1678,39 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 }
             },
             unarchive: { [weak self] id in
+                if self?.routeToMachine(id, "unarchive") == true { return }
                 self?.acDelegate?.agentSessionEngine.unarchive(id)
                 self?.sessionStageDidChange()
             },
-            delete: { [weak self] id in self?.confirmDeleteSession(id) },
+            delete: { [weak self] id in
+                if let s = self?.acDelegate?.sessionRecord(id), SessionHome.branchNeedsWord(s),
+                   self?.acDelegate?.machine(forSession: id) != nil {
+                    self?.askBranchFate(s, deleting: true)
+                    return
+                }
+                if self?.routeToMachine(id, "delete") == true { return }
+                self?.confirmDeleteSession(id)
+            },
             newWorktree: { [weak self] id, req in
+                if let m = self?.acDelegate?.machine(forSession: id) {
+                    // On a native machine: its host makes the checkout and
+                    // the session; select it once the mirror carries it.
+                    Task { @MainActor [weak self] in
+                        var body: [String: Any] = ["name": req.name, "tool": req.tool.rawValue, "initGit": req.initGit]
+                        if let msg = req.message { body["message"] = msg }
+                        if let base = req.base { body["base"] = base }
+                        let r = await m.hostControl("POST", "/agent-sessions/\(id.uuidString)/worktree", body)
+                        guard let self, let newID = (r?.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                            if let err = r?.json["error"] as? String { self?.debugToast(err) }
+                            return
+                        }
+                        for _ in 0..<20 where self.acDelegate?.sessionRecord(newID) == nil {
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                        }
+                        self.selectSession(newID)
+                    }
+                    return
+                }
                 guard let self, let delegate = self.acDelegate,
                       let newID = delegate.agentSessionEngine.startWorktree(
                           from: id, name: req.name, tool: req.tool, message: req.message,
@@ -1529,20 +1719,32 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.selectSession(newID)
             },
             gitState: { [weak self] id in
+                if let m = self?.acDelegate?.machine(forSession: id) {
+                    guard let r = await m.hostControl("POST", "/agent-sessions/git-state", ["id": id.uuidString]),
+                          r.status == 200 else { return nil }
+                    return GitFolderState(json: r.json)
+                }
                 guard let engine = self?.acDelegate?.agentSessionEngine,
                       let s = engine.store.session(id) else { return nil }
                 return await engine.gitState(profileID: s.profileID, cwd: s.cwd)
             },
             mergeBranch: { [weak self] id, into, squash, removeAfter in
+                var body: [String: Any] = ["squash": squash, "removeAfter": removeAfter]
+                if let into { body["into"] = into }
+                if self?.routeToMachine(id, "branch-merge", body) == true { return }
                 self?.acDelegate?.agentSessionEngine.mergeBranch(id, into: into, squash: squash, removeAfter: removeAfter)
             },
             branchPullRequest: { [weak self] id in
+                if self?.routeToMachine(id, "branch-pr") == true { return }
                 self?.acDelegate?.agentSessionEngine.branchPullRequest(id)
                 self?.sessionStageDidChange()
             },
             discardBranch: { [weak self] id in self?.confirmDiscardBranch(id) },
             showBranches: { [weak self] pid in self?.acDelegate?.branchesWindows.open(profileID: pid) },
-            declineMerge: { [weak self] id in self?.acDelegate?.agentSessionEngine.declineMerge(id) },
+            declineMerge: { [weak self] id in
+                if self?.routeToMachine(id, "branch-decline") == true { return }
+                self?.acDelegate?.agentSessionEngine.declineMerge(id)
+            },
             reviewBranch: { [weak self] id in self?.acDelegate?.sessionReviews.open(sessionID: id) },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
@@ -1563,7 +1765,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             moveToRoom: { [weak self] sid, rid in
                 guard let self else { return }
-                let from = self.acDelegate?.agentSessionStore.session(sid)?.roomID
+                let from = self.acDelegate?.sessionRecord(sid)?.roomID
                 self.acDelegate?.roomMove(sid, to: rid)
                 self.roomController?.refresh()
                 if rid == nil, let from { self.offerRoomUndo(sid, back: from) }
@@ -1623,6 +1825,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
     }
 
+    private var fleetPrompter: FleetAdmissionPrompter?
+
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
     func debugToast(_ text: String) { toasts.show(text) {} }
@@ -1639,10 +1843,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// "Discard branch": the checkout, the branch and the session go, after
     /// a word — there's no taking it back.
     private func confirmDiscardBranch(_ id: UUID) {
-        guard let s = acDelegate?.agentSessionStore.session(id) else { return }
+        guard let s = acDelegate?.sessionRecord(id) else { return }
         BranchAlerts.confirmDiscard(s, on: self) { [weak self] in
             guard let self else { return }
-            self.acDelegate?.agentSessionEngine.discardBranch(id)
+            if !self.routeToMachine(id, "branch-discard") {
+                self.acDelegate?.agentSessionEngine.discardBranch(id)
+            }
             if self.selectedSessionID == id { self.clearSessionStage(); self.selectInitialSession() }
             else { self.sessionStageDidChange() }
         }
@@ -1657,7 +1863,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             guard let self else { return }
             let engine = delegate.agentSessionEngine
             if discard {
-                engine.discardBranch(id)
+                if !self.routeToMachine(id, "branch-discard") { engine.discardBranch(id) }
+            } else if self.routeToMachine(id, "branch-keep") {
+                _ = self.routeToMachine(id, deleting ? "delete" : "archive")
             } else {
                 engine.keepBranchQuietly(id)
                 deleting ? engine.delete(id) : engine.archive(id)
@@ -1670,7 +1878,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             } else if !deleting {
                 self.toasts.show(String(format: NSLocalizedString("Archived %@ · branch kept", comment: "undo toast"),
                                         UndoToastHost.quoted(s.title))) { [weak self] in
-                    self?.acDelegate?.agentSessionEngine.unarchive(id)
+                    if self?.routeToMachine(id, "unarchive") != true {
+                        self?.acDelegate?.agentSessionEngine.unarchive(id)
+                    }
                     self?.sessionStageDidChange()
                 }
             }
@@ -1678,7 +1888,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     private func confirmDeleteSession(_ id: UUID) {
-        guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id) else { return }
+        guard let delegate = acDelegate, let s = delegate.sessionRecord(id) else { return }
         if SessionHome.branchNeedsWord(s) { askBranchFate(s, deleting: true); return }
         // Nothing running: gone at once, and a few seconds to take it back
         // (the record and its saved conversation are kept until then).
@@ -1731,8 +1941,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if listModel.sessionsFirst, filePaneOpen {
             setFilePaneOpen(false, animated: false)
         }
-        delegate.agentSessionStore.reconcile(entries: listModel.entries)
-        if let s = SessionHome.initialSession(in: delegate.agentSessionStore, model: listModel,
+        delegate.agentSessionStore.reconcile(entries: delegate.sessionEntries(for: listModel))
+        if let s = SessionHome.initialSession(in: delegate.homeSessionStore, model: listModel,
                                               remembered: rememberedSessionID) {
             selectSession(s.id)
         } else {
@@ -1748,8 +1958,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sessionReconcileTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let delegate = self.acDelegate, self.listModel.sessionsFirst else { return }
-                delegate.agentSessionStore.reconcile(entries: self.listModel.entries)
-                delegate.agentSessionEngine.probeLiveness(entries: self.listModel.entries)
+                let entries = delegate.sessionEntries(for: self.listModel)
+                delegate.agentSessionStore.reconcile(entries: entries)
+                delegate.agentSessionEngine.probeLiveness(entries: entries)
                 self.sessionStageDidChange()
             }
         }
@@ -1796,9 +2007,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserPaneDidChangeWorkspace()   // no machine here: no browser (and no globe)
         let running = Set(listModel.profileRows
             .filter { $0.state == .running || $0.state == .booting }.map(\.id))
-        let store = delegate.agentSessionStore
+        let store = delegate.homeSessionStore
+        // Attached machines are targets too (the new session opens there).
+        let machines = delegate.attachedMachines.values.filter(\.connected)
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let view = NewSessionView(
-            profiles: delegate.profiles,
+            profiles: delegate.profiles + machines.map(\.profile),
             runningIDs: running,
             recentFolders: { pid in
                 var seen: [String] = []
@@ -1811,6 +2025,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             onStart: { [weak self] req in
                 guard let self, let delegate = self.acDelegate else { return }
+                if let machine = delegate.attachedMachines[req.profileID] {
+                    self.startOnMachine(machine, req, room: room)
+                    return
+                }
                 var req = req
                 if let room { req.roomID = room }
                 let id = delegate.agentSessionEngine.start(req)
@@ -1823,7 +2041,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             onCancel: { [weak self] in
                 guard let self, let delegate = self.acDelegate,
-                      let s = SessionHome.initialSession(in: delegate.agentSessionStore,
+                      let s = SessionHome.initialSession(in: delegate.homeSessionStore,
                                                          model: self.listModel,
                                                          remembered: self.rememberedSessionID)
                 else { return }   // nothing else to show: the screen stays
@@ -1836,7 +2054,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 await delegate?.listGuestFolders(profileID: pid, path: path)
             },
             readyTools: { [weak delegate] p in
-                p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
+                // A plain Mac runs whatever agent its user installed.
+                if delegate?.attachedMachines[p.id] != nil { return Set(Profile.Tool.allCases) }
+                return p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
                                      subscribed: delegate?.subscribedProviders(for: p) ?? [])
             },
             peerMentions: { [weak delegate] pid in
@@ -1845,8 +2065,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             assignNickname: { [weak delegate] id, nick in
                 delegate?.agentSessionStore.setNickname(id, nick)
             },
-            recentStarts: NewSessionView.RecentStart.from(delegate.agentSessionStore.sessions,
-                                                          profiles: delegate.profiles))
+            recentStarts: NewSessionView.RecentStart.from(delegate.allSessionRecords,
+                                                          profiles: delegate.profiles),
+            instructionStore: delegate.instructionPresetStore)
         showSessionOverlay(view)
         if let room, let name = delegate.agentRoomStore.room(room)?.name {
             showRoomBanner(name)
@@ -1858,7 +2079,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// agent runs, the launch surface while it's starting, else its
     /// ended/asleep page.
     func selectSession(_ id: UUID) {
-        guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id) else { return }
+        guard let delegate = acDelegate, let s = delegate.sessionRecord(id) else { return }
         // Already on stage: re-plan only if something changed.
         if selectedSessionID == id, !listModel.newSessionSelected {
             presentSession(s)
@@ -1890,8 +2111,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// store hasn't seen it yet. Falls back to the plain tab.
     func selectSession(profileID: Profile.ID, windowIndex: Int) {
         guard let delegate = acDelegate else { return }
-        delegate.agentSessionStore.reconcile(entries: listModel.entries)
-        if let s = delegate.agentSessionStore.session(profileID: profileID, windowIndex: windowIndex) {
+        delegate.agentSessionStore.reconcile(entries: delegate.sessionEntries(for: listModel))
+        if let s = delegate.sessionRecord(profileID: profileID, windowIndex: windowIndex) {
             selectSession(s.id)
         } else if let entry = listModel.entries.first(where: { $0.id == profileID }),
                   let position = entry.model.tabs.firstIndex(where: { $0.index == windowIndex }) {
@@ -1903,12 +2124,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Re-plan the surface for the selected session after its state changed
     /// (the views call back through `represent`; the reconcile tick and the
     /// app delegate on pane add/remove). No-op when nothing changed.
+    /// Ticks the session on stage has been missing from the store.
+    private var missingSessionTicks = 0
+    /// Workspaces a live session on stage is having a pane attached for.
+    private var attachingForSession: Set<Profile.ID> = []
+
     func sessionStageDidChange() {
         guard let id = selectedSessionID else { return }
-        guard let s = acDelegate?.agentSessionStore.session(id) else {
-            clearSessionStage()
+        guard let s = acDelegate?.sessionRecord(id) else {
+            // Deleting a session clears the stage itself; here it's only
+            // missing — an attached machine's sessions can drop out of one
+            // poll. A few ticks in a row, not one, before the chat goes.
+            missingSessionTicks += 1
+            if missingSessionTicks >= 3 { missingSessionTicks = 0; clearSessionStage() }
             return
         }
+        missingSessionTicks = 0
         presentSession(s)
     }
 
@@ -1917,9 +2148,33 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let livePosition = SessionHome.liveTabPosition(for: s, in: listModel)
         let bucket = SessionHome.bucket(for: s, in: listModel)
         revealChangedFiles(for: s, live: livePosition != nil && pane(s.profileID) != nil)
+        // An attached machine's session chats over the machine's link.
+        let machine = delegate.attachedMachines[s.profileID]
         // The tab itself is the surface while the agent runs; an ended
         // session's shell is reachable as a terminal from the Machines list.
-        let liveChat = livePosition != nil && pane(s.profileID) != nil && bucket != .ended
+        let liveChat = livePosition != nil && (pane(s.profileID) != nil || machine?.connected == true)
+            && bucket != .ended
+        // B73: a live session in a workspace that runs with no pane here
+        // (booted detached — at startup, by an automation or a CLI start —
+        // or its window was closed with the VM kept up). Its roster still
+        // reads (the headless entry), so the sidebar said "Needs you" while
+        // the stage, finding no tab position, fell to the resting surface:
+        // "Paused. Your next message picks it up", the local copy instead
+        // of the live file, and no card for the agent's approval prompt.
+        // Attach a pane quietly; its arrival re-plans this stage.
+        if livePosition == nil, machine == nil, s.windowIndex != nil,
+           bucket == .needsYou || bucket == .working || bucket == .idle,
+           !delegate.isAttached(s.profileID), delegate.runningSessions[s.profileID] != nil,
+           !attachingForSession.contains(s.profileID) {
+            let pid = s.profileID
+            attachingForSession.insert(pid)
+            DispatchQueue.main.async { [weak self] in
+                self?.attachingForSession.remove(pid)
+                guard let delegate = self?.acDelegate, !delegate.isAttached(pid),
+                      let running = delegate.runningSessions[pid] else { return }
+                delegate.attachWindow(to: running, quiet: true)
+            }
+        }
         let key: String
         if DemoMode.isLive(s.id) {
             key = "demo:\(s.id.uuidString)"
@@ -1934,7 +2189,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if sessionHeaderHost?.isHidden == false {
             sessionHeaderHeight?.constant = SessionHome.headerHeight(s, base: Self.sessionHeaderHeightValue)
         }
-        guard key != sessionPresentationKey else { return }
+        // Same plan — unless the live chat's pane fell out of the slot (see
+        // `selectTab`): then it's planned again, not left blank.
+        guard key != sessionPresentationKey || (liveChat && machine == nil && !isMounted(s.profileID)) else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
         // The browser pane follows the session: its own state when live,
@@ -1942,6 +2199,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         defer { browserPaneDidChangeWorkspace() }
         demoChat?.stop()
         demoChat = nil
+        machineChat?.stop()
+        machineChat = nil
+        if liveChat, let machine, let w = s.windowIndex {
+            let m = makeMachineChatModel(machine, window: w, session: s)
+            machineChat = m
+            m.start()
+            showSessionOverlay(BeautifiedSessionView(model: m))
+            return
+        }
         if DemoMode.isLive(s.id) {
             // Manual screenshots: the real chat view over the fixture.
             let m = DemoMode.chatModel(for: s, delegate: delegate)
@@ -1975,15 +2241,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             applySessionViewMode(pane)
             return
         }
-        let accent = Color(hex: delegate.profile(for: s.profileID)?.color.hexInUI ?? "#3B82F6")
+        let accent = Color(hex: delegate.profile(for: s.profileID)?.color.hexInUI
+                           ?? machine?.accentHex ?? "#3B82F6")
         if s.isLaunching {
             showSessionOverlay(SessionLaunchView(
-                store: delegate.agentSessionStore, model: listModel, sessionID: s.id,
+                store: delegate.homeSessionStore, model: listModel, sessionID: s.id,
                 accent: accent, actions: sessionStageActions))
         } else {
             let cache = delegate.agentSessionEngine.transcripts
             showSessionOverlay(SessionRestView(
-                store: delegate.agentSessionStore, model: listModel, sessionID: s.id,
+                store: delegate.homeSessionStore, model: listModel, sessionID: s.id,
                 accent: accent, actions: sessionStageActions,
                 fetchTranscript: { [weak self] s in
                     await self?.acDelegate?.fetchSessionTranscript(s)
@@ -2003,11 +2270,149 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard key != revealedChangesKey else { return }
         revealedChangesKey = key
         guard !filePaneOpen else { return }
-        setFilePaneOpen(true, animated: true)
+        // B15: never at the chat's expense. With the browser open the Files
+        // pane opens only as wide as the room left over (at least its
+        // minimum), else not at all — the toolbar still opens it by hand.
+        guard let width = autoFilePaneWidth() else { return }
+        setFilePaneOpen(true, animated: true, width: width)
+    }
+
+    /// How wide the Files pane can open on its own without squeezing the
+    /// chat below its floor; nil = not without squeezing it.
+    private func autoFilePaneWidth() -> CGFloat? {
+        let stageW = stage.bounds.width
+        guard stageW > 0 else { return expandedFilePaneWidth }
+        let browserW = browserPaneOpen ? (browserPaneWidthConstraint?.constant ?? 0) : 0
+        let room = stageW - browserW - Self.terminalSlotMinWidth
+        guard room >= Self.filePaneMinWidth else { return nil }
+        return min(expandedFilePaneWidth, room)
     }
 
     private static func changesKey(_ id: UUID, _ at: Date) -> String {
         "\(id.uuidString)|\(Int(at.timeIntervalSince1970))"
+    }
+
+    /// Debug: what the stage shows for the selected session.
+    var debugSessionSurface: [String: Any] {
+        var d: [String: Any] = ["key": sessionPresentationKey ?? "", "machineChat": machineChat != nil,
+                                "overlay": sessionHosting.map { String(describing: type(of: $0)).prefix(80) } ?? "none"]
+        if let id = selectedSessionID, let s = acDelegate?.sessionRecord(id) {
+            d["livePosition"] = SessionHome.liveTabPosition(for: s, in: listModel) ?? -1
+            d["bucket"] = SessionHome.bucket(for: s, in: listModel).rawValue
+            d["machineConnected"] = acDelegate?.attachedMachines[s.profileID]?.connected ?? false
+            d["windowIndex"] = s.windowIndex ?? -1
+        }
+        return d
+    }
+
+    // MARK: Attached machines
+
+    /// A new session on an attached machine: started there, selected once
+    /// the machine lists it (its next poll).
+    private func startOnMachine(_ machine: AttachedMachine, _ req: AgentSessionEngine.NewSessionRequest,
+                                room: UUID? = nil) {
+        var body: [String: Any] = ["profile": machine.id.uuidString, "tool": req.tool.rawValue, "cwd": req.cwd]
+        if let c = req.cloneURL, !c.isEmpty { body["cloneURL"] = c }
+        if let m = req.openingMessage, !m.isEmpty { body["message"] = m }
+        let wire = req.attachments.filter { $0.folder == nil }.map(\.wireDictionary)
+        if !wire.isEmpty { body["attachments"] = wire }
+        Task { @MainActor [weak self, weak machine] in
+            guard let machine,
+                  let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
+                  let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                NSSound.beep()
+                return
+            }
+            // Started from a room ("Add to Room"): into it, and back to its grid.
+            if let room, let delegate = self?.acDelegate, delegate.agentRoomStore.room(room) != nil {
+                delegate.assignMachineRoom(id, room)
+                self?.showRoom(room)
+                return
+            }
+            for _ in 0..<40 where machine.sessionStore.session(id) == nil {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            self?.selectSession(id)
+        }
+    }
+
+    /// The chat for window `w` of an attached machine, wired like a VM
+    /// session's (delegations, mentions, slash commands, the inline
+    /// terminal) — not started.
+    private func makeMachineChatModel(_ machine: AttachedMachine, window w: Int,
+                                      session s: AgentSession) -> BeautifiedSessionModel {
+        let provider = MachineTranscriptProvider(machine: machine, window: w,
+                                                 accent: Color(hex: machine.accentHex))
+        let m = BeautifiedSessionModel(provider: provider)
+        let mid = machine.id
+        m.draftKey = "machine:\(mid.uuidString):\(w)"
+        m.cachedTranscript = SessionTranscriptCache.loadDetached
+        m.delegationStore = acDelegate?.delegationStore
+        m.sessionStore = acDelegate?.homeSessionStore
+        m.currentSession = { [weak machine] in machine?.sessionStore.session(profileID: mid, windowIndex: w) }
+        m.openSession = { [weak self] sid in self?.selectSession(sid) }
+        m.workspaceName = { [weak self] pid in
+            self?.acDelegate?.profile(for: pid)?.name ?? self?.acDelegate?.attachedMachines[pid]?.name ?? ""
+        }
+        m.peerMentions = { [weak self] in
+            guard let d = self?.acDelegate else { return [] }
+            return PeerMention.candidates(d.allSessionRecords, excluding: s.id, workspace: { pid in
+                d.profile(for: pid)?.name ?? d.attachedMachines[pid]?.name ?? ""
+            })
+        }
+        m.assignNickname = { [weak machine] sid, nick in
+            machine?.hostSessionCommand(sid, "nickname", ["nickname": nick])
+        }
+        if s.openingShown != true, let msg = s.openingMessage, !msg.isEmpty,
+           Date().timeIntervalSince(s.createdAt) < 600 {
+            m.seedOpening(msg)
+        }
+        let tab = machine.tabsModel.tabs.first { $0.index == w }
+        m.loadSlashCommands(agent: s.tool.rawValue, cwd: tab?.cwd ?? s.cwd)
+        m.inlineTerminal = { [weak self, weak machine] in
+            guard let self, let machine else { return nil }
+            return self.machineTerminalController(machine).view(forWindow: w)
+        }
+        // The agent's account sign-in runs on the machine itself (its own
+        // device-code login); the card shows the link and code.
+        let sid = s.id
+        let call: MachineSignIn.Call = { [weak machine] action, body in
+            await machine?.control("POST", "/agent-sessions/\(sid.uuidString)/\(action)", body ?? [:], timeout: 20)
+        }
+        m.hostSignInMachine = machine.name
+        m.hostSignIn = { _, events in MachineSignIn.run(call, events: events) }
+        m.submitHostSignInCode = { code in Task { _ = await call("signin-code", ["code": code]) } }
+        m.cancelHostSignIn = { Task { _ = await call("signin-cancel", nil) } }
+        m.relaunchAfterSignIn = { Task { _ = await call("restart", nil) } }
+        return m
+    }
+
+    /// Terminals on an attached machine attach through this app's control
+    /// socket, which hands them down the machine's link.
+    private func machineTerminalController(_ machine: AttachedMachine) -> TerminalSessionController {
+        if let c = machineTerms[machine.id] { return c }
+        let c = TerminalSessionController(profile: machine.profile)
+        machineTerms[machine.id] = c
+        return c
+    }
+
+    /// The machine's tmux window as a terminal on stage.
+    private func showMachineTerminal(_ machine: AttachedMachine, window w: Int) {
+        guard let view = machineTerminalController(machine).view(forWindow: w) else { return }
+        showSessionOverlay(MachineTerminalView(terminal: view))
+    }
+
+    /// A tab picked in a machine's list: its session when it hosts one,
+    /// else the terminal.
+    private func showMachineTab(_ machine: AttachedMachine, position: Int) {
+        guard position < machine.tabsModel.tabs.count else { return }
+        let w = machine.tabsModel.tabs[position].index
+        if let s = machine.sessionStore.session(profileID: machine.id, windowIndex: w) {
+            selectSession(s.id)
+            return
+        }
+        clearSessionStage()
+        showMachineTerminal(machine, window: w)
     }
 
     /// A session on stage is a chat. Pane-local — never rewrites the
@@ -2040,14 +2445,19 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard listModel.sessionsFirst, selectedSessionID == nil, !listModel.newSessionSelected,
               let pid = selectedID, let pane = pane(pid), let tab = pane.model.activeTab
         else { return nil }
-        return acDelegate?.agentSessionStore.session(profileID: pid, windowIndex: tab.index)?.id
+        return acDelegate?.sessionRecord(profileID: pid, windowIndex: tab.index)?.id
     }
 
     /// The Linux machine behind a session: its terminal tab (unfolding the
     /// Machines list, where the tab lights up), or the machine's dashboard
     /// when the tab is gone.
     func showLinux(for id: UUID) {
-        guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id) else { return }
+        guard let delegate = acDelegate, let s = delegate.sessionRecord(id) else { return }
+        if let m = delegate.attachedMachines[s.profileID], let w = s.windowIndex {
+            clearSessionStage()
+            showMachineTerminal(m, window: w)
+            return
+        }
         listModel.machinesExpanded = true
         if let position = SessionHome.liveTabPosition(for: s, in: listModel), pane(s.profileID) != nil {
             clearSessionStage()
@@ -2072,7 +2482,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             sessionSlot.layer?.add(t, forKey: "surface")
         }
         sessionHosting?.removeFromSuperview()
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.sizingOptions = []   // never let SwiftUI size the window
         host.translatesAutoresizingMaskIntoConstraints = false
         sessionSlot.addSubview(host)
@@ -2100,9 +2510,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private func setSessionHeader(visible: Bool) {
         sessionHeaderHost.isHidden = !visible
         sessionHeaderHeight?.constant = visible
-            ? SessionHome.headerHeight(selectedSessionID.flatMap { acDelegate?.agentSessionStore.session($0) },
+            ? SessionHome.headerHeight(selectedSessionID.flatMap { acDelegate?.sessionRecord($0) },
                                        base: Self.sessionHeaderHeightValue)
             : 0
+        // B60: a session surface is a window-colored page. The stage's black
+        // (a terminal's backing) showed as a band under the header for the
+        // first frame, before the surface below had drawn — and the header
+        // was drawn at its old height (title cut off). Canvas behind it, and
+        // the new geometry laid out before anything is displayed.
+        if visible {
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                stage.layer?.backgroundColor = NSColor.acCanvas.cgColor
+            }
+            stage.layoutSubtreeIfNeeded()
+        } else {
+            applyOpacityChrome(for: selectedID.flatMap { pane($0) })
+        }
     }
 
     /// Leave the session surfaces — a machine row, a board or a dashboard
@@ -2137,7 +2560,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         icon: "plus", keywords: "start agent", shortcut: "⌘N") { [weak self] in self?.showNewSession() },
             PaletteItem(section: .actions, title: NSLocalizedString("New Room…", comment: "session menu"),
                         icon: "square.grid.2x2", tint: .indigo, keywords: "group") { [weak self] in self?.promptNewRoom() },
-            PaletteItem(section: .actions, title: NSLocalizedString("Security Timeline", comment: ""),
+            PaletteItem(section: .actions, title: NSLocalizedString("Security", comment: "security window title"),
                         icon: "shield.lefthalf.filled", tint: .green, keywords: "security events firewall audit log overview") {
                 delegate.openSecurityTimelineAction(nil)
             },
@@ -2155,7 +2578,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
         ]
         // The session on stage: branch it, or merge its branch.
-        if let sid = selectedSessionID, let cur = delegate.agentSessionStore.session(sid), !cur.isArchived {
+        if let sid = selectedSessionID, let cur = delegate.sessionRecord(sid), !cur.isArchived {
             let actions = sessionStageActions
             if SessionHome.hasFolder(cur) {
                 items.append(PaletteItem(section: .actions, title: NSLocalizedString("New Branch…", comment: "session menu"),
@@ -2177,7 +2600,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                                          keywords: "worktree git branch") { actions.mergeBranch(sid, nil, false, true) })
             }
         }
-        let sessions = delegate.agentSessionStore.sessions.filter { !$0.isDeleted && !$0.isSwitchboard }
+        let sessions = delegate.allSessionRecords.filter { !$0.isDeleted && !$0.isSwitchboard }
         let ordered = SessionHome.orderedAll(sessions, in: listModel) + SessionHome.archived(sessions)
         for s in ordered {
             let bucket = SessionHome.bucket(for: s, in: listModel)
@@ -2193,9 +2616,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
         for r in delegate.agentRoomStore.rooms {
             items.append(PaletteItem(section: .rooms, title: r.name,
-                                     subtitle: RoomTally.summary(r, delegate.agentSessionStore.sessions, in: listModel),
+                                     subtitle: RoomTally.summary(r, delegate.allSessionRecords, in: listModel),
                                      icon: "square.grid.2x2.fill", tint: Color(hex: r.colorHex), keywords: "room") { [weak self] in
                 self?.showRoom(r.id)
+            })
+        }
+        for m in delegate.attachedMachines.values {
+            items.append(PaletteItem(section: .machines,
+                                     title: String(format: NSLocalizedString("Branches on %@", comment: "branches window title"), m.name),
+                                     icon: "arrow.triangle.branch", tint: .purple, keywords: "worktrees git stale native") { [weak self] in
+                self?.acDelegate?.branchesWindows.open(profileID: m.id)
             })
         }
         for p in delegate.profiles {
@@ -2218,7 +2648,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         palette.toggle(in: self, items: items) { [weak self] q in
             guard let self, let delegate = self.acDelegate else { return [] }
             return TranscriptSearchIndex.shared.matches(q).compactMap { id, snippet -> PaletteItem? in
-                guard let s = delegate.agentSessionStore.session(id), !s.isDeleted else { return nil }
+                guard let s = delegate.sessionRecord(id), !s.isDeleted else { return nil }
                 return PaletteItem(section: .messages, title: s.title, subtitle: snippet,
                                    icon: "text.bubble", tint: AgentAvatar.tint(for: s.tool)) { [weak self] in
                     self?.selectSession(id)
@@ -2363,7 +2793,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onInstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtInstall(in: p) } },
             onUninstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtUninstall(in: p) } },
             initialContainerID: container)
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         dockerSlot.addSubview(host)
         NSLayoutConstraint.activate([
@@ -2432,7 +2862,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             store: delegate.kubeClusterStore, clusterID: id,
             workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
             actions: actions)
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.sizingOptions = []
         host.translatesAutoresizingMaskIntoConstraints = false
         kubeSlot.addSubview(host)
@@ -2560,7 +2990,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             store: delegate.kubeClusterStore, registryID: id,
             workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
             actions: actions)
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.sizingOptions = []
         host.translatesAutoresizingMaskIntoConstraints = false
         registrySlot.addSubview(host)
@@ -2698,7 +3128,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
             onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
             onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() })
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.addSubview(host)
         NSLayoutConstraint.activate([
@@ -2729,7 +3159,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// automation's, or a blank one (id = nil, the sidebar "+").
     /// Rebuilt on every show so the profile snapshot (names, credentials,
     /// ask-before-use flags) is current.
-    func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) {
+    func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil,
+                              trigger: ScheduledAutomation.TriggerKind? = nil) {
         guard let delegate = acDelegate else { return }
         if automationEditorVisible {
             // Re-clicking the automation that's already open must not
@@ -2757,14 +3188,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             profiles: delegate.profiles,
             editing: id,
             prefill: prefill,
+            initialTrigger: trigger,
             onSave: { [weak self] automation in
                 self?.acDelegate?.saveAutomation(automation)
                 self?.clearAutomationEditor(force: true)
+                self?.showAutomationBoard(tab: .automations)
             },
             onRunNow: { [weak self] automation in
                 self?.acDelegate?.saveAutomation(automation)
                 self?.acDelegate?.runAutomationNow(automation.id)
                 self?.clearAutomationEditor(force: true)
+                self?.showAutomationBoard(tab: .runs)
             },
             onDelete: { [weak self] automationID in
                 self?.acDelegate?.confirmDeleteAutomation(automationID)
@@ -2774,8 +3208,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             onDirtyChange: { [weak self] dirty in
                 self?.automationDraftDirty = dirty
+            },
+            onClose: { [weak self] in
+                // Back to the hub; a dirty draft asks first.
+                guard let self, self.clearAutomationEditor() else { return }
+                self.showAutomationBoard()
             })
-        let host = NSHostingView(rootView: view)
+        let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         automationSlot.addSubview(host)
         NSLayoutConstraint.activate([
@@ -2817,10 +3256,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         return true
     }
 
-    /// Show the automation kanban board as the stage surface: Scheduled /
-    /// In Progress / (Needs Attention) / Done. The hosting view is built
-    /// once and kept — everything it renders reads live observable state.
-    func showAutomationBoard() {
+    /// Show the Automations hub as the stage surface (Overview / Findings /
+    /// Repositories / Board). The hosting view is built once and kept —
+    /// everything it renders reads live observable state.
+    func showAutomationBoard(tab: AutomationHubModel.Tab? = nil) {
+        if let tab { automationHub.tab = tab }
         guard let delegate = acDelegate else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
@@ -2832,20 +3272,92 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearSessionStage()
         listModel.automationBoardSelected = true
         if kanbanHosting == nil {
-            let view = AutomationKanbanView(
-                store: delegate.scheduledAutomationStore,
+            let view = AutomationHubView(
+                automationStore: delegate.scheduledAutomationStore,
+                findingStore: delegate.findingStore,
+                taskStore: delegate.codingTaskStore,
                 model: listModel,
-                actions: AutomationKanbanView.Actions(
-                    selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
-                    newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
-                    runNow: { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
-                    toggle: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
-                    delete: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) },
-                    openRun: { [weak self] run in self?.acDelegate?.openAutomationRun(run) },
-                    acknowledge: { [weak self] id in
-                        self?.acDelegate?.scheduledAutomationStore.acknowledge(id)
+                hub: automationHub,
+                workspaces: { [weak self] in self?.acDelegate?.watchWorkspaceChoices() ?? [] },
+                promptGuardInstalled: { PromptInjectionModels.isInstalled(.promptGuard) },
+                actions: AutomationHubView.Actions(
+                    board: AutomationKanbanView.Actions(
+                        selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+                        newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
+                        runNow: { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
+                        toggle: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
+                        delete: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) },
+                        openRun: { [weak self] run in self?.acDelegate?.openAutomationRun(run) },
+                        acknowledge: { [weak self] id in
+                            self?.acDelegate?.scheduledAutomationStore.acknowledge(id)
+                        }),
+                    newAutomation: { [weak self] kind in self?.showAutomationEditor(nil, trigger: kind) },
+                    saveWatch: { [weak self] w, scan in self?.acDelegate?.saveWatch(w, scanNow: scan) },
+                    deleteWatch: { [weak self] id in
+                        self?.acDelegate?.repoWatchEngine.removeWatch(id, removeFindings: true)
+                    },
+                    toggleWatch: { [weak self] id in self?.acDelegate?.repoWatchEngine.toggleWatch(id) },
+                    scanNow: { [weak self] id in self?.acDelegate?.repoWatchEngine.scanNow(id) },
+                    scanBaseline: { [weak self] id in
+                        self?.acDelegate?.repoWatchEngine.scanNow(id, baseline: true)
+                    },
+                    fix: { [weak self] id, confirmed, done in
+                        guard let d = self?.acDelegate, let f = d.findingStore.finding(id) else {
+                            done(.failed(NSLocalizedString("that finding is gone", comment: "finding hand-over failure")))
+                            return
+                        }
+                        if f.handOverRefusal(confirmed: confirmed) != nil {
+                            done(.flagged(warning: f.screenWarning ?? "")); return
+                        }
+                        done(d.repoWatchEngine.fix(id) == nil
+                             ? .failed(NSLocalizedString("couldn't start the fix", comment: "finding hand-over failure"))
+                             : .done)
+                    },
+                    routeToSwitchboard: { [weak self] id, room, confirmed, done in
+                        guard let d = self?.acDelegate, let f = d.findingStore.finding(id) else {
+                            done(.failed(NSLocalizedString("that finding is gone", comment: "finding hand-over failure")))
+                            return
+                        }
+                        if f.handOverRefusal(confirmed: confirmed) != nil {
+                            done(.flagged(warning: f.screenWarning ?? "")); return
+                        }
+                        done(d.routeFindingToSwitchboard(id, room: room, confirmed: confirmed)
+                             ? .done
+                             : .failed(NSLocalizedString("no Switchboard could be started", comment: "finding hand-over failure")))
+                    },
+                    switchboardRooms: { [weak self] in self?.acDelegate?.switchboardRoomChoices() ?? [] },
+                    askSession: { [weak self] id, sid, confirmed, done in
+                        Task { @MainActor in
+                            guard let d = self?.acDelegate else {
+                                done(.failed(NSLocalizedString("that session is gone", comment: "finding → session failure")))
+                                return
+                            }
+                            if let f = d.findingStore.finding(id), f.handOverRefusal(confirmed: confirmed) != nil {
+                                done(.flagged(warning: f.screenWarning ?? "")); return
+                            }
+                            done(await d.routeFindingToSession(id, session: sid, confirmed: confirmed).map { .failed($0) } ?? .done)
+                        }
+                    },
+                    sessionChoices: { [weak self] in self?.acDelegate?.findingSessionChoices() ?? [] },
+                    openTask: { [weak self] id in self?.acDelegate?.openFixTask(id) },
+                    setStatus: { [weak self] id, status, note in
+                        self?.acDelegate?.findingStore.setStatus(id, status, note: note)
+                    },
+                    markDuplicate: { [weak self] id, of in
+                        self?.acDelegate?.findingStore.markDuplicate(id, of: of)
+                    },
+                    deleteFinding: { [weak self] id in self?.acDelegate?.findingStore.removeFinding(id) },
+                    // The watch sheet's "Edit Workspace…": its credentials (the
+                    // GitHub token a watch needs).
+                    editWorkspace: { [weak self] id in
+                        guard let d = self?.acDelegate,
+                              let p = d.profiles.first(where: { $0.id == id }) else { return }
+                        d.openEditorWindow(editing: p, category: .credentials)
+                    },
+                    fetchRepos: { [weak self] pid in
+                        try await self?.acDelegate?.fetchGitHubRepos(profileID: pid) ?? []
                     }))
-            let host = NSHostingView(rootView: view)
+            let host = NonMovableHostingView(rootView: view)
             // The board's SwiftUI max-width must never resize the WINDOW —
             // same required-constraint gotcha as the file pane (sizingOptions).
             host.sizingOptions = []
@@ -2917,10 +3429,20 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         self?.acDelegate?.codingTaskEngine.moveToInProgress(id)
                     },
                     merge: { [weak self] id in
-                        self?.acDelegate?.codingTaskEngine.merge(id)
+                        // The review window, on its Merge confirmation.
+                        self?.acDelegate?.taskReviewWindows.open(taskID: id, confirm: .merge)
                     },
                     closeNoMerge: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.closeWithoutMerge(id)
+                    },
+                    markDone: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.markDone(id)
+                    },
+                    stop: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.stopToBacklog(id)
+                    },
+                    startOver: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.startOver(id)
                     },
                     delete: { [weak self] id in
                         self?.acDelegate?.codingTaskStore.remove(id)
@@ -2945,8 +3467,28 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     openTranscript: { [weak self] id in
                         self?.acDelegate?.taskTranscriptWindows.open(taskID: id)
-                    }))
-            let host = NSHostingView(rootView: view)
+                    },
+                    assignees: { [weak self] in self?.acDelegate?.taskDispatcher.choices() ?? TaskAssigneeChoices() },
+                    assign: { [weak self] id, a in self?.acDelegate?.taskDispatcher.assign(id, to: a) },
+                    answer: { [weak self] id, text in
+                        Task { @MainActor in _ = await self?.acDelegate?.taskDispatcher.answer(id, text: text) }
+                    },
+                    recall: { [weak self] id in self?.acDelegate?.taskDispatcher.recall(id) },
+                    openAssignee: { [weak self] task in
+                        guard let self, let a = task.assignment else { return }
+                        switch a.kind {
+                        case .session: self.selectSession(a.id)
+                        case .room: self.showRoom(a.id)
+                        case .worktree: break
+                        case .switchboard:
+                            if let sid = self.acDelegate?.switchboardEngine.switchboard?.id {
+                                self.selectSession(sid)
+                            }
+                        }
+                    },
+                    retryLanding: { [weak self] id in self?.acDelegate?.codingTaskEngine.retryLanding(id) }),
+                sessionStore: delegate.homeSessionStore)
+            let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false
             taskBoardSlot.addSubview(host)
@@ -3012,7 +3554,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         } else {
             isOpaque = true
             backgroundColor = nil
-            stage.layer?.backgroundColor = NSColor.black.cgColor
+            // A session's page keeps the canvas behind it (see setSessionHeader).
+            let sessionPage = sessionHeaderHost?.isHidden == false
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                stage.layer?.backgroundColor = (sessionPage ? NSColor.acCanvas : NSColor.black).cgColor
+            }
             setBackgroundFrost(radius: 0)
         }
     }
@@ -3033,12 +3579,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearKubeDashboard()
         clearRegistryDashboard()
         clearVMDashboard()
-        if selectedID != id { select(profileID: id) }
+        // Mount it when it isn't what the stage holds — not only when another
+        // machine was picked: a pane removed and re-added while a room had
+        // the stage (re-attached quietly, never mounted) kept `selectedID`,
+        // and its sessions came back to a blank stage with no composer.
+        if selectedID != id || !isMounted(id) { select(profileID: id) }
         guard let pane = pane(id) else { return }
         pane.switchTo(index: index)
-        // Sessions-first: a tab picked by hand from the Machines list is a
-        // terminal — the chat is what sessions are for.
-        if listModel.sessionsFirst, asTerminal {
+        // A tab picked by hand from the Machines list is a terminal — the
+        // chat is what sessions are for.
+        if asTerminal {
             pane.sessionOnStage = false
             pane.setViewMode(.terminal, persist: false)
             pane.updateNativeTerminalMount()
@@ -3168,7 +3718,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
               selectedSessionID != nil || listModel.newSessionSelected
         else { return false }
         if let n = Int(chars), (1...9).contains(n) {
-            let ordered = SessionHome.sidebarOrder(delegate.agentSessionStore.sessions,
+            let ordered = SessionHome.sidebarOrder(delegate.allSessionRecords,
                                                    rooms: delegate.agentRoomStore.rooms, in: listModel)
             if !isRepeat, ordered.indices.contains(n - 1) { selectSession(ordered[n - 1].id) }
             return true
@@ -3183,7 +3733,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// ⌥⌘↑/↓: the previous / next session in the sidebar's order.
     func stepSession(_ delta: Int) -> Bool {
         guard listModel.sessionsFirst, let delegate = acDelegate else { return false }
-        let ordered = SessionHome.sidebarOrder(delegate.agentSessionStore.sessions,
+        let ordered = SessionHome.sidebarOrder(delegate.allSessionRecords,
                                                rooms: delegate.agentRoomStore.rooms, in: listModel)
         guard !ordered.isEmpty else { return false }
         let i = selectedSessionID.flatMap { id in ordered.firstIndex { $0.id == id } }
@@ -3195,7 +3745,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// ⌘⏎: resume the paused or finished session on stage.
     func resumeOnStage() -> Bool {
         guard let id = selectedSessionID, let delegate = acDelegate,
-              let s = delegate.agentSessionStore.session(id) else { return false }
+              let s = delegate.sessionRecord(id) else { return false }
         let bucket = SessionHome.bucket(for: s, in: listModel)
         guard bucket == .asleep || bucket == .ended, !SessionHome.isGone(s, in: listModel) else { return false }
         delegate.agentSessionEngine.resume(id)
@@ -3204,7 +3754,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     private func confirmEndSession(_ id: UUID) {
-        guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id),
+        guard let delegate = acDelegate, let s = delegate.sessionRecord(id),
               s.windowIndex != nil, !s.hasEnded else { return }
         let alert = NSAlert()
         alert.messageText = String(format: NSLocalizedString("End “%@”?", comment: "end session"), s.title)
@@ -3289,6 +3839,11 @@ struct SessionSidebar: View {
     /// Scheduled automations — the third sidebar group, after the
     /// workspace rows.
     var automationStore: ScheduledAutomationStore
+    /// Repository-watch findings: the Automations header's open-findings pill.
+    var findingStore: FindingStore? = nil
+    private var openFindingCount: Int {
+        findingStore?.findings.filter { $0.status == .new }.count ?? 0
+    }
     let onNewAutomation: () -> Void
     /// Open the automation kanban board as the stage surface.
     let onShowAutomationBoard: () -> Void
@@ -3325,6 +3880,8 @@ struct SessionSidebar: View {
     var onConnectorAction: (UUID, KubeRowAction) -> Void = { _, _ in }
     /// A machine's "Rewind home…": the window puts up the sheet.
     var onRewindHome: (Profile.ID) -> Void = { _ in }
+    /// Admit, remove (block) or unblock a native machine.
+    var onFleet: (UUID, FleetAction) -> Void = { _, _ in }
     /// The search text lives on the model (the debug hooks set it too).
     private var sessionFilter: String {
         get { model.sidebarFilter }
@@ -3379,6 +3936,7 @@ struct SessionSidebar: View {
                 AutomationsSection(
                     store: automationStore,
                     model: model,
+                    openFindings: openFindingCount,
                     onNew: onNewAutomation,
                     onShowBoard: onShowAutomationBoard)
                 if let taskStore {
@@ -3386,7 +3944,8 @@ struct SessionSidebar: View {
                         store: taskStore,
                         model: model,
                         onShowBoard: onShowTaskBoard,
-                        onNew: onNewTask)
+                        onNew: onNewTask,
+                        sessionStore: sessionStore)
                 }
                 SidebarSectionHeader(title: NSLocalizedString("Workspaces", comment: "sidebar section"),
                                      count: model.profileRows.count,
@@ -3421,8 +3980,8 @@ struct SessionSidebar: View {
         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
     }
 
-    /// Sessions-first: the search field, the new-session button, one
-    /// Sessions list, the Kanban and Automations rows, and the machines
+    /// Sessions-first: the search field, the new-session button, the
+    /// Coding Tasks and Automations rows, one Sessions list, and the machines
     /// folded away at the bottom.
     @ViewBuilder
     private func sessionsFirstContent(_ sessionStore: AgentSessionStore, _ taskStore: CodingTaskStore) -> some View {
@@ -3458,26 +4017,62 @@ struct SessionSidebar: View {
 
         ScrollView {
             VStack(alignment: .leading, spacing: 3) {
+                // The boards first, right under New session — then the
+                // sessions.
+                CodingTasksSection(
+                    store: taskStore,
+                    model: model,
+                    onShowBoard: onShowTaskBoard,
+                    onNew: onNewTask,
+                    sessionStore: sessionStore)
+                AutomationsSection(
+                    store: automationStore,
+                    model: model,
+                    openFindings: openFindingCount,
+                    onNew: onNewAutomation,
+                    onShowBoard: onShowAutomationBoard)
                 SessionSectionsView(store: sessionStore, model: model,
                                     filter: sessionFilter, onSelect: onSelectSession,
                                     actions: sessionActions,
                                     rooms: roomStore?.rooms ?? [],
                                     contentSearch: contentSearch,
                                     lastReply: lastReply)
-                CodingTasksSection(
-                    store: taskStore,
-                    model: model,
-                    onShowBoard: onShowTaskBoard,
-                    onNew: onNewTask)
-                AutomationsSection(
-                    store: automationStore,
-                    model: model,
-                    onNew: onNewAutomation,
-                    onShowBoard: onShowAutomationBoard)
                 machinesSection
+                nativeSection
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
+        }
+    }
+
+    /// "Native Machines" — plain Macs attached to this app (Bromure Agent
+    /// Host), apart from the VMs: their agents run unsandboxed, and every
+    /// row here (and every session on them) says so. Absent while none is.
+    @ViewBuilder
+    private var nativeSection: some View {
+        let rows = model.profileRows.filter { model.machineIDs.contains($0.id) }
+        if !rows.isEmpty || !model.pendingMachines.isEmpty || !model.blockedMachines.isEmpty {
+            SidebarSectionHeader(title: NativeMachine.sectionTitle,
+                                 narrowTitle: NativeMachine.sectionNarrowTitle,
+                                 expanded: model.nativeExpanded,
+                                 badges: [(rows.filter { $0.state == .running }.count, .orange)],
+                                 count: rows.count,
+                                 help: NSLocalizedString("Macs whose agents run natively — not sandboxed — attached with Bromure Agent Host", comment: "sidebar"),
+                                 onTitle: { withAnimation(.easeInOut(duration: 0.15)) { model.nativeExpanded.toggle() } })
+            if model.nativeExpanded {
+                ForEach(rows) { row in
+                    NativeMachineSection(row: row,
+                                         entry: model.entries.first { $0.id == row.id },
+                                         onSelectTab: onSelectTab,
+                                         onRemove: { onFleet(row.id, .block) })
+                }
+                ForEach(model.pendingMachines) { m in
+                    FleetAdmissionRow(machine: m, blocked: false, onAction: { onFleet(m.id, $0) })
+                }
+                ForEach(model.blockedMachines) { m in
+                    FleetAdmissionRow(machine: m, blocked: true, onAction: { onFleet(m.id, $0) })
+                }
+            }
         }
     }
 
@@ -3488,12 +4083,13 @@ struct SessionSidebar: View {
     /// runs the credential wizard first).
     @ViewBuilder
     private var machinesSection: some View {
-        let running = model.profileRows.filter { $0.state == .running || $0.state == .booting }.count
+        let vms = model.profileRows.filter { !model.machineIDs.contains($0.id) }
+        let running = vms.filter { $0.state == .running || $0.state == .booting }.count
         SidebarSectionHeader(title: NSLocalizedString("Virtual Machines", comment: "sidebar section"),
                              narrowTitle: NSLocalizedString("VMs", comment: "sidebar section, when narrow"),
                              expanded: model.machinesExpanded,
                              badges: [(running, .green)],
-                             count: model.profileRows.count,
+                             count: vms.count,
                              help: NSLocalizedString("The isolated machines your sessions run in", comment: "sidebar"),
                              onTitle: { withAnimation(.easeInOut(duration: 0.15)) { model.machinesExpanded.toggle() } },
                              onAdd: onNewProfile,
@@ -3509,7 +4105,7 @@ struct SessionSidebar: View {
     @ViewBuilder
     private var kubeSection: some View {
         // Only once there is something to list: an empty category is noise
-        // (File › Infrastructure creates the first cluster or registry).
+        // (Workspaces › Infrastructure creates the first cluster or registry).
         if let kubeStore {
             if !kubeStore.clusters.isEmpty {
                 KubeClustersSection(store: kubeStore, model: model,
@@ -3539,7 +4135,7 @@ struct SessionSidebar: View {
             onFocusCell: onFocusGridCell,
             onDropPayload: onDropGridPayload,
             onSetAutoFill: { on in gridStore.setAutoFill(on); onGridEdited() })
-        ForEach(model.profileRows) { row in
+        ForEach(model.profileRows.filter { !model.machineIDs.contains($0.id) }) { row in
             VMSection(
                 row: row,
                 entry: model.entries.first { $0.id == row.id },
@@ -3564,7 +4160,8 @@ struct SessionSidebar: View {
                 onReset: onReset,
                 onDelete: onDelete,
                 onAddAllToGrid: onAddAllToGrid,
-                onRewindHome: onRewindHome)
+                onRewindHome: onRewindHome,
+                sessionStore: model.sessionsFirst ? sessionStore : nil)
         }
     }
 }
@@ -4228,10 +4825,25 @@ private struct VMSection: View {
     let onDelete: (Profile.ID) -> Void
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
+    /// Sessions-first: a tab whose session the user renamed shows that name.
+    var sessionStore: AgentSessionStore? = nil
 
     @State private var hovering = false
 
     private var isLive: Bool { row.state == .running || row.state == .booting }
+
+    /// The tab's label: the tmux one, unless the session on it was named by
+    /// hand — its `@display` can't follow (it's what binds the session to
+    /// the tab), so the rename would otherwise never reach the sidebar.
+    private func label(of tab: TabsModel.Tab) -> String {
+        // The session's title (the agent names it, or the user did) over
+        // the tab's, which is the first prompt it opened with.
+        if let s = sessionStore?.session(profileID: row.id, windowIndex: tab.index),
+           let title = AgentSession.liveTitle(s) {
+            return title
+        }
+        return tab.shownLabel
+    }
 
     private var stateLabel: String? {
         switch row.state {
@@ -4315,7 +4927,7 @@ private struct VMSection: View {
                         let idx = item.idx
                         let tab = item.tab
                         TabRow(
-                            label: tab.shownLabel,
+                            label: label(of: tab),
                             // Derive the icon from the shown label: a worktree
                             // tab's display ("Refactor website (claude)")
                             // names its tool, so agentKind's contains-match
@@ -4421,6 +5033,125 @@ private struct ControlMenu: View {
 }
 
 /// The profile's tile with a run-state badge.
+/// One native machine in the sidebar: a Mac, not a VM — its own icon with
+/// the unsandboxed badge, "Not sandboxed" under its name, and its agents'
+/// tabs. None of a VM's controls (no power, no settings): the machine is
+/// its user's, and Bromure only reaches its agents.
+private struct NativeMachineSection: View {
+    let row: SessionListModel.ProfileRow
+    var entry: SessionListModel.VMEntry?
+    let onSelectTab: (Profile.ID, Int) -> Void
+    var onRemove: () -> Void = {}
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(NativeMachine.tint.opacity(row.state == .off ? 0.08 : 0.15))
+                    .frame(width: 24, height: 24)
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(NativeMachine.tint.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+                    .overlay(Image(systemName: "laptopcomputer")
+                        .font(.system(size: 12))
+                        .foregroundStyle(NativeMachine.tint.opacity(row.state == .off ? 0.5 : 1)))
+                    .overlay(alignment: .bottomTrailing) {
+                        NativeMachineBadge(size: 8)
+                            .padding(1)
+                            .background(Circle().fill(Color.acSidebar))
+                            .offset(x: 4, y: 4)
+                    }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(row.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                    Text(row.state == .off ? NSLocalizedString("Not connected", comment: "native machine")
+                                           : NativeMachine.notSandboxed)
+                        .font(.system(size: 10))
+                        .foregroundStyle(row.state == .off ? AnyShapeStyle(.tertiary) : AnyShapeStyle(NativeMachine.tint))
+                }
+                Spacer(minLength: 4)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 7)
+                .fill(hovering ? Color.primary.opacity(0.04) : .clear))
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .help(NativeMachine.help(row.name))
+            .contextMenu {
+                Button(role: .destructive, action: onRemove) {
+                    Label(NSLocalizedString("Remove from Fleet…", comment: "native machine"), systemImage: "xmark.shield")
+                }
+            }
+
+            if let entry {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
+                        TabRow(
+                            label: tab.shownLabel,
+                            agentKind: BromureIcons.agentKind(forLabel: tab.shownLabel),
+                            agentStatus: tab.agentStatus,
+                            isActive: false,
+                            accentHex: "#F59E0B",
+                            chord: nil,
+                            onSelect: { onSelectTab(row.id, idx) },
+                            onClose: {})
+                    }
+                }
+                .padding(.leading, 14)
+            }
+        }
+    }
+}
+
+/// A native machine waiting for the user's answer, or blocked: its name,
+/// dimmed, and the answer at hand.
+private struct FleetAdmissionRow: View {
+    let machine: FleetMachine
+    let blocked: Bool
+    let onAction: (FleetAction) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(NativeMachine.tint.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                .frame(width: 24, height: 24)
+                .overlay(Image(systemName: blocked ? "nosign" : "questionmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(machine.name)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .foregroundStyle(.tertiary)
+                Text(blocked ? NSLocalizedString("Blocked", comment: "native machine")
+                             : NSLocalizedString("Wants to join", comment: "native machine"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(blocked ? AnyShapeStyle(.tertiary) : AnyShapeStyle(NativeMachine.tint))
+            }
+            Spacer(minLength: 4)
+            if !blocked {
+                Button(NSLocalizedString("Allow", comment: "fleet admission")) { onAction(.allow) }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .contextMenu {
+            if blocked {
+                Button(NSLocalizedString("Unblock", comment: "fleet admission")) { onAction(.unblock) }
+                Button(NSLocalizedString("Allow Now", comment: "fleet admission")) { onAction(.allow) }
+            } else {
+                Button(NSLocalizedString("Allow", comment: "fleet admission")) { onAction(.allow) }
+                Button(NSLocalizedString("Block", comment: "fleet admission"), role: .destructive) { onAction(.block) }
+            }
+        }
+    }
+}
+
 private struct VMIcon: View {
     let accentHex: String
     let state: SessionListModel.RunState
@@ -4892,15 +5623,37 @@ struct UnifiedToolbarBar: View {
         return model.profileRows.first { $0.id == pid }
     }
 
+    /// No running machine behind what's on stage, yet a session page:
+    /// the machine controls stay, dimmed.
+    private var placeholderControls: Bool {
+        guard model.sessionsFirst, model.selectedRoomID == nil else { return false }
+        if restingMachine != nil { return true }
+        return model.newSessionSelected
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            if let row = restingMachine {
-                MachineMenu(name: row.name, accentHex: row.accentHex,
-                            onSettings: { onSettings(row.id) },
-                            onReboot: {}, onTrace: {}, onDetach: {},
-                            onDetails: onDetails.map { f in { f(row.id) } },
-                            running: false)
+            // B5/B13: a session whose machine is asleep, and the new-session
+            // screen, keep the same controls in the same places — dimmed
+            // where they need a running machine — so the bar doesn't jump
+            // when a machine wakes or a session is picked.
+            if placeholderControls {
+                LinuxPill(back: false, action: {})
+                    .disabled(true).opacity(0.45)
+                    .help(NSLocalizedString("The Linux machine behind this session — available while it runs", comment: "toolbar"))
+                if let row = restingMachine {
+                    MachineMenu(name: row.name, accentHex: row.accentHex,
+                                onSettings: { onSettings(row.id) },
+                                onReboot: {}, onTrace: {}, onDetach: {},
+                                onDetails: onDetails.map { f in { f(row.id) } },
+                                running: false)
+                }
+                HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
+                           active: false) {}
+                    .disabled(true).opacity(0.45)
+                HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
+                           active: model.filePaneOpen) { onToggleFilePane() }
             }
             // A room spans machines: nothing machine-specific in its bar —
             // the browser and Files follow the focused cell.

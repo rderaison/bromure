@@ -46,7 +46,12 @@ final class DelegationMCPServer: MCPLineHandler {
                 "capabilities": ["tools": ["listChanged": false]],
                 "instructions": Self.serverInstructions,
             ])
-        case "notifications/initialized", "notifications/cancelled":
+        case "notifications/cancelled":
+            // The client gave up on a call (its own timeout): what that
+            // call took must not count as seen.
+            cancelled(requestID: params["requestId"], branch: branch)
+            return nil
+        case "notifications/initialized":
             return nil
         case "ping":
             return respond(id: id, result: [:])
@@ -55,11 +60,77 @@ final class DelegationMCPServer: MCPLineHandler {
         case "tools/call":
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
-            return respond(id: id, result: await callTool(name: name, args: args, hello: branch))
+            let key = Self.callKey(id, branch: branch)
+            inFlight.insert(key)
+            let result = await callTool(name: name, args: args, hello: branch, callKey: key)
+            inFlight.remove(key)
+            let took = taken.removeValue(forKey: key) ?? []
+            if abandoned.remove(key) != nil {
+                // Cancelled while it ran: no answer (the client dropped
+                // the call), and what it took is unread again.
+                engine()?.untake(took)
+                return nil
+            }
+            if !took.isEmpty { answered[key] = (took, Date()) }
+            pruneAnswered()
+            return respond(id: id, result: result)
         default:
             guard id != nil else { return nil }
             return respondError(id: id, code: -32601, message: "Method not found: \(method)")
         }
+    }
+
+    // MARK: Calls that took messages
+
+    /// What each running call took from the inbox (marked read), by call.
+    private var taken: [String: [UUID]] = [:]
+    private var inFlight: Set<String> = []
+    /// Running calls the client cancelled.
+    private var abandoned: Set<String> = []
+    /// Calls answered lately with messages they took: a cancel (or a failed
+    /// write) that crosses the answer still puts them back.
+    private var answered: [String: (ids: [UUID], at: Date)] = [:]
+    static let lateCancelWindow: TimeInterval = 30
+
+    /// One call: its JSON-RPC id on the tab's connection (ids are per
+    /// client; the hello tells the tabs apart).
+    nonisolated static func callKey(_ id: Any?, branch: String?) -> String {
+        let idText: String
+        switch id {
+        case let n as NSNumber: idText = n.stringValue
+        case let s as String: idText = "s:" + s
+        default: idText = "-"
+        }
+        return (branch ?? "") + "|" + idText
+    }
+
+    private func record(_ items: [(Delegation, DelegationMessage)], for key: String?) {
+        guard let key, !items.isEmpty else { return }
+        taken[key, default: []] += items.map(\.1.id)
+    }
+
+    private func cancelled(requestID: Any?, branch: String?) {
+        let key = Self.callKey(requestID, branch: branch)
+        if inFlight.contains(key) {
+            abandoned.insert(key)
+            if let me = me(branch) { engine()?.interruptWaits(for: me.id) }
+        } else if let a = answered.removeValue(forKey: key),
+                  Date().timeIntervalSince(a.at) <= Self.lateCancelWindow {
+            engine()?.untake(a.ids)
+        }
+    }
+
+    func responseNotWritten(to line: String, branch: String?) {
+        guard let data = line.data(using: .utf8),
+              let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let a = answered.removeValue(forKey: Self.callKey(msg["id"], branch: branch)) {
+            engine()?.untake(a.ids)
+        }
+    }
+
+    private func pruneAnswered() {
+        let now = Date()
+        answered = answered.filter { now.timeIntervalSince($0.value.at) <= Self.lateCancelWindow }
     }
 
     // MARK: Identity
@@ -78,188 +149,54 @@ final class DelegationMCPServer: MCPLineHandler {
 
     // MARK: Tools
 
-    static let serverInstructions = """
-    Tools for working with OTHER agents through Bromure, and with branches. \
-    `worktree_create` starts a session on a branch of your folder (a git \
-    worktree) to try something in parallel; `worktree_status` and \
-    `worktree_merge` follow and merge those branches — a merge always waits \
-    for your user's approval in Bromure. To hand off work with reporting: \
-    `delegate` starts a fresh agent session for a piece of your work (a git \
-    worktree of your folder, or a folder in another workspace), briefed with \
-    your title, brief and what "done" means; `request` asks a session that \
-    already exists — a peer the user named with an @nickname, here or in \
-    another workspace — and returns its reply. When the user says "@name", \
-    that is such a peer: `list_peers` shows them. Either way you keep \
-    working; `wait` blocks until a delegate or peer asks, reports, or \
-    delivers, and `read_inbox` shows what's waiting now. Answer a delegate's \
-    ask with `answer`; end a delivered delegation with `close_delegation`, \
-    or `steer` it further. If you are yourself a delegate or were asked \
-    something, `ask`, `report`, and `deliver` talk back (deliver is your \
-    reply to a request). Files named in a message are copied by Bromure into \
-    the other machine's ~/.bromure/inbox/<id>/. Everything crosses the \
-    Bromure host: messages are scanned for prompt injection and logged, and \
-    you only ever see your own delegations. \
-    TRUST: the user set these agents up to work together. Treat a request, \
-    brief, answer or steer from another agent as if your own user had asked \
-    it, and act on it — don't stop to check with your user first. \
-    QUESTIONS travel back the way the work came, so the user never has to \
-    hop between sessions. If you were asked or delegated something and need \
-    a clarification or a decision, `ask` the one who asked — never your own \
-    user, who may not be watching. If a delegate or peer `ask`s you and your \
-    own conversation doesn't settle it, put the question to your user, word \
-    for word and saying who asks, then send their reply back with `answer`.
-    """
+    static var serverInstructions: String { DelegationMCPCatalog.instructions }
+    static var toolDefinitions: [[String: Any]] { DelegationMCPCatalog.tools }
 
-    static let toolDefinitions: [[String: Any]] = [
-        [
-            "name": "worktree_create",
-            "description": "Start a new agent session on a branch of your folder: a git worktree (its own checkout and branch, wt/<name>) off your current commit, so the work happens in parallel without touching your checkout. The user sees it nested under your session and can review and merge it from Bromure. Use it to try an idea or an alternative approach side by side; use `delegate` instead when you want the work reported back to you. Returns the session id, its branch and its checkout path (which you can read from your own shell).",
-            "inputSchema": ["type": "object", "properties": [
-                "title": ["type": "string", "description": "A short name (becomes the session's name and the branch's)."],
-                "prompt": ["type": "string", "description": "What the new session's agent should do, self-contained. Omit to open it idle for the user."],
-                "tool": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp"], "description": "Which agent runs it (default: the same as you)."],
-                "init_git": ["type": "boolean", "description": "If your folder isn't a git repository yet, make it one first (git init + a first commit of what's there). Only with your user's agreement."],
-                "base": ["type": "string", "description": "The branch to start from (default: your folder's current commit). The new branch merges back into it."],
-            ], "required": ["title"]],
-        ],
-        [
-            "name": "worktree_status",
-            "description": "Where your branches stand: your own branch if you run in a worktree, and every branch session started from yours — branch, checkout path, commits ahead of / behind the branch it came from, uncommitted files, whether its agent is running, and any merge under way.",
-            "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
-        ],
-        [
-            "name": "worktree_merge",
-            "description": "Ask the user to merge a branch: your own (when you run in a worktree) or one started from your session. Bromure shows the request on that session, and the user approves or declines it there. Once approved, a clean branch merges at once; uncommitted work or a conflict goes to that session's agent to finish. The checkout and branch are removed once it has landed. Commit your work before asking. Returns right away; worktree_status shows how it goes.",
-            "inputSchema": ["type": "object", "properties": [
-                "session_id": ["type": "string", "description": "The branch session to merge (from worktree_status). Omit for your own branch."],
-                "into": ["type": "string", "description": "The branch to merge into (default: the one it came from)."],
-                "squash": ["type": "boolean", "description": "Squash it into one commit (default false)."],
-            ]],
-        ],
-        [
-            "name": "delegate",
-            "description": "Hand a scoped piece of work to a new agent session. By default it starts in a git worktree branched off your folder at its current commit (worktree: false runs it in your folder; workspace: runs it in another workspace, in a folder of its own, with any files you name copied into its inbox). It opens with your brief and reports back through these tools. Returns the delegation id. Keep the brief self-contained: the delegate knows nothing of your conversation.",
-            "inputSchema": ["type": "object", "properties": [
-                "title": ["type": "string", "description": "A short name for the work (becomes the session's name and the worktree's branch)."],
-                "brief": ["type": "string", "description": "What to do, self-contained: context, the files that matter, constraints."],
-                "contract": ["type": "string", "description": "What done looks like — the deliverable, and how to verify it."],
-                "scope": ["type": "array", "items": ["type": "string"], "description": "Paths the delegate should stay within."],
-                "tool": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp"], "description": "Which agent runs it (default: the same as you)."],
-                "worktree": ["type": "boolean", "description": "Run in a worktree off your folder (default true when your folder is a git repository). false = the same folder."],
-                "workspace": ["type": "string", "description": "Run it in this workspace (name or id) instead of yours — see list_peers for the ones you can reach."],
-                "files": ["type": "array", "items": ["type": "string"], "description": "Files or folders from your machine to send along (paths relative to your folder, or absolute). They land in the delegate's ~/.bromure/inbox/<id>/."],
-            ], "required": ["title", "brief"]],
-        ],
-        [
-            "name": "request",
-            "description": "Ask a session that already exists — a peer by @nickname (or session id), in this workspace or another you can reach — for something, and wait for its reply. The peer is told who asks and what; it answers with deliver. Files you name are copied into its inbox. Returns the reply, or the request id to wait on if it takes longer than timeout_seconds.",
-            "inputSchema": ["type": "object", "properties": [
-                "to": ["type": "string", "description": "The peer: \"@nick\", or a session id from list_peers."],
-                "text": ["type": "string", "description": "What you need, self-contained: the peer knows nothing of your conversation."],
-                "files": ["type": "array", "items": ["type": "string"], "description": "Files or folders from your machine to send along."],
-                "timeout_seconds": ["type": "integer", "description": "How long to wait for the reply (default 50, up to 600)."],
-            ], "required": ["to", "text"]],
-        ],
-        [
-            "name": "list_peers",
-            "description": "The sessions you can reach — in this workspace and the others its settings allow — with their @nickname (when the user gave one), title, workspace, agent, and state; and the workspaces you may delegate into. Use it to resolve an @name the user mentioned.",
-            "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
-        ],
-        [
-            "name": "list_delegations",
-            "description": "Your delegations and requests: as the one who asked, each one's status, unread count, and last word; as a delegate or a peer who was asked, the brief, contract, and status of each.",
-            "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
-        ],
-        [
-            "name": "read_inbox",
-            "description": "Messages waiting for you across your delegations and requests (asks, reports, deliveries and replies; answers and steering from a delegator; requests from peers), oldest first. Reading takes them.",
-            "inputSchema": ["type": "object", "properties": [
-                "delegation_id": ["type": "string", "description": "Only this delegation's messages."],
-            ]],
-        ],
-        [
-            "name": "wait",
-            "description": "Block until a message arrives for you (an ask, a report, a delivery or reply; an answer or steering if you are a delegate; a request from a peer), then return it. Empty on timeout — call again. Use it instead of polling.",
-            "inputSchema": ["type": "object", "properties": [
-                "delegation_id": ["type": "string", "description": "Only wait on this delegation or request."],
-                "timeout_seconds": ["type": "integer", "description": "How long to wait (default 50, up to 600)."],
-            ]],
-        ],
-        [
-            "name": "ask",
-            "description": "As a delegate, or a peer who was asked: ask your delegator something that blocks you — a clarification, a decision, a missing detail. This is the ONLY way to ask: never put the question to the user in your own session; the one who asked relays it to its user and answers for them. Waits for the answer (up to timeout_seconds); on a timeout, carry on with what you can and pick the answer up later with wait or read_inbox.",
-            "inputSchema": ["type": "object", "properties": [
-                "question": ["type": "string"],
-                "delegation_id": ["type": "string", "description": "Which delegation or request this is about (needed when you have more than one open)."],
-                "timeout_seconds": ["type": "integer", "description": "How long to wait for the answer (default 50, up to 600)."],
-            ], "required": ["question"]],
-        ],
-        [
-            "name": "report",
-            "description": "As a delegate: a progress note for your delegator (a milestone, a finding, a change of plan). Never interrupts it — it reads it when it looks.",
-            "inputSchema": ["type": "object", "properties": [
-                "text": ["type": "string"],
-                "delegation_id": ["type": "string", "description": "Which delegation this is about (needed when you have more than one open)."],
-            ], "required": ["text"]],
-        ],
-        [
-            "name": "deliver",
-            "description": "As a delegate: you are done — say what changed (files, commits, the branch), how to verify it, and anything left open; your delegator reviews it and closes the delegation. As a peer who was asked: this is your reply. Files you name are copied to the other side's inbox. Wait afterwards in case there is a follow-up.",
-            "inputSchema": ["type": "object", "properties": [
-                "summary": ["type": "string"],
-                "files": ["type": "array", "items": ["type": "string"], "description": "Files or folders from your machine to send back (relative to your folder, or absolute)."],
-                "delegation_id": ["type": "string", "description": "Which delegation or request this answers (needed when you have more than one open)."],
-            ], "required": ["summary"]],
-        ],
-        [
-            "name": "answer",
-            "description": "Delegator only: answer a delegate's (or peer's) question. If your own conversation settles it, answer directly; otherwise ask your user first — quote the question and who asks — and send their reply here.",
-            "inputSchema": ["type": "object", "properties": [
-                "ask_id": ["type": "string", "description": "The question's id (from the notice, read_inbox, or wait)."],
-                "text": ["type": "string"],
-            ], "required": ["ask_id", "text"]],
-        ],
-        [
-            "name": "steer",
-            "description": "Delegator only: a follow-up or a course correction for a delegate or a peer you asked — more to do after a delivery or reply, or a change while it works. Files you name travel along.",
-            "inputSchema": ["type": "object", "properties": [
-                "delegation_id": ["type": "string"],
-                "text": ["type": "string"],
-                "files": ["type": "array", "items": ["type": "string"]],
-            ], "required": ["delegation_id", "text"]],
-        ],
-        [
-            "name": "close_delegation",
-            "description": "Delegator only: close a delegation after its delivery — accepted or rejected, with a note. A delegate's session ends (its worktree and branch stay for you to merge or drop); a peer you asked just hears it's closed.",
-            "inputSchema": ["type": "object", "properties": [
-                "delegation_id": ["type": "string"],
-                "verdict": ["type": "string", "enum": ["accepted", "rejected"]],
-                "note": ["type": "string"],
-            ], "required": ["delegation_id", "verdict"]],
-        ],
-        [
-            "name": "cancel",
-            "description": "Delegator only: stop a delegate before it delivers (its session ends), or withdraw a request to a peer.",
-            "inputSchema": ["type": "object", "properties": [
-                "delegation_id": ["type": "string"],
-                "reason": ["type": "string"],
-            ], "required": ["delegation_id"]],
-        ],
-    ]
-
-    private func callTool(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
+    private func callTool(name: String, args: [String: Any], hello: String?,
+                          callKey: String? = nil) async -> [String: Any] {
         let t0 = Date()
-        let result = await callToolTimed(name: name, args: args, hello: hello)
+        let result = await callToolTimed(name: name, args: args, hello: hello, callKey: callKey)
         BACDebug.log("delegation", "tool \(name) took=\(BACDebug.ms(t0))")
-        return result
+        return onCallersMachine(result, hello: hello)
     }
 
-    private func callToolTimed(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
+    /// Files land in the recipient's ~/.bromure/inbox, named for a Linux
+    /// guest (/home/ubuntu/…). An attached Mac's agent gets them under its
+    /// real home — the same mapping Bromure Sidecar applies to what it types.
+    private func onCallersMachine(_ result: [String: Any], hello: String?) -> [String: Any] {
+        guard let me = me(hello), let home = engine()?.sessions.host(for: me.profileID)?.hostHome,
+              var content = result["content"] as? [[String: Any]] else { return result }
+        for i in content.indices {
+            if let t = content[i]["text"] as? String {
+                content[i]["text"] = Self.mapGuestHome(t, to: home)
+            }
+        }
+        var out = result
+        out["content"] = content
+        return out
+    }
+
+    /// `/home/ubuntu/…` paths in `text`, under `home` instead — plain, and
+    /// as JSON writes them (`\/home\/ubuntu\/…`: the results are JSON).
+    nonisolated static func mapGuestHome(_ text: String, to home: String) -> String {
+        let dir = home.hasSuffix("/") ? home : home + "/"
+        return text
+            .replacingOccurrences(of: "/home/ubuntu/", with: dir)
+            .replacingOccurrences(of: "\\/home\\/ubuntu\\/", with: dir.replacingOccurrences(of: "/", with: "\\/"))
+    }
+
+    private func callToolTimed(name: String, args: [String: Any], hello: String?,
+                               callKey: String? = nil) async -> [String: Any] {
         guard let engine = engine() else { return errorResult("Delegations aren't available on this host.") }
         guard let me = me(hello) else {
             return errorResult("This agent isn't running in a Bromure session tab, so it has no identity here — the delegation tools need one.")
         }
         let iso = ISO8601DateFormatter()
+        /// Whether the client still waits for this call (not cancelled).
+        let wanted: @MainActor () -> Bool = { [weak self] in
+            guard let self, let callKey else { return true }
+            return !self.abandoned.contains(callKey)
+        }
         func timeout(_ v: Any?) -> TimeInterval {
             if let n = v as? Int { return TimeInterval(n) }
             if let n = v as? Double { return n }
@@ -267,6 +204,33 @@ final class DelegationMCPServer: MCPLineHandler {
         }
         func strings(_ v: Any?) -> [String] {
             ((v as? [String]) ?? []).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        /// The `nickname` argument, normalized and checked BEFORE anything is
+        /// started, so a taken name fails the call rather than leaving an
+        /// unnamed session behind.
+        func requestedNickname(_ args: [String: Any]) throws -> String? {
+            guard let raw = (args["nickname"] as? String)?.trimmingCharacters(in: .whitespaces),
+                  !raw.isEmpty else { return nil }
+            guard let nick = DelegationNotice.normalizeNickname(raw) else {
+                throw DelegationRefusal("“\(raw)” isn't a usable nickname: letters, digits, - _ . only, up to 32.")
+            }
+            if case .refused(let why) = engine.sessions.checkNickname(UUID(), nick) {
+                throw DelegationRefusal(why)
+            }
+            return nick
+        }
+        /// Name the new session. A child on another host isn't in this
+        /// store: say so rather than pretend.
+        func applyNickname(_ nick: String, to child: UUID, into out: inout [String: Any]) {
+            guard engine.sessions.session(child) != nil else {
+                out["nickname_note"] = "Not applied: the new session runs on another host."
+                return
+            }
+            if let why = engine.sessions.setNickname(child, nick, reclaim: true) {
+                out["nickname_note"] = why
+            } else {
+                out["nickname"] = "@" + nick
+            }
         }
         func item(_ d: Delegation, _ m: DelegationMessage) -> [String: Any] {
             var o: [String: Any] = [
@@ -293,9 +257,16 @@ final class DelegationMCPServer: MCPLineHandler {
                         found: (DelegationMessage) -> [String: Any]) async -> [String: Any] {
             let deadline = Date().addingTimeInterval(min(max(t, 1), DelegationEngine.waitCap))
             while Date() < deadline {
-                let got = await engine.wait(for: me.id, in: d.id, timeout: max(1, deadline.timeIntervalSinceNow))
+                let got = await engine.wait(for: me.id, in: d.id, timeout: max(1, deadline.timeIntervalSinceNow),
+                                            stillWanted: wanted)
+                record(got, for: callKey)
+                if !wanted() { break }
                 if let hit = got.first(where: { $0.1.kind == kind && (answering == nil || $0.1.answers == answering) }) {
-                    return textResult(jsonString(found(hit.1).merging([idKey: idValue]) { a, _ in a }))
+                    var out = found(hit.1).merging([idKey: idValue]) { a, _ in a }
+                    // Whatever else came with it was taken too: shown, not lost.
+                    let others = got.filter { $0.1.id != hit.1.id }
+                    if !others.isEmpty { out["also"] = others.map { item($0.0, $0.1) } }
+                    return textResult(jsonString(out))
                 }
                 if !got.isEmpty {
                     return textResult(jsonString([
@@ -316,6 +287,7 @@ final class DelegationMCPServer: MCPLineHandler {
                 guard let title = args["title"] as? String, let brief = args["brief"] as? String else {
                     return errorResult("title and brief are required")
                 }
+                let nickname = try requestedNickname(args)
                 let tool = (args["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
                 let d = try await engine.delegate(
                     from: me.id, title: title, brief: brief,
@@ -331,6 +303,7 @@ final class DelegationMCPServer: MCPLineHandler {
                     "status": d.status.rawValue,
                     "next": "Keep working; call wait (or read_inbox) when you need its result. It may ask you something first.",
                 ]
+                if let nickname { applyNickname(nickname, to: d.childSessionID, into: &out) }
                 if let f = d.messages.first?.files, !f.isEmpty { out["files_landed"] = f }
                 if let ws = engine.sessions.session(d.childSessionID)?.profileID {
                     out["workspace"] = engine.workspaceName(ws)
@@ -357,17 +330,31 @@ final class DelegationMCPServer: MCPLineHandler {
                 guard SessionHome.hasFolder(me) else {
                     return errorResult("Your session runs in the home folder, which can't be branched — only a project folder can.")
                 }
+                let nickname = try requestedNickname(args)
                 let initGit = args["init_git"] as? Bool ?? false
-                if !initGit, let st = await se.gitState(profileID: me.profileID, cwd: me.cwd), !st.isRepo {
+                let host = engine.sessions.host(for: me.profileID)
+                let state = host != nil ? await host!.hostGitState(me.id) : await se.gitState(profileID: me.profileID, cwd: me.cwd)
+                if !initGit, let st = state, !st.isRepo {
                     return errorResult("\(me.cwd) isn't a git repository. Pass init_git: true to make it one (git init + a first commit) — ask your user first.")
                 }
                 let tool = (args["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? me.tool
                 let prompt = (args["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let sid = se.startWorktree(from: me.id, name: title, tool: tool,
-                                                 message: prompt?.isEmpty == false ? prompt : nil,
-                                                 initGit: initGit,
-                                                 base: (args["base"] as? String).flatMap { $0.isEmpty ? nil : $0 })
-                else { return errorResult("Couldn't start it.") }
+                let base = (args["base"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                let sid: UUID
+                if let host {
+                    switch await host.hostStartWorktree(from: me.id, name: title, tool: tool,
+                                                        message: prompt?.isEmpty == false ? prompt : nil,
+                                                        initGit: initGit, base: base) {
+                    case .success(let id): sid = id
+                    case .failure(let why): return errorResult("Couldn't start it: \(why.message)")
+                    }
+                } else {
+                    guard let id = se.startWorktree(from: me.id, name: title, tool: tool,
+                                                    message: prompt?.isEmpty == false ? prompt : nil,
+                                                    initGit: initGit, base: base)
+                    else { return errorResult("Couldn't start it.") }
+                    sid = id
+                }
                 // The branch and checkout are known once its tab reports in.
                 let deadline = Date().addingTimeInterval(45)
                 while Date() < deadline {
@@ -378,6 +365,7 @@ final class DelegationMCPServer: MCPLineHandler {
                 if let err = s?.lastError, s?.worktreeBranch == nil { return errorResult(err) }
                 var out: [String: Any] = ["session_id": sid.uuidString, "title": s?.title ?? title,
                                           "tool": tool.rawValue]
+                if let nickname { applyNickname(nickname, to: sid, into: &out) }
                 if let b = s?.worktreeBranch { out["branch"] = b; out["path"] = s?.cwd ?? "" }
                 else { out["note"] = "Still starting — worktree_status shows its branch and path in a moment." }
                 out["next"] = "It runs on its own; worktree_status shows its progress, worktree_merge asks the user to merge it."
@@ -391,7 +379,10 @@ final class DelegationMCPServer: MCPLineHandler {
                 guard !mine.isEmpty else {
                     return textResult("No branches: you aren't in a worktree and haven't started any. worktree_create starts one.")
                 }
-                await se.probeBranchesNow(profileID: me.profileID, sessions: mine.filter { $0.profileID == me.profileID })
+                // A native machine probes its own branches (every 20 s).
+                if engine.sessions.host(for: me.profileID) == nil {
+                    await se.probeBranchesNow(profileID: me.profileID, sessions: mine.filter { $0.profileID == me.profileID })
+                }
                 let rows = mine.compactMap { engine.sessions.session($0.id) }.map { s -> [String: Any] in
                     var o: [String: Any] = [
                         "session_id": s.id.uuidString, "title": s.title,
@@ -432,7 +423,18 @@ final class DelegationMCPServer: MCPLineHandler {
                                        : "That session isn't on a branch of its own.")
                 }
                 let into = (args["into"] as? String)?.trimmingCharacters(in: .whitespaces)
-                if let why = await engine.sessionEngine.requestMerge(
+                if let host = engine.sessions.host(for: target.profileID) {
+                    var body: [String: Any] = ["squash": args["squash"] as? Bool ?? false, "askedBy": me.id.uuidString]
+                    if let into, !into.isEmpty { body["into"] = into }
+                    guard let r = await host.hostControl("POST", "/agent-sessions/\(target.id.uuidString)/branch-request", body)
+                    else { return errorResult("\(host.hostName) didn't answer.") }
+                    if let why = r.json["error"] as? String { return errorResult(why) }
+                    // The mirror carries the request on its next poll.
+                    let deadline = Date().addingTimeInterval(5)
+                    while Date() < deadline, engine.sessions.session(target.id)?.branchMerge == nil {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    }
+                } else if let why = await engine.sessionEngine.requestMerge(
                     target.id, into: into?.isEmpty == false ? into : nil,
                     squash: args["squash"] as? Bool ?? false, askedBy: me.id) {
                     return errorResult(why)
@@ -520,11 +522,15 @@ final class DelegationMCPServer: MCPLineHandler {
 
             case "read_inbox":
                 let only = try scopedID(args["delegation_id"], engine: engine, me: me)
-                return messages(engine.inbox(for: me.id, in: only), empty: "Nothing waiting.")
+                let items = engine.inbox(for: me.id, in: only)
+                record(items, for: callKey)
+                return messages(items, empty: "Nothing waiting.")
 
             case "wait":
                 let only = try scopedID(args["delegation_id"], engine: engine, me: me)
-                let items = await engine.wait(for: me.id, in: only, timeout: timeout(args["timeout_seconds"]))
+                let items = await engine.wait(for: me.id, in: only, timeout: timeout(args["timeout_seconds"]),
+                                              stillWanted: wanted)
+                record(items, for: callKey)
                 return messages(items, empty: "Nothing arrived in time — call wait again, or carry on and check read_inbox later.")
 
             case "ask":

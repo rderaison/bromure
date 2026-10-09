@@ -17,6 +17,11 @@ import Foundation
 
 /// One sign-in in flight for a workspace.
 final class ProxySignIn {
+    /// Names this sign-in to the proxy's capture hook, which holds only
+    /// values (see `beginProxySignIn`).
+    let token = UUID()
+    /// The sign-in simulator's (e2e): never touches a credential store.
+    var simulated = false
     let provider: SubscriptionProvider
     let profileID: UUID
     let windowIndex: Int
@@ -31,7 +36,30 @@ final class ProxySignIn {
     }
 }
 
+/// The sign-in simulator's fixed endpoint and tally (debug / e2e only).
+@MainActor
+enum SignInSimulator {
+    static let host = "signin-sim.bromure.test"
+    static let path = "/oauth/token"
+    /// Simulated sign-ins completed since launch.
+    static var completed = 0
+}
+
 extension ACAppDelegate {
+    /// Leave the agent (Ctrl-C twice, C-u for a stray keystroke) in ONE
+    /// window — resolved once to its tmux id, so the keys can't follow the
+    /// index to another tab — then type the login line only once a shell
+    /// holds that window's foreground (an agent would take it as a message).
+    nonisolated static func loginKeysCommand(window w: Int, line: String) -> String {
+        PaneTypeGuard.resolve(.index(w))
+            + "[ -n \"$_bt\" ] && { tmux send-keys -t \"$_bt\" C-c; sleep 0.4; tmux send-keys -t \"$_bt\" C-c; "
+            + "sleep 1.5; tmux send-keys -t \"$_bt\" C-u; }; "
+            + PaneTypeGuard.guardFunction(.index(w, foreground: .shell))
+            // The agent may take a few seconds to wind down.
+            + "_bn=0; until _bg >/dev/null; do _bn=$((_bn+1)); [ $_bn -ge 8 ] && break; sleep 1; done; "
+            + "if _bg; then \(PaneTypeGuard.literalSend(line)) && sleep 0.2 && tmux send-keys -t \"$_bt\" Enter; fi"
+    }
+
     /// Each CLI's login subcommand — straight to the browser hand-off, no
     /// wizard in between (nobody answers a picker in a hidden tab).
     static func loginCommand(for provider: SubscriptionProvider) -> String {
@@ -100,14 +128,18 @@ extension ACAppDelegate {
         proxySignIns[profileID] = signIn
 
         let endpoint = Self.tokenEndpoint(for: provider)
+        // The hook runs on a proxy connection's task and is released there.
+        // It captures values only — no app delegate, no ProxySignIn: a
+        // capture of those objects was over-released on that path (macOS 15:
+        // the connection freeing its copy of the hook hit a freed object, a
+        // crash the instant the browser's "Authorize" came back). The main
+        // actor finds the live sign-in by workspace + token.
+        let token = signIn.token
         engine.signInCaptures.arm(SignInCapture(
             profileID: profileID, hosts: endpoint.hosts, pathPrefix: endpoint.path,
-            handle: { [weak self] status, body in
-                guard status == 200,
-                      let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
-                      let access = json["access_token"] as? String, !access.isEmpty else { return nil }
-                let owner = self   // a constant for the hop — not the captured weak var
-                return await MainActor.run { owner?.proxySignInCaptured(signIn, json: json, access: access) }
+            handle: { status, body in
+                guard status == 200 else { return nil }
+                return await ACAppDelegate.proxySignInExchanged(profileID: profileID, token: token, body: body)
             }))
 
         // Leave whatever the agent shows (Ctrl-C twice exits every supported
@@ -119,9 +151,7 @@ extension ACAppDelegate {
         Task { @MainActor in
             _ = try? await self.guestExec(
                 profileID: profileID,
-                command: "tmux send-keys -t bromure:\(w) C-c; sleep 0.4; tmux send-keys -t bromure:\(w) C-c; "
-                    + "sleep 1.5; tmux send-keys -t bromure:\(w) C-u; "
-                    + "tmux send-keys -t bromure:\(w) -l '\(cmd)'; sleep 0.2; tmux send-keys -t bromure:\(w) Enter",
+                command: Self.loginKeysCommand(window: w, line: cmd),
                 timeout: 20)
         }
         signIn.timeout = Task { @MainActor [weak self] in
@@ -131,6 +161,59 @@ extension ACAppDelegate {
                 "Bromure didn't receive a %@ sign-in in time. You can try again.", comment: ""),
                 provider.displayName))
         }
+    }
+
+    /// The capture hook's way in: the sign-in still live for `profileID`
+    /// under `token`, and the exchange's reply carrying an access token.
+    @MainActor
+    static func proxySignInExchanged(profileID: UUID, token: UUID, body: Data) -> Data? {
+        guard let app = NSApp.delegate as? ACAppDelegate,
+              let s = app.proxySignIns[profileID], s.token == token, !s.finished,
+              let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let access = json["access_token"] as? String, !access.isEmpty else { return nil }
+        if s.simulated {
+            app.endProxySignIn(s, success: true, message: nil)
+            SignInSimulator.completed += 1
+            return SignInCapture.response(status: 200, reason: "OK", json: [
+                "bromure_sim": "kept-on-host", "token": token.uuidString,
+            ])
+        }
+        return app.proxySignInCaptured(s, json: json, access: access)
+    }
+
+    /// The sign-in simulator (debug `sign-in-sim`, e2e): arm a capture for
+    /// `profileID` exactly as `beginProxySignIn` does — the same values-only
+    /// hook, the same registry — on `SignInSimulator.host`, whose provider
+    /// reply is canned. A guest POST to it then drives the proxy's capture,
+    /// the hook's hop to the main actor, and its release on the proxy's
+    /// thread, with no browser and no credential store touched. Returns the
+    /// sign-in's token, or nil when another sign-in is in flight there.
+    @MainActor
+    func beginSimulatedSignIn(profileID: UUID) -> UUID? {
+        guard let engine = mitmEngine else { return nil }
+        if let existing = proxySignIns[profileID], !existing.finished { return nil }
+        let signIn = ProxySignIn(provider: .claude, profileID: profileID, windowIndex: -1)
+        signIn.simulated = true
+        proxySignIns[profileID] = signIn
+        let token = signIn.token
+        let canned = SignInCapture.response(status: 200, reason: "OK", json: [
+            "access_token": "sim-access-\(token.uuidString)", "refresh_token": "sim-refresh",
+            "token_type": "Bearer", "expires_in": 3600,
+        ])
+        var capture = SignInCapture(
+            profileID: profileID, hosts: [SignInSimulator.host], pathPrefix: SignInSimulator.path,
+            handle: { status, body in
+                guard status == 200 else { return nil }
+                return await ACAppDelegate.proxySignInExchanged(profileID: profileID, token: token, body: body)
+            })
+        capture.simulatedReply = canned
+        engine.signInCaptures.arm(capture)
+        signIn.timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+            guard let self, let live = self.proxySignIns[profileID], live === signIn, !live.finished else { return }
+            self.endProxySignIn(signIn, success: false, message: nil)
+        }
+        return token
     }
 
     /// The exchange came back with tokens: keep them on the host and decide

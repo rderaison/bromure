@@ -378,7 +378,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "退出 Bromure Agentic Coding？";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d 个正在运行的 VM (%@) 将根据每个工作区的关闭操作而关闭。";
+"The workspace %@ is running. It will be closed according to its close action." = "工作区 %@ 正在运行，将根据其关闭操作关闭。";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d 个工作区正在运行（%2$@），每个都将根据其关闭操作关闭。";
+"The infrastructure machine %@ is running and will be suspended." = "基础设施机器 %@ 正在运行，将被挂起。";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d 台基础设施机器正在运行（%2$@），将被挂起。";
 "Quit" = "退出";
 
 /* Guardrails: new prompt-on-write mode */
@@ -468,7 +471,6 @@
 "Allow this request" = "允许此请求";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure 在本机分析代理的 AI 流量以检测被注入的指令——任何数据都不会离开 Mac。每个检测器使用本地模型，首次启用时从 bromure.io 下载。";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "对代理读取的文件内容、网页和工具输出进行评分（Prompt Guard），捕捉藏在恶意仓库中的「忽略先前指令 / 窃取机密」。首次启用时下载约 272 MB。";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "对 Claude Code、Codex 和 Grok 作为权威加载的 CLAUDE.md、AGENTS.md、GROK.md 及其他指令 / 设置文件进行评分。首次启用时下载约 571 MB。";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“记录但继续”将检测记录到安全日志窗口。“询问我该怎么做”会暂停请求并显示被标记的文本。“阻止”会直接让请求失败。";
 "Possible %@ in “%@”" = "“%@”中可能存在%@";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure 标记了代理即将发送给模型的内容（来自 %@）。请在下方查看——放行还是阻止此请求？";
@@ -1228,34 +1230,24 @@
 "Backlog" = "待办";
 "No tasks yet — write one." = "还没有任务——写一个吧。";
 "Plan" = "规划";
-"No phases yet — click Plan on a backlog card." = "还没有阶段——在待办卡片上点击“规划”。";
-"Start %d selected" = "开始所选的%d项";
-"One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are." = "一次性启动每个所选阶段。依赖未完成的阶段会排队，完成后自动开始。";
 "Move to Testing" = "移到“测试”";
 "Close Without Merging" = "不合并直接关闭";
-"Stop Agent & Delete Worktree" = "停止智能体并删除工作树";
-"Remove Card Only" = "仅移除卡片";
 "Testing/Review" = "测试/审查";
 "Nothing to review" = "没有待审查的内容";
 "Merge into %@…" = "合并到 %@…";
 "parent" = "父分支";
 "Back to In Progress" = "退回“进行中”";
-"Delete Worktree & Branch" = "删除工作树和分支";
 "Nothing shipped yet" = "还没有完成的内容";
 "Remove from board" = "从看板移除";
 "Remove “%@”?" = "移除“%@”？";
-"Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace." = "停止会删除智能体会话及其在工作树中未提交/未合并的工作。“仅移除卡片”会将它们保留在工作区中。";
 "This can't be undone." = "此操作无法撤销。";
 "queued" = "已排队";
 "Starts automatically when its dependencies are Done." = "依赖完成后自动开始。";
 "Phases that must be Done before this one starts." = "此阶段开始前必须完成的阶段。";
 "Untitled task" = "未命名任务";
 "planning — click to watch" = "规划中——点击查看";
-"A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them." = "一个可见的规划会话正在进行——点击卡片打开；阶段登记后会出现在“规划”列。";
 "Plan reviewed by the agent" = "计划已由智能体审查";
 "part of “%@”" = "属于“%@”";
-"A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column." = "规划智能体会阅读任务简述和代码仓库，然后在“规划”列登记有序的阶段卡片（含依赖关系）。";
-"One shot" = "一步到位";
 "Straight to In Progress: the agent does the whole task autonomously and hands you the diff in Testing/Review." = "直接进入“进行中”：智能体自主完成整个任务，并在测试/审查中交付差异。";
 "starting…" = "正在启动…";
 "session gone" = "会话已丢失";
@@ -1278,9 +1270,7 @@
 "Write" = "编辑";
 "Preview" = "预览";
 "Starting the task launches the agent in a fresh worktree of the repository with this brief as its prompt. It works on its own branch and commits its changes; you review the diff in Testing, then merge." = "开始任务后，智能体会以此简述为提示词，在仓库的全新工作树中启动。它在自己的分支上工作并提交更改；你在测试中审查差异，然后合并。";
-"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column." = "先保存，然后打开一个可见的规划会话：智能体探索仓库（可以向它提问——它能看到你），并把带依赖关系的有序阶段卡片登记到“规划”列。";
 "Planning — %@" = "规划 — %@";
-"Your brief" = "你的任务简述";
 "The agent explores the repository and may ask you questions here, then files the plan's phases onto the board." = "智能体会探索仓库，可能在此向你提问，然后把计划的各阶段登记到看板上。";
 "1 question answered — %@" = "已回答1个问题——%@";
 "%d questions answered — %@" = "已回答%d个问题——%@";
@@ -1344,7 +1334,7 @@
 "The transcript file has no readable entries." = "转录文件没有可读条目。";
 "No transcript" = "无转录";
 "This run's transcript couldn't be read." = "无法读取此次运行的转录。";
-"⏎ send   ⌥⏎ newline" = "⏎ 发送   ⌥⏎ 换行";
+"⏎ send   ⇧⏎ newline" = "⏎ 发送   ⇧⏎ 换行";
 "Send (⏎)" = "发送 (⏎)";
 "The agent asked" = "智能体曾提问";
 "The agent is asking %d questions — answer them all, then Submit" = "智能体提出了%d个问题——全部回答后点击提交";
@@ -1366,11 +1356,8 @@
 "Couldn't reach the workspace — is it running?" = "无法连接工作区——它在运行吗？";
 "Plan: %@" = "规划：%@";
 "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”." = "“%@”在工作区中不存在——请选择现有文件夹，或编辑任务并启用“创建文件夹和 git 仓库”。";
-"The planning session ended before filing phases — click Plan to retry." = "规划会话在登记阶段前就结束了——点击“规划”重试。";
-"The planning session timed out without filing phases — click Plan to retry." = "规划会话超时且未登记任何阶段——点击“规划”重试。";
 "The planning session never started — is the workspace running? Click Plan to retry." = "规划会话从未启动——工作区在运行吗？点击“规划”重试。";
 "Claude exited before filing phases — click Plan to retry." = "Claude 在登记阶段前就退出了——点击“规划”重试。";
-"The planning session was interrupted — click Plan to retry." = "规划会话被中断——点击“规划”重试。";
 "Merge → %@" = "合并 → %@";
 "PR: %@" = "拉取请求：%@";
 
@@ -1381,7 +1368,6 @@
 "Types every drafted comment into the coding agent running in the active tab." = "把每条草稿评论输入到活动标签页中运行的编码智能体。";
 
 /* Plan column — batch selection bar */
-"Delete %d selected phase(s)?" = "删除所选的%d个阶段？";
 "Remove every selected phase from the board" = "从看板移除所有所选阶段";
 
 /* Coding board — session restart */
@@ -1679,7 +1665,6 @@
 "The workspace did not start in time" = "工作区未能及时启动";
 "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again." = "代理一直没有出现。工作区可能运行着旧版的 VM 内代理 — 请重启它（虚拟机 › ⋯ › 重启）后再试。";
 "Under the Hood" = "深入内部";
-"New task" = "新建任务";
 "Describe what you want done (⌘N)" = "描述你想完成的事 (⌘N)";
 "Search tasks" = "搜索任务";
 "Virtual Machines" = "虚拟机";
@@ -1774,9 +1759,6 @@
 "The task's checkout is gone, so there is nothing to resume into." = "任务的检出已不存在，无处可恢复。";
 "Reopen the agent on this task's branch to keep working — the task goes back to In Progress. If the branch was cleaned up, you'll be offered a fresh start instead." = "在此任务的分支上重新打开代理继续工作 — 任务回到“进行中”。如果分支已被清理，会改为提供重新开始。";
 "Needs a fresh start" = "需要重新开始";
-"The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch." = "%@ 的检出已不存在，且无法在 %@ 中重新创建。重新开始会在新分支上再跑一遍任务。";
-"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch." = "任务的分支 %@ 在 %@ 中已不存在 — 其检出已被移除（合并后清理，或被删除）。重新开始会在新分支上再跑一遍任务。";
-"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@." = "仓库文件夹“%@”已从工作区消失，无处可恢复。重新开始会从头再跑一遍任务%@。";
 ", cloning the repository first" = "，并先克隆仓库";
 "Waking the workspace…" = "正在唤醒工作区…";
 "Starting the workspace…" = "正在启动工作区…";
@@ -1792,7 +1774,7 @@
 "The machine it runs on — running" = "它运行所在的机器 — 运行中";
 "The machine it runs on — asleep, wakes up when you start" = "它运行所在的机器 — 休眠中，启动时唤醒";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "它的工作位置：一个新文件夹、你已有的文件夹，或要检出的仓库";
-"⏎ start   ⌥⏎ newline" = "⏎ 开始   ⌥⏎ 换行";
+"⏎ start   ⇧⏎ newline" = "⏎ 开始   ⇧⏎ 换行";
 "Start the session (⏎)" = "开始会话 (⏎)";
 "Working in this folder — click to start in a new folder instead" = "正在此文件夹中工作 — 点按改为在新文件夹中开始";
 "Work in this folder again" = "再次在此文件夹中工作";
@@ -1811,7 +1793,7 @@
 "Up one folder" = "上一级文件夹";
 "No folders in here yet." = "这里还没有文件夹。";
 "The machine's folders can't be read right now." = "现在无法读取机器的文件夹。";
-"Message %@…  (or drop files)" = "给 %@ 发消息…  （或拖入文件）";
+"Message %@… (or drop files)" = "给 %@ 发消息…（或拖入文件）";
 "Ready · %@" = "就绪 · %@";
 "Ended · %@ ago" = "已结束 · %@前";
 "End “%@”?" = "结束“%@”？";
@@ -2017,7 +1999,7 @@
 "Streaming to bromure.io" = "正在流式发送到 bromure.io";
 "Signed in to bromure.io" = "已登录 bromure.io";
 "Log out" = "登出";
-"Message the agent…  (or drop files)" = "给代理发消息…  （或拖入文件）";
+"Message the agent… (or drop files)" = "给代理发消息…（或拖入文件）";
 "Drop to attach" = "松开以附加";
 "Loading transcript…" = "正在载入记录…";
 "Say what you need — the agent is listening." = "说说你需要什么 — 代理在听。";
@@ -2100,6 +2082,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "已允许 — 跳过证书验证 (X-bromure-insecure)；未注入凭据";
 "To-dos" = "待办";
 "⎋ stop   ⏎ send" = "⎋ 停止   ⏎ 发送";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ 停止   ⏎ 发送   ⇧⏎ 换行";
 "Stop the agent (Esc)" = "停止代理 (Esc)";
 "Completed" = "已完成";
 "Reopened" = "已重新打开";
@@ -2800,7 +2783,7 @@
 "Viewed" = "已查看";
 "Viewed — click to unmark" = "已查看——点按取消";
 "What the changes are compared against" = "更改的比较对象";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ 添加评论   ⌥⏎ 换行   ⇧⌘⏎ 发送给代理";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ 添加评论   ⇧⏎ 换行   ⇧⌘⏎ 发送给代理";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@（当前）";
@@ -2834,7 +2817,7 @@
 "The current commit" = "当前提交";
 "This machine has no branches made by Bromure." = "此机器上没有 Bromure 创建的分支。";
 "last commit %@" = "最近提交 %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ 添加评论   ⌥⏎ 换行   ⇧⌘⏎ 退回";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ 添加评论   ⇧⏎ 换行   ⇧⌘⏎ 退回";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "只回复你的 Slack 账号——频道和其他所有人都会被忽略。";
@@ -3127,3 +3110,1033 @@
 "%@ stopped as it started: %@" = "%1$@ 启动时停止：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ 曾由已归档的会话“%2$@”使用，最后一次在 %3$@。要在此会话中重新使用吗？";
 "Delegation" = "委派";
+
+/* Added for hotfixes-v5 */
+"Requests" = "请求";
+"Working for others" = "为他人工作";
+"The model the agent last answered with" = "代理最近一次回复所用的模型";
+"Time the agent spent working: %d turns, the longest %@" = "代理工作时间：%d 轮，最长 %@";
+"Erasing and restoring storage is done on the server Mac." = "存储的清除和恢复需在服务器 Mac 上进行。";
+"Home folder size" = "主文件夹大小";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "从 %d GB（当前大小——主文件夹不能缩小）到 1024 GB。更大的主文件夹将在工作区下次启动时生效。磁盘映像只占用其文件实际使用的空间。";
+"Queued — sent when the agent is done" = "排队中 — 代理完成后发送";
+"Queued — sent when %@ is done" = "排队中 — %@ 完成后发送";
+"Queued — the agent reads it next" = "排队中 — 代理接下来会读取";
+"Queued — %@ reads it next" = "排队中 — %@ 接下来会读取";
+"Don't send it" = "不发送";
+"Chart" = "图表";
+"Video" = "视频";
+"Open in its own window" = "在单独窗口中打开";
+"Play video" = "播放视频";
+"Not an image or a video this app can show." = "不是此应用可以显示的图像或视频。";
+"This window can't read files from that machine." = "此窗口无法读取那台机器上的文件。";
+"Couldn't read %@." = "无法读取 %@。";
+"That image couldn't be decoded." = "无法解码该图像。";
+"Couldn't prepare the video." = "无法准备视频。";
+"The chart couldn't be drawn: %@" = "无法绘制图表：%@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "在单独窗口中打开（在聊天中按住 ⌥ 滚动可缩放图表）";
+"No timed turns yet: the timeline fills in as the agent works." = "还没有计时的轮次：代理工作时时间线会逐步填充。";
+"Hover a bar for what the agent was doing · click a turn to zoom in" = "将指针悬停在条上查看代理在做什么 · 点击某一轮放大";
+"All turns" = "所有轮次";
+"(no message)" = "（无消息）";
+"of work across %d turns" = "共 %d 轮的工作";
+"in this turn" = "本轮";
+"tool calls" = "次工具调用";
+"files edited" = "个编辑过的文件";
+"longest solo run" = "最长独立工作";
+"Worked %@ on its own" = "独立工作了 %@";
+"%d tool calls without a single prompt — “%@”" = "无需任何提示完成 %d 次工具调用 —「%@」";
+"See it" = "查看";
+"“%@” — %@, %d tool calls · click to zoom in" = "「%@」— %@，%d 次工具调用 · 点击放大";
+"Thinking & writing — %@" = "思考与写作 — %@";
+"No timed turns in this room yet." = "此房间还没有计时的轮次。";
+"of combined work by %d agents" = "%d 个代理的合计工作";
+"at once, at peak" = "同时进行（峰值）";
+"worked the most" = "工作最多";
+"Hover a bar for who was doing what, and for how long" = "将指针悬停在条上查看谁在做什么、持续多久";
+"Thinking & writing" = "思考与写作";
+"Edits" = "编辑";
+"Reading & search" = "阅读与搜索";
+"Web" = "网页";
+"Sub-agents" = "子代理";
+"MCP tools" = "MCP 工具";
+"Other tools" = "其他工具";
+"%@ — timeline" = "%@ — 时间线";
+"Room timeline: who worked when, and on what" = "房间时间线：谁在何时做了什么";
+"Time the agent spent working: %d turns, the longest %@ — click for where it went" = "代理工作时间：%d 轮，最长 %@ — 点击查看时间花在哪里";
+
+/* Installer: Local Network access (Sequoia) */
+"Bromure Needs Local Network Access" = "Bromure 需要访问本地网络";
+"The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "安装程序无法连接到此 Mac 上的 Bromure。在 macOS Sequoia 上，请在“系统设置 › 隐私与安全性 › 本地网络”中允许 Bromure Agentic Coding。\n\n安装将继续，直接下载。如果开关已经打开，请将其关闭后再打开，或重启 Mac——在此之前，Sequoia 的虚拟机网络可能会一直卡住。";
+"Open Local Network Settings" = "打开本地网络设置";
+
+/* Models: your environment (auto mode) */
+"Applies to every workspace from its next launch." = "从每个工作区下次启动时生效。";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "在此处打开终端，位于此会话的文件夹";
+"Drag to resize" = "拖动以调整大小";
+"Hide — the shell keeps running (⌃`)" = "隐藏——shell 继续运行 (⌃`)";
+"Close the terminal (ends the shell)" = "关闭终端（结束 shell）";
+"The terminal isn't available right now." = "终端暂时不可用。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "正在同步最新内容…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "本轮开始后没有任何更改。";
+
+/* Repository watches + Automations hub */
+"%1$@ · ×%2$d" = "%1$@ · ×%2$d";
+"%1$d new finding(s) in %2$@" = "%2$@ 中有 %1$d 个新发现项";
+"%d dismissed" = "%d 个已忽略";
+"%d duplicate" = "%d 个重复";
+"%d finding(s)" = "%d 个发现项";
+"%d fixed" = "%d 个已修复";
+"%d need attention" = "%d 个需要关注";
+"%d new" = "%d 个新";
+"%d scanning continuously" = "%d 个持续扫描中";
+"A fix is a coding task on its own branch — it waits in review for you before anything merges. At most three automatic fixes run at once per repository." = "修复是在独立分支上进行的编码任务——在合并任何内容之前都会等待你审查。每个仓库最多同时运行三个自动修复。";
+"A repository watch manages this automation — edit the watch in the Automations hub's Repositories tab. Changes made here are replaced the next time the watch is saved." = "此自动化由仓库监视管理——请在自动化中心的“仓库”标签页中编辑该监视。在此处所做的更改将在下次保存监视时被替换。";
+"A watch scans a GitHub repository with an agent in one of your workspaces: the whole codebase on a schedule, and every new commit and pull request as they land. Findings are deduplicated across scans." = "监视会使用你某个工作区中的代理扫描 GitHub 仓库：按计划扫描整个代码库，并在每个新提交和拉取请求到达时进行扫描。发现项会在多次扫描之间去重。";
+"Agent working on the fix" = "代理正在修复";
+"All" = "全部";
+"All %d" = "全部 (%d)";
+"All repositories" = "所有仓库";
+"Any severity" = "任意严重程度";
+"Bug" = "缺陷";
+"Bugs" = "缺陷";
+"Checkout in the workspace" = "工作区中的检出位置";
+"Closed" = "已关闭";
+"Commit" = "提交";
+"Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "提交和拉取请求扫描会将第三方文本交给代理处理，因此需要 PromptGuard 模型。保存监视时会下载该模型；在其就绪之前，这些扫描会被阻止。";
+"Commits" = "提交";
+"Couldn't clone %1$@ into %2$@ — %3$@" = "无法将 %1$@ 克隆到 %2$@——%3$@";
+"Critical" = "严重";
+"Critical finding in %@" = "%@ 中有严重发现项";
+"Delete Finding" = "删除发现项";
+"Dependency" = "依赖项";
+"Dismiss this finding?" = "要忽略此发现项吗？";
+"Dismissed" = "已忽略";
+"Dismiss…" = "忽略…";
+"Duplicate of" = "重复于";
+"Edit Workspace…" = "编辑工作区…";
+"Every new commit" = "每个新提交";
+"Every new pull request" = "每个新拉取请求";
+"Evidence" = "证据";
+"Finding" = "发现项";
+"Findings" = "发现项";
+"Findings appear here as the repository watches scan. Watch a repository from the Repositories tab." = "仓库监视扫描时，发现项会显示在这里。请在“仓库”标签页中监视仓库。";
+"Findings pipeline" = "发现项流水线";
+"First seen" = "首次发现";
+"Fix" = "修复";
+"Fix closed without merging" = "修复已关闭，未合并";
+"Fix merged" = "修复已合并";
+"Fix not started" = "修复未开始";
+"Fix: %@" = "修复：%@";
+"Fixed" = "已修复";
+"Fixed in the last 30 days" = "过去 30 天内修复";
+"Fixes" = "修复";
+"Flagged by the prompt-injection screen" = "被提示注入筛查标记";
+"Flagged by the prompt-injection screen: %@" = "被提示注入筛查标记：%@";
+"For critical findings" = "针对严重发现项";
+"For high and critical" = "针对高和严重";
+"For medium and above" = "针对中及以上";
+"Full repository scan" = "完整仓库扫描";
+"Full scan" = "完整扫描";
+"High" = "高";
+"In progress" = "进行中";
+"In review" = "审查中";
+"Info" = "信息";
+"Instructions for the scanning agent" = "给扫描代理的说明";
+"Its scans stop and its automations are removed. Its findings are deleted too; fix tasks already started stay on the task board." = "其扫描将停止，自动化将被移除。其发现项也会被删除；已开始的修复任务仍保留在任务看板上。";
+"Last seen" = "最后发现";
+"Later scans that see it again won't reopen it." = "之后再次发现它的扫描不会重新打开它。";
+"Location" = "位置";
+"Look for" = "查找";
+"Low" = "低";
+"Mark as %@" = "标记为%@";
+"Medium" = "中";
+"Needs attention" = "需要关注";
+"Never" = "从不";
+"New" = "新";
+"No findings yet" = "暂无发现项";
+"No scans yet — they appear here as the watches run." = "暂无扫描——监视运行后会显示在这里。";
+"No watched repositories" = "没有监视的仓库";
+"Nothing needs you right now." = "目前没有需要你处理的事项。";
+"Open findings" = "未解决的发现项";
+"Other" = "其他";
+"Pick a repository (owner/name)." = "选择一个仓库（owner/name）。";
+"Pipeline" = "流水线";
+"Planning" = "规划中";
+"Pull requests" = "拉取请求";
+"Quality" = "质量";
+"Ready for review" = "待审查";
+"Reappeared after being marked fixed" = "标记为已修复后再次出现";
+"Reason (optional)" = "原因（可选）";
+"Recent scans" = "最近的扫描";
+"Recommendation" = "建议";
+"Reported by" = "报告者";
+"Resolved by a scan: %@" = "已由扫描解决：%@";
+"Run a full scan of %@ now" = "立即对 %@ 运行完整扫描";
+"Scan Now" = "立即扫描";
+"Scans" = "扫描";
+"Search findings" = "搜索发现项";
+"Security" = "安全";
+"Security and bugs" = "安全与缺陷";
+"Security vulnerabilities" = "安全漏洞";
+"Seen" = "发现";
+"Severity" = "严重程度";
+"Start Fix Anyway" = "仍然开始修复";
+"Start fixes automatically" = "自动开始修复";
+"Stop Watching" = "停止监视";
+"Stop Watching…" = "停止监视…";
+"Stop watching %@?" = "要停止监视 %@ 吗？";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and a fix agent would read it too. Check it before starting a fix." = "提示注入筛查标记了它（%@）。它来自读取仓库内容的代理，修复代理也会读取它。开始修复前请先检查。";
+"These credentials ask before each use, which stalls an unattended scan until you answer: %@" = "这些凭据在每次使用前都会询问，这会使无人值守的扫描停滞，直到你作出回应：%@";
+"This finding's text was flagged" = "此发现项的文本已被标记";
+"This workspace has no github.com token — scans poll GitHub with it." = "此工作区没有 github.com 令牌——扫描需要用它轮询 GitHub。";
+"Watch" = "监视";
+"Watch a GitHub Repository" = "监视 GitHub 仓库";
+"Watch a GitHub Repository…" = "监视 GitHub 仓库…";
+"Watch and Scan Now" = "监视并立即扫描";
+"Watch on %@" = "监视 %@";
+"Watched repositories" = "监视的仓库";
+"What's wrong" = "问题描述";
+"Where the repository is (or will be cloned) inside the workspace." = "仓库在工作区中的位置（或将被克隆到的位置）。";
+"default branch" = "默认分支";
+"last %@" = "上次 %@";
+"reported %d times" = "已报告 %d 次";
+"watching" = "监视中";
+"watching · checked %@" = "监视中 · %@检查";
+"…and %d more" = "…以及另外 %d 个";
+"Clear Filters" = "清除筛选条件";
+"Findings by severity and status" = "按严重程度和状态分类的发现项";
+"No matching findings" = "没有匹配的发现项";
+"Nothing matches these filters." = "没有符合这些筛选条件的内容。";
+"Repositories this workspace's token can reach" = "此工作区的令牌可访问的仓库";
+"Start a Fix" = "开始修复";
+"Watch a Repository…" = "监视仓库…";
+"Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "修复已开始——代理正在其独立分支上处理。准备就绪后会移至“审查中”。";
+"Full scan of %@ requested — it shows under Recent scans once the agent starts." = "已请求对 %@ 进行完整扫描——代理开始后会显示在“最近的扫描”下。";
+"Now watching %@." = "现在正在监视 %@。";
+"%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ 在 %3$@ 中，于 %2$@ 的新分支上处理你的提示词";
+"%d run(s) need your attention" = "%d 个运行需要你关注";
+"(a disposable copy)" = "（一次性副本）";
+"A schedule, or something happening on GitHub or Linear." = "按计划，或在 GitHub 或 Linear 上发生某件事时。";
+"An agent picks up that item with your prompt — screened for prompt injection first" = "代理会根据你的提示词处理该条目——事先会进行提示注入筛查";
+"An agent reviews the whole repository weekly, and every new commit and pull request" = "代理每周审查整个仓库，以及每个新提交和拉取请求";
+"An agent starts in one of your workspaces with your prompt, on a fresh branch" = "代理在你的某个工作区中以你的提示词在新分支上启动";
+"Another one finishes" = "另一个自动化完成";
+"At set times" = "在设定的时间";
+"At the time you pick — every weekday at 9:00, hourly, weekly…" = "在你选择的时间——每个工作日 9:00、每小时、每周…";
+"Backlog, dismiss, mark fixed…" = "待办、忽略、标记为已修复…";
+"Change the status" = "更改状态";
+"Dismiss (Not an Issue)" = "忽略（不是问题）";
+"Each item runs once, on its own branch, listed on the Runs tab" = "每个条目运行一次，在独立分支上，并列在“运行”标签页中";
+"Each run starts this agent with your prompt, on a fresh branch." = "每次运行都会以你的提示词在新分支上启动此代理。";
+"Every %1$@ at %2$@" = "每%1$@ %2$@";
+"Every %d hours" = "每 %d 小时";
+"Every %d minutes" = "每 %d 分钟";
+"Every automation runs an agent unattended in one of your workspaces, under its credentials and guardrails." = "每个自动化都会在你的某个工作区中无人值守地运行代理，并使用该工作区的凭据和防护措施。";
+"Every day at %@" = "每天 %@";
+"Every hour" = "每小时";
+"Every weekday at %@" = "每个工作日 %@";
+"Findings are collected and deduplicated across scans, by severity" = "发现项会跨扫描收集并去重，按严重程度排列";
+"Full scan %1$@ %2$02d:00" = "完整扫描 %1$@ %2$02d:00";
+"GitHub & Linear events" = "GitHub 与 Linear 事件";
+"Hasn't run yet" = "尚未运行";
+"Insert:" = "插入：";
+"Issue" = "议题";
+"Last run %@" = "上次运行 %@";
+"Mark as Fixed" = "标记为已修复";
+"Mark as New" = "标记为新";
+"Marked fixed by hand" = "已手动标记为已修复";
+"Move to Backlog" = "移至待办";
+"Name this automation" = "为此自动化命名";
+"Needs a token" = "需要令牌";
+"New issue" = "新议题";
+"Next %@" = "下次 %@";
+"No event automations — e.g. review every new pull request" = "没有事件自动化——例如审查每个新拉取请求";
+"No open findings" = "没有未解决的发现项";
+"No scheduled automations — e.g. a weekday-morning triage of open issues" = "没有计划的自动化——例如每个工作日早上分拣未解决的议题";
+"Nothing runs on its own yet" = "还没有任何内容会自动运行";
+"One click starts a fix on its own branch — you review before anything merges" = "一键在独立分支上开始修复——合并前由你审查";
+"Open Runs" = "打开运行";
+"Open Task" = "打开任务";
+"Opened on GitHub" = "在 GitHub 上创建";
+"Pick what should start an agent. Every automation runs unattended in one of your workspaces, under its credentials and guardrails." = "选择启动代理的条件。每个自动化都会在你的某个工作区中无人值守地运行，并使用该工作区的凭据和防护措施。";
+"Pull request" = "拉取请求";
+"Pushed to a branch" = "推送到分支";
+"React when something happens on GitHub or Linear." = "在 GitHub 或 Linear 上发生某件事时做出响应。";
+"Reopen" = "重新打开";
+"Retry the Fix" = "重试修复";
+"Run an agent on a prompt, on a schedule." = "按计划以提示词运行代理。";
+"Run now" = "立即运行";
+"Running now" = "正在运行";
+"Runs" = "运行";
+"Scan Now only" = "仅“立即扫描”";
+"Scan now" = "立即扫描";
+"Scanning" = "正在扫描";
+"Scans run as automations in the workspace you choose, with its GitHub token. Nothing is changed in the repository until you start a fix and merge it." = "扫描会以自动化的形式在你选择的工作区中运行，并使用其 GitHub 令牌。在你开始修复并合并之前，仓库不会有任何更改。";
+"Set Up" = "设置";
+"Show Details" = "显示详细信息";
+"Show Findings" = "显示发现项";
+"Show Runs" = "显示运行";
+"Step %d" = "第 %d 步";
+"The fix couldn't start: %@" = "无法开始修复：%@";
+"The session closes; its transcript and branch stay for you to review" = "会话关闭；其记录和分支会保留供你审查";
+"The session stays open for you to check" = "会话保持打开，供你检查";
+"The workspace's credentials and guardrails apply to every run." = "工作区的凭据和防护措施适用于每次运行。";
+"Then" = "然后";
+"Watching · checked %@" = "监视中 · %@检查";
+"What" = "内容";
+"What happens" = "运作方式";
+"What should run on its own?" = "要自动运行什么？";
+"What the agent does" = "代理要做什么";
+"When" = "时间";
+"When a Linear issue is assigned to you" = "当 Linear 议题分配给你时";
+"When a commit lands on %1$@ of %2$@" = "当提交进入 %2$@ 的 %1$@ 时";
+"When a pull request is opened on %@" = "当 %@ 上有拉取请求被创建时";
+"When a pull request, issue or commit lands on GitHub, a Linear issue appears, or another automation finishes" = "当 GitHub 上有拉取请求、议题或提交，Linear 上出现议题，或另一个自动化完成时";
+"When an issue on %@ is assigned to you" = "当 %@ 上的议题分配给你时";
+"When an unassigned Linear issue is created" = "当创建未分配的 Linear 议题时";
+"When an unassigned issue is opened on %@" = "当 %@ 上有未分配的议题被创建时";
+"When it runs" = "运行时间";
+"When “%@” finishes" = "当“%@”完成时";
+"Where it runs" = "运行位置";
+"You find its result on the Runs tab: transcript and branch" = "你可以在“运行”标签页中找到结果：记录和分支";
+"a repository" = "某个仓库";
+"against %@" = "（目标分支 %@）";
+"another automation" = "另一个自动化";
+"every commit" = "每个提交";
+"every pull request" = "每个拉取请求";
+"the default branch" = "默认分支";
+"the home folder" = "主文件夹";
+"touching %@" = "（涉及 %@）";
+"“%@” is starting — follow it on the Runs tab." = "“%@”正在启动——可在“运行”标签页中跟进。";
+"%d comment(s)" = "%d 条评论";
+"Agents at work" = "工作中的代理";
+"An agent fixes it on a branch of its own — or the Switchboard proposes which of your running sessions should. You review the change before anything merges." = "代理会在独立分支上修复它——或由总机建议你正在运行的哪个会话来修复。在合并任何内容之前，你会先审查更改。";
+"Ask a Room's Switchboard" = "询问某个房间的总机";
+"Ask the Switchboard Instead…" = "改为询问总机…";
+"Ask the Switchboard Who Should Fix It" = "询问总机该由谁修复";
+"Asked the Switchboard — it will propose a session and wait for your OK." = "已询问总机——它会建议一个会话并等待你确认。";
+"Briefs waiting to start" = "等待开始的任务简介";
+"Merged or closed" = "已合并或已关闭";
+"No phases yet — click Plan on a backlog card to have an agent split it into ordered phases." = "还没有阶段——在待办卡片上点击“规划”，让代理将其拆分为有序的阶段。";
+"Phases, in order" = "阶段（按顺序）";
+"Sent to the Switchboard to find who fixes it" = "已发送给总机以确定由谁修复";
+"Sent to the “%@” room's Switchboard to find who fixes it" = "已发送给“%@”房间的总机以确定由谁修复";
+"Session gone" = "会话已消失";
+"Start a Fix Session" = "开始修复会话";
+"Waiting for your review" = "等待你审查";
+"Code Review" = "代码审查";
+"Code review" = "代码审查";
+"Continuous code review for your GitHub repositories" = "为你的 GitHub 仓库提供持续的代码审查";
+"Keep a GitHub repository continuously reviewed for vulnerabilities and bugs." = "让 GitHub 仓库持续接受漏洞和缺陷审查。";
+"No repository is watched — set up a continuous code review" = "没有监视任何仓库——设置持续代码审查";
+"%@ says:" = "%@ 说：";
+"Answer %@" = "回答 %@";
+"Answer…" = "回答…";
+"Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back." = "已交付，但在分支 %@ 上找不到工作树——无法显示差异。请阅读摘要，或将其退回。";
+"Handing over" = "正在移交";
+"Question" = "提问";
+"Show the session working on it" = "显示正在处理它的会话";
+"That session no longer exists." = "该会话已不存在。";
+"The room has no Switchboard to take the task." = "该房间没有可接手任务的总机。";
+"Your answer" = "你的回答";
+"#%1$d in %2$@'s queue" = "%2$@ 队列中的第 %1$d 个";
+"@nickname or #room" = "@昵称 或 #房间";
+"A new agent" = "新代理";
+"A new agent (in its own worktree)" = "新代理（在自己的工作树中）";
+"A new agent each (%d at a time)" = "每个任务一个新代理（每次 %d 个）";
+"A room" = "房间";
+"A session" = "会话";
+"A session or room pushes its branch and opens a pull request before the card moves to Testing/Review." = "会话或房间会推送其分支并创建拉取请求，然后卡片才会移至“测试/审查”。";
+"Added “%@”" = "已添加“%@”";
+"Assign" = "分配";
+"Assign…" = "分配…";
+"Auto-pickup: off" = "自动接手：关闭";
+"Details (optional)" = "详细信息（可选）";
+"In its own fresh worktree — queued with the other new-agent tasks" = "在自己的新工作树中——与其他新代理任务一起排队";
+"New agent" = "新代理";
+"New backlog items go to" = "新待办事项交给";
+"New items → %@" = "新事项 → %@";
+"Next for %@" = "%@ 的下一个";
+"No session or room matches." = "没有匹配的会话或房间。";
+"No sessions yet — start one, give it a @nickname, and it can take tasks from the board." = "还没有会话——启动一个并为它设置 @昵称，它就能从看板领取任务。";
+"Nobody — I start them" = "无人——由我启动";
+"Open a pull request when done" = "完成后创建拉取请求";
+"Pull request #%@" = "拉取请求 #%@";
+"Quick Task…" = "快速任务…";
+"Sessions and rooms open a pull request when done" = "会话和房间完成后创建拉取请求";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Testing/Review. To give it to a session or a room, use Assign." = "直接进入“进行中”：由新代理在新的工作树中完成整个任务，并在“测试/审查”中交给你差异。要交给会话或房间，请使用“分配”。";
+"The room's Switchboard picks a member" = "房间的总机会挑选一位成员";
+"This session (%@)" = "此会话（%@）";
+"Unassign" = "取消分配";
+"Who picks it up" = "由谁接手";
+"Who picks this task up" = "由谁接手此任务";
+"Who picks this up?" = "由谁接手？";
+"Who picks up new backlog items on their own and takes them to Testing/Review. Each task can still be assigned by hand." = "自动接手新待办事项并推进到“测试/审查”的对象。每个任务仍可手动分配。";
+"busy — it takes this after its current work" = "忙碌——会在当前工作之后接手";
+"New task — or ⇧⌥Space from any app for a quick one" = "新建任务——或在任意应用中按 ⇧⌥空格键快速创建";
+"%@ picks it up on its own and takes it to Testing/Review." = "%@ 会自动接手，并推进到“测试/审查”。";
+"A new agent picks it up from the queue and takes it to Testing/Review." = "新代理会从队列中接手，并推进到“测试/审查”。";
+"Add Task" = "添加任务";
+"Describe the task — what's wrong, where, what done looks like. Markdown welcome." = "描述任务——哪里出了问题、在什么位置、完成后是什么样子。支持 Markdown。";
+"Description" = "描述";
+"What needs doing?  @agent to assign" = "需要做什么？  @agent 以分配";
+"busy — takes it after its current work" = "忙碌——会在当前工作之后接手";
+"in its own worktree" = "在自己的工作树中";
+"the room's Switchboard picks a member" = "房间的总机会挑选一位成员";
+"↩ add · ⌘↩ add another · ⇥⇥ full editor" = "↩ 添加 · ⌘↩ 继续添加 · ⇥⇥ 完整编辑器";
+"%@ works in its own workspace and folder, with its own agent" = "%@ 在自己的工作区和文件夹中，用自己的代理工作";
+"%@'s Switchboard picks a member" = "%@ 的总机会挑选一位成员";
+"@switchboard" = "@switchboard";
+"The Switchboard — it picks a session" = "总机——由它挑选会话";
+"The app's Switchboard picks the session best placed for it" = "应用的总机会挑选最合适的会话";
+"There's no workspace to run the Switchboard in." = "没有可运行总机的工作区。";
+"picks the session best placed for it" = "挑选最合适的会话";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "描述你的环境";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "代理的安全检查需要了解的信息：你的组织、你的服务器及其用途、你信任的仓库和域名、哪些内容可以安全更改。每行一条。Claude 的自动模式据此区分日常工作和有风险的操作。";
+"Variables" = "变量";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "信任此文件夹？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · 已下载";
+"%@ · sent by the agent" = "%@ · 由代理发送";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "无法读取机器上的文件——文件是否仍在，机器是否正在运行？";
+"Couldn't write the file here." = "无法在此处写入文件。";
+"Downloaded" = "已下载";
+"Save As…" = "存储为…";
+"Save or Share" = "存储或共享";
+"Saved to %@" = "已存储到 %@";
+"Sent by the agent" = "由代理发送";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "添加指令";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "当会话以这些指令启动时，会添加到代理的系统提示词中。描述代理应扮演的角色以及工作方式——“你是一名……”。";
+"Careful reviewer" = "细致的审阅者";
+"Delete these instructions" = "删除这些指令";
+"Edit instructions…" = "编辑指令…";
+"Instructions" = "指令";
+"Instructions added to the agent's system prompt (“You are a…”)" = "添加到代理系统提示词中的指令（“你是一名……”）";
+"Instructions without a name or text are not kept." = "没有名称或文本的指令不会被保留。";
+"New instructions" = "新指令";
+"No instructions" = "无指令";
+"No instructions yet. Add some with +." = "还没有指令。用 + 添加。";
+"Teacher" = "老师";
+"The agent as it comes" = "原样的代理";
+"Untitled" = "未命名";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "你是一名一丝不苟的资深工程师，在变更发布前进行审阅。先查找缺陷、边界情况和安全问题，解释你的推理，并优先选择小而经过充分测试的变更，而不是大规模重写。";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "你是一位耐心的老师。边做边用通俗的语言解释你在做什么以及为什么，并指出用户能从每一步学到什么。";
+
+/* Local model context window */
+"%@ context" = "%@ 上下文";
+"Context?" = "上下文？";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "服务器未公布此模型的上下文长度——代理会假定为 128K。点按以输入。";
+"The context window agents are told this model has. Click to change it." = "告知代理的此模型上下文窗口。点按以更改。";
+"Context window" = "上下文窗口";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "%@ 能处理的 token 数。所有使用它的代理都会得知，以便在合适的时机压缩。";
+"e.g. 1M, 256K or 131072" = "例如 1M、256K 或 131072";
+"Enter a number of tokens, like 1M or 200K." = "请输入 token 数，例如 1M 或 200K。";
+"Use the server's value" = "使用服务器的值";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "打开登录页面并批准访问。";
+"Approve the sign-in in your browser; it should show this code:" = "在浏览器中批准登录；页面上应显示此代码：";
+"Open the sign-in page and check that it shows this code:" = "打开登录页面，确认页面上显示的是此代码：";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "无法读取你的自定义脚本（%@）——将在不运行它的情况下构建镜像。";
+"Run my customize script after Bromure's setup" = "在 Bromure 设置完成后运行我的自定义脚本";
+"No script chosen" = "未选择脚本";
+"Last Log" = "上次日志";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "在安装代理之后，以 root 身份在基础镜像中运行；每次重建或更新镜像时都会运行，因此之后创建或重置的每个工作区都会包含它安装的内容。使用 bash -x 跟踪，输出保存到 ~/Library/Logs/BromureAC/base-image-customize.log。如果失败，将保留当前镜像。";
+"Choose the shell script to run inside the base image" = "选择要在基础镜像中运行的 shell 脚本";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "下载预构建镜像";
+"The latest published image, then the recommended packages. A few minutes." = "获取最新发布的镜像，然后安装推荐的软件包。需要几分钟。";
+"Recommended" = "推荐";
+"Rebuild locally" = "在本地重建";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "在这台 Mac 上用完整安装程序从头构建。大约 10 分钟。";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "你的工作区不会被改动——每个工作区下次启动时都会提示重置到新镜像。";
+"Download & Update" = "下载并更新";
+"Rebuild" = "重建";
+"Update the base image" = "更新基础镜像";
+"New workspaces start from this image: the system, the coding agents and their tools." = "新的工作区都从这个镜像开始：系统、编程代理及其工具。";
+"Customize the image" = "自定义镜像";
+"Choose Script…" = "选择脚本…";
+"Change…" = "更改…";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "在安装代理之后，每次重建或更新时以 root 身份在镜像中运行，因此新建或重置的工作区都会包含它安装的内容。使用 bash -x 跟踪并写入 ~/Library/Logs/BromureAC/base-image-customize.log。如果失败，将保留当前镜像。";
+"Your customize script failed — the current image is kept. See %@" = "你的自定义脚本运行失败——已保留当前镜像。请查看 %@";
+"%@ says" = "%@ 说";
+"The agent" = "代理";
+"Ask %@ to Merge into %@" = "请 %@ 合并到 %@";
+"Ask %@ to Merge" = "请 %@ 合并";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "请完成任务的代理在其工作的地方合并它的分支；它回报后卡片即标记为完成。按住可选择压缩合并、拉取请求或其他分支。";
+"%@ merges %@ into…" = "%@ 将 %@ 合并到…";
+"%@ — where it started" = "%@ — 开始工作的地方";
+"Loading branches…" = "正在加载分支…";
+"Squash into one commit" = "压缩为一个提交";
+"Ask %@ to Merge into…" = "请 %@ 合并到…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "选择分支：完成工作的代理会在其工作的地方合并，它回报后卡片即标记为完成。";
+"Mark as Done" = "标记为完成";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "将任务原样移到“完成”——不合并任何内容，工作树及其分支保留。";
+"Confirm" = "确认";
+"Created %@" = "创建于 %@";
+"Modified %@" = "修改于 %@";
+"Updated %@" = "更新于 %@";
+"GitHub rejected this workspace's token" = "GitHub 拒绝了此工作区的令牌";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "github.com 令牌已过期、已撤销或输入有误（HTTP 401）。请在 %@ › 凭据 中更新，或选择其他工作区。";
+"Fix the workspace's GitHub token to watch a repository." = "请先修正工作区的 GitHub 令牌，才能监视仓库。";
+"Assigned to %@ — click to change" = "已分配给 %@ — 点击更改";
+"Click to fold the error" = "点击收起错误";
+"Click to read the whole error" = "点击查看完整错误";
+"Deleted workspace" = "已删除的工作区";
+"Open Coding Tasks (⇧⌘T)" = "打开编码任务 (⇧⌘T)";
+"No open tasks" = "没有未完成的任务";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "每次自动化触发时，它的运行都会显示在这里——已排程、进行中、然后完成。先创建一个自动化开始吧。";
+"Open Automations" = "打开自动化";
+"Open Automations (⇧⌘A)" = "打开自动化 (⇧⌘A)";
+"View" = "显示";
+"Help" = "帮助";
+"Close Window" = "关闭窗口";
+"Toggle Sidebar" = "显示/隐藏边栏";
+"Toggle Files Pane" = "显示/隐藏文件面板";
+"Toggle Browser Pane" = "显示/隐藏浏览器面板";
+"Enter Full Screen" = "进入全屏幕";
+"Zoom" = "缩放";
+"%@ Manual" = "%@ 手册";
+"Add a note about this workspace" = "为此工作区添加备注";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "评估每个代理作为权威加载的指令 / 设置文件：CLAUDE.md（Claude Code）、AGENTS.md（Codex、Kimi 和 omp）和 GROK.md（Grok），以及它们的嵌套和全局版本。首次启用时下载约 571 MB。";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "出站连接规则需在运行此工作区的 Mac 上编辑。";
+"Click a protection that's off to turn it on in that workspace's settings." = "点击已关闭的保护，即可在该工作区的设置中将其打开。";
+"Turn on…" = "打开…";
+"%1$@ is on for %2$@. Click to change it." = "%2$@ 的%1$@已打开。点击可更改。";
+"%1$@ is off for %2$@. Click to turn it on." = "%2$@ 的%1$@已关闭。点击可打开。";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "未扫描 — %@";
+"blocked, not sent — %@" = "已拦截，未发送 — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@（%2$d 次，显示最近一次）";
+
+"Security…" = "安全…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "下载当前版本";
+"Update" = "更新";
+"an unknown version" = "未知版本";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "已过时：共享镜像为 %1$@；此版本的 Agentic Coding 使用 %2$@。请打开 Bromure 让它更新浏览器镜像，或仅为 Agentic Coding 下载当前版本（在 Bromure 跟上之前，将代替共享镜像使用）。";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "已过时：此镜像为 %1$@；当前版本为 %2$@。更新即可下载。";
+"The Linux machine behind this session — available while it runs" = "此会话背后的 Linux 机器 — 仅在运行时可用";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "显示了 1 个媒体";
+"%d media items shown" = "显示了 %d 个媒体";
+"1 chart shown" = "显示了 1 个图表";
+"%d charts shown" = "显示了 %d 个图表";
+"1 file sent" = "发送了 1 个文件";
+"%d files sent" = "发送了 %d 个文件";
+"1 tool result" = "1 个工具结果";
+"%d tool results" = "%d 个工具结果";
+"Available when the workspace is running" = "工作区运行时可用";
+"Video available when the workspace is running" = "工作区运行时可查看视频";
+"Image available when the workspace is running" = "工作区运行时可查看图片";
+
+/* Fat client: link states (reconnecting / key rejected / host key changed) */
+"“%@” didn't accept this Mac's key" = "“%@”未接受此 Mac 的密钥";
+"“%@” presented a different host key" = "“%@”提供了不同的主机密钥";
+"Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection." = "它的身份与此 Mac 信任的不再一致。如果远程 Mac 重装过，请通过“连接到远程 Bromure…”重新连接以查看新密钥；否则可能有人在拦截连接。";
+"Reconnecting to %@…" = "正在重新连接到 %@…";
+"The connection dropped. What you see is from just before; it picks up again on its own." = "连接已中断。您看到的是中断前的内容；连接会自动恢复。";
+
+/* Coding Tasks: landing an approved task (2026-10) */
+"Ready to land" = "准备合入";
+"Landing — merging into %@…" = "合入中 — 正在合并到 %@…";
+"Landing — %1$@ is opening a pull request into %2$@…" = "合入中 — %1$@ 正在创建到 %2$@ 的拉取请求…";
+"Landing — %1$@ is merging into %2$@…" = "合入中 — %1$@ 正在合并到 %2$@…";
+"Needs you — %@" = "需要你处理 — %@";
+"marked by you" = "由你标记";
+"reported by %@, not verified" = "由 %@ 报告，未验证";
+"the agent" = "代理";
+"PR #%@ opened" = "已创建 PR #%@";
+"Marked done by you" = "已由你标记为完成";
+"All its phases are done" = "所有阶段均已完成";
+"The agent couldn't land it." = "代理无法合入。";
+"Couldn't read the branch's repository or where it started — is the workspace running?" = "无法读取分支所在的仓库或其起点 — 工作区在运行吗？";
+"The branch %@ doesn't exist in the repository any more — merge into another branch." = "分支 %@ 已不在仓库中 — 请合并到其他分支。";
+"The task's branch %@ is gone from the repository." = "任务的分支 %@ 已从仓库中消失。";
+"The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry." = "%@ 的检出有此任务涉及文件的未提交更改 — 请在那里提交或 stash，然后重试。";
+"The repository has no remote to open a pull request on — merge it instead." = "仓库没有可创建拉取请求的远程 — 请改为合并。";
+"Couldn't reach the session that did the task." = "无法连接完成该任务的会话。";
+"Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel." = "合入停滞 — 代理在 20 分钟后仍未完成。打开其会话查看进度，然后重试或取消。";
+"%@ stopped before it landed — open its session to see why, then retry." = "%@ 在合入前停止了 — 打开其会话查看原因，然后重试。";
+"The app quit while landing this — retry." = "合入过程中应用已退出 — 请重试。";
+"Mark done without merging?" = "不合并就标记为完成？";
+"Mark Done" = "标记为完成";
+"The agent is stopped. Nothing is merged; the branch %@ and its checkout are kept in the workspace." = "代理将被停止。不会合并任何内容；分支 %@ 及其检出保留在工作区中。";
+"Nothing is merged. The branch %@ and its checkout are kept in the workspace." = "不会合并任何内容。分支 %@ 及其检出保留在工作区中。";
+"Discard this branch?" = "丢弃此分支？";
+"The branch %@ and its checkout are deleted and the agent's session is put away. The task goes to Done as closed without merging; its transcript is kept." = "分支 %@ 及其检出将被删除，代理的会话会被归档。任务以“未合并关闭”进入“完成”；其对话记录会保留。";
+"Merge into %@?" = "合并到 %@？";
+"Bromure merges it directly when it can; otherwise %1$@, the agent that wrote it, rebases onto %2$@, fixes conflicts, runs the tests and merges. Afterwards the branch is removed and the session archived." = "能直接合并时由 Bromure 直接合并；否则由编写它的代理 %1$@ 变基到 %2$@、解决冲突、运行测试并合并。之后分支会被删除，会话会被归档。";
+"Sessions and rooms open a pull request at delivery (skips review)" = "会话和房间在交付时创建拉取请求（跳过审查）";
+"Who new tasks are queued for when you create them — they pick them up on their own and take them to Review. Each task can still be assigned by hand." = "新建任务时排入谁的队列 — 他们会自行领取并推进到“审查”。每个任务仍可手动分配。";
+"Tasks waiting to start" = "等待开始的任务";
+"Move to Review" = "移到审查";
+"Stop & Return to Backlog" = "停止并退回待办";
+"Nothing done yet" = "尚无完成的任务";
+"Merged, opened as pull requests, or closed" = "已合并、已创建拉取请求或已关闭";
+"Open Pull Request" = "创建拉取请求";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Review. To give it to a session or a room, use Assign." = "直接进入“进行中”：新代理在新的 worktree 中完成整个任务，并在“审查”中交给你差异。要交给会话或房间，请使用“分配”。";
+"Open a pull request at delivery (skips review)" = "交付时创建拉取请求（跳过审查）";
+"No code changes — read the report" = "无代码更改 — 阅读报告";
+"Assigned to %@" = "已分配给 %@";
+"Workspace: %@" = "工作区：%@";
+"Agent: %@" = "代理：%@";
+"Folder: %@" = "文件夹：%@";
+"Folder" = "文件夹";
+"Clone this repository first (optional)" = "先克隆此仓库（可选）";
+"Make the folder and an empty git repository when they don't exist yet — tasks run on their own branch." = "文件夹和空的 git 仓库不存在时创建它们 — 任务在自己的分支上运行。";
+"When approved" = "批准后";
+"Workspace default (%@)" = "工作区默认（%@）";
+"What happens when you approve the task in Review: merged into the branch it came from, or opened as a pull request." = "在“审查”中批准任务时的操作：合并到它来源的分支，或创建拉取请求。";
+"A new agent picks it up from the queue and takes it to Review." = "新代理从队列中领取并推进到“审查”。";
+"%@ picks it up on its own and takes it to Review." = "%@ 会自行领取并推进到“审查”。";
+"Send Back" = "退回";
+"Send Back (%d)" = "退回（%d）";
+"This task isn't in Review any more." = "此任务已不在“审查”中。";
+"%1$@ worked on %2$@ in %3$@" = "%1$@ 在 %3$@ 中处理了 %2$@";
+"%1$@ worked in %2$@" = "%1$@ 在 %2$@ 中工作过";
+"%1$@ (+%2$d −%3$d) vs %4$@" = "%1$@（+%2$d −%3$d），相对于 %4$@";
+"%d uncommitted" = "%d 项未提交";
+"%1$@ moved %2$d commits since" = "%1$@ 此后前进了 %2$d 个提交";
+"%@ checkout clean" = "%@ 检出干净";
+"%@ checkout has uncommitted changes" = "%@ 检出有未提交的更改";
+"%@ not checked out" = "%@ 未被检出";
+"remote: %@" = "远程：%@";
+"none" = "无";
+"can't reach the machine for the details" = "无法连接机器以获取详情";
+"%@'s final report" = "%@ 的最终报告";
+"No code changes to merge" = "没有需要合并的代码更改";
+"Reading the agent's report…" = "正在读取代理的报告…";
+"Cancel Landing" = "取消合入";
+"The task produced no code: it goes to Done as it is." = "该任务没有产生代码：它将按原样进入“完成”。";
+"View Pull Request #%@" = "查看拉取请求 #%@";
+"Mark Merged" = "标记为已合并";
+"The pull request was merged on the forge: the task goes to Done as merged." = "拉取请求已在代码平台上合并：任务以已合并进入“完成”。";
+"More" = "更多";
+"Merge into Another Branch…" = "合并到其他分支…";
+"Keep Branch — Mark Done" = "保留分支 — 标记为完成";
+"Open a pull request for the branch; hold for the other ways to land it." = "为该分支创建拉取请求；按住可查看其他合入方式。";
+"Merge the branch; hold for the other ways to land it." = "合并该分支；按住可查看其他合入方式。";
+"Mark done without merging — the branch is kept." = "不合并就标记为完成 — 分支会保留。";
+"Open a pull request into %@?" = "创建到 %@ 的拉取请求？";
+"Squash & merge into %@?" = "压缩并合并到 %@？";
+"%1$@ is ahead of %2$@ with nothing in the way: Bromure merges it directly." = "%1$@ 领先于 %2$@ 且没有阻碍：Bromure 直接合并。";
+"Into" = "合并到";
+"Afterwards the session is archived; the branch stays for the pull request." = "之后会话会被归档；分支保留给拉取请求。";
+"Afterwards the session is archived; the branch and its checkout are kept." = "之后会话会被归档；分支及其检出会保留。";
+"Afterwards the branch is removed and the session archived." = "之后分支会被删除，会话会被归档。";
+"Keep branch" = "保留分支";
+"%1$@ says it's done, but Bromure doesn't see it in %2$@: %3$@" = "%1$@ 说已完成，但 Bromure 在 %2$@ 中没有看到：%3$@";
+"The planning session ended." = "规划会话已结束。";
+"The planning session has ended" = "规划会话已结束";
+"Merge into the branch" = "合并到分支";
+"Open a pull request" = "创建拉取请求";
+"When a task is approved" = "任务获批准时";
+"What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise." = "编码任务“审查”主按钮的操作：合并到它来源的分支，或创建拉取请求。每个工作区和每个任务都可以另行选择。";
+"App default (%@)" = "应用默认（%@）";
+"What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise." = "此工作区中编码任务“审查”主按钮的操作。每个任务仍可另行选择。";
+
+/* Coding Tasks vocabulary + start/live-state (2026-10) */
+"Start %d Selected" = "开始所选的%d项";
+"Off: the session or room hands its branch back for your review, and lands it once you approve. On: it pushes and opens a pull request before the task moves to Review." = "关闭：会话或房间把分支交回给你审查，经你批准后合入。开启：在任务移到“审查”之前推送并创建拉取请求。";
+"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phases with dependencies into the Plan column." = "先保存，然后打开一个可见的规划会话：智能体探索仓库（可以向它提问——它能看到你），并把带依赖关系的有序阶段登记到“规划”列。";
+"%1$@, the agent that wrote it, will rebase onto %2$@, run the tests, push %3$@ to %4$@ and open a pull request. You'll see its progress on the task and in its session." = "编写它的代理 %1$@ 将变基到 %2$@、运行测试、把 %3$@ 推送到 %4$@ 并创建拉取请求。你可以在任务和其会话中看到进度。";
+"%1$@, the agent that wrote it, will rebase onto %2$@, fix conflicts, run the tests and merge. You'll see its progress on the task and in its session." = "编写它的代理 %1$@ 将变基到 %2$@、解决冲突、运行测试并合并。你可以在任务和其会话中看到进度。";
+"The planning session timed out without filing phases — click Plan First to retry." = "规划会话超时且未登记任何阶段——点击“先规划”重试。";
+"The planning session ended before filing phases — click Plan First to retry." = "规划会话在登记阶段前就结束了——点击“先规划”重试。";
+"The planning session didn't start — %@ may not be set up in this workspace. Open a session there to check, then click Plan First to retry." = "规划会话没有启动 — 此工作区可能未配置 %@。请在那里打开一个会话检查，然后点击“先规划”重试。";
+"%@ exited before filing phases — click Plan First to retry." = "%@ 在提交阶段之前退出了 — 点击“先规划”重试。";
+"The planning session was interrupted — click Plan First to retry." = "规划会话被中断——点击“先规划”重试。";
+"The checkout for %@ is gone and couldn't be re-created in %@. Start Over runs the task again on a new branch." = "%@ 的检出已不存在，且无法在 %@ 中重新创建。重新开始会在新分支上再跑一遍任务。";
+"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start Over runs the task again on a new branch." = "任务的分支 %@ 在 %@ 中已不存在 — 其检出已被移除（合并后清理，或被删除）。重新开始会在新分支上再跑一遍任务。";
+"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start Over runs the task again from scratch%@." = "仓库文件夹“%@”已从工作区消失，无处可恢复。重新开始会从头再跑一遍任务%@。";
+"Plan First" = "先规划";
+"Remove Task" = "移除任务";
+"Remove Task Only" = "仅移除任务";
+"Stop & Discard Branch" = "停止并丢弃分支";
+"Discarding ends the agent's session and deletes its branch and worktree, with any uncommitted or unmerged work. “Remove Task Only” leaves them in the workspace." = "丢弃会结束智能体的会话，并删除其分支和工作树，包括任何未提交或未合并的工作。“仅移除任务”会将它们保留在工作区中。";
+"Unassigned — I'll start it" = "未指派——我自己启动";
+"New tasks: Unassigned" = "新任务：未指派";
+"New tasks: assigned to %@" = "新任务：分配给 %@";
+"Assign new tasks to" = "将新任务分配给";
+"No phases yet — click Plan First on a Backlog task." = "还没有阶段——在待办任务上点击“先规划”。";
+"Starts every selected phase. Phases whose dependencies aren't Done queue and start automatically when they are." = "启动每个所选阶段。依赖未完成的阶段会排队，完成后自动开始。";
+"A visible planning session is running — click the task to open it; phases appear in the Plan column as it files them." = "一个可见的规划会话正在进行——点击任务打开；阶段登记后会出现在“规划”列。";
+"A planner agent reads the task and the repository, then files ordered phases (with dependencies) in the Plan column." = "规划智能体会阅读任务和代码仓库，然后在“规划”列登记有序的阶段（含依赖关系）。";
+"Start it from the board, or Plan First to split it into phases." = "从看板启动，或选择“先规划”将其拆分为多个阶段。";
+"Remove %d selected phase(s)?" = "移除所选的%d个阶段？";
+"Your task" = "你的任务";
+"Start Over" = "重新开始";
+"Runs the task again from scratch on a new branch." = "在新分支上从头重新运行任务。";
+"The agent is waiting at its prompt without having handed the task over — open its session to see where it is." = "智能体在提示符处等待，尚未交回任务——打开其会话查看进展。";
+"Checking the workspace and the folder — the task moves to In Progress once its agent can start." = "正在检查工作区和文件夹——智能体可以启动后，任务会移到“进行中”。";
+"Connecting…" = "正在连接…";
+"Waiting for the host's first update." = "正在等待主机的首次更新。";
+
+/* Task landing / review QA fixes */
+"Planning in the terminal — open it to watch and answer." = "正在终端中规划 — 打开终端即可查看并回答。";
+"The %@ checkout has uncommitted changes — if they touch the same files, the merge stops until you commit or stash them there." = "%@ 的检出有未提交的更改 — 如果涉及相同文件，合并会停止，直到你在那里提交或暂存（stash）它们。";
+"Your review comments didn't reach the agent — they're still pending. Restart Session sends them." = "你的审阅评论没有送达代理 — 它们仍待发送。“重新启动会话”会发送它们。";
+"%1$@ is ahead of %2$@: Bromure merges it directly." = "%1$@ 领先于 %2$@：Bromure 直接合并。";
+"%1$@ adds nothing %2$@ doesn't already have: the task goes to Done." = "%1$@ 没有 %2$@ 尚未包含的内容：任务转为已完成。";
+"The %1$@ checkout has uncommitted changes — if they touch the same files, %2$@ can't merge until you commit or stash them there." = "%1$@ 的检出有未提交的更改 — 如果涉及相同文件，在你提交或暂存（stash）它们之前，%2$@ 无法合并。";
+"%@ didn't start in the task's session — open it to see why, then Restart Session." = "%@ 未在任务的会话中启动 — 打开它查看原因，然后“重新启动会话”。";
+"%1$@, the agent that wrote it, will %2$@. You'll see its progress on the task and in its session." = "编写它的代理 %1$@ 将：%2$@。你可以在任务及其会话中看到进度。";
+"%@ moved 1 commit since" = "%@ 此后新增了 1 个提交";
+"Checking the branch…" = "正在检查分支…";
+"Comment on the whole change instead" = "改为评论整个更改";
+"commit what's left uncommitted" = "提交剩余未提交的内容";
+"Landed or closed" = "已合入或已关闭";
+"Merge the branch." = "合并该分支。";
+"merge" = "合并";
+"No code changes" = "无代码更改";
+"Open a pull request for the branch." = "为该分支打开拉取请求。";
+"Other ways to land it" = "其他合入方式";
+"Read Report" = "阅读报告";
+"rebase onto %@ and fix conflicts" = "变基到 %@ 并解决冲突";
+"run the tests" = "运行测试";
+"squash it into one commit" = "压缩为一个提交";
+
+/* Task delivery, landing hand-over, undelivered review comments */
+"%@ kept a menu open in the task's session, so the message wasn't typed — open the session, answer it, then try again." = "%@ 在任务会话中打开了一个菜单，因此消息未输入 — 请打开会话、作出回应，然后重试。";
+"Couldn't check on the agent in the task's session — is the workspace running?" = "无法检查任务会话中的代理 — 工作区是否正在运行？";
+"Handing over to %@…" = "正在交给 %@…";
+"The landing brief didn't reach %@." = "合并说明未送达 %@。";
+"%d review comment(s) that never reached the agent will be discarded." = "%d 条从未送达代理的审查评论将被丢弃。";
+"%d comment(s) didn't reach the agent before it handed the task back. Send them back again?" = "代理交回任务前，有 %d 条评论未送达。要再次退回吗？";
+"Send Back Again" = "再次退回";
+"not delivered" = "未送达";
+"The agent handed the task back before this comment reached it." = "此评论送达前，代理已交回任务。";
+"Report" = "报告";
+
+/* Task board QA fixes (launch watch, plurals, card menus) */
+"1 comment" = "1 条评论";
+"%d comments" = "%d 条评论";
+"1 comment drafted" = "1 条评论草稿";
+"%d comments drafted" = "%d 条评论草稿";
+"1 review comment that never reached the agent will be discarded." = "1 条从未送达代理的审查评论将被丢弃。";
+"%d review comments that never reached the agent will be discarded." = "%d 条从未送达代理的审查评论将被丢弃。";
+"1 comment didn't reach the agent before it handed the task back. Send it back again?" = "代理交回任务前，有 1 条评论没有送达。要再次发回吗？";
+"%d comments didn't reach the agent before it handed the task back. Send them back again?" = "代理交回任务前，有 %d 条评论没有送达。要再次发回吗？";
+"Deselect" = "取消选择";
+"Select" = "选择";
+"Retry Landing" = "重试合入";
+"Read Transcript" = "阅读转录";
+"Phase %d" = "阶段 %d";
+"Selected" = "已选择";
+"In backlog" = "在待办中";
+"Land it again with the same choices" = "用相同的选项再次合入";
+"There's unsent text in %@'s input box in the task's session, so the message wasn't typed — open the session, send or clear it, then try again." = "任务会话中 %@ 的输入框里有未发送的文本，因此没有输入消息 — 请打开会话，发送或清除它，然后重试。";
+"%@ exited right after it started (status %d) — open the session to see why, then Restart Session." = "%@ 启动后立即退出（状态 %d）— 请打开会话查看原因，然后点“重启会话”。";
+"%@ quit right after it started — open the session to see why, then Restart Session." = "%@ 启动后立即退出 — 请打开会话查看原因，然后点“重启会话”。";
+"Close without landing" = "关闭且不合入";
+"%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ 已不在任务的会话中运行（只剩下一个 shell），因此没有输入任何内容 — 重启会话以恢复它。";
+"The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "任务的会话标签页已不存在或已属于其他内容，因此没有向其输入任何内容 — 重启会话以恢复 %@。";
+"The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "消息未输入：会话的标签页已不再显示其代理。请恢复会话后重试。";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "未发送 — 会话的标签页已不存在，或已属于其他内容。";
+"Not sent — the agent isn't running in the session's tab any more." = "未发送 — 代理已不在会话的标签页中运行。";
+"No such task." = "没有这个任务。";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "该任务处于“查看”阶段：其代理已完成。请改为将其退回“进行中”，或丢弃其分支。";
+"The task is done: there's no agent to stop." = "该任务已完成：没有可停止的代理。";
+"The task isn't running: there's no agent to stop." = "该任务未在运行：没有可停止的代理。";
+"Waiting — the agent is asking you something; answer the card first" = "等待中 — 智能体正在向你提问；请先回答卡片";
+"Waiting — %@ is asking you something; answer the card first" = "等待中 — %@ 正在向你提问；请先回答卡片";
+"Not sent — the agent is asking you something. Answer it first, then send again." = "未发送 — 智能体正在向你提问。请先回答，然后再次发送。";
+"Not sent — typing it into the session failed. Edit it or send it again." = "未发送 — 向会话输入失败。请编辑或再次发送。";
+"Restart Session relaunches %@ on this task's worktree." = "“重启会话”会在此任务的工作树上重新启动 %@。";
+"Task brief" = "任务说明";
+"Show less" = "收起";
+"Show more" = "展开更多";
+"Copy Reply" = "拷贝回复";
+"Copy as Markdown" = "拷贝为 Markdown";
+"Copy the whole reply as Markdown" = "将整条回复拷贝为 Markdown";
+"Showing first %@ of %@ characters" = "显示前 %@ 个字符，共 %@ 个";
+"Copy full output" = "拷贝完整输出";
+"Copy this file's diff" = "拷贝此文件的差异";
+"Copy Diff" = "拷贝差异";
+"Copy the whole diff shown here as a patch" = "将此处显示的全部差异拷贝为补丁";
+"Copy Pane History" = "拷贝窗格历史记录";
+"Copied 1 line" = "已拷贝 1 行";
+"Copied %@ lines" = "已拷贝 %@ 行";
+"Couldn't read the terminal's history" = "无法读取终端历史记录";
+"Copy message" = "复制消息";
+"%@ characters" = "%@ 个字符";
+"Showing the start of %@ characters" = "正在显示 %@ 个字符的开头";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "已送达 — 在代理的队列中";
+"Delivered — queued by %@" = "已送达 — 在 %@ 的队列中";
+"1 delegation call" = "1 次委派调用";
+"%d delegation calls" = "%d 次委派调用";
+"downloaded — install scripts could not be checked" = "已下载 — 无法检查安装脚本";
+"Bromure — approval needed" = "Bromure — 需要批准";
+"No answer within %d s counts as Don't allow." = "%d 秒内未回应即视为不允许。";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "代理想要执行：\n\n%@\n\n批准仅适用于这一请求——其他任何写入都会再次询问。";
+"Allow this request for 15 minutes" = "允许此请求 15 分钟";
+"Allow this request for the rest of the session" = "在本次会话剩余时间内允许此请求";
+"Provider unreachable" = "无法连接服务商";
+"Usage limit reached" = "已达使用上限";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi 审批";
+"Never ask" = "从不询问";
+"Ask before sensitive actions" = "敏感操作前询问";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "从不询问：Kimi Code 会不停顿地运行每条命令、每次编辑和每个工具，并自行决定自己的问题和计划——工作区的虚拟机和 Bromure 的防护措施就是安全边界。敏感操作前询问（Kimi 的“Ask When Needed”模式）：普通命令和编辑仍然无需询问即可运行；Kimi 只会在接触敏感文件（如 .env 或 SSH 密钥）、运行危险命令（如 rm -rf）或退出 Plan 模式之前停下，以及在有问题要问你时停下。从下次启动或恢复时生效。";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "已被 Bromure 拦截 — 提示注入";
+"Blocked by Bromure — rogue instructions" = "已被 Bromure 拦截 — 恶意指令";
+"Blocked by Bromure — credential leak" = "已被 Bromure 拦截 — 凭据泄露";
+"Blocked by Bromure — supply chain" = "已被 Bromure 拦截 — 供应链";
+"Blocked by Bromure — client certificate" = "已被 Bromure 拦截 — 客户端证书";
+"Blocked by Bromure" = "已被 Bromure 拦截";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "请求没有到达提供商。详情见安全时间线；问题解决后请重新发送。";
+"Credential approval" = "凭据审批";
+"allowed for 1 hour" = "已允许 1 小时";
+"allowed for 5 minutes" = "已允许 5 分钟";
+"allowed for the rest of the session" = "已允许至本次会话结束";
+"denied — no answer in time; the next request asks again" = "已拒绝 — 未及时回应；下次请求时会再次询问";
+"denied — you said no a moment ago" = "已拒绝 — 你刚才拒绝过";
+"denied by you" = "你已拒绝";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "登录存储无法读取 — Bromure 不会覆盖它。在能够再次读取之前，其中保存的登录不可用。";
+"Last refreshed %@" = "上次刷新 %@";
+"Not refreshed since sign-in" = "登录后尚未刷新";
+"access token expires %@" = "访问令牌过期时间 %@";
+"access token renews on next use" = "访问令牌将在下次使用时续期";
+"(exit code %d)" = "（退出代码 %d）";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "未送达 — 代理没有接收。请编辑或再次发送。";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "默认关闭：在下方勾选某个工作区（或打开“每个工作区”）之前，这里的代理无法访问其他工作区。";
+"Closes the editor without saving changes" = "关闭编辑器，不保存更改";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok 询问是否允许 xAI 保留你的编程数据";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "正在问你问题";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "没有任何内容到达提供商。Bromure 会从此对话之后的请求中移除被拦截的工具输出，因此你可以发送下一条消息。如果代理仍然失败，请将对话回退到该步骤之前，或开始新的会话。";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "%1$d 秒内未回应即视为“%2$@”。";
+"The workspace %@ will be shut down." = "工作区 %@ 将被关机。";
+"The workspaces %@ will be shut down." = "工作区 %@ 将被关机。";
+"The workspace %@ will be suspended and resume where it left off." = "工作区 %@ 将被挂起，下次从中断处继续。";
+"The workspaces %@ will be suspended and resume where they left off." = "工作区 %@ 将被挂起，下次从中断处继续。";
+
+/* QA round 4 */
+"“%@”" = "“%@”";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "此对话框在代理的终端中显示不下，因此无法在此显示其选项。请在终端中回答。";
+"Open the terminal" = "打开终端";
+"Opt out" = "选择退出";
+"Opt in" = "选择加入";
+"Grok's own setting; you can change it later in Grok's /settings." = "这是 Grok 自己的设置；之后可在 Grok 的 /settings 中更改。";
+
+"Listing its tools" = "列出其工具";
+"Looking up %@" = "正在查看 %@";
+"Reading earlier output" = "正在读取先前的输出";
+"Reading earlier output #%@" = "正在读取先前的输出 #%@";
+"tool lookup" = "工具查询";
+"earlier output" = "先前的输出";
+"Instructions for the agent" = "给代理的指示";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "未送达 — 消息已在代理的输入框中，但回车未被接收。请在终端中按回车，或清空输入框后重新发送。";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "有 1 条审查评论尚未送达代理 — 现在合并将不包含它。";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "有 %d 条审查评论尚未送达代理 — 现在合并将不包含它们。";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "等待中 — 代理的终端里有一个菜单打开着；请在那里回答或关闭它";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "等待中 — %@ 的终端里有一个菜单打开着；请在那里回答或关闭它";
+"Open terminal" = "打开终端";
+"Dismiss (Esc)" = "关闭 (Esc)";
+"Conversation compacted" = "对话已压缩";
+"The agent's work is its report above — there is no diff to read." = "代理的工作就是上面的报告 — 没有可查看的差异。";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "登录机器未能就绪，因此无法开始 %@ 登录。";
+"The %@ sign-in command didn't start in the sign-in machine." = "%@ 登录命令未在登录机器中启动。";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "登录机器一直处于忙碌状态（%1$@），因此无法开始 %2$@ 登录。";
+"Couldn't start the %@ sign-in" = "无法开始 %@ 登录";
+"Retry types the sign-in command into the sign-in machine again." = "“重试”会在登录机器中再次输入登录命令。";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "%@ 订阅未登录";
+"using API key" = "正在使用 API 密钥";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "更改在保存后立即应用到正在运行的工作区，无需重启。取消勾选某条规则即可关闭它而不删除，也可以通过它的时钟菜单限时开启。";
+"Time limit" = "时限";
+"On — untick to switch this rule off without deleting it" = "已开启 — 取消勾选可关闭此规则而不删除";
+"Off — this rule is ignored until you tick it" = "已关闭 — 勾选前此规则将被忽略";
+"On for 15 minutes" = "开启 15 分钟";
+"On for 1 hour" = "开启 1 小时";
+"On until the workspace stops" = "开启直到工作区停止";
+"Make permanent" = "设为永久";
+"until stop" = "直到停止";
+"expired" = "已过期";
+"On until this workspace stops, then switched off automatically" = "开启直到此工作区停止，之后自动关闭";
+"Switches off automatically at %@" = "将于 %@ 自动关闭";
+"Turn this rule on for a limited time" = "限时开启此规则";
+"%@ — default policy" = "%@ — 默认策略";
+"Allow…" = "允许…";
+"Rule…" = "规则…";
+"Block…" = "阻止…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "请在运行此工作区的 Mac 上，于其设置中更改此工作区的防火墙规则。";
+"Allow %@" = "允许 %@";
+"Allow all of %@" = "允许整个 %@";
+"Block %@" = "阻止 %@";
+"Block all of %@" = "阻止整个 %@";
+"Switch off rule “%@”" = "关闭规则“%@”";
+"Remove rule “%@”" = "移除规则“%@”";
+"The rule that allowed this is no longer in the workspace's rules." = "允许此连接的规则已不在工作区的规则中。";
+"Always" = "始终";
+"For 15 minutes" = "15 分钟";
+"For 1 hour" = "1 小时";
+"Until the workspace stops" = "直到工作区停止";
+"Add a rule allowing this destination — applies to the running workspace at once" = "添加一条允许此目标的规则 — 立即应用到正在运行的工作区";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "关闭允许此连接的规则，或阻止该目标 — 立即生效";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "自上次审查以来的新提交";
+"The full repository (baseline)" = "整个仓库（基线）";
+"New commits" = "新提交";
+"Baseline review at %@" = "在 %@ 的基线审查";
+"Review of new commits %1$@…%2$@" = "新提交 %1$@…%2$@ 的审查";
+"Review of the last %1$d commits up to %2$@" = "截至 %2$@ 的最近 %1$d 个提交的审查";
+"No new commits since the last review (%@)" = "自上次审查以来没有新提交（%@）";
+"%@ (not set up here)" = "%@（此处未设置）";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ 未在此工作区中设置——无人值守的审查会停在它的登录步骤。请在首次扫描前在工作区设置中添加它（或在该工作区的会话中登录）。";
+"Scheduled review" = "定时审查";
+"Start with a full-repository baseline" = "先对整个仓库进行基线审查";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "提交和拉取请求扫描从监视创建之后到达的内容开始。对现有代码请使用“立即运行基线审查”。";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "每次审查只覆盖自上一次以来到达 %@ 的提交——快速且省钱。没有新内容就不运行。";
+"Reviewed through %1$@ (%2$@)." = "已审查至 %1$@（%2$@）。";
+"The first review covers the whole repository; later ones only what's new." = "首次审查覆盖整个仓库；之后只审查新内容。";
+"Nothing reviewed yet: the first review covers the last %d commits." = "尚未审查任何内容：首次审查覆盖最近 %d 个提交。";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "每次审查都会遍历整个代码库，先看风险最高的部分。很彻底，但大型仓库耗时更长，消耗的 token 也更多。";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "已请求审查 %@ 的新提交——代理开始后会显示在“最近的扫描”下（如果自上次审查以来没有新内容，则不运行）。";
+"Now watching %@ — the first review is starting." = "现在正在监视 %@——首次审查正在开始。";
+"Run Baseline Now" = "立即运行基线审查";
+"Review the commits that landed since the last review" = "审查自上次审查以来到达的提交";
+"Review the whole repository" = "审查整个仓库";
+"Review the new commits on %@ now" = "立即审查 %@ 的新提交";
+"New commits %1$@ %2$02d:00" = "新提交 %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "允许";
+"deny" = "拒绝";
+"“%@” no longer allows it" = "“%@”不再允许它";
+"connection closed — %@" = "连接已关闭 — %@";
+"Blocked now" = "现已阻止";
+"Allowed now" = "现已允许";
+"Blocked now by “%@”" = "现已由“%@”阻止";
+"Allowed now by “%@”" = "现已由“%@”允许";
+"Blocked now by the default policy" = "现已由默认策略阻止";
+"Allowed now by the default policy" = "现已由默认策略允许";
+"“%@” exists and is off" = "“%@”已存在且已关闭";
+"“%@” is on until the workspace stops" = "“%@”在工作区停止前保持开启";
+"“%1$@” is on until %2$@" = "“%1$@”开启至 %2$@";
+"“%@” is already on, with no time limit" = "“%@”已开启，无时间限制";
+"The workspace's rules have changed since this connection" = "自此连接以来，工作区的规则已更改";
+"Log allowed connections" = "记录允许的连接";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "在安全时间线中也列出防火墙放行的连接——每个目标一行，重复项合并显示——以便你从那里阻止某个主机。关闭：只列出被阻止的连接。在你做出选择之前，工作区有规则时此项开启。";
+"Enable rule %@" = "启用规则 %@";
+"Time limit set" = "已设置时间限制";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "规则在编辑器之外被更改（安全时间线中的操作或时间限制）。该更改已合并到你未保存的编辑中。";
+"The rules changed outside the editor while you have unsaved edits." = "你有未保存的编辑时，规则在编辑器之外被更改。";
+"Reload" = "重新载入";
+"Keep my edits" = "保留我的编辑";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "连接已关闭（代理） — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "连接已关闭（直连） — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "也显示为：%@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "上移规则";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "下移规则";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "删除规则";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "在安全时间线中也列出允许的连接";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "正在加载对话…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "正在加载更早的对话…（%@ / %@）";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "无法加载此对话——机器未及时响应。";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "在其机器上找不到此会话的对话。";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "让某个会话修复";
+"Ask a Session Instead…" = "改为询问某个会话…";
+"Ask a Session or the Switchboard…" = "询问某个会话或总机…";
+"Show the findings for %@" = "显示 %@ 的发现项";
+"Sent to %@ to fix" = "已发送给 %@ 修复";
+"Sent to %@ — it works on the fix in its own session." = "已发送给 %@ — 它会在自己的会话中进行修复。";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "仓库没有可推送的远程——请合并但不推送。";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "已合并到 %@，但无法连接工作区进行推送——它在运行吗？";
+"Merge & Push" = "合并并推送";
+"Push %1$@ to %2$@" = "将 %1$@ 推送到 %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ 包含它即完成。如果 %1$@ 已有新提交，%3$@ 会拉取、解决冲突并推送。";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "无法发送给 %1$@：%2$@";
+"that session is gone" = "该会话已不存在";
+"the server didn't answer" = "服务器没有响应";
+"the server runs an older Bromure — update it to hand findings to a session" = "服务器运行的是旧版 Bromure——请更新后再将发现项交给会话";
+"the server refused it" = "服务器拒绝了";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "无法交给 %1$@：%2$@";
+"a menu or dialog stayed open in that session" = "该会话中有菜单或对话框一直打开";
+"something else was typed in that session's input box" = "该会话的输入框中已有其他内容";
+"Couldn't hand it to the Switchboard: %@" = "无法交给总机：%@";
+"the Switchboard session is gone" = "总机会话已不存在";
+"the message couldn't be typed into the Switchboard" = "无法将消息输入到总机";
+"the Switchboard's agent never started" = "总机的代理始终未启动";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "其文本被提示注入检查标记 (%@) — 交给代理前请先确认";
+"Hand It Over Anyway" = "仍然交给它";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "提示注入检查标记了它 (%@)。它来自读取仓库内容的代理，你交给的代理也会读取它。交出前请先检查。";
+"Couldn't start the fix: %@" = "无法开始修复：%@";
+"Couldn't ask the Switchboard: %@" = "无法询问总机：%@";
+"that finding is gone" = "该发现项已不存在";
+"couldn't start the fix" = "无法开始修复";
+"no Switchboard could be started" = "无法启动总机";

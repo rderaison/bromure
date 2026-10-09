@@ -150,8 +150,11 @@ enum AgentStatus: String, Sendable {
     case working, done, needsInput
 
     /// Parse a guest-hook signal ("working"/"done"/"needsInput"/"needs-input").
+    /// Only its first line: the reporter adds the hook's session id on a
+    /// second one (`AgentStatusReport`).
     init?(signal: String) {
-        switch signal.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        let first = signal.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        switch first.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "working": self = .working
         case "done": self = .done
         case "needsinput", "needs-input", "needs_input": self = .needsInput
@@ -325,6 +328,22 @@ final class SessionListModel {
     /// Per-profile run state shown in the source list.
     enum RunState { case off, booting, running, suspended }
 
+    /// The machine can run a Switchboard (not a Bromure Agent Host).
+    var switchboardAvailable = true
+
+    /// Rows/entries that are attached plain Macs (Bromure Agent Host,
+    /// MachineLinks.swift), not this app's VMs: listed like one, but never
+    /// reconciled or probed as a local workspace.
+    var machineIDs: Set<UUID> = []
+    /// The sidebar's Native Machines section is unfolded.
+    var nativeExpanded = true
+    /// Native machines asking to join this host's fleet (the user decides),
+    /// and the ones the user blocked.
+    var pendingMachines: [FleetMachine] = []
+    var blockedMachines: [FleetMachine] = []
+    /// The entries backed by this app's own VMs.
+    var localEntries: [VMEntry] { machineIDs.isEmpty ? entries : entries.filter { !machineIDs.contains($0.id) } }
+
     /// One row per profile — running or not. Rebuilt wholesale by the
     /// delegate's `refreshSidebar()`; a running row pairs (by id) with a
     /// `VMEntry` that carries the live tab model for its nested tab rows.
@@ -338,6 +357,15 @@ final class SessionListModel {
 
     /// Running, attached panes — carry live tab models.
     var entries: [VMEntry] = []
+    /// Running workspaces with no window here (a server's headless VMs),
+    /// from their live roster: the sessions in them bind and read as live
+    /// like anyone's, but they have no sidebar tabs or pane to select.
+    var headlessEntries: [VMEntry] = []
+
+    /// A workspace's tabs for session bookkeeping — windowed or headless.
+    func sessionEntry(_ id: Profile.ID) -> VMEntry? {
+        entries.first { $0.id == id } ?? headlessEntries.first { $0.id == id }
+    }
     /// Every profile, in display order — the source list's top level.
     var profileRows: [ProfileRow] = []
     var selectedID: Profile.ID?
@@ -473,4 +501,76 @@ struct HomeCheckpoint: Identifiable, Equatable, Sendable {
     let id: String
     let createdAt: Date
     let allocatedBytes: Int64
+}
+
+// MARK: - Mirrored rosters
+
+extension TabsModel {
+    /// Take a tmux roster as a server reports it in /state (`vms[].tabs`:
+    /// index, title, cwd, agentStatus, worktree fields, active) — the fat
+    /// client's mirror and bromure-ac's attached machines (MachineLinks.swift).
+    func applyRoster(_ roster: [[String: Any]]) {
+        if tabs.count > roster.count {
+            tabs.removeLast(tabs.count - roster.count)
+        }
+        while tabs.count < roster.count {
+            tabs.append(TabsModel.Tab(label: "", index: 0))
+        }
+        var activePos = activeIndex
+        for (i, t) in roster.enumerated() {
+            let tab = tabs[i]
+            let idx = t["index"] as? Int ?? i
+            let title = t["title"] as? String ?? "shell"
+            if tab.index != idx { tab.index = idx }
+            if tab.label != title { tab.label = title }
+            // `title` is already display-or-label; mirror it into `display` so
+            // `shownLabel`, worktree ordering and the Merge-tab check all work.
+            let display: String? = title
+            if tab.display != display { tab.display = display }
+            let wb = t["worktreeBranch"] as? String
+            if tab.worktreeBranch != wb { tab.worktreeBranch = wb }
+            let pb = t["parentBranch"] as? String
+            if tab.parentBranch != pb { tab.parentBranch = pb }
+            let rr = t["rootRepo"] as? String
+            if tab.rootRepo != rr { tab.rootRepo = rr }
+            let repoRoot = t["repoRoot"] as? String
+            if tab.repoRoot != repoRoot { tab.repoRoot = repoRoot }
+            let cwd = t["cwd"] as? String
+            if tab.cwd != cwd { tab.cwd = cwd }
+            let containerID = t["containerID"] as? String
+            if tab.containerID != containerID { tab.containerID = containerID }
+            if let s = t["agentStatus"] as? String, let st = AgentStatus(rawValue: s) {
+                if tab.agentStatus != st { tab.agentStatus = st }
+            } else if tab.agentStatus != .done {
+                tab.agentStatus = .done
+            }
+            if (t["active"] as? Bool) == true { activePos = i }
+        }
+        if activePos >= tabs.count { activePos = max(0, tabs.count - 1) }
+        if activeIndex != activePos { activeIndex = activePos }
+    }
+}
+
+/// A native machine as the fleet's admission lists name it.
+struct FleetMachine: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var name: String
+
+    /// `pendingMachines` / `blockedMachines` of /state.
+    static func list(_ any: Any?) -> [FleetMachine] {
+        ((any as? [[String: Any]]) ?? []).compactMap { d in
+            guard let id = (d["id"] as? String).flatMap(UUID.init(uuidString:)) else { return nil }
+            return FleetMachine(id: id, name: d["name"] as? String ?? "Mac")
+        }
+    }
+}
+
+/// What the user can do about a native machine and a host's fleet.
+enum FleetAction: Sendable {
+    /// Let a waiting (or blocked) machine in.
+    case allow
+    /// Refuse it, now and from now on (drops it if it's in).
+    case block
+    /// Forget a blocked machine's answer: it asks again when it next dials.
+    case unblock
 }

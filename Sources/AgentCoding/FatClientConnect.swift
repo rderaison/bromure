@@ -274,8 +274,12 @@ final class RemoteConnectModel {
     /// heartbeating bromure.io greys out within a refresh cycle.
     private var directoryTimer: Timer?
 
-    var signedIn: Bool { account.signedIn }
-    var accountLabel: String? { account.accountLabel }
+    /// Doc/video renders: a stand-in account and server list (no keychain,
+    /// no bromure.io calls).
+    var demoAccount: String?
+    var demoServers: [DeviceInfo]?
+    var signedIn: Bool { demoAccount != nil || account.signedIn }
+    var accountLabel: String? { demoAccount ?? account.accountLabel }
     /// Managed (enterprise) identity — owned by the managed-enrollment
     /// lifecycle, so this window must not offer Sign Out for it (the
     /// coordinator refuses it anyway).
@@ -303,6 +307,7 @@ final class RemoteConnectModel {
     /// starts observing identity changes so a sign-in completed while the window
     /// is open refreshes the list.
     func refreshAccount() {
+        if let demoServers { p2pServers = demoServers; return }
         account.refresh()
         if identityObserver == nil {
             identityObserver = NotificationCenter.default.addObserver(
@@ -340,8 +345,9 @@ final class RemoteConnectModel {
         do {
             let devices = try await client.listDevices(bearer: id.bearer)
             // The directory is already scoped to this user's own servers; just
-            // drop our own row (you don't mirror yourself).
-            p2pServers = devices.filter { !$0.isSelf && !$0.revoked }
+            // drop our own row (you don't mirror yourself) and Bromure Sidecar
+            // Macs (they attach to servers; there's nothing to mirror).
+            p2pServers = devices.filter { !$0.isSelf && !$0.revoked && !$0.isAgentHost }
             directoryEverLoaded = true
             firstLoad401Retries = 0
         } catch ControlPlaneError.http(401, _) where directoryEverLoaded {

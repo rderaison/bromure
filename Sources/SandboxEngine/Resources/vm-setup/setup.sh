@@ -309,11 +309,12 @@ log "apt-get install X + WM + fonts + audio"
 retry apt-get install -y -q --no-install-recommends \
     xserver-xorg-core xserver-xorg-legacy \
     xserver-xorg-input-libinput xserver-xorg-video-modesetting \
-    xinit xauth x11-xserver-utils x11-xkb-utils \
+    xinit xauth x11-xserver-utils x11-xkb-utils x11-utils libxtst6 libxss1 \
     keyboard-configuration console-setup xkb-data \
     openbox xdotool \
     spice-vdagent \
-    libgl1-mesa-dri \
+    libgl1-mesa-dri libegl-mesa0 libglx-mesa0 libgbm1 libegl1 libgles2 mesa-utils \
+    mesa-va-drivers libva2 libva-drm2 libva-x11-2 vainfo \
     fonts-dejavu-core fonts-freefont-ttf fonts-liberation fonts-noto-color-emoji \
     adwaita-icon-theme \
     pipewire pipewire-pulse wireplumber pulseaudio-utils alsa-utils \
@@ -538,6 +539,7 @@ EOS
 bromure_agent_unit file-agent            chrome file-agent.py
 bromure_agent_unit webcam-agent          root   webcam-agent.py
 bromure_agent_unit precision-scroll-agent root  precision-scroll-agent.py
+bromure_agent_unit pointer-agent         root   pointer-agent.py
 bromure_agent_unit warp-agent            root   warp-agent.py
 bromure_agent_unit wireguard-agent       root   wireguard-agent.py
 bromure_agent_unit ikev2-agent           root   ikev2-agent.py
@@ -548,7 +550,7 @@ bromure_agent_unit cjk-input-agent       chrome cjk-input-agent.py
 
 systemctl enable bromure-onboot.service bromure-config-agent.service \
     bromure-file-agent.service bromure-webcam-agent.service \
-    bromure-precision-scroll-agent.service bromure-warp-agent.service \
+    bromure-precision-scroll-agent.service bromure-pointer-agent.service bromure-warp-agent.service \
     bromure-wireguard-agent.service bromure-ikev2-agent.service \
     bromure-openvpn-agent.service bromure-network-refresh-agent.service \
     bromure-keyboard-agent.service bromure-cjk-input-agent.service \
@@ -749,6 +751,22 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 # ---------------------------------------------------------------------------
 
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
+install_config   scripts/resize-watcher.py  /mnt/usr/local/bin/resize-watcher.py 755
+install_config   scripts/experimental-multigpu.py /mnt/usr/local/bin/experimental-multigpu.py 755
+install_config   scripts/experimental-multigpu-input.py /mnt/usr/local/bin/experimental-multigpu-input.py 755
+install_config   scripts/graphics-env.sh /mnt/usr/local/bin/graphics-env.sh 644
+install_config   scripts/graphics-diagnostics.py /mnt/usr/local/bin/graphics-diagnostics.py 755
+install_config   scripts/graphics-prerequisites.py /mnt/usr/local/bin/graphics-prerequisites.py 755
+mkdir -p /mnt/etc/bromure
+mkdir -p /mnt/opt/bromure/graphics-sources
+for asset in "$SCRIPT_DIR"/gpu/*; do
+    cp "$asset" /mnt/opt/bromure/graphics-sources/ || exit 1
+done
+if ! chroot /mnt sh /opt/bromure/graphics-sources/build-guest-graphics.sh; then
+    echo 'ERROR: guest VirGL/video graphics build failed'
+    exit 1
+fi
+install_config   configs/graphics-capabilities.json /mnt/etc/bromure/graphics-capabilities.json 644
 install_config   scripts/apply-config.sh   /mnt/usr/local/bin/apply-config.sh 755
 install_config   scripts/install-mtls.sh   /mnt/usr/local/bin/install-mtls.sh 755
 install_config   scripts/on-boot.sh        /mnt/usr/local/bin/on-boot.sh 755
@@ -821,6 +839,7 @@ install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py    
 install_config scripts/mtls-reload-agent.py /mnt/usr/local/bin/mtls-reload-agent.py 755
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
 install_config scripts/precision-scroll-agent.py      /mnt/usr/local/bin/precision-scroll-agent.py      755
+install_config scripts/pointer-agent.py      /mnt/usr/local/bin/pointer-agent.py      755
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
 install_config scripts/wireguard-agent.py  /mnt/usr/local/bin/wireguard-agent.py  755
 install_config scripts/ikev2-agent.py     /mnt/usr/local/bin/ikev2-agent.py     755
@@ -833,12 +852,22 @@ install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py  
 install_config scripts/cdp-agent.py         /mnt/usr/local/bin/cdp-agent.py         755
 install_config scripts/cdp-lan-forwarder.py /mnt/usr/local/bin/cdp-lan-forwarder.py 755
 install_config scripts/tab-agent.py         /mnt/usr/local/bin/tab-agent.py         755
+install_config scripts/shared_windows.py    /mnt/usr/local/bin/shared_windows.py    755
 install_config scripts/bromure-hostkey      /mnt/usr/local/bin/bromure-hostkey      755
 install_config scripts/shell-agent.py       /mnt/usr/local/bin/shell-agent.py       755
 install_config scripts/trace-agent.py      /mnt/usr/local/bin/trace-agent.py      755
 install_config scripts/resilient-launch.sh /mnt/usr/local/bin/resilient-launch.sh 755
 install_config scripts/download-guard.sh    /mnt/usr/local/bin/download-guard.sh    755
 install_config scripts/test-runner.sh      /mnt/usr/local/bin/test-runner.sh       755
+
+# Validate the installed GL stack without starting X or requiring a GPU in
+# the installer VM. A successful report is packaging evidence only.
+if ! chroot /mnt /usr/bin/python3 /usr/local/bin/graphics-prerequisites.py --require-ready \
+    > /mnt/etc/bromure/graphics-prerequisites.json; then
+    cat /mnt/etc/bromure/graphics-prerequisites.json
+    echo "SANDBOX_SETUP_FAILED: guest graphics prerequisites are incomplete"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Credential bridge (passkeys + passwords)
@@ -931,8 +960,14 @@ done
 # connect-at-startup VPN is configured — prevents IP leak during handshake).
 mkdir -p /mnt/opt/bromure/splash
 install_config splash/splash.html /mnt/opt/bromure/splash/splash.html
-install_config splash/night.jpg   /mnt/opt/bromure/splash/night.jpg
-install_config splash/day.jpg     /mnt/opt/bromure/splash/day.jpg
+mkdir -p /mnt/opt/bromure/splash/fonts
+for font in Manrope-SemiBold.ttf InterTight.woff2 FragmentMono.woff2; do
+    install_config "splash/fonts/$font" "/mnt/opt/bromure/splash/fonts/$font"
+done
+mkdir -p /mnt/opt/bromure/splash/licenses
+for license in Manrope-OFL.txt InterTight-OFL.txt FragmentMono-OFL.txt ASSETS.txt; do
+    install_config "splash/licenses/$license" "/mnt/opt/bromure/splash/licenses/$license"
+done
 
 # Native messaging hosts (link sender + file picker + trace + corporate guard)
 mkdir -p /mnt/etc/chromium/native-messaging-hosts

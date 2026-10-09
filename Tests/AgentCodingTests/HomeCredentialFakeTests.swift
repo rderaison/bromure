@@ -84,6 +84,31 @@ struct HomeCredentialFakeTests {
             atPath: home.appendingPathComponent(".docker/config.json").path))
     }
 
+    @Test("A GitHub token saved without a username still reaches ~/.git-credentials")
+    func blankUsernameToken() throws {
+        let (store, root) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var p = Profile(name: "blank-user", tool: .claude, authMode: .token)
+        p.gitHTTPSCredentials = [
+            GitHTTPSCredential(host: "github.com", username: "",
+                               token: "ghp_REALrealREALrealREALrealREALreal12"),
+        ]
+        #expect(p.gitHTTPSCredentials[0].isUsable)
+        #expect(p.gitHTTPSCredentials[0].effectiveUsername == "x-access-token")
+        let plan = p.makeTokenPlan(salt: Data("test-salt-32-bytes-of-entropy!!".utf8))
+        try store.prepareHomeDirectory(for: p, terminalDefaults: TerminalAppDefaults.load(),
+                                       tokenPlan: plan)
+        let home = store.homeDirectory(for: p)
+        let gitCreds = try String(
+            contentsOf: home.appendingPathComponent(".git-credentials"), encoding: .utf8)
+        let fake = try #require(plan.fakeForGitHTTPS(host: "github.com", username: "x-access-token"))
+        #expect(gitCreds.contains("https://x-access-token:\(fake)@github.com"))
+        #expect(!gitCreds.contains("REALreal"))
+        let gitconfig = try String(
+            contentsOf: home.appendingPathComponent(".gitconfig"), encoding: .utf8)
+        #expect(gitconfig.contains("credential-store --file"))
+    }
+
     @Test("With a plan the home carries the fakes, never the reals")
     func planWritesFakesNotReals() throws {
         let (store, root) = try makeStore()

@@ -1,0 +1,35 @@
+{
+  "chromiumRenderer": "ANGLE (Mesa, virgl, OpenGL ES 3.0 Mesa 25.2.8-0ubuntu0.24.04.3)",
+  "features": {
+    "2d_canvas": "enabled",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "enabled",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "enabled_on",
+    "rasterization": "enabled_force",
+    "raw_draw": "disabled_off_ok",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "enabled",
+    "video_encode": "disabled_software",
+    "vulkan": "disabled_off",
+    "webgl": "enabled",
+    "webgpu": "enabled",
+    "webgpu_on_vk_via_gl_interop": "enabled",
+    "webnn": "disabled_off"
+  },
+  "webgl": {
+    "webgl2": true,
+    "antialias": true,
+    "samples": 4,
+    "pixel": [
+      255,
+      0,
+      0,
+      255
+    ],
+    "error": 0
+  },
+  "videoDecodingProfiles": [],
+  "validation": "Signed real Bromure browser VM; exact WebGL2 4xMSAA red readback; no rejected renderer commands"
+}

@@ -139,6 +139,96 @@ struct SecurityTimelineMirrorTests {
         #expect(full?.decision == "swapped for stand-ins")
     }
 
+    @Test("A firewall verb denial is credited to the Firewall, not Guardrails")
+    func firewallVerbAttribution() {
+        let pid = UUID()
+        // The proxy's shared 403 path, tagged as a firewall rule.
+        let tagged = SecurityTimeline.map(
+            profileID: pid, eventType: "guardrails.block",
+            eventData: ["host": .string("httpbin.org"), "method": .string("POST"), "path": .string("/post"),
+                        "reason": .string("POST to httpbin.org blocked"), "engine": .string("firewall")],
+            now: Date())
+        #expect(tagged?.engine == "Firewall")
+        #expect(tagged?.kind == .blocked)
+        #expect(tagged?.condition == "POST httpbin.org/post")
+        // An egress event that carries the request reads like one.
+        let verb = SecurityTimeline.map(
+            profileID: pid, eventType: "egress.firewall",
+            eventData: ["host": .string("httpbin.org"), "method": .string("PUT"), "path": .string("/put"),
+                        "action": .string("deny")],
+            now: Date())
+        #expect(verb?.engine == "Firewall")
+        #expect(verb?.kind == .blocked)
+        #expect(verb?.condition == "PUT httpbin.org/put")
+        // A credential write policy stays Guardrails.
+        let cred = SecurityTimeline.map(
+            profileID: pid, eventType: "guardrails.block",
+            eventData: ["host": .string("api.github.com"), "method": .string("DELETE"), "path": .string("/repos/a/b")],
+            now: Date())
+        #expect(cred?.engine == "Guardrails")
+    }
+
+    @Test("A firewall web-verb denial (proxy shape) reads as the request")
+    func firewallWebVerbShape() {
+        let e = SecurityTimeline.map(
+            profileID: UUID(), eventType: "egress.firewall",
+            eventData: ["action": .string("deny"), "layer": .string("web"), "proto": .string("web"),
+                        "host": .string("httpbin.org"), "port": .int(443), "method": .string("POST"),
+                        "path": .string("/post"), "reason": .string("POST to httpbin.org blocked by the firewall")],
+            now: Date())
+        #expect(e?.engine == "Firewall")
+        #expect(e?.condition == "POST httpbin.org/post")
+        #expect(e?.kind == .blocked)
+    }
+
+    @Test("A skipped content scan is an info row for the engine that missed it")
+    func contentScanSkipped() {
+        let pid = UUID()
+        let one = SecurityTimeline.map(
+            profileID: pid, eventType: "content_scan.skipped",
+            eventData: ["host": .string("chatgpt.com"), "path": .string("/backend-api/codex/responses"),
+                        "reason": .string("zstd-compressed request body"), "engines": .array([.string("pii")])],
+            now: Date())
+        #expect(one?.engine == "PII protection")
+        #expect(one?.condition == "chatgpt.com")
+        #expect(one?.decision == "not scanned — zstd-compressed request body")
+        #expect(one?.kind == .info)
+        let both = SecurityTimeline.map(
+            profileID: pid, eventType: "content_scan.skipped",
+            eventData: ["host": .string("api.kimi.ai"), "reason": .string("request body too large to scan"),
+                        "engines": .array([.string("prompt_injection"), .string("pii")])],
+            now: Date())
+        #expect(both?.engine == "Prompt injection")
+        #expect(both?.condition == "api.kimi.ai (Prompt injection + PII protection)")
+        #expect(both?.kind == .info)
+    }
+
+    @Test("Only a coalesced row shows a repeat count")
+    func repeatsOnlyOnCoalesced() {
+        let pid = UUID()
+        var coalesced = SecurityTimeline.Event(time: Date(), engine: "Credential brokering", condition: "c",
+                                               decision: "swapped in x", kind: .info, profileID: pid, count: 42)
+        coalesced.coalesceKey = "token_swap|a|b|h"
+        #expect(coalesced.repeats == 42)
+        let pii = SecurityTimeline.Event(time: Date(), engine: "PII protection", condition: "c",
+                                         decision: "swapped", kind: .info, profileID: pid, count: 3)
+        #expect(pii.repeats == nil)
+    }
+
+    @Test("Mirrored rows keep their coalesce key")
+    func mirrorKeepsCoalesceKey() {
+        let tl = SecurityTimeline(directory: nil)
+        tl.clear()
+        var e = SecurityTimeline.Event(time: Date(), engine: "Credential brokering", condition: "c",
+                                       decision: "d", kind: .info, profileID: UUID(), count: 5)
+        e.coalesceKey = "k"
+        tl.append(e)
+        let client = SecurityTimeline(directory: nil)
+        client.applyMirror(tl.mirrorRows(), host: "ark")
+        #expect(client.remote["ark"]?.first?.coalesceKey == "k")
+        #expect(client.remote["ark"]?.first?.repeats == 5)
+    }
+
     @Test("A mirrored host never overwrites this Mac's events, nor another host's")
     func separateMachines() {
         let tl = SecurityTimeline(directory: nil)

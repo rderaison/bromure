@@ -21,19 +21,23 @@ final class AutomationMCPServer: MCPLineHandler {
     private let save: (ScheduledAutomation) -> Void
     private let remove: (UUID) -> Void
     private let runNow: (UUID) -> Void
+    /// The repository watches' engine — the findings tools.
+    private let watches: () -> RepoWatchEngine?
 
     init(profileID: Profile.ID,
          store: @escaping () -> ScheduledAutomationStore?,
          profile: @escaping () -> Profile?,
          save: @escaping (ScheduledAutomation) -> Void,
          remove: @escaping (UUID) -> Void,
-         runNow: @escaping (UUID) -> Void) {
+         runNow: @escaping (UUID) -> Void,
+         watches: @escaping () -> RepoWatchEngine? = { nil }) {
         self.profileID = profileID
         self.store = store
         self.profile = profile
         self.save = save
         self.remove = remove
         self.runNow = runNow
+        self.watches = watches
     }
 
     // MARK: JSON-RPC
@@ -62,6 +66,10 @@ final class AutomationMCPServer: MCPLineHandler {
         case "tools/call":
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
+            if name.hasPrefix("findings_") {
+                return respond(id: id, result: await callFindingsTool(name: name, args: args,
+                                                                      branch: branch))
+            }
             return respond(id: id, result: callTool(name: name, args: args))
         default:
             guard id != nil else { return nil }
@@ -78,7 +86,13 @@ final class AutomationMCPServer: MCPLineHandler {
     automation_get read them; automation_create, automation_update and \
     automation_delete change them; automation_run fires one now. Only this \
     workspace's automations exist here: ids from other workspaces are not \
-    found, and anything you create belongs to this workspace.
+    found, and anything you create belongs to this workspace. \
+    The findings_* tools hold the structured results of code scans of the \
+    GitHub repositories this workspace watches: findings_list and \
+    findings_get read them, findings_report files issues you verified (they \
+    are deduplicated against what is already known), findings_resolve marks \
+    an open finding as gone from the code, and findings_done ends a scan run \
+    (call it once, last, with the commit you reviewed).
     """
 
     private static let fieldProperties: [String: Any] = [
@@ -158,7 +172,177 @@ final class AutomationMCPServer: MCPLineHandler {
                             "properties": ["id": ["type": "string"]],
                             "required": ["id"]],
         ],
+        [
+            "name": "findings_list",
+            "description": "Known findings (issues found by code scans) for this workspace's watched repositories — id, title, severity, location, status. Check this before reporting so you don't re-report known issues.",
+            "inputSchema": ["type": "object", "properties": [
+                "repo": ["type": "string", "description": "owner/name; omit for every repository."],
+                "status": ["type": "string", "enum": ["open", "all", "new", "triaged", "inProgress", "inReview", "fixed", "duplicate", "dismissed"],
+                           "description": "Default open (new, backlog, in progress, in review)."],
+                "limit": ["type": "integer", "description": "Default 100, at most 500."],
+            ] as [String: Any]],
+        ],
+        [
+            "name": "findings_get",
+            "description": "One finding in full: summary, evidence, recommendation, history.",
+            "inputSchema": ["type": "object",
+                            "properties": ["id": ["type": "string"]],
+                            "required": ["id"]],
+        ],
+        [
+            "name": "findings_report",
+            "description": "Report verified issues found in a repository. Each is deduplicated against the repository's known findings (by your fingerprint key, else by location and title), so re-reporting a known issue only updates it. In a scan run the repository is known; elsewhere pass repo.",
+            "inputSchema": ["type": "object", "properties": [
+                "repo": ["type": "string", "description": "owner/name — required outside a scan run."],
+                "commit": ["type": "string", "description": "The commit you reviewed (sha)."],
+                "findings": ["type": "array", "items": ["type": "object", "properties": [
+                    "title": ["type": "string", "description": "One line: what the issue is and where."],
+                    "severity": ["type": "string", "enum": ["critical", "high", "medium", "low", "info"]],
+                    "category": ["type": "string", "enum": ["security", "bug", "dependency", "quality", "other"]],
+                    "cwe": ["type": "string", "description": "e.g. CWE-89, when it applies."],
+                    "file": ["type": "string", "description": "Repo-relative path."],
+                    "line": ["type": "integer"],
+                    "endLine": ["type": "integer"],
+                    "summary": ["type": "string", "description": "Markdown: what is wrong, how it is reached, the impact."],
+                    "evidence": ["type": "string", "description": "The offending code."],
+                    "recommendation": ["type": "string", "description": "How to fix it."],
+                    "fingerprint": ["type": "string", "description": "A short stable key you would give this same issue in a later scan, e.g. sqli-orders-search."],
+                    "duplicateOf": ["type": "string", "description": "The id of a known finding this is the same issue as."],
+                ] as [String: Any], "required": ["title", "severity", "summary"]]],
+            ] as [String: Any], "required": ["findings"]],
+        ],
+        [
+            "name": "findings_resolve",
+            "description": "Mark an open finding as fixed because the issue is no longer in the code (not for findings that have a fix task running).",
+            "inputSchema": ["type": "object",
+                            "properties": ["id": ["type": "string"],
+                                           "reason": ["type": "string", "description": "One line: why it is gone."]],
+                            "required": ["id", "reason"]],
+        ],
+        [
+            "name": "findings_done",
+            "description": "End a repository scan run: call it once, as your last action, after your last findings_report. Records the commit you reviewed — the next review of new commits starts after it — and closes the run.",
+            "inputSchema": ["type": "object",
+                            "properties": [
+                                "summary": ["type": "string", "description": "What you covered, what you skipped, how many findings you reported."],
+                                "commit": ["type": "string", "description": "The commit you reviewed (`git rev-parse HEAD`)."],
+                            ] as [String: Any],
+                            "required": ["summary"]],
+        ],
     ]
+
+    // MARK: Findings
+
+    private func findingDoc(_ f: RepoFinding, full: Bool) -> [String: Any] {
+        var d: [String: Any] = [
+            "id": f.id.uuidString,
+            "repo": f.repo,
+            "title": f.title,
+            "severity": f.severity.rawValue,
+            "category": f.category.rawValue,
+            "status": f.status.rawValue,
+            "seenCount": f.seenCount,
+            "lastSeen": ISO8601DateFormatter().string(from: f.lastSeenAt),
+        ]
+        if !f.location.isEmpty { d["location"] = f.location }
+        if let cwe = f.cwe { d["cwe"] = cwe }
+        if let dup = f.duplicateOf { d["duplicateOf"] = dup.uuidString }
+        if full {
+            d["summary"] = f.summary
+            if let e = f.evidence { d["evidence"] = e }
+            if let r = f.recommendation { d["recommendation"] = r }
+            if let n = f.statusNote { d["statusNote"] = n }
+            if let c = f.commit { d["commit"] = c }
+            d["firstSeen"] = ISO8601DateFormatter().string(from: f.firstSeenAt)
+        } else {
+            d["summary"] = f.summary.count > 300 ? String(f.summary.prefix(300)) + "…" : f.summary
+        }
+        return d
+    }
+
+    private func callFindingsTool(name: String, args: [String: Any],
+                                  branch: String?) async -> [String: Any] {
+        guard let engine = watches() else { return errorResult("findings unavailable") }
+        let mine = engine.store.findings.filter { $0.profileID == profileID }
+        func one(_ raw: Any?) -> RepoFinding? {
+            guard let s = raw as? String,
+                  let id = UUID(uuidString: s.trimmingCharacters(in: .whitespaces))
+            else { return nil }
+            return mine.first { $0.id == id }
+        }
+        switch name {
+        case "findings_list":
+            var list = mine
+            if let repo = (args["repo"] as? String)?.trimmingCharacters(in: .whitespaces),
+               !repo.isEmpty {
+                list = list.filter { $0.repo.caseInsensitiveCompare(repo) == .orderedSame }
+            }
+            switch (args["status"] as? String) ?? "open" {
+            case "all": break
+            case "open": list = list.filter { $0.status.isOpen }
+            case let raw:
+                guard let s = RepoFinding.Status(rawValue: raw) else {
+                    return errorResult("unknown status \(raw)")
+                }
+                list = list.filter { $0.status == s }
+            }
+            let limit = min(max((args["limit"] as? Int) ?? 100, 1), 500)
+            let sorted = list.sortedForTriage()
+            return textResult(jsonString([
+                "findings": sorted.prefix(limit).map { findingDoc($0, full: false) },
+                "count": sorted.count,
+            ]))
+        case "findings_get":
+            guard let f = one(args["id"]) else { return errorResult("no finding with that id in this workspace") }
+            return textResult(jsonString(findingDoc(f, full: true)))
+        case "findings_report":
+            guard let raw = args["findings"] as? [[String: Any]], !raw.isEmpty else {
+                return errorResult("findings (non-empty array) is required")
+            }
+            guard raw.count <= 50 else {
+                return errorResult("at most 50 findings per call — report in several calls")
+            }
+            let reports = raw.compactMap(FindingReport.parse)
+            guard !reports.isEmpty else { return errorResult("every finding needs a title") }
+            let repo = (args["repo"] as? String)?.trimmingCharacters(in: .whitespaces)
+            let commit = (args["commit"] as? String)?.trimmingCharacters(in: .whitespaces)
+            switch await engine.report(reports, profileID: profileID, branch: branch,
+                                       repo: repo?.isEmpty == true ? nil : repo,
+                                       commit: commit?.isEmpty == true ? nil : commit) {
+            case .failure:
+                return errorResult("this session isn't a repository-watch scan — pass repo (owner/name)")
+            case .success(let out):
+                var lines = ["Recorded: \(out.created.count) new, \(out.updated.count) already known"
+                    + (out.reopened.isEmpty ? "" : ", \(out.reopened.count) reopened (had been marked fixed)") + "."]
+                for f in out.created { lines.append("new \(f.id.uuidString): \(f.title)") }
+                for f in out.updated { lines.append("known \(f.id.uuidString): \(f.title) [\(f.status.rawValue)]") }
+                for f in out.reopened { lines.append("reopened \(f.id.uuidString): \(f.title)") }
+                if reports.count < raw.count {
+                    lines.append("\(raw.count - reports.count) entr(y/ies) without a title were skipped.")
+                }
+                return textResult(lines.joined(separator: "\n"))
+            }
+        case "findings_resolve":
+            guard let f = one(args["id"]) else { return errorResult("no finding with that id in this workspace") }
+            let reason = ((args["reason"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !reason.isEmpty else { return errorResult("reason is required") }
+            guard engine.resolve(f.id, profileID: profileID, reason: String(reason.prefix(300))) else {
+                return errorResult("only open findings without a running fix can be resolved (this one is \(f.status.rawValue))")
+            }
+            return textResult("Marked fixed.")
+        case "findings_done":
+            let summary = ((args["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let commit = (args["commit"] as? String)?.trimmingCharacters(in: .whitespaces)
+            guard engine.scanDone(profileID: profileID, branch: branch,
+                                  commit: commit?.isEmpty == true ? nil : commit,
+                                  summary: String(summary.prefix(2000))) else {
+                return errorResult("this session isn't a running repository-watch scan — nothing to close")
+            }
+            return textResult("Recorded — the run closes shortly. You are done: stop here.")
+        default:
+            return errorResult("Unknown tool: \(name)")
+        }
+    }
 
     // MARK: Scope
 

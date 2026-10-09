@@ -1,0 +1,74 @@
+---
+title: "Introduction"
+description: "What Bromure is, why every browser window runs in its own disposable virtual machine, the main features, who the app is for, and how it relates to Bromure Agentic Coding."
+order: 1
+---
+
+# Introduction
+
+This chapter explains what Bromure is, the idea behind it, and what it can do. Read it first if you're deciding whether Bromure fits your needs, or if you want to understand why it behaves differently from Safari or Chrome before you start using it.
+
+## What Bromure is
+
+**Bromure** is a web browser for macOS that runs every window inside its own throwaway Linux virtual machine (VM). The window looks and feels like a normal Mac browser — a native tab bar, an address field, the usual keyboard shortcuts — but the web pages themselves never run on your Mac. They run in Chromium (or Google Chrome, if you choose it) inside a small Ubuntu Linux VM that Bromure starts for that window, using Apple's Virtualization framework.
+
+When you close the window, the VM is shut down and its disk is deleted. Cookies, cache, history, downloaded files that you didn't save, and anything a malicious page managed to install are all gone. The next window starts again from the same clean image.
+
+When you *do* want a browser that remembers things — your sign-ins, bookmarks and history for work, say — you create a **persistent profile**. A persistent profile keeps its browsing data on a small separate disk that is attached to its VM each time you open it; everything else in the VM is still thrown away.
+
+This manual documents Bromure version **5.0.0**. It requires macOS 14 (Sonoma) or later on a Mac with Apple Silicon.
+
+## Why a VM per window
+
+A conventional browser protects your Mac with a sandbox: a set of operating-system restrictions around the processes that render web pages. Sandboxes are good, but they share the kernel, the file system and the user account with everything else you run. A single browser bug chained with a sandbox escape can reach your documents, your keychain, and your other apps.
+
+Bromure puts a hypervisor boundary between the web and your Mac instead. A page that fully compromises the browser still finds itself inside a disposable Linux machine that:
+
+- has no access to your Mac's files, except the files you explicitly upload through the [file drawer](09-files-downloads.mdx);
+- has its own network interface, which can be kept off your local network;
+- shares the clipboard, the camera, the microphone, macOS passwords and passkeys only when you turn those on for the profile;
+- disappears, with everything it wrote, when you close the window.
+
+Because each window is a separate VM, windows are also isolated from each other. A tracker in one window can't see the cookies of another, and two profiles never share a cache.
+
+Bromure keeps this fast by always having one VM booted and waiting (a *pre-warmed* VM). When you open a window, Bromure hands you that VM and immediately starts warming the next one, so a new window appears in about a second. [Concepts & Architecture](04-concepts.mdx) explains the machinery in detail.
+
+## Key features
+
+- **Disposable windows.** Every window starts from a clean image and is erased when it closes. The built-in **Private Browsing** profile keeps nothing at all.
+- **Profiles.** Create as many profiles as you like, each with its own color, home page, browser (Chromium or Google Chrome), and settings. Persistent profiles keep bookmarks, history, cookies and passwords between sessions, optionally encrypted. See [Profiles](06-profiles.mdx).
+- **A native Mac window.** A macOS tab bar with a profile chip, back and forward, a site-information popover with certificate details, printing, and standard Mac shortcuts. See [The Browser Window](05-browser-window.mdx).
+- **Controlled sharing with your Mac.** Per-profile switches for the clipboard, file upload and download, keyboard-layout matching, macOS passkeys and passwords, audio, the webcam and the microphone. See [Profile Settings](07-profile-settings/index.mdx).
+- **Safe downloads.** Downloaded files land in a drawer, not on your disk. They can be scanned with VirusTotal before you save them, and threats can be blocked. See [Files & Downloads](09-files-downloads.mdx).
+- **Network isolation.** Keep a profile off your local network, restrict it to certain ports, give it its own network interface, or route it through Cloudflare WARP, WireGuard, IKEv2 or OpenVPN. Ad blocking and malware-site blocking are built in. See [Network Isolation](07-profile-settings/network-isolation.mdx) and [VPN & Ads](07-profile-settings/vpn-ads.mdx).
+- **Privacy and safety tools.** Optional AI phishing detection, screen-capture blocking, a custom user agent, and a per-profile browser language. See [Privacy & Security](12-privacy-security.mdx).
+- **Camera effects.** When you share your webcam, add a city and local time, a name badge, a logo, or swap your face in the outgoing video. See [Camera & Effects](10-camera-effects.mdx).
+- **Session recording.** Record every request a window makes, inspect it in a waterfall viewer, and export it as JSON or SQLite. See [Session Recording](11-session-recording.mdx).
+- **Enterprise management.** Enroll the Mac with an organization to receive read-only managed profiles with client certificates, enforced recording and corporate-site rules. See [Enterprise](13-enterprise.mdx).
+- **Automation.** An optional local HTTP API with a Chrome DevTools Protocol proxy, an MCP server for AI assistants, AppleScript commands and a command-line tool. See [Automation](14-automation.mdx).
+
+## Who it's for
+
+Bromure is useful for anyone who wants to browse without leaving traces on their Mac or exposing it to the web, and especially for:
+
+- **Security-conscious users** who open links from email, chat or search results they don't fully trust.
+- **Security teams and researchers** who need to visit suspicious sites, analyze phishing pages, or record exactly what a page does on the network.
+- **People who separate identities** — work and personal accounts, clients, test accounts — and want each one in its own sealed browser.
+- **Organizations** that want to hand employees a hardened, centrally configured browser for sensitive web apps, with optional request recording.
+- **Developers and automation users** who need clean, scriptable browser instances that don't pollute each other.
+
+## What Bromure is not
+
+- It is not a VPN or an anonymity network. Sites still see a normal network connection from your Mac (or from the VPN you configure for the profile). Use a VPN profile if you need to hide your address.
+- It doesn't protect you from giving your password to a phishing page yourself. The optional [AI phishing detection](07-profile-settings/privacy-safety.mdx) can warn you, but judgment still matters.
+- It isn't meant to replace your everyday browser for everything. Many people keep Safari for trusted sites and send everything else to Bromure; [Profiles](06-profiles.mdx) explains how to make Bromure open links from other apps.
+
+## Bromure Agentic Coding
+
+Bromure has a sibling product, **Bromure Agentic Coding**, which applies the same VM isolation to AI coding agents. It is a separate app with its own manual; this manual covers only the Bromure web browser.
+
+## Where to go next
+
+- To install Bromure and run the first-time setup, continue with [Installation & First Run](02-installation.mdx).
+- To open your first window and create a profile, follow the [Quick Start](03-quick-start.mdx).
+- For the full picture of how the pieces fit together, read [Concepts & Architecture](04-concepts.mdx).

@@ -45,14 +45,57 @@ struct DroppedFile {
             return DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)
         }
         if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            // The drag's own format (public.jpeg…), not whatever "an image"
+            // resolves to first — the bytes as they were.
+            let typeID = p.registeredTypeIdentifiers.first { UTType($0)?.conforms(to: .image) == true }
+                ?? UTType.image.identifier
             let data: Data? = await withCheckedContinuation { cont in
-                p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { d, _ in
+                p.loadDataRepresentation(forTypeIdentifier: typeID) { d, _ in
                     cont.resume(returning: d)
                 }
             }
             guard let data, data.count <= maxBytes else { return nil }
-            return DroppedFile(name: "pasted-image.png", data: data, isImage: true)
+            return DroppedFile(name: imageName(suggested: p.suggestedName, data: data, typeID: typeID),
+                               data: data, isImage: true)
         }
+        return nil
+    }
+
+    /// A name for image data dropped without a file: the name the drag
+    /// suggests ("whatisthis") when it has one, with the extension the BYTES
+    /// call for — it used to be "pasted-image.png" for everything, a JPEG
+    /// included. "pasted-image" only when nothing better is known.
+    static func imageName(suggested: String?, data: Data, typeID: String) -> String {
+        let ext = imageExtension(of: data)
+            ?? UTType(typeID)?.preferredFilenameExtension
+            ?? "png"
+        var base = (suggested ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+        if !base.isEmpty, let dot = base.lastIndex(of: "."),
+           UTType(filenameExtension: String(base[base.index(after: dot)...]))?.conforms(to: .image) == true {
+            base = String(base[..<dot])   // "photo.png" suggested for JPEG bytes → "photo.jpg"
+        }
+        if base.isEmpty { base = "pasted-image" }
+        return base + "." + ext
+    }
+
+    /// The image format the bytes are in, by their signature.
+    static func imageExtension(of data: Data) -> String? {
+        let b = [UInt8](data.prefix(16))
+        func has(_ sig: [UInt8], at o: Int = 0) -> Bool {
+            b.count >= o + sig.count && Array(b[o..<o + sig.count]) == sig
+        }
+        if has([0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if has([0x89, 0x50, 0x4E, 0x47]) { return "png" }
+        if has([0x47, 0x49, 0x46, 0x38]) { return "gif" }
+        if has([0x52, 0x49, 0x46, 0x46]), has([0x57, 0x45, 0x42, 0x50], at: 8) { return "webp" }
+        if has([0x49, 0x49, 0x2A, 0x00]) || has([0x4D, 0x4D, 0x00, 0x2A]) { return "tiff" }
+        if has(Array("ftyp".utf8), at: 4) {
+            let brand = String(decoding: b.count >= 12 ? b[8..<12] : [], as: UTF8.self)
+            if ["heic", "heix", "mif1", "msf1", "hevc"].contains(brand) { return "heic" }
+            if brand == "avif" { return "avif" }
+        }
+        if has([0x42, 0x4D]) { return "bmp" }
         return nil
     }
 
@@ -66,6 +109,96 @@ struct DroppedFile {
         if files.count < providers.count { NSSound.beep() }   // too big / unreadable
         #endif
         return files
+    }
+
+    /// The host files the user is handing over right now: file URLs on the
+    /// drag pasteboard (a drop onto a text field pastes their paths) and on
+    /// the clipboard (a Finder copy, then ⌘V). Standardized paths.
+    ///
+    /// Asked on every change of the composer's text, so it's read again only
+    /// when a pasteboard changed (its `changeCount`): a pasteboard read is a
+    /// round trip to the pasteboard server, on the main thread, per keystroke.
+    static func offeredHostPaths() -> Set<String> {
+        #if canImport(AppKit)
+        let boards = [NSPasteboard(name: .drag), NSPasteboard.general]
+        return offeredPaths.get(counts: boards.map(\.changeCount)) {
+            var out: Set<String> = []
+            for pb in boards {
+                let urls = pb.readObjects(forClasses: [NSURL.self],
+                                          options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+                for u in urls { out.insert(u.standardizedFileURL.path) }
+            }
+            return out
+        }
+        #else
+        return []
+        #endif
+    }
+    static let offeredPaths = OfferedPathsCache()
+
+    /// The offered paths as of the pasteboards' change counts: read again
+    /// only when one moved.
+    final class OfferedPathsCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var counts: [Int]?
+        private var paths: Set<String> = []
+
+        func get(counts now: [Int], read: () -> Set<String>) -> Set<String> {
+            lock.lock()
+            defer { lock.unlock() }
+            if counts == now { return paths }
+            paths = read()
+            counts = now
+            return paths
+        }
+    }
+
+    /// The longest token taken for a path (macOS's PATH_MAX, with room for
+    /// a `file://` scheme and percent escapes).
+    static let maxPathToken = 4096
+
+    /// The names of the `offered` files that `text` mentions. Every form a
+    /// path takes in text (as is, `~/…`, a `file://` URL) ends with its
+    /// file's name — percent-escaped in a URL — so a text naming none of
+    /// them holds none of them: the cheap test before any tokenizing (a
+    /// 200 KB paste is tens of thousands of tokens).
+    static func offeredNames(in text: String, offered: Set<String>) -> [String] {
+        var names: [String] = []
+        for p in offered {
+            let name = (p as NSString).lastPathComponent
+            guard !name.isEmpty else { continue }
+            if text.contains(name) { names.append(name); continue }
+            if let escaped = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+               escaped != name, text.contains(escaped) { names.append(escaped) }
+        }
+        return names
+    }
+
+    /// The pieces of `text` that may be one of the `offered` paths: the
+    /// whole text and each line (trimmed — a path with spaces is found
+    /// whole), then the whitespace-separated tokens; only those short enough
+    /// for a path that name an offered file, each once.
+    static func pathCandidates(in text: String, offered: Set<String>) -> [String] {
+        let names = offeredNames(in: text, offered: offered)
+        guard !names.isEmpty else { return [] }
+        var all: [String] = [text.trimmingCharacters(in: .whitespacesAndNewlines)]
+        all += text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        all += text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init)
+        var seen: Set<String> = []
+        return all.filter { tok in
+            guard !tok.isEmpty, tok.utf8.count <= maxPathToken,
+                  names.contains(where: { tok.contains($0) }), !seen.contains(tok) else { return false }
+            seen.insert(tok)
+            return true
+        }
+    }
+
+    /// A readable host FILE for `token` (absolute path, `~`, or `file://`)
+    /// that is among `offered` (see ``offeredHostPaths()``), or nil.
+    static func hostFileURL(_ token: String, offered: Set<String>) -> URL? {
+        guard let url = hostFileURL(token),
+              offered.contains(url.standardizedFileURL.path) else { return nil }
+        return url
     }
 
     /// A readable host FILE for `token` (absolute path, `~`, or `file://`), or nil.
@@ -85,16 +218,17 @@ struct DroppedFile {
     /// anything. Each becomes a file and leaves the text. Lines and the whole
     /// text are tried first, so a path with spaces is found whole; then the
     /// whitespace-separated tokens.
-    static func absorbHostPaths(in text: String) -> (text: String, files: [DroppedFile]) {
+    ///
+    /// Only paths of files the user actually handed over count — on the drag
+    /// pasteboard (a drop) or the clipboard as files (a paste): a path merely
+    /// TYPED (`~/.ssh/id_rsa`) is text, never an upload into the machine.
+    static func absorbHostPaths(in text: String,
+                                offered: Set<String> = offeredHostPaths()) -> (text: String, files: [DroppedFile]) {
+        guard !offered.isEmpty else { return (text, []) }
         var out = text
         var files: [DroppedFile] = []
-        var candidates: [String] = [text.trimmingCharacters(in: .whitespacesAndNewlines)]
-        candidates += text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-        candidates += text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init)
-        var seen: Set<String> = []
-        for tok in candidates where !tok.isEmpty && !seen.contains(tok) {
-            seen.insert(tok)
-            guard out.contains(tok), let url = hostFileURL(tok),
+        for tok in pathCandidates(in: text, offered: offered) {
+            guard out.contains(tok), let url = hostFileURL(tok, offered: offered),
                   let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= maxBytes else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             files.append(DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg))
@@ -257,6 +391,10 @@ struct SessionStageActions {
     var showMachine: (UUID) -> Void = { _ in }
     /// Put the Switchboard on stage — starting it first when there's none.
     var openSwitchboard: () -> Void = {}
+    /// The board task a session works on, when it is one: its brief and the
+    /// board's Restart Session (a task whose agent couldn't start shows
+    /// both, as its card does).
+    var boardTask: (UUID) -> BoardTaskLink? = { _ in nil }
 
     /// The machine's settings (the workspace editor), by profile id — from
     /// a session's right-click, its ⋯ menu, its sidebar row.
@@ -401,9 +539,16 @@ struct SessionHeaderView: View {
     var store: AgentSessionStore
     @Bindable var model: SessionListModel
     let actions: SessionStageActions
-    @State private var renaming = false
+    /// The session being renamed. The header is ONE view reused for every
+    /// session, so a draft keyed on "whatever is shown" followed a
+    /// selection change and Enter (or losing focus) renamed another session.
+    @State private var renamingID: UUID?
     @State private var draftTitle = ""
     @State private var worktreeSheet = false
+    #if os(macOS)
+    /// The session whose flamegraph popover is open (the stopwatch).
+    @State private var flameFor: UUID?
+    #endif
     @State private var nicknameSheet = false
 
     private var session: AgentSession? { model.selectedSessionID.flatMap { store.session($0) } }
@@ -446,6 +591,192 @@ struct SessionHeaderView: View {
         }
     }
 
+    /// The quiet line under the title: @nick · status · agent · machine ·
+    /// folder · …, at a level of detail (7 = all; 6 drops the clone; 5
+    /// shortens the folder to its last part; 4 drops it; 3 also the tokens;
+    /// 2 also the model; 1 also the machine, branch and time; 0 keeps
+    /// @nick · status · agent). The folder goes before the tokens and the
+    /// model: a task's long worktree path dropped all three at once while
+    /// the row had room for them. One step at a
+    /// time: a nickname (or a longer status) used to push the row from
+    /// "everything" straight to "no model, no folder, no tokens". The header picks the richest
+    /// that fits (B14: an overflowing row was centred and spilled over the
+    /// sidebar; B4: nothing in it truncates, so a status change never
+    /// re-truncates the folder frame by frame).
+    /// A folder as its last part ("…/cc-demo"), for a tight header.
+    nonisolated static func shortFolder(_ path: String) -> String {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+        guard parts.count > 1, let last = parts.last else { return path }
+        return "…/" + last
+    }
+
+    @ViewBuilder
+    private func metaLine(_ s: AgentSession, bucket: SessionBucket, gone: Bool, detail: Int) -> some View {
+        HStack(spacing: 7) {
+            if let nick = s.nickname, !nick.isEmpty {
+                Text("@" + nick)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                    .fixedSize()
+                    .help(NSLocalizedString("How agents and the composer reach this session", comment: "session header"))
+                metaDot
+            }
+            HStack(spacing: 5) {
+                if let st = SessionHome.dot(for: s, in: model) {
+                    AgentStatusDot(status: st).scaleEffect(1.15)   // breathes while working
+                } else {
+                    Circle().fill(bucket.tint).frame(width: 7, height: 7)
+                }
+                Text(SessionHome.goneReason(s, in: model) ?? statusText(s, bucket: bucket))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(bucket.tint)
+            }
+            .fixedSize()
+            metaDot
+            HStack(spacing: 5) {
+                AgentAvatar(tool: s.tool, size: 13)
+                Text(s.tool.displayName)
+                #if os(macOS)
+                if detail >= 3, let m = TranscriptSearchIndex.shared.model(for: s, among: store.sessions)
+                    ?? s.lastModel.map(TranscriptSearchIndex.prettyModel) {
+                    Text(m)
+                        .foregroundStyle(.tertiary)
+                        .help(NSLocalizedString("The model the agent last answered with", comment: "session header"))
+                }
+                #endif
+            }
+            .fixedSize()
+            if detail >= 2, !workspaceName(s.profileID).isEmpty {
+                metaDot
+                HStack(spacing: 5) {
+                    WorkspaceSquare(accentHex: accentHex(s.profileID), size: 7)
+                    Text(workspaceName(s.profileID))
+                }
+                .fixedSize()
+                .contentShape(Rectangle())
+                .onTapGesture { actions.showMachine(s.profileID) }
+                .contextMenu { machineItems(s, gone: gone) }
+                .help(NSLocalizedString("The machine this session runs on — click for its details, right-click for its settings", comment: "session header"))
+                // A native machine: said plainly, every time.
+                if model.machineIDs.contains(s.profileID) {
+                    HStack(spacing: 4) {
+                        NativeMachineBadge(size: 10)
+                        Text(NativeMachine.notSandboxed)
+                            .foregroundStyle(NativeMachine.tint)
+                    }
+                    .fixedSize()
+                    .help(NativeMachine.help(workspaceName(s.profileID)))
+                }
+            }
+            if detail >= 5 {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "folder").font(.system(size: 10.5))
+                    Text(detail >= 6 ? prettyGuestPath(s.cwd) : Self.shortFolder(prettyGuestPath(s.cwd)))
+                        .font(.system(size: 11.5, design: .monospaced))
+                }
+                .fixedSize()
+                .help(prettyGuestPath(s.cwd))
+            }
+            if detail >= 2, let branch = s.worktreeBranch, !branch.isEmpty {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.branch").font(.system(size: 10.5))
+                    Text(branch)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .truncationMode(.middle)
+                    if let sum = SessionHome.branchSummary(s), s.branchMerge == nil {
+                        Text(sum).foregroundStyle(.tertiary)
+                    }
+                }
+                .help(s.branchParent.map {
+                    String(format: NSLocalizedString("Its own git branch, off %@ — merge it back when it's ready", comment: "session header"), $0)
+                } ?? NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
+            }
+            if detail >= 7, let url = s.cloneURL, !url.isEmpty {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.down.circle").font(.system(size: 10.5))
+                    Text(CodingTask.shortRepoURL(url))
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .truncationMode(.middle)
+                }
+                .help(url)
+            }
+            #if os(macOS)
+            // Time spent working: the chat's live timeline
+            // (any surface), else this Mac's transcript index.
+            let timeline = SessionTimelineStore.shared.timeline(s.id)
+            let turns = TranscriptSearchIndex.shared.turns(s.id)
+            let count = timeline?.turns.count ?? turns.count
+            if detail >= 2, count > 0 {
+                let busy = timeline?.busy ?? turns.reduce(0) { $0 + $1.duration }
+                let longest = timeline?.turns.map(\.duration).max() ?? turns.map(\.duration).max() ?? 0
+                metaDot
+                Button { if timeline != nil { flameFor = s.id } } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stopwatch").font(.system(size: 10.5))
+                        if bucket == .working, let since = timeline?.end {
+                            // Mid-turn the transcript only moves when a record
+                            // lands (omp writes whole messages): tick from the
+                            // last one so the counter doesn't jump 17s → 38s.
+                            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                                let extra = min(max(0, ctx.date.timeIntervalSince(since)), SessionTimeline.idleGap)
+                                Text(TranscriptSearchIndex.duration(busy + extra)).monospacedDigit()
+                            }
+                        } else {
+                            Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(String(format: NSLocalizedString("Time the agent spent working: %d turns, the longest %@ — click for where it went", comment: "session header"),
+                             count, TranscriptSearchIndex.duration(longest)))
+                .popover(isPresented: Binding(get: { flameFor == s.id },
+                                              set: { if !$0 { flameFor = nil } })) {
+                    if let tl = SessionTimelineStore.shared.timeline(s.id) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                                Spacer()
+                                Button {
+                                    flameFor = nil
+                                    let sid = s.id
+                                    TimelineWindows.open(title: s.title, SessionFlameWindow(sessionID: sid))
+                                } label: {
+                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                }
+                                .buttonStyle(.plain)
+                                .help(NSLocalizedString("Open in its own window", comment: "display card"))
+                            }
+                            FlameGraphView(timeline: tl)
+                        }
+                        .padding(14)
+                        .frame(width: 940, height: 520)
+                    }
+                }
+            }
+            if detail >= 4, let t = TranscriptSearchIndex.shared.tokens(for: s) {
+                metaDot
+                HStack(spacing: 4) {
+                    Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 10.5))
+                    Text(String(format: NSLocalizedString("%@ tokens", comment: "session header"),
+                                TranscriptSearchIndex.compact(t.total)))
+                        .monospacedDigit()
+                }
+                .help(String(format: NSLocalizedString("Input %@ · cached %@ · output %@", comment: "session header"),
+                             TranscriptSearchIndex.compact(t.input),
+                             TranscriptSearchIndex.compact(t.cached),
+                             TranscriptSearchIndex.compact(t.output)))
+            }
+            #endif
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+
     var body: some View {
         if let s = session {
             let bucket = SessionHome.bucket(for: s, in: model)
@@ -454,13 +785,17 @@ struct SessionHeaderView: View {
             VStack(spacing: 0) {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        if renaming {
+                        if renamingID == s.id {
                             TextField("", text: $draftTitle, onCommit: {
-                                actions.rename(s.id, draftTitle); renaming = false
+                                if let id = renamingID { actions.rename(id, draftTitle) }
+                                renamingID = nil
                             })
                             .textFieldStyle(.plain)
                             .font(.system(size: 16, weight: .semibold))
-                            .platformExitCommand { renaming = false }
+                            .platformExitCommand { renamingID = nil }
+                            // Another session on show: drop the draft, never
+                            // commit it anywhere.
+                            .onChange(of: model.selectedSessionID) { _, _ in renamingID = nil }
                         } else {
                             Text(s.title)
                                 .font(.system(size: 16, weight: .semibold))
@@ -468,102 +803,30 @@ struct SessionHeaderView: View {
                                 .truncationMode(.tail)
                                 .onTapGesture(count: 2) {
                                     guard !gone else { return }
-                                    draftTitle = s.title; renaming = true
+                                    draftTitle = s.title; renamingID = s.id
                                 }
                                 .help(gone ? "" : NSLocalizedString("Double-click to rename", comment: "session header"))
                                 .contextMenu { machineItems(s, gone: gone) }
                         }
                         // One quiet line: @nick · status · agent · machine · folder.
-                        HStack(spacing: 7) {
-                            if let nick = s.nickname, !nick.isEmpty {
-                                Text("@" + nick)
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(Color.accentColor)
-                                    .fixedSize()
-                                    .help(NSLocalizedString("How agents and the composer reach this session", comment: "session header"))
-                                metaDot
-                            }
-                            HStack(spacing: 5) {
-                                if let st = SessionHome.dot(for: s, in: model) {
-                                    AgentStatusDot(status: st).scaleEffect(1.15)   // breathes while working
-                                } else {
-                                    Circle().fill(bucket.tint).frame(width: 7, height: 7)
-                                }
-                                Text(SessionHome.goneReason(s, in: model) ?? statusText(s, bucket: bucket))
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(bucket.tint)
-                            }
-                            .fixedSize()
-                            metaDot
-                            HStack(spacing: 5) {
-                                AgentAvatar(tool: s.tool, size: 13)
-                                Text(s.tool.displayName)
-                            }
-                            .fixedSize()
-                            if !workspaceName(s.profileID).isEmpty {
-                                metaDot
-                                HStack(spacing: 5) {
-                                    WorkspaceSquare(accentHex: accentHex(s.profileID), size: 7)
-                                    Text(workspaceName(s.profileID))
-                                }
-                                .fixedSize()
-                                .contentShape(Rectangle())
-                                .onTapGesture { actions.showMachine(s.profileID) }
-                                .contextMenu { machineItems(s, gone: gone) }
-                                .help(NSLocalizedString("The machine this session runs on — click for its details, right-click for its settings", comment: "session header"))
-                            }
-                            metaDot
-                            HStack(spacing: 4) {
-                                Image(systemName: "folder").font(.system(size: 10.5))
-                                Text(prettyGuestPath(s.cwd))
-                                    .font(.system(size: 11.5, design: .monospaced))
-                                    .truncationMode(.middle)
-                            }
-                            if let branch = s.worktreeBranch, !branch.isEmpty {
-                                metaDot
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.triangle.branch").font(.system(size: 10.5))
-                                    Text(branch)
-                                        .font(.system(size: 11.5, design: .monospaced))
-                                        .truncationMode(.middle)
-                                    if let sum = SessionHome.branchSummary(s), s.branchMerge == nil {
-                                        Text(sum).foregroundStyle(.tertiary)
-                                    }
-                                }
-                                .help(s.branchParent.map {
-                                    String(format: NSLocalizedString("Its own git branch, off %@ — merge it back when it's ready", comment: "session header"), $0)
-                                } ?? NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
-                            }
-                            if let url = s.cloneURL, !url.isEmpty {
-                                metaDot
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.down.circle").font(.system(size: 10.5))
-                                    Text(CodingTask.shortRepoURL(url))
-                                        .font(.system(size: 11.5, design: .monospaced))
-                                        .truncationMode(.middle)
-                                }
-                                .help(url)
-                            }
-                            #if os(macOS)
-                            if let t = TranscriptSearchIndex.shared.tokens(s.id) {
-                                metaDot
-                                HStack(spacing: 4) {
-                                    Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 10.5))
-                                    Text(String(format: NSLocalizedString("%@ tokens", comment: "session header"),
-                                                TranscriptSearchIndex.compact(t.total)))
-                                        .monospacedDigit()
-                                }
-                                .help(String(format: NSLocalizedString("Input %@ · cached %@ · output %@", comment: "session header"),
-                                             TranscriptSearchIndex.compact(t.input),
-                                             TranscriptSearchIndex.compact(t.cached),
-                                             TranscriptSearchIndex.compact(t.output)))
-                            }
-                            #endif
+                        ViewThatFits(in: .horizontal) {
+                            metaLine(s, bucket: bucket, gone: gone, detail: 7)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 6)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 5)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 4)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 3)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 2)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 1)
+                            metaLine(s, bucket: bucket, gone: gone, detail: 0)
                         }
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        .clipped()
                     }
+                    // First claim on the row's width: the Spacer beside it is
+                    // flexible too, and an even split left the meta line half
+                    // the free room — the model name dropped out with space
+                    // to spare (Files pane open).
+                    .layoutPriority(1)
                     Spacer(minLength: 8)
                     if !gone, SessionHome.isBranch(s) {
                         BranchMergeControl(session: s, actions: actions)
@@ -575,6 +838,8 @@ struct SessionHeaderView: View {
                         } label: {
                             Label(NSLocalizedString("Resume", comment: "session header"), systemImage: "play.fill")
                                 .font(.system(size: 12.5, weight: .semibold))
+                                .lineLimit(1)
+                                .fixedSize()
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                                 .foregroundStyle(.white)
@@ -582,6 +847,11 @@ struct SessionHeaderView: View {
                                 .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
                         }
                         .buttonStyle(.plain)
+                        // Never squeezed: the meta line beside it takes the
+                        // row's width first and steps its own detail down —
+                        // without this it wrapped the label to "Resum/e".
+                        .fixedSize()
+                        .layoutPriority(2)
                         .help(bucket == .asleep
                               ? NSLocalizedString("Wake up and continue where it left off", comment: "session header")
                               : NSLocalizedString("Resume where it left off", comment: "session header"))
@@ -589,7 +859,7 @@ struct SessionHeaderView: View {
                     Menu {
                         if !gone {
                             Button(NSLocalizedString("Rename…", comment: "session menu")) {
-                                draftTitle = s.title; renaming = true
+                                draftTitle = s.title; renamingID = s.id
                             }
                             Button(NSLocalizedString("Nickname…", comment: "session menu")) { nicknameSheet = true }
                             if s.isArchived {
@@ -674,9 +944,18 @@ struct SessionHeaderView: View {
     }
 
     private func statusText(_ s: AgentSession, bucket: SessionBucket) -> String {
+        // Launching or resuming: what's happening ("Waking up…" while the
+        // machine boots, "Starting…" once the agent is on its way) — the
+        // same words as the sidebar row.
+        // A failed start reads "Couldn't start", like the sidebar row and
+        // the error card below — never "Ready" then "Paused".
+        if s.isLaunching || (bucket == .working && SessionHome.isStartingUp(s))
+            || !(s.lastError ?? "").isEmpty {
+            return SessionHome.statusLine(for: s, in: model)
+        }
         let detail: String?
         switch bucket {
-        case .working: detail = s.isLaunching ? NSLocalizedString("starting", comment: "pill") : nil
+        case .working: detail = nil
         case .idle:    detail = SessionHome.elapsed(since: s.lastSeenAt)
         case .ended:   detail = SessionHome.elapsed(since: s.endedAt).map {
             // "3 min ago" — but never "just now ago".
@@ -855,15 +1134,84 @@ struct BranchMergeControl: View {
 
 // MARK: - Launch surface
 
+/// Conversations already parsed for a stage, by session: the resting page,
+/// the launch page a resume swaps in, and the page after it all show the
+/// same history at once instead of re-reading it ("the history vanished
+/// for a second" on every resume).
+@MainActor
+enum StageTranscriptMemo {
+    private static var items: [UUID: [TranscriptItem]] = [:]
+    private static var order: [UUID] = []
+    static func get(_ id: UUID) -> [TranscriptItem]? { items[id] }
+    static func put(_ id: UUID, _ list: [TranscriptItem]) {
+        guard !list.isEmpty else { return }
+        items[id] = list
+        order.removeAll { $0 == id }
+        order.append(id)
+        while order.count > 8 { items[order.removeFirst()] = nil }
+    }
+}
+
+/// A read-back conversation: the newest `limit` rows laid out eagerly (a
+/// lazy stack anchored at the bottom left the page blank over a tall row),
+/// older ones a click away.
+private struct RestingTranscriptRows: View {
+    let items: [TranscriptItem]
+    let sessionID: UUID
+    @Binding var limit: Int
+    static let step = 200
+
+    var body: some View {
+        let hidden = max(0, items.count - limit)
+        VStack(alignment: .leading, spacing: 14) {
+            if hidden > 0 {
+                Button {
+                    limit += Self.step
+                } label: {
+                    let n = min(hidden, Self.step)
+                    Label(n == 1
+                          ? NSLocalizedString("Show 1 earlier message", comment: "beautified history")
+                          : String(format: NSLocalizedString("Show %d earlier messages", comment: "beautified history"), n),
+                          systemImage: "arrow.up.circle")
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+            }
+            TranscriptRowsView(items: hidden > 0 ? Array(items.suffix(limit)) : items)
+        }
+        .environment(\.changesSessionID, sessionID)
+    }
+}
+
 /// The chat before the agent's tab exists: the opening message as the first
-/// turn, a live cue for what is happening, the composer parked.
+/// turn — or, for a session being resumed, the conversation so far — a live
+/// cue for what is happening, the composer parked.
 struct SessionLaunchView: View {
     var store: AgentSessionStore
     @Bindable var model: SessionListModel
     let sessionID: UUID
     let accent: Color
     let actions: SessionStageActions
+    /// The conversation as last copied (nil: this app's own copy).
+    var cachedTranscript: ((AgentSession) -> Data?)?
     @State private var draft = ""
+    /// The conversation so far, when there is one (a resume).
+    @State private var history: [TranscriptItem]
+    @State private var limit = RestingTranscriptRows.step
+    @State private var viewportHeight: CGFloat = 0
+
+    init(store: AgentSessionStore, model: SessionListModel, sessionID: UUID, accent: Color,
+         actions: SessionStageActions, cachedTranscript: ((AgentSession) -> Data?)? = nil) {
+        self.store = store
+        self.model = model
+        self.sessionID = sessionID
+        self.accent = accent
+        self.actions = actions
+        self.cachedTranscript = cachedTranscript
+        _history = State(initialValue: StageTranscriptMemo.get(sessionID) ?? [])
+    }
 
     private var session: AgentSession? { store.session(sessionID) }
 
@@ -884,8 +1232,10 @@ struct SessionLaunchView: View {
             let live = SessionHome.liveTabPosition(for: s, in: model)
             VStack(spacing: 0) {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if let msg = s.openingMessage, !msg.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if !history.isEmpty {
+                            RestingTranscriptRows(items: history, sessionID: sessionID, limit: $limit)
+                        } else if let msg = s.openingMessage, !msg.isEmpty {
                             TranscriptItemView(item: TranscriptItem(id: 0, kind: .userText(msg), timestamp: nil))
                         }
                         HStack(spacing: 10) {
@@ -901,7 +1251,13 @@ struct SessionLaunchView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
+                    // Bottom-anchored like the live chat it turns into, by
+                    // filling the viewport (a short page anchored by the
+                    // scroll view alone hit-tests top-aligned).
+                    .frame(maxWidth: .infinity, minHeight: max(0, viewportHeight), alignment: .bottom)
                 }
+                .defaultScrollAnchor(.bottom)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
                 Divider().opacity(0.5)
                 ChatComposer(
                     placeholder: String(format: NSLocalizedString("%@ is starting — you can talk to it in a moment…", comment: "session launch"), s.tool.displayName),
@@ -910,10 +1266,27 @@ struct SessionLaunchView: View {
                 .padding(.vertical, 10)
             }
             .background(Color.platformTextBackground)
+            .task(id: s.id) { await loadHistory(s) }
             .onChange(of: live) { _, new in if new != nil { actions.represent(s.id) } }
             .onChange(of: s.launchingSince) { _, _ in actions.represent(s.id) }
             .onChange(of: s.lastError) { _, _ in actions.represent(s.id) }
         }
+    }
+
+    /// A resumed session's conversation, from the local copy.
+    private func loadHistory(_ s: AgentSession) async {
+        let id = s.id
+        let source = cachedTranscript
+        let agent = s.tool.rawValue
+        let names = GuestSharePaths.names(profileID: s.profileID)
+        let data: Data? = source.map { $0(s) } ?? SessionTranscriptCache.shared.load(id)
+        guard let data, !data.isEmpty else { return }
+        let items = await Task.detached(priority: .userInitiated) {
+            GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
+        }.value
+        guard !items.isEmpty, items.count >= history.count else { return }
+        history = items
+        StageTranscriptMemo.put(id, items)
     }
 }
 
@@ -938,21 +1311,42 @@ struct SessionRestView: View {
     var fetchWhenAsleep = false
 
     private enum Load { case idle, loading, loaded([TranscriptItem]), unavailable }
-    @State private var load: Load = .idle
+    @State private var load: Load
+
+    init(store: AgentSessionStore, model: SessionListModel, sessionID: UUID, accent: Color,
+         actions: SessionStageActions, fetchTranscript: @escaping (AgentSession) async -> String?,
+         cachedTranscript: @escaping (AgentSession) -> Data?, fetchWhenAsleep: Bool = false) {
+        self.store = store
+        self.model = model
+        self.sessionID = sessionID
+        self.accent = accent
+        self.actions = actions
+        self.fetchTranscript = fetchTranscript
+        self.cachedTranscript = cachedTranscript
+        self.fetchWhenAsleep = fetchWhenAsleep
+        // Shown a moment ago (the launch page, the live chat's last read):
+        // on screen from the first frame.
+        _load = State(initialValue: StageTranscriptMemo.get(sessionID).map { .loaded($0) } ?? .idle)
+    }
     /// Words to scroll to once the conversation is in.
     @State private var pendingFind: String?
+    @State private var limit = RestingTranscriptRows.step
+    @State private var viewportHeight: CGFloat = 0
     private var loadedCount: Int { if case .loaded(let items) = load { return items.count } else { return 0 } }
 
     private func applyFind(_ proxy: ScrollViewProxy) {
         guard let q = pendingFind, !q.isEmpty, case .loaded(let items) = load else { return }
         pendingFind = nil
-        guard let hit = items.first(where: { item in
+        guard let at = items.firstIndex(where: { item in
             switch item.kind {
             case .userText(let t), .assistantText(let t):
                 return t.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
             default: return false
             }
         }) else { return }
+        let hit = items[at]
+        // Laid out first, when it's among the older rows.
+        if items.count - at > limit { limit = items.count - at + 10 }
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(hit.id, anchor: .center) }
         }
@@ -970,14 +1364,27 @@ struct SessionRestView: View {
                 ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        if let err = s.lastError, !err.isEmpty { errorCard(err) }
+                        let task = actions.boardTask(s.id)
+                        // A task whose agent never took its brief: the brief
+                        // it was given, at the top (as the live chat shows it).
+                        if let task, !(task.brief.isEmpty && task.title.isEmpty), !hasUserTurn {
+                            TaskBriefCard(link: task, accent: accent)
+                        }
+                        if let err = s.lastError, !err.isEmpty { errorCard(err, restart: task?.restart) }
                         transcript(s, bucket: bucket)
                     }
                     .frame(maxWidth: 900, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 20)
+                    // The conversation sits at its end, as the live chat
+                    // does — a resume used to slide it from top-aligned to
+                    // bottom-anchored. Filling the viewport (not the scroll
+                    // anchor alone) keeps a short page hit-testable.
+                    .frame(maxWidth: .infinity, minHeight: max(0, viewportHeight), alignment: .bottom)
                 }
+                .defaultScrollAnchor(.bottom)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
                 // Opened from a search: to the first message with the words
                 // (once the conversation has loaded).
                 .onReceive(NotificationCenter.default.publisher(for: .bromureFindInChat)) { note in
@@ -1004,23 +1411,39 @@ struct SessionRestView: View {
                     // The way back in is the same as ever: say something.
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
-                            Image(systemName: s.isArchived ? "archivebox"
-                                  : bucket == .asleep ? "pause.circle" : "checkmark.circle")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                            Text(s.isArchived
-                                 ? NSLocalizedString("Archived. Your next message brings it back and carries on from here.", comment: "session rest")
-                                 : bucket == .asleep
-                                 ? NSLocalizedString("Paused. Your next message picks it up from here.", comment: "session rest")
-                                 : NSLocalizedString("Finished. Your next message picks it up from here.", comment: "session rest"))
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+                            if s.isLaunching || bucket == .needsYou || bucket == .working || bucket == .idle {
+                                // Picked up again, on its way — or live with
+                                // no tab to show yet (its workspace's pane is
+                                // being attached): say what the sidebar says,
+                                // never "Paused" (B73).
+                                ProgressView().controlSize(.mini)
+                                Text(SessionHome.statusLine(for: s, in: model))
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Image(systemName: s.isArchived ? "archivebox" : "pause.circle")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                // One word for it, wherever it shows: paused.
+                                Text(s.isArchived
+                                     ? NSLocalizedString("Archived. Your next message brings it back and carries on from here.", comment: "session rest")
+                                     : NSLocalizedString("Paused. Your next message picks it up from here.", comment: "session rest"))
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
                             Spacer(minLength: 0)
                         }
                         .padding(.horizontal, 6)
+                        #if os(macOS)
+                        // What's held for it (sent while it was busy, or
+                        // couldn't be typed) stays in sight, to edit or
+                        // drop; it goes in once the session is back.
+                        SessionQueueStrip(sessionID: s.id, agent: s.tool.displayName, accent: accent,
+                                          onEdit: { text in draft = draft.isEmpty ? text : text + "\n\n" + draft })
+                        #endif
                         ChatComposer(
                             placeholder: String(format: NSLocalizedString("Message %@…", comment: "session rest composer"), s.tool.displayName),
-                            text: $draft, busy: sending, accent: accent,
+                            text: $draft, busy: sending || s.isLaunching, accent: accent,
                             onSend: { send(s) })
                     }
                     .padding(.horizontal, 12)
@@ -1044,30 +1467,72 @@ struct SessionRestView: View {
     }
 
     /// The local copy first — instantly, machine on or off — then the live
-    /// file when the workspace can still be read.
+    /// file when the workspace can still be read, MERGED into the copy: the
+    /// live read is a 300 KB tail of the newest transcript in the folder,
+    /// which used to replace the whole conversation with its last answer
+    /// (or with another session's, sharing the folder).
     private func loadTranscript(_ s: AgentSession, bucket: SessionBucket) async {
-        load = .loading
+        let id = s.id
+        if let memo = StageTranscriptMemo.get(id) { load = .loaded(memo) } else { load = .loading }
         let agent = s.tool.rawValue
-        if let cached = cachedTranscript(s), !cached.isEmpty {
+        let names = GuestSharePaths.names(profileID: s.profileID)
+        let cached = cachedTranscript(s)
+        if let cached, !cached.isEmpty {
             let items = await Task.detached(priority: .userInitiated) {
-                AgentTranscript.parse(cached, agent: agent)
+                GuestSharePaths.rewrite(AgentTranscript.parse(cached, agent: agent), names: names)
             }.value
-            load = items.isEmpty ? .unavailable : .loaded(items)
+            if !items.isEmpty {
+                load = .loaded(items)
+                StageTranscriptMemo.put(id, items)
+            } else if case .loading = load {
+                load = .unavailable
+            }
         }
         guard bucket == .ended || fetchWhenAsleep, let raw = await fetchTranscript(s), !raw.isEmpty else {
             if case .loading = load { load = .unavailable }
             return
         }
+        let liveData = Data(raw.utf8)
+        let data: Data
+        if let cached, !cached.isEmpty {
+            guard let merged = SessionTranscriptCache.merge(history: cached, incoming: liveData, mode: .overlapOnly),
+                  merged.count != cached.count else { return }
+            data = merged
+        } else {
+            data = liveData
+        }
         let items = await Task.detached(priority: .userInitiated) {
-            AgentTranscript.parse(Data(raw.utf8), agent: agent)
+            GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
         }.value
-        if !items.isEmpty { load = .loaded(items) } else if case .loading = load { load = .unavailable }
+        if !items.isEmpty, items.count >= loadedCount {
+            load = .loaded(items)
+            StageTranscriptMemo.put(id, items)
+        } else if case .loading = load {
+            load = .unavailable
+        }
     }
 
-    private func errorCard(_ text: String) -> some View {
+    /// Whether the conversation on screen has a turn of the user's (the
+    /// brief went in) — else a task's brief is shown above it.
+    private var hasUserTurn: Bool {
+        guard case .loaded(let items) = load else { return false }
+        return items.contains { if case .userText = $0.kind { true } else { false } }
+    }
+
+    private func errorCard(_ text: String, restart: (() -> Void)? = nil) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text(text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                if let restart {
+                    // The board's Restart Session, here too: the card says
+                    // to use it.
+                    Button(action: restart) {
+                        Label(NSLocalizedString("Restart Session", comment: ""), systemImage: "arrow.clockwise")
+                    }
+                    .controlSize(.small)
+                }
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1088,10 +1553,7 @@ struct SessionRestView: View {
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         case .loaded(let items):
-            LazyVStack(alignment: .leading, spacing: 14) {
-                TranscriptRowsView(items: items)
-            }
-            .environment(\.changesSessionID, sessionID)
+            RestingTranscriptRows(items: items, sessionID: sessionID, limit: $limit)
         }
     }
 }
@@ -1127,6 +1589,9 @@ struct NewSessionView: View {
     let assignNickname: ((UUID, String) -> Void)?
     /// The last few agent + machine + folder combinations, one click each.
     let recentStarts: [RecentStart]
+    /// Instructions to add to the agent's system prompt (nil: a server too
+    /// old to apply them — no chip).
+    let instructionStore: InstructionPresetStore?
 
     struct RecentStart: Hashable {
         let profileID: UUID
@@ -1139,12 +1604,26 @@ struct NewSessionView: View {
             var out: [RecentStart] = []
             for s in sessions.sorted(by: { $0.createdAt > $1.createdAt })
             where !s.isDeleted && !s.isSwitchboard && profiles.contains(where: { $0.id == s.profileID }) {
+                // A folder the app minted for a fresh-folder session is that
+                // session's own: picking up "the same" again means a fresh
+                // one, not N look-alike chips ("Daily / run-this-exact-…").
                 let home = s.cwd.isEmpty || s.cwd == "~" || s.cwd == "/home/ubuntu"
+                    || isSynthesizedFolder(s.cwd)
                 let r = RecentStart(profileID: s.profileID, tool: s.tool, folder: home ? "" : s.cwd)
                 if !out.contains(r) { out.append(r) }
                 if out.count == limit { break }
             }
             return out
+        }
+
+        /// "~/hello-260915-1830", "~/shell-command-1003-1204-2": a folder
+        /// `AgentSessionEngine.syntheticFolderName` made in the home.
+        static func isSynthesizedFolder(_ path: String) -> Bool {
+            let parent = (path as NSString).deletingLastPathComponent
+            guard parent == "~" || parent == "/home/ubuntu" else { return false }
+            let name = (path as NSString).lastPathComponent
+            return name.range(of: #"^[\p{L}\p{N}-]+-(\d{6}|\d{4})-\d{4}(-\d+)?$"#,
+                              options: .regularExpression) != nil
         }
     }
 
@@ -1167,6 +1646,8 @@ struct NewSessionView: View {
     @State private var repoURL: String = ""
     @State private var derivedFolder: String?
     @State private var message = ""
+    /// The instructions picked for this session (nil: none).
+    @State private var instructionsID: UUID?
     /// The greeting, one of a rotation: picked when the screen comes up
     /// and kept while it's on show. Each is its own key, so every
     /// language phrases it in its own way.
@@ -1253,8 +1734,10 @@ struct NewSessionView: View {
          readyTools: ((Profile) -> Set<Profile.Tool>)? = nil,
          peerMentions: ((UUID) -> [PeerMention])? = nil,
          assignNickname: ((UUID, String) -> Void)? = nil,
-         recentStarts: [RecentStart] = []) {
+         recentStarts: [RecentStart] = [],
+         instructionStore: InstructionPresetStore? = nil) {
         self.recentStarts = recentStarts
+        self.instructionStore = instructionStore
         self.profiles = profiles
         self.runningIDs = runningIDs
         self.recentFolders = recentFolders
@@ -1344,7 +1827,8 @@ struct NewSessionView: View {
         onStart(AgentSessionRequest(
             profileID: profileID, tool: tool, cwd: effectiveFolder,
             cloneURL: place == .repository ? repoURL.trimmingCharacters(in: .whitespaces) : nil,
-            openingMessage: message, attachments: attachments))
+            openingMessage: message, attachments: attachments,
+            instructions: instructionStore?.preset(instructionsID)?.text))
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -1543,7 +2027,11 @@ struct NewSessionView: View {
                 ComposerChip(help: NSLocalizedString("The agent that runs this session", comment: "new session chip"),
                              action: { agentPopover.toggle() }) {
                     AgentAvatar(tool: tool, size: 16)
+                    // Never truncated: the agent's name is short and the
+                    // one thing the chip must say ("Clau…" read as a bug).
                     Text(tool.displayName)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 .popover(isPresented: $agentPopover, arrowEdge: .bottom) { agentList.platformCompactPopover() }
 
@@ -1553,6 +2041,9 @@ struct NewSessionView: View {
                              action: { machinePopover.toggle() }) {
                     WorkspaceSquare(accentHex: selectedProfile?.color.hexInUI ?? "#888888", size: 9)
                     Text(selectedProfile?.name ?? NSLocalizedString("Machine", comment: "new session"))
+                        .lineLimit(1)
+                        .frame(maxWidth: 160)
+                        .fixedSize(horizontal: true, vertical: false)
                     if runningIDs.contains(profileID) {
                         Circle().fill(Color.green).frame(width: 5, height: 5)
                     }
@@ -1564,22 +2055,31 @@ struct NewSessionView: View {
                     Image(systemName: place == .repository ? "arrow.down.circle" : "folder")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-                    // Hugs its text, truncating only past 220pt.
+                    // Hugs its text up to 220pt; the one chip that gives way
+                    // (middle-truncated) when the row runs out of room.
                     Text(whereLabel)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: 220)
-                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .popover(isPresented: $wherePopover, arrowEdge: .bottom) { whereEditor.platformCompactPopover() }
+
+                if let instructionStore {
+                    InstructionsChip(store: instructionStore, selection: $instructionsID)
+                }
                 }
 
                 Spacer(minLength: 8)
                 #if os(macOS)
-                Text(NSLocalizedString("⏎ start   ⌥⏎ newline", comment: "new session hint"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.quaternary)
-                    .lineLimit(1)
+                // Whole or not at all — a truncated "⇧⏎ new…" says nothing.
+                ViewThatFits(in: .horizontal) {
+                    Text(NSLocalizedString("⏎ start   ⇧⏎ newline", comment: "new session hint"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.quaternary)
+                        .lineLimit(1)
+                        .fixedSize()
+                    Color.clear.frame(width: 0, height: 0)
+                }
                 #endif
                 Button(action: start) {
                     HStack(spacing: 6) {
@@ -1677,10 +2177,12 @@ struct NewSessionView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "folder").font(.system(size: 10))
+                            // Head-truncated: folders differ at their end
+                            // (a minted folder's date), which must stay.
                             Text(p)
                                 .font(.system(size: 11.5, design: .monospaced))
                                 .lineLimit(1)
-                                .truncationMode(.middle)
+                                .truncationMode(.head)
                         }
                         .foregroundStyle(picked ? Color.accentColor : Color.secondary)
                         .padding(.horizontal, 8)
@@ -1690,9 +2192,9 @@ struct NewSessionView: View {
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
-                    .help(picked
+                    .help((picked
                           ? NSLocalizedString("Working in this folder — click to start in a new folder instead", comment: "new session recent")
-                          : NSLocalizedString("Work in this folder again", comment: "new session recent"))
+                          : NSLocalizedString("Work in this folder again", comment: "new session recent")) + "\n" + p)
                 }
                 Spacer(minLength: 0)
             }
@@ -2503,6 +3005,104 @@ private struct ChipStrip<Content: View>: View {
 
 /// A choice riding along the composer's bottom edge: what it is now, a
 /// chevron, a popover to change it.
+/// The instructions added to the agent's system prompt: none, one of the
+/// presets, or the editor to manage them.
+private struct InstructionsChip: View {
+    @ObservedObject var store: InstructionPresetStore
+    @Binding var selection: UUID?
+    @State private var popover = false
+    @State private var editing = false
+
+    private var picked: InstructionPreset? { store.preset(selection) }
+
+    var body: some View {
+        ComposerChip(help: NSLocalizedString("Instructions added to the agent's system prompt (“You are a…”)", comment: "new session chip"),
+                     action: { popover.toggle() }) {
+            Image(systemName: "person.text.rectangle")
+                .font(.system(size: 11))
+                .foregroundStyle(picked == nil ? .secondary : Color.accentColor)
+            Text(picked?.name ?? NSLocalizedString("No instructions", comment: "new session instructions chip"))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 160)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .popover(isPresented: $popover, arrowEdge: .bottom) { list.platformCompactPopover() }
+        .sheet(isPresented: $editing) {
+            InstructionPresetEditor(store: store, initial: selection) { editing = false }
+        }
+        // A preset deleted (here or on another device) can't stay picked.
+        .onChange(of: store.presets) { _, list in
+            if let s = selection, !list.contains(where: { $0.id == s }) { selection = nil }
+        }
+    }
+
+    private var list: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                row(title: NSLocalizedString("No instructions", comment: "new session instructions chip"),
+                    detail: NSLocalizedString("The agent as it comes", comment: "new session instructions"),
+                    selected: picked == nil) { selection = nil }
+                ForEach(store.presets) { p in
+                    row(title: p.name, detail: p.text, selected: p.id == selection) { selection = p.id }
+                }
+                Divider().padding(.vertical, 4)
+                Button {
+                    popover = false
+                    editing = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 13))
+                            .frame(width: 22)
+                        Text(NSLocalizedString("Edit instructions…", comment: "new session instructions"))
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(6)
+        }
+        .frame(width: 320)
+        .frame(maxHeight: 420)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func row(title: String, detail: String, selected: Bool, pick: @escaping () -> Void) -> some View {
+        Button {
+            pick()
+            popover = false
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                if selected {
+                    Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(selected ? Color.accentColor.opacity(0.14) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct ComposerChip<Content: View>: View {
     let help: String
     let action: () -> Void
@@ -2526,5 +3126,56 @@ private struct ComposerChip<Content: View>: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(help)
+    }
+}
+
+// MARK: - Board task link (shared with the live chat)
+
+/// The board task a session works on: its brief, and the board's Restart Session.
+struct BoardTaskLink {
+    var title: String
+    var brief: String
+    /// The board's Restart Session for it; nil when it doesn't apply.
+    var restart: (() -> Void)?
+    /// Why its agent couldn't start, as the board recorded it ("Kimi Code
+    /// exited right after it started (status 137)…") — the failure card's
+    /// body, over whatever the terminal scrape found.
+    var lastError: String? = nil
+}
+
+/// A board task's opening brief, at the top of its chat.
+struct TaskBriefCard: View {
+    let link: BoardTaskLink
+    let accent: Color
+    @State private var expanded = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(NSLocalizedString("Task brief", comment: "chat: a board task's opening brief"),
+                  systemImage: "list.bullet.rectangle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(accent)
+            Text(link.title).font(.system(size: 12.5, weight: .semibold))
+            if !link.brief.isEmpty {
+                Text(link.brief)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(expanded ? nil : 6)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if link.brief.count > 400 || link.brief.split(whereSeparator: \.isNewline).count > 6 {
+                    Button(expanded ? NSLocalizedString("Show less", comment: "task brief")
+                                    : NSLocalizedString("Show more", comment: "task brief")) { expanded.toggle() }
+                        #if os(macOS)
+                        .buttonStyle(.link)
+                        #else
+                        .buttonStyle(.borderless)
+                        #endif
+                        .font(.system(size: 11))
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(accent.opacity(0.06)))
     }
 }

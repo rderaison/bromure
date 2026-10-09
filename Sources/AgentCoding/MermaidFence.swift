@@ -311,8 +311,9 @@ extension MermaidFence where Fallback == EmptyView {
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)
             let root = ScrollView {
-                Markdown(markdown)
-                    .markdownTheme(transcriptReaderTheme(bodySize: 13, serif: false))
+                // The chat's own row for a reply (tables and all).
+                TranscriptItemView(item: TranscriptItem(id: 0, kind: .assistantText(markdown),
+                                                        timestamp: nil))
                     .padding(16)
             }
             .frame(width: 760, height: 900)

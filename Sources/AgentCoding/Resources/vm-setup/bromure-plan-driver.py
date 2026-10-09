@@ -841,7 +841,7 @@ class GrokDriver(Driver):
         if os.path.exists(TASK_MCP_SHIM):
             # Board MCP over ACP's native stdio-server list (same shim +
             # branch argument as agentd's _task_mcp_setup writes into
-            # .grok/settings.json for tmux runs).
+            # .grok/config.toml [mcp_servers.*] for tmux runs).
             params["mcpServers"] = [{
                 "name": "bromure-board",
                 "command": "python3",

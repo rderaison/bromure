@@ -114,6 +114,7 @@ extension UbuntuImageManager {
             try await runPostinstall(
                 steps: steps,
                 targetDisk: scratchDisk,
+                customize: true,
                 progress: progress,
                 output: output
             )

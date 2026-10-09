@@ -132,22 +132,44 @@ public enum NPMRegistryTransforms {
     /// chain transforms shouldn't be able to brick an install of a
     /// well-formed package.
     public static func stripScriptsFromTarball(rawResponse: Data) -> (data: Data, didStrip: Bool) {
-        guard let parts = splitHTTPResponse(rawResponse) else { return (rawResponse, false) }
-        let (head, body) = parts
+        let (data, result) = inspectTarball(rawResponse: rawResponse)
+        return (data, result == .stripped)
+    }
 
-        guard let unzipped = gunzip(body) else { return (rawResponse, false) }
+    /// What the script strip did to one tarball response.
+    public enum TarballStrip: Equatable {
+        /// Install scripts were present and removed.
+        case stripped
+        /// Read the package.json: no install scripts to remove.
+        case noScripts
+        /// Not a tarball body to rewrite (an error status, a redirect).
+        case notApplicable
+        /// A tarball we couldn't read: it went through UNMODIFIED.
+        case failed(String)
+    }
+
+    /// `stripScriptsFromTarball`, saying why nothing changed — a tarball
+    /// that couldn't be read passes through with its scripts, and the
+    /// caller must record that rather than log it as a clean download.
+    public static func inspectTarball(rawResponse: Data) -> (data: Data, result: TarballStrip) {
+        guard let parts = splitHTTPResponse(rawResponse) else { return (rawResponse, .failed("unparseable HTTP response")) }
+        let (head, body) = parts
+        let status = head.split(separator: " ", maxSplits: 2).dropFirst().first.flatMap { Int($0) } ?? 200
+        guard status == 200 else { return (rawResponse, .notApplicable) }
+
+        guard let unzipped = gunzip(body) else { return (rawResponse, .failed("gzip stream unreadable or over \(maxTarballBytes / 1_048_576) MB unpacked")) }
         guard let (newTar, didStrip) = rewriteTarStripScripts(unzipped) else {
-            return (rawResponse, false)
+            return (rawResponse, .failed("tar archive unreadable"))
         }
         if didStrip {
-            guard let regz = gzip(newTar) else { return (rawResponse, false) }
-            return (rebuildHTTPResponse(originalHead: head, newBody: regz), true)
+            guard let regz = gzip(newTar) else { return (rawResponse, .failed("re-compression failed")) }
+            return (rebuildHTTPResponse(originalHead: head, newBody: regz), .stripped)
         }
         // We *inspected* the tarball but found no install scripts to
         // strip — tag the response so the log window / debugging
         // sees "proxy considered this package" without paying the
         // cost of a needless gzip round-trip on the body.
-        return (tagInspected(rawResponse: rawResponse), false)
+        return (tagInspected(rawResponse: rawResponse), .noScripts)
     }
 
     // MARK: - Tar walker
@@ -402,57 +424,82 @@ public enum NPMRegistryTransforms {
         let payloadEnd = data.count - 8
         guard offset < payloadEnd else { return nil }
         let payload = data.subdata(in: offset..<payloadEnd)
-        // Grow until the decompressor consumes everything.
-        var out = Data(count: max(payload.count * 6, 1024 * 1024))
-        let count: Int = out.withUnsafeMutableBytes { dst in
-            payload.withUnsafeBytes { src in
-                compression_decode_buffer(
-                    dst.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    dst.count,
-                    src.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    payload.count,
-                    nil,
-                    COMPRESSION_ZLIB)
+        // Streamed: a one-shot decode into a buffer sized from a guessed
+        // ratio silently TRUNCATES anything that compresses better than the
+        // guess (core-js: 290 KB → 4.3 MB), and the walker then gave up on
+        // the short tar — the tarball went through with its install scripts.
+        guard let out = inflateRaw(payload, limit: maxTarballBytes) else { return nil }
+        // ISIZE (uncompressed length mod 2^32) must match: a short or
+        // corrupt decode is never rewritten.
+        let isize = UInt32(data[data.count - 4]) | UInt32(data[data.count - 3]) << 8
+            | UInt32(data[data.count - 2]) << 16 | UInt32(data[data.count - 1]) << 24
+        guard UInt32(truncatingIfNeeded: out.count) == isize else { return nil }
+        return out
+    }
+
+    /// Unpacked-tarball ceiling: past it the package passes through
+    /// unmodified (and the caller says so) rather than ballooning RAM.
+    static let maxTarballBytes = 512 * 1024 * 1024
+
+    /// Streaming raw-deflate decode, bounded by `limit`. nil on error.
+    static func inflateRaw(_ payload: Data, limit: Int) -> Data? {
+        let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: 256 * 1024)
+        defer { dst.deallocate() }
+        var stream = compression_stream(dst_ptr: dst, dst_size: 0, src_ptr: dst, src_size: 0, state: nil)
+        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
+            return nil
+        }
+        defer { compression_stream_destroy(&stream) }
+        var out = Data()
+        return payload.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Data? in
+            guard let base = src.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
+            stream.src_ptr = base
+            stream.src_size = src.count
+            while true {
+                stream.dst_ptr = dst
+                stream.dst_size = 256 * 1024
+                let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                let produced = 256 * 1024 - stream.dst_size
+                if produced > 0 { out.append(dst, count: produced) }
+                if out.count > limit { return nil }
+                switch status {
+                case COMPRESSION_STATUS_END: return out
+                case COMPRESSION_STATUS_OK:
+                    if produced == 0 && stream.src_size == 0 { return nil }   // stalled: truncated input
+                default: return nil
+                }
             }
         }
-        guard count > 0 else { return nil }
-        return out.prefix(count)
     }
 
     private static func gzip(_ data: Data) -> Data? {
-        // Encode raw deflate via Compression.framework, then prepend
-        // a minimal 10-byte gzip header + append CRC32 + ISIZE.
-        var out = Data(count: max(data.count + 64, 4096))
+        // Streaming raw-deflate encode (no guessed output size).
         let deflated: Data
-        let count: Int = out.withUnsafeMutableBytes { dst in
-            data.withUnsafeBytes { src in
-                compression_encode_buffer(
-                    dst.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    dst.count,
-                    src.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    data.count,
-                    nil,
-                    COMPRESSION_ZLIB)
+        do {
+            let cap = 256 * 1024
+            let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: cap)
+            defer { dst.deallocate() }
+            var stream = compression_stream(dst_ptr: dst, dst_size: 0, src_ptr: dst, src_size: 0, state: nil)
+            guard compression_stream_init(&stream, COMPRESSION_STREAM_ENCODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
+                return nil
             }
-        }
-        if count <= 0 {
-            // Buffer too small — try once with a bigger one.
-            out = Data(count: max(data.count * 2, 16 * 1024 * 1024))
-            let c2: Int = out.withUnsafeMutableBytes { dst in
-                data.withUnsafeBytes { src in
-                    compression_encode_buffer(
-                        dst.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                        dst.count,
-                        src.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                        data.count,
-                        nil,
-                        COMPRESSION_ZLIB)
+            defer { compression_stream_destroy(&stream) }
+            var acc = Data()
+            let ok: Bool = data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Bool in
+                stream.src_ptr = src.baseAddress?.assumingMemoryBound(to: UInt8.self) ?? UnsafePointer(dst)
+                stream.src_size = src.count
+                while true {
+                    stream.dst_ptr = dst
+                    stream.dst_size = cap
+                    let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                    let produced = cap - stream.dst_size
+                    if produced > 0 { acc.append(dst, count: produced) }
+                    if status == COMPRESSION_STATUS_END { return true }
+                    if status != COMPRESSION_STATUS_OK { return false }
                 }
             }
-            guard c2 > 0 else { return nil }
-            deflated = out.prefix(c2)
-        } else {
-            deflated = out.prefix(count)
+            guard ok else { return nil }
+            deflated = acc
         }
 
         // Build gzip wrapper.
@@ -474,12 +521,17 @@ public enum NPMRegistryTransforms {
         return gz
     }
 
+    private static let crcTable: [UInt32] = (0..<256).map { n -> UInt32 in
+        var c = UInt32(n)
+        for _ in 0..<8 { c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1 }
+        return c
+    }
+
     private static func crc32(_ data: Data) -> UInt32 {
         var crc: UInt32 = 0xFFFF_FFFF
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                crc = (crc >> 1) ^ (UInt32(0xEDB88320) & UInt32(0 &- (crc & 1)))
+        crcTable.withUnsafeBufferPointer { t in
+            data.withUnsafeBytes { (b: UnsafeRawBufferPointer) in
+                for byte in b { crc = t[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8) }
             }
         }
         return crc ^ 0xFFFF_FFFF

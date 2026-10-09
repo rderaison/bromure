@@ -1040,6 +1040,10 @@ struct RoomTranscriptView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
                             TranscriptRowsView(items: items)
+                                // A picture the agent shows (display MCP) is read off its machine.
+                                .environment(\.displayFileReader, DisplayFileReader.chunked { op in
+                                    try? await controller.guestFileOp(session.profileID, op: op)
+                                })
                         }
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)

@@ -6,7 +6,7 @@ import Virtualization
 /// Manages a pool of pre-warmed Linux VMs for instant browser windows.
 ///
 /// Pre-boots a VM in the background so that "File > New Browser" is instant.
-/// When a VM is claimed (shown to user), the next one starts booting immediately.
+/// Optional replenishment keeps a spare VM available after a browser launch.
 private let bromureDebug = ProcessInfo.processInfo.environment["BROMURE_DEBUG"] != nil
 
 /// Outcome of the guest's boot-time network probe (see on-boot.sh).
@@ -42,7 +42,14 @@ public final class VMPool {
     public static var webcamResolutionProbe: ((_ cameraID: String?, _ quality: WebcamQuality) -> (width: Int, height: Int))?
 
     /// A pre-warmed VM ready to be shown to the user.
+    public final class RetirementState {
+        fileprivate var task: Task<Void, Never>?
+        fileprivate var completed = false
+    }
+
     public struct WarmVM {
+        public let retirement = RetirementState()
+        @MainActor public var resourcesReleased: Bool { retirement.completed }
         public let vm: VZVirtualMachine
         public let ephemeralDisk: EphemeralDisk
         public let serialInput: Pipe
@@ -65,6 +72,12 @@ public final class VMPool {
         public var networkReady: Bool { networkDiagnosisBox.value == .ok }
         /// Network mode the VM was booted/swapped to: "nat" or an interface name for bridged.
         public var bootedNetworkMode: String = "nat"
+        public var requestedMetalRenderer = false
+        public var graphicsSession: (any HostGraphicsSession)? = nil
+        public var additionalGraphicsSessions: [any HostGraphicsSession] = []
+        public var graphicsSessions: [any HostGraphicsSession] {
+            (graphicsSession.map { [$0] } ?? []) + additionalGraphicsSessions
+        }
     }
 
     private var config: VMConfig
@@ -85,7 +98,11 @@ public final class VMPool {
     /// sets this false to boot whatever complete boot set is present. Default
     /// true preserves Web's behaviour.
     private let requireImageVersion: Bool
+    private let experimentalGPU: Bool
+    /// Browser disables replacement VMs on hosts with shared browser windows.
+    private let automaticallyReplenishes: Bool
     private var warmVM: WarmVM?
+    private var shutdownRequested = false
     private var isWarming = false
     private var configListenerDelegate: ConfigListenerDelegate?
     private var configListenerCleanup: (() -> Void)?
@@ -109,14 +126,17 @@ public final class VMPool {
     }
 
     public init(config: VMConfig, storageDir: URL? = nil, isolatePeers: Bool = true,
-                requireImageVersion: Bool = true, pinnedOctet: UInt8? = nil) {
+                requireImageVersion: Bool = true, pinnedOctet: UInt8? = nil,
+                experimentalGPU: Bool? = nil, automaticallyReplenishes: Bool = true) {
         self.config = config
+        self.automaticallyReplenishes = automaticallyReplenishes
         let dir = storageDir ?? VMConfig.defaultStorageDirectory
         self.storageDir = dir
         self.imageManager = LinuxImageManager(storageDir: dir)
         self.isolatePeers = isolatePeers
         self.requireImageVersion = requireImageVersion
         self.pinnedOctet = pinnedOctet
+        self.experimentalGPU = experimentalGPU ?? MetalRendererPreference.isEnabled
     }
 
     /// Pre-warm a VM by booting it to an idle shell prompt.
@@ -124,15 +144,17 @@ public final class VMPool {
     /// The VM boots with no chrome-env, no services — just Alpine at a shell prompt.
     /// The guest xinitrc waits up to 120s for `/tmp/bromure/chrome-ready`, which is
     /// written later by `applyConfig(_:to:)` when the user claims the VM.
-    public func warmUp() async throws {
-        guard !isWarming, warmVM == nil else { return }
+    public func warmUp(requestedConfig: VMConfig? = nil) async throws {
+        guard !shutdownRequested, !isWarming, warmVM == nil else { return }
         isWarming = true
         defer { isWarming = false }
 
         let defaults = UserDefaults.standard
         let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
         let bridgedIface: String?
-        if networkMode == "bridged",
+        if let interface = requestedConfig?.networkInterface, !interface.isEmpty {
+            bridgedIface = interface == "nat" ? nil : interface
+        } else if networkMode == "bridged",
            let ifName = defaults.string(forKey: "vm.bridgedInterface"),
            !ifName.isEmpty {
             bridgedIface = ifName
@@ -140,7 +162,12 @@ public final class VMPool {
             bridgedIface = nil
         }
 
-        let warm = try await bootVM(bridgedInterface: bridgedIface)
+        let warm = try await bootVM(bridgedInterface: bridgedIface, requestedConfig: requestedConfig)
+        if shutdownRequested {
+            _ = await Self.releaseResources(warm)
+            warmingMAC = nil
+            return
+        }
         warmVM = warm
         warmingMAC = nil  // Now tracked by warmVM.macAddress
 
@@ -175,7 +202,8 @@ public final class VMPool {
     /// Boot a fresh VM with the specified network mode.
     /// - Parameter bridgedInterface: Interface name for bridged mode, or nil for NAT.
     /// - Returns: A booted WarmVM ready for claim.
-    private func bootVM(bridgedInterface: String?) async throws -> WarmVM {
+    private func bootVM(bridgedInterface: String?, requestedConfig: VMConfig? = nil) async throws -> WarmVM {
+        let config = requestedConfig ?? self.config
         let imageOK = requireImageVersion
             ? imageManager.baseImageExists       // files + version stamp
             : imageManager.hasBootFiles          // files only (reused image)
@@ -253,6 +281,36 @@ public final class VMPool {
             macAddress: mac
         )
 
+        var graphicsSession: (any HostGraphicsSession)?
+        var additionalGraphicsSessions: [any HostGraphicsSession] = []
+        let requestedMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
+            imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
+        if requestedMetal, #available(macOS 27.0, *) {
+            do {
+                guard (1...16).contains(config.experimentalGPUCount), (1...16).contains(config.sharedWindowScanoutCount),
+                      config.sharedWindowScanoutCount == 1 || config.experimentalGPUCount == 1 else {
+                    throw SandboxError.vmStartFailed("Experimental GPU count must be 1 through 16")
+                }
+                var sessions: [MacOS27GPUSession] = []
+                do {
+                    for _ in 0..<config.experimentalGPUCount {
+                        sessions.append(try await MacOS27GPUSession.create(
+                            width: config.displayWidth, height: config.displayHeight + config.nativeChromeInset,
+                            scanoutCount: config.sharedWindowScanoutCount))
+                    }
+                    vzConfig.customVirtioDevices = sessions.map { $0.configuration }
+                    try vzConfig.validate()
+                } catch {
+                    sessions.forEach { $0.stop() }; vzConfig.customVirtioDevices = []; throw error
+                }
+                graphicsSession = sessions.first
+                additionalGraphicsSessions = Array(sessions.dropFirst())
+                print("[VMPool] Sandboxed VirGL/Metal renderer selected (\(sessions.count) GPU devices)")
+            } catch {
+                print("[VMPool] Experimental GPU unavailable; using software: \(error)")
+            }
+        }
+
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
@@ -304,7 +362,10 @@ public final class VMPool {
             serialWaiter: waiter,
             macAddress: mac,
             networkDiagnosisBox: diagnosisBox,
-            bootedNetworkMode: bootedNetworkMode
+            bootedNetworkMode: bootedNetworkMode,
+            requestedMetalRenderer: requestedMetal,
+            graphicsSession: graphicsSession,
+            additionalGraphicsSessions: additionalGraphicsSessions
         )
     }
 
@@ -322,11 +383,20 @@ public final class VMPool {
         profileID: UUID? = nil,
         profileImageDir: URL? = nil,
         profileDiskKey: String? = nil,
-        restoreSession: Bool = false
+        restoreSession: Bool = false,
+        onColdBoot: (() -> Void)? = nil
     ) async -> WarmVM? {
+        guard !shutdownRequested else { return nil }
+        var reportedColdBoot = false
+        func reportColdBoot() {
+            guard !reportedColdBoot else { return }
+            reportedColdBoot = true
+            onColdBoot?()
+        }
         // If no pre-warmed VM is available, warm up on demand.
         // If another task is already warming up, wait for it to finish.
         if warmVM == nil {
+            reportColdBoot()
             if isWarming {
                 // Another task is warming up — poll until it finishes
                 for _ in 0..<300 { // up to 30s
@@ -335,20 +405,20 @@ public final class VMPool {
                 }
             }
             if warmVM == nil {
-                try? await warmUp()
+                try? await warmUp(requestedConfig: config)
             }
         }
         // If the warm VM died (e.g. pool was restarted), discard and warm a fresh one.
         // Paused is valid (pool suspends after 30s idle).
         if let warm = warmVM, warm.vm.state != .running && warm.vm.state != .paused {
+            reportColdBoot()
             print("[VMPool] claim: discarding dead warm VM (state=\(warm.vm.state.rawValue))")
-            if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
-            try? warm.ephemeralDisk.destroy()
+            _ = await Self.releaseResources(warm)
             warmVM = nil
-            try? await warmUp()
+            try? await warmUp(requestedConfig: config)
         }
 
-        // Check if the profile needs a different network mode than the pool VM.
+        // Check whether the profile needs different networking or rendering than the pool VM.
         // If so, boot a dedicated VM with the right network from the start.
         // The pool VM is left for other profiles that match the global setting.
         let profileNetwork: String
@@ -366,11 +436,29 @@ public final class VMPool {
             profileBridgedIface = nil  // will use pool VM as-is
         }
 
-        if let warm = warmVM, profileNetwork != warm.bootedNetworkMode {
-            print("[VMPool] claim: profile needs \(profileNetwork) but pool has \(warm.bootedNetworkMode) — booting dedicated VM")
+        let profileWantsMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
+            imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
+        if let warm = warmVM,
+           profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer ||
+            (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
+             config.experimentalGPUCount != warm.graphicsSessions.count) ||
+            (profileWantsMetal && config.sharedWindowScanoutCount != (warm.graphicsSession?.outputCapacity ?? 1)) {
+            reportColdBoot()
+            print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
+            if !automaticallyReplenishes, let unused = warmVM {
+                warmVM = nil
+                suspendTimer?.invalidate()
+                suspendTimer = nil
+                _ = await Self.releaseResources(unused)
+            }
             do {
-                let dedicated = try await bootVM(bridgedInterface: profileBridgedIface)
+                let dedicated = try await bootVM(bridgedInterface: profileBridgedIface,
+                                                 requestedConfig: config)
                 warmingMAC = nil
+                guard !shutdownRequested else {
+                    _ = await Self.releaseResources(dedicated)
+                    return nil
+                }
                 deflateBalloon(vm: dedicated.vm)
                 var warm = dedicated
                 warm = applyNetworkFiltering(warm: warm, config: config)
@@ -382,6 +470,10 @@ public final class VMPool {
                     }
                 }
                 await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: profileImageDir != nil, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
+                guard !shutdownRequested else {
+                    _ = await Self.releaseResources(warm)
+                    return nil
+                }
                 print("[VMPool] claim: dedicated VM ready")
                 // Schedule pool replacement
                 scheduleWarmUp(delay: .seconds(3))
@@ -408,13 +500,15 @@ public final class VMPool {
                 print("[VMPool] Resumed pre-warmed VM for claim")
             } catch {
                 print("[VMPool] Failed to resume pre-warmed VM: \(error)")
-                if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
-                try? warm.ephemeralDisk.destroy()
-                warm.networkFilter?.stop()
+                _ = await Self.releaseResources(warm)
                 return nil
             }
         }
 
+        guard !shutdownRequested else {
+            _ = await Self.releaseResources(warm)
+            return nil
+        }
         // Deflate balloon — give all memory back before running the browser
         deflateBalloon(vm: warm.vm)
         print("[VMPool] claim: balloon deflated")
@@ -439,12 +533,17 @@ public final class VMPool {
 
         await applyConfig(config, to: warm, profileID: profileID, hasProfileDisk: profileImageDir != nil, profileDiskKey: profileDiskKey, restoreSession: restoreSession)
         print("[VMPool] claim: config applied, returning VM")
+        guard !shutdownRequested else {
+            _ = await Self.releaseResources(warm)
+            return nil
+        }
         return warm
     }
 
     /// Schedule a warm-up after a delay, to avoid resource contention with the
     /// session that just launched.
     public func scheduleWarmUp(delay: Duration = .seconds(20)) {
+        guard automaticallyReplenishes, !shutdownRequested else { return }
         Task {
             try? await Task.sleep(for: delay)
             try? await warmUp()
@@ -513,6 +612,8 @@ public final class VMPool {
         // through the SOCKS forwarder). Takes precedence over the above in
         // config-agent, so the browser reaches the remote guest's dev server.
         if let pac = config.proxyPacBase64 { cfg["proxyPacB64"] = pac }
+        if warm.graphicsSessions.count > 1 { cfg["experimentalGPUCount"] = warm.graphicsSessions.count }
+        cfg["graphicsBackend"] = config.enableGPU ? (warm.graphicsSession?.backendName ?? "software") : "software"
         if !config.enableGPU { cfg["disableGPU"] = true }
         if !config.enableWebGL { cfg["disableWebGL"] = true }
         if config.enableGPU { cfg["gpuAccel"] = true }
@@ -686,6 +787,10 @@ public final class VMPool {
         //   defaults write io.bromure.app vm.extraChromeFlags -string "--foo --bar"
         //   defaults write io.bromure.app vm.chromeEnvExtra -string "LP_NUM_THREADS=8"
         var extraChromeFlags = UserDefaults.standard.string(forKey: "vm.extraChromeFlags") ?? ""
+        if warm.graphicsSession?.backendName == "virgl" {
+            // The Metal renderer exposes GLES; Chromium's desktop GL path needs a core profile.
+            extraChromeFlags = "--use-angle=gles " + extraChromeFlags
+        }
         // Software display compositing. The guest has no GPU: virtio-gpu
         // offers no 3D, so "GPU acceleration" runs Chromium's GL compositor
         // on llvmpipe (CPU). Measured while flinging a page (7 vCPUs, 2x
@@ -694,9 +799,15 @@ public final class VMPool {
         // ~90% with identical frame timing. Less CPU per frame is also
         // what keeps 120 Hz scrolling from dropping frames.
         // Escape hatch: defaults write io.bromure.app vm.gpuCompositing -bool YES
-        if config.enableGPU,
+        if config.enableGPU, warm.graphicsSession == nil,
            !(UserDefaults.standard.object(forKey: "vm.gpuCompositing") as? Bool ?? false) {
             extraChromeFlags = (extraChromeFlags + " --disable-gpu-compositing")
+                .trimmingCharacters(in: .whitespaces)
+        }
+        // GPU off (--disable-gpu) with WebGL on: Chromium no longer falls back
+        // to SwiftShader for WebGL on its own, so WebGL would silently vanish.
+        if !config.enableGPU, config.enableWebGL {
+            extraChromeFlags = (extraChromeFlags + " --enable-unsafe-swiftshader")
                 .trimmingCharacters(in: .whitespaces)
         }
         // Profile opt-out of strict site isolation (Performance pane). The
@@ -976,7 +1087,7 @@ public final class VMPool {
         warmVM = nil
         suspendTimer?.invalidate()
         suspendTimer = nil
-        await Self.tearDown(warm)
+        _ = await Self.releaseResources(warm)
     }
 
     /// Tear down a WarmVM that was already handed out via `claim()` (so it's
@@ -984,30 +1095,51 @@ public final class VMPool {
     /// must be discarded — e.g. user cancelled or the network was wedged
     /// and we're about to repair + re-claim.
     public func retire(_ warm: WarmVM) async {
-        await Self.tearDown(warm)
+        _ = await Self.releaseResources(warm)
     }
 
-    private static func tearDown(_ warm: WarmVM) async {
-        if let mac = warm.macAddress {
-            MACAddressPool.shared.release(mac)
-        }
-        // Detach the shared VMNetSwitch port / close the proxy socketpairs and
-        // free the DHCP lease. Explicit because relying on NetworkFilter.deinit
-        // leaks a socketpair + switch port per VM (see fullCleanup). Idempotent.
-        warm.networkFilter?.stop()
-        if warm.vm.state == .running || warm.vm.state == .paused {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                DispatchQueue.main.async {
-                    warm.vm.stop { _ in cont.resume() }
+    /// All copies of WarmVM share this owner. Timeout leaves the task alive;
+    /// it reaps resources only after an explicit terminal VZ state.
+    public static func releaseResources(_ warm: WarmVM) async -> Bool {
+        let state = warm.retirement
+        if state.completed { return true }
+        if state.task == nil {
+            state.task = Task { @MainActor in
+                var stopRequested = false
+                while warm.vm.state != .stopped && warm.vm.state != .error {
+                    if !stopRequested && (warm.vm.state == .running || warm.vm.state == .paused) {
+                        stopRequested = true
+                        DispatchQueue.main.async {
+                            warm.vm.stop { error in
+                                if let error {
+                                    print("[VMPool] Stop failed; retaining ownership: \(error)")
+                                }
+                            }
+                        }
+                    }
+                    try? await Task.sleep(for: .milliseconds(50))
                 }
+                if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
+                warm.networkFilter?.stop()
+                warm.graphicsSessions.forEach { $0.stop() }
+                warm.serialOutput.fileHandleForReading.readabilityHandler = nil
+                warm.serialInput.fileHandleForWriting.readabilityHandler = nil
+                try? warm.serialOutput.fileHandleForReading.close()
+                try? warm.serialOutput.fileHandleForWriting.close()
+                try? warm.serialInput.fileHandleForReading.close()
+                try? warm.serialInput.fileHandleForWriting.close()
+                try? warm.ephemeralDisk.destroy()
+                state.completed = true
+                state.task = nil
             }
         }
-        warm.serialOutput.fileHandleForReading.readabilityHandler = nil
-        try? warm.serialOutput.fileHandleForReading.close()
-        try? warm.serialOutput.fileHandleForWriting.close()
-        try? warm.serialInput.fileHandleForReading.close()
-        try? warm.serialInput.fileHandleForWriting.close()
-        try? warm.ephemeralDisk.destroy()
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        while !state.completed && ProcessInfo.processInfo.systemUptime < deadline {
+            do { try await Task.sleep(for: .milliseconds(50)) }
+            catch { return false } // The independent retirement owner keeps running.
+        }
+        if !state.completed { print("[VMPool] Cleanup timed out; owner will reap after VM stops") }
+        return state.completed
     }
 
     /// Shut down the pool and clean up.
@@ -1015,11 +1147,9 @@ public final class VMPool {
         suspendTimer?.invalidate()
         suspendTimer = nil
 
-        // Release any in-flight MAC from a warmUp() that hasn't finished yet.
-        if let mac = warmingMAC {
-            MACAddressPool.shared.release(mac)
-            warmingMAC = nil
-        }
+        // An in-flight boot retains its lease; warmUp retires its result rather
+        // than publishing it after shutdown. Never release a bare boot MAC.
+        shutdownRequested = true
 
         if let warm = warmVM {
             // Release DHCP lease so vmnet reclaims the address
@@ -1027,27 +1157,7 @@ public final class VMPool {
                 warm.serialInput.fileHandleForWriting.write(Data("udhcpc -R -i eth0 2>/dev/null\n".utf8))
                 try? await Task.sleep(for: .milliseconds(500))
             }
-            // Release MAC address back to the pool
-            if let mac = warm.macAddress {
-                MACAddressPool.shared.release(mac)
-            }
-            if warm.vm.state == .running || warm.vm.state == .paused {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    DispatchQueue.main.async {
-                        warm.vm.stop { _ in cont.resume() }
-                    }
-                }
-            }
-            warm.serialOutput.fileHandleForReading.readabilityHandler = nil
-            warm.serialInput.fileHandleForWriting.readabilityHandler = nil
-            try? warm.serialOutput.fileHandleForReading.close()
-            try? warm.serialOutput.fileHandleForWriting.close()
-            try? warm.serialInput.fileHandleForReading.close()
-            try? warm.serialInput.fileHandleForWriting.close()
-            try? warm.ephemeralDisk.destroy()
-            // Detach the switch port / close proxy socketpairs (see tearDown).
-            warm.networkFilter?.stop()
-            warmVM = nil
+            if await Self.releaseResources(warm) { warmVM = nil }
         }
     }
 
@@ -1326,7 +1436,7 @@ private final class RejectListenerDelegate: NSObject, VZVirtioSocketListenerDele
         from socketDevice: VZVirtioSocketDevice
     ) -> Bool {
         // Close the fd immediately so the guest agent gets EOF and exits.
-        Darwin.close(conn.fileDescriptor)
+        conn.close()   // VZ owns the fd: closing it here closed it twice
         return true
     }
 }

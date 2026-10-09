@@ -58,7 +58,8 @@ final class RulesFileScanner: @unchecked Sendable {
     /// Extract instruction-file spans from the system prompt, scan each,
     /// and log any findings. No-op when nothing matches. Cheap (string
     /// scans) — safe to call inline from the trace path.
-    func scanAndLog(systemPrompt: String?, host: String, profileID: UUID) {
+    func scanAndLog(systemPrompt: String?, extraSpans: [Span] = [], host: String, profileID: UUID) {
+        scanSpansAndLog(extraSpans, host: host, profileID: profileID)
         guard let systemPrompt, !systemPrompt.isEmpty else { return }
 
         // The whole system prompt is fair game for the hidden-Unicode
@@ -80,6 +81,10 @@ final class RulesFileScanner: @unchecked Sendable {
         }
         globalFindings.removeAll()
 
+        scanSpansAndLog(spans, host: host, profileID: profileID)
+    }
+
+    private func scanSpansAndLog(_ spans: [Span], host: String, profileID: UUID) {
         for span in spans {
             var findings = Self.scanHiddenUnicode(span.content)
             findings += Self.scanInstructionContent(span.content)
@@ -95,12 +100,19 @@ final class RulesFileScanner: @unchecked Sendable {
     /// Enforcement variant: returns the first high-severity flagged span
     /// (source + a preview of its content) for the ask/block path, or nil.
     /// No dedup/logging — the caller decides what to do.
-    func detect(systemPrompt: String?) -> (source: String, preview: String)? {
+    func detect(systemPrompt: String?, extraSpans: [Span] = []) -> (source: String, preview: String)? {
+        for span in Self.scannable(extraSpans) {
+            var findings = Self.scanHiddenUnicode(span.content)
+            findings += Self.scanInstructionContent(span.content)
+            if let f = findings.first(where: { $0.severity == .high }) {
+                return (span.source, Self.preview(span.content, finding: f))
+            }
+        }
         guard let systemPrompt, !systemPrompt.isEmpty else { return nil }
         if let f = Self.scanHiddenUnicode(systemPrompt).first(where: { $0.severity == .high }) {
             return ("the system prompt", Self.preview(systemPrompt, finding: f))
         }
-        for span in Self.extractInstructionSpans(systemPrompt) {
+        for span in Self.scannable(Self.extractInstructionSpans(systemPrompt)) {
             var findings = Self.scanHiddenUnicode(span.content)
             findings += Self.scanInstructionContent(span.content)
             if let f = findings.first(where: { $0.severity == .high }) {
@@ -134,9 +146,105 @@ final class RulesFileScanner: @unchecked Sendable {
     /// input tuples (`id` = the cited path) — lets the ModernBERT model run a
     /// semantic pass over the same CLAUDE.md / AGENTS.md / GROK.md bodies the
     /// heuristics scan.
-    static func classifierSpans(_ systemPrompt: String?) -> [(id: String?, content: String)] {
-        guard let systemPrompt else { return [] }
-        return extractInstructionSpans(systemPrompt).map { (id: $0.source, content: $0.content) }
+    /// True when `content` alone trips the deterministic pass (a high
+    /// finding) — which span a `detect` hit came from, for redaction.
+    static func isHighRisk(_ content: String) -> Bool {
+        (scanHiddenUnicode(content) + scanInstructionContent(content)).contains { $0.severity == .high }
+    }
+
+    /// Instruction spans as the scanners should read them: a body Bromure
+    /// already withheld (`PromptInjectionRedactions.instructionsPlaceholder`)
+    /// has nothing left to scan.
+    static func scannable(_ spans: [Span]) -> [Span] {
+        spans.filter { !PromptInjectionRedactions.isWithheldInstructions($0.content) }
+    }
+
+    static func classifierSpans(_ systemPrompt: String?,
+                                extraSpans: [Span] = []) -> [(id: String?, content: String)] {
+        let spans = scannable((systemPrompt.map(extractInstructionSpans) ?? []) + extraSpans)
+        return spans.map { (id: $0.source, content: $0.content) }
+    }
+
+    // MARK: - Instruction files riding in the conversation
+
+    /// Repo instruction files an agent pastes into the CONVERSATION rather
+    /// than the system prompt — untrusted content (a cloned repo ships its
+    /// own) that the model still reads as direction:
+    ///   - Codex ≥ 0.15x: a user message `# AGENTS.md instructions for <dir>`
+    ///     wrapping the file in `<INSTRUCTIONS>…</INSTRUCTIONS>`; older Codex:
+    ///     `<user_instructions>…</user_instructions>`.
+    ///   - Claude Code: a `<system-reminder>` carrying
+    ///     `Contents of <path>/CLAUDE.md (project instructions…):` bodies.
+    /// Only the file bodies are returned — never the text the user typed
+    /// alongside them, which is the user's own direction.
+    static func conversationInstructionSpans(_ conv: Conversation) -> [Span] {
+        var spans: [Span] = []
+        for message in conv.messages where message.role == .user || message.role == .system {
+            for block in message.content {
+                guard case let .text(text) = block else { continue }
+                spans += instructionSpans(inMessageText: text)
+            }
+        }
+        // History repeats every turn; one span per distinct body.
+        var seen = Set<String>()
+        return spans.filter { seen.insert($0.source + "\u{1}" + $0.content).inserted }
+    }
+
+    static func instructionSpans(inMessageText text: String) -> [Span] {
+        var spans: [Span] = []
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Codex: "# AGENTS.md instructions for /path\n\n<INSTRUCTIONS>…".
+        let codexHeader = "# AGENTS.md instructions for "
+        if trimmed.hasPrefix(codexHeader) {
+            let firstLine = trimmed.prefix { $0 != "\n" }
+            let dir = firstLine.dropFirst(codexHeader.count).trimmingCharacters(in: .whitespaces)
+            let source = dir.isEmpty ? "AGENTS.md" : (dir.hasSuffix("/") ? dir : dir + "/") + "AGENTS.md"
+            let body = between(trimmed, "<INSTRUCTIONS>", "</INSTRUCTIONS>")
+                ?? String(trimmed.dropFirst(firstLine.count))
+            let content = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !content.isEmpty { spans.append(Span(source: source, content: content)) }
+        }
+        if let body = between(trimmed, "<user_instructions>", "</user_instructions>") {
+            let content = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !content.isEmpty { spans.append(Span(source: "AGENTS.md", content: content)) }
+        }
+        // Claude Code: instruction files inside <system-reminder> blocks only
+        // (a user typing "Contents of …" in their own prompt isn't a file).
+        var rest = Substring(text)
+        while let open = rest.range(of: "<system-reminder>") {
+            let after = rest[open.upperBound...]
+            let close = after.range(of: "</system-reminder>")
+            let inner = close.map { after[..<$0.lowerBound] } ?? after
+            for span in extractInstructionSpans(String(inner)) {
+                let content = trimReminderTail(span.content)
+                if !content.isEmpty { spans.append(Span(source: span.source, content: content)) }
+            }
+            guard let close else { break }
+            rest = after[close.upperBound...]
+        }
+        return spans
+    }
+
+    /// Claude Code's reminder continues past the files with its own sections
+    /// (`# currentDate` …) and a closing disclaimer — not file content.
+    private static func trimReminderTail(_ body: String) -> String {
+        let sectionHeads: Set<String> = ["# currentDate", "# userEmail", "# gitStatus",
+                                         "# claudeMd", "# todoList", "# importantInstructionReminders"]
+        var kept: [Substring] = []
+        for line in body.split(separator: "\n", omittingEmptySubsequences: false) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if sectionHeads.contains(t)
+                || t.hasPrefix("IMPORTANT: this context may or may not be relevant") { break }
+            kept.append(line)
+        }
+        return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func between(_ s: String, _ open: String, _ close: String) -> String? {
+        guard let a = s.range(of: open) else { return nil }
+        let tail = s[a.upperBound...]
+        guard let b = tail.range(of: close) else { return String(tail) }
+        return String(tail[..<b.lowerBound])
     }
 
     private func dedupe(_ key: String) -> Bool {

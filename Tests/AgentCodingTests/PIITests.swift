@@ -267,4 +267,301 @@ struct PIIWireTests {
         out += r.finish()
         #expect(String(decoding: out, as: UTF8.self) == #"{"content":[{"type":"text","text":"Dear Alexandra"}],"signature":"\#(s)"}"#)
     }
+
+    // MARK: Kimi / OpenAI chat: tool-call arguments and escapes
+
+    private func chatEvents(_ out: Data) -> [[String: Any]] {
+        String(decoding: out, as: UTF8.self).components(separatedBy: "\n")
+            .filter { $0.hasPrefix("data: {") }
+            .map { try! JSONSerialization.jsonObject(with: Data($0.dropFirst(6).utf8)) as! [String: Any] }
+    }
+
+    @Test("Kimi stream: tool-call arguments split mid stand-in and after \\n escapes are restored")
+    func kimiToolCallStream() throws {
+        let vault = PIIVault(secret: secret)
+        let name = vault.learn("Margaret", label: .givenName).surrogate
+        let mail = vault.learn("margaret.holloway@example.org", label: .email).surrogate
+        let phone = vault.learn("+1 415 555 0142", label: .phone).surrogate
+        let r = PIIResponseRestorer(vault: vault, contentType: "text/event-stream")
+        // The arguments JSON as the model writes it, cut into small fragments
+        // at awkward places (inside stand-ins, inside the `\n` escape).
+        let args = #"{"path":"/home/ubuntu/s2pii.txt","content":"\#(name)\n\#(mail)\n\#(phone)\n"}"#
+        var pieces: [String] = []
+        var rest = Substring(args)
+        var size = 3
+        while !rest.isEmpty { pieces.append(String(rest.prefix(size))); rest = rest.dropFirst(size); size = size % 7 + 2 }
+        func ev(_ obj: [String: Any]) -> String {
+            String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+        }
+        var events = [ev(["object": "chat.completion.chunk", "choices": [["index": 0, "delta": [
+            "role": "assistant", "content": "",
+            "tool_calls": [["index": 0, "id": "WriteFile:0", "type": "function",
+                            "function": ["name": "WriteFile", "arguments": ""]]]]]]])]
+        for p in pieces {
+            events.append(ev(["object": "chat.completion.chunk", "choices": [["index": 0, "finish_reason": NSNull(), "delta": [
+                "tool_calls": [["index": 0, "function": ["arguments": p]]]]]]]))
+        }
+        events.append(ev(["object": "chat.completion.chunk", "choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]]))
+        events.append(ev(["object": "chat.completion.chunk", "choices": [], "usage": ["total_tokens": 9]]))
+        var out = Data()
+        // Feed in odd byte slices, as the network would.
+        let wire = Data(events.map { "data: \($0)\n\n" }.joined().utf8) + Data("data: [DONE]\n\n".utf8)
+        var i = 0
+        while i < wire.count { out += r.feed(wire.subdata(in: i..<min(wire.count, i + 37))); i += 37 }
+        out += r.finish()
+        var joined = ""
+        for o in chatEvents(out) {
+            for c in o["choices"] as? [[String: Any]] ?? [] {
+                for t in (c["delta"] as? [String: Any])?["tool_calls"] as? [[String: Any]] ?? [] {
+                    joined += (t["function"] as? [String: Any])?["arguments"] as? String ?? ""
+                }
+            }
+        }
+        let parsed = try JSONSerialization.jsonObject(with: Data(joined.utf8)) as! [String: String]
+        #expect(parsed["content"] == "Margaret\nmargaret.holloway@example.org\n+1 415 555 0142\n")
+    }
+
+    @Test("Kimi stream: reply text and visible reasoning are restored")
+    func kimiTextAndReasoning() {
+        let vault = PIIVault(secret: secret)
+        let s = vault.learn("Holloway", label: .surname).surrogate
+        let r = PIIResponseRestorer(vault: vault, contentType: "text/event-stream; charset=utf-8")
+        var out = r.feed(Data(("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"user is \(s.prefix(2))\"}}]}\n\n"
+            + "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"\(s.dropFirst(2))\"}}]}\n\n"
+            + "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Dear Ms \(s.prefix(3))\"}}]}\n\n"
+            + "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\(s.dropFirst(3))\\nbye\"}}]}\n\n"
+            + "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n").utf8))
+        out += r.finish()
+        var text = "", reasoning = ""
+        for o in chatEvents(out) {
+            let d = ((o["choices"] as! [[String: Any]])[0]["delta"] as? [String: Any]) ?? [:]
+            text += d["content"] as? String ?? ""
+            reasoning += d["reasoning_content"] as? String ?? ""
+        }
+        #expect(text == "Dear Ms Holloway\nbye")
+        #expect(reasoning == "user is Holloway")
+    }
+
+    @Test("Non-streaming chat reply: tool-call arguments restored inside their JSON")
+    func chatJSONArguments() throws {
+        let vault = PIIVault(secret: secret)
+        let mail = vault.learn("o\"neil@corp.com", label: .email).surrogate
+        let name = vault.learn("Alexandra", label: .givenName).surrogate
+        let args = #"{"content":"\#(name)\n\#(mail)"}"#
+        let body: [String: Any] = ["choices": [["index": 0, "message": [
+            "role": "assistant", "content": "Wrote it for \(name).",
+            "tool_calls": [["id": "c1", "type": "function", "function": ["name": "WriteFile", "arguments": args]]]]]]]
+        let r = PIIResponseRestorer(vault: vault, contentType: "application/json")
+        var out = r.feed(try JSONSerialization.data(withJSONObject: body))
+        out += r.finish()
+        let o = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+        let msg = (o["choices"] as! [[String: Any]])[0]["message"] as! [String: Any]
+        #expect(msg["content"] as? String == "Wrote it for Alexandra.")
+        let call = (msg["tool_calls"] as! [[String: Any]])[0]["function"] as! [String: Any]
+        let inner = try JSONSerialization.jsonObject(with: Data((call["arguments"] as! String).utf8)) as! [String: String]
+        #expect(inner["content"] == "Alexandra\no\"neil@corp.com")
+    }
+
+    @Test("Anthropic input_json_delta: a stand-in after an escaped newline, split across deltas")
+    func anthropicToolInput() throws {
+        let vault = PIIVault(secret: secret)
+        let mail = vault.learn("bob@corp.com", label: .email).surrogate
+        let r = PIIResponseRestorer(vault: vault, contentType: "text/event-stream")
+        let raw = #"{"text":"hi\n\#(mail)"}"#
+        let cut1 = raw.index(raw.startIndex, offsetBy: 11)        // inside "\n"
+        let cut2 = raw.index(cut1, offsetBy: 5)
+        func delta(_ p: Substring) -> String {
+            let o: [String: Any] = ["type": "content_block_delta", "index": 1,
+                                    "delta": ["type": "input_json_delta", "partial_json": String(p)]]
+            return String(decoding: try! JSONSerialization.data(withJSONObject: o), as: UTF8.self)
+        }
+        var out = r.feed(sse([delta(raw[..<cut1]), delta(raw[cut1..<cut2])]))
+        out += r.feed(sse([delta(raw[cut2...]), #"{"type":"content_block_stop","index":1}"#]))
+        out += r.finish()
+        var json = ""
+        for o in chatEvents(out) { json += ((o["delta"] as? [String: Any])?["partial_json"] as? String) ?? "" }
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: String]
+        #expect(parsed["text"] == "hi\nbob@corp.com")
+    }
+
+    @Test("Responses API: function-call argument deltas and the .done event are restored")
+    func responsesArguments() throws {
+        let vault = PIIVault(secret: secret)
+        let name = vault.learn("Alexandra", label: .givenName).surrogate
+        let r = PIIResponseRestorer(vault: vault, contentType: "text/event-stream")
+        let raw = #"{"cmd":"echo\n\#(name)"}"#
+        let mid = raw.index(raw.startIndex, offsetBy: raw.count - 5)
+        func d(_ p: Substring) -> String {
+            let o: [String: Any] = ["type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": String(p)]
+            return String(decoding: try! JSONSerialization.data(withJSONObject: o), as: UTF8.self)
+        }
+        let done: [String: Any] = ["type": "response.function_call_arguments.done", "item_id": "fc_1", "arguments": raw]
+        var out = r.feed(sse([d(raw[..<mid]), d(raw[mid...])]))
+        out += r.feed(sse([String(decoding: try JSONSerialization.data(withJSONObject: done), as: UTF8.self)]))
+        out += r.finish()
+        var streamed = ""
+        var final = ""
+        for o in chatEvents(out) {
+            if o["type"] as? String == "response.function_call_arguments.delta" { streamed += o["delta"] as? String ?? "" }
+            if o["type"] as? String == "response.function_call_arguments.done" { final = o["arguments"] as? String ?? "" }
+        }
+        let want = #"{"cmd":"echo\nAlexandra"}"#
+        #expect(streamed == want)
+        #expect(final == want)
+    }
+
+    @Test("Request: tool-call arguments swap per inner string; one stand-in per value")
+    func requestArguments() async throws {
+        let vault = PIIVault(secret: secret)
+        let mail = "margaret.holloway@example.org"
+        let args = #"{"path":"/tmp/x","content":"Hello\n\#(mail)\n"}"#
+        let msgs: [[String: Any]] = [
+            ["role": "user", "content": "Write \(mail) to a file"],
+            ["role": "assistant", "content": "", "tool_calls": [["id": "c1", "type": "function",
+                "function": ["name": "WriteFile", "arguments": args]]]],
+            ["role": "tool", "tool_call_id": "c1", "content": "wrote 2 lines"],
+        ]
+        let body = try JSONSerialization.data(withJSONObject: ["model": "kimi", "messages": msgs])
+        let o = await PIIRewriter.rewriteRequest(body, policy: PIIPolicy(enabled: true), vault: vault)
+        let out = try JSONSerialization.jsonObject(with: o.body) as! [String: Any]
+        let m = out["messages"] as! [[String: Any]]
+        let sub = vault.learn(mail, label: .email).surrogate
+        #expect(m[0]["content"] as? String == "Write \(sub) to a file")
+        let a = ((m[1]["tool_calls"] as! [[String: Any]])[0]["function"] as! [String: Any])["arguments"] as! String
+        let inner = try JSONSerialization.jsonObject(with: Data(a.utf8)) as! [String: String]
+        #expect(inner["content"] == "Hello\n\(sub)\n")
+        #expect(!String(decoding: o.body, as: UTF8.self).contains("nmargaret"))
+    }
+
+    @Test("A stand-in echoed back by the agent is never learned as a new value")
+    func surrogateNotRelearned() async throws {
+        let vault = PIIVault(secret: secret)
+        let sub = vault.learn("margaret.holloway@example.org", label: .email).surrogate
+        let body = try JSONSerialization.data(withJSONObject: ["model": "k", "messages": [
+            ["role": "user", "content": "the file says \(sub)"]]])
+        let o = await PIIRewriter.rewriteRequest(body, policy: PIIPolicy(enabled: true), vault: vault)
+        #expect(o.body == body)
+        #expect(o.total == 0)
+        #expect(vault.restore(sub) == "margaret.holloway@example.org")
+    }
+}
+
+@Suite("PII false positives in agent traffic")
+struct PIIFalsePositiveTests {
+    private func kept(_ text: String, _ needle: String, _ label: PIILabel, score: Double = 0.95) -> Bool {
+        let r = (text as NSString).range(of: needle)
+        precondition(r.location != NSNotFound, needle)
+        let span = PIISpan(start: r.location, end: NSMaxRange(r), label: label, score: score, heuristic: false)
+        return !PIIRewriter.plan([span], in: text, policy: PIIPolicy(enabled: true)).isEmpty
+    }
+
+    @Test("Hashes, UUID pieces, generated ids and timestamps are not ID numbers or phones")
+    func noFalseIDs() {
+        let uuid = "Session ec0b1592-369c-4f63-b5af-174c02268e1d resumed"
+        #expect(!kept(uuid, "174c02268e1d", .driversLicense))
+        #expect(!kept(uuid, "369c-4f63", .governmentID))
+        #expect(!kept("commit 53ABE468 fixes the build", "53ABE468", .passport))
+        #expect(!kept("HEAD is now at 8ff43487 Fix session-scoped queues", "8ff43487", .governmentID))
+        #expect(!kept("job id b3p1d0w0o finished", "b3p1d0w0o", .driversLicense))
+        #expect(!kept("request 7222-47b2-8dc5 ok", "7222-47b2-8dc5", .driversLicense))
+        #expect(!kept("trace 0DE95A8B-6211-4679-9731-B17B420D8 done", "4679-9731", .phone))
+        #expect(!kept("2026-10-04 12:30:45 [info] started", "2026-10-04", .phone))
+        #expect(!kept("  1427\tlet x = 1\n  1428\tlet y = 2", "1427", .buildingNumber))
+        #expect(!kept("sed -n 55,330p HTTPProxy.swift", "55,330p", .streetName))
+        #expect(!kept("added 18 new keys to the catalog", "18 new keys", .streetName))
+        #expect(!kept("build 4679 9731 passed", "4679 9731", .phone))
+        #expect(!kept("token W3RD8G85BC rotated", "W3RD8G85BC", .driversLicense))
+        #expect(!kept("Co-Authored-By: Claude <noreply@anthropic.com>", "noreply@anthropic.com", .email))
+        #expect(!kept("Read FC debug output", "Read FC debug", .surname))
+    }
+
+    @Test("Real personal data still gets through the tightened rules")
+    func truePositives() {
+        #expect(kept("My passport number is X1234567.", "X1234567", .passport))
+        #expect(kept("Driver's license: D1234567", "D1234567", .driversLicense))
+        #expect(kept("IBAN DE89370400440532013000 please", "DE89370400440532013000", .bankAccount))
+        #expect(kept("routing 021000021 acct", "021000021", .routingNumber))
+        #expect(!kept("routing 021000022 acct", "021000022", .routingNumber))     // bad checksum
+        #expect(kept("call me at +1 415 555 0142", "+1 415 555 0142", .phone))
+        #expect(kept("reach her on 06 12 34 56 78", "06 12 34 56 78", .phone))
+        #expect(kept("phone: 5550142999", "5550142999", .phone))
+        #expect(kept("living at 1427 Juniper Hollow Road, Portland", "1427 Juniper Hollow Road", .streetName))
+        #expect(kept("My customer is Margaret Holloway", "Margaret Holloway", .givenName))
+    }
+
+    @Test("Realistic agent traffic swaps nothing")
+    func agentTrafficZeroSwaps() async throws {
+        let toolOut = """
+        commit 8ff43487a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6
+        Author: CI Bot <noreply@example.com>
+        Date:   2026-10-04 12:30:45 +0200
+
+            Fix session-scoped queues (#4679)
+
+         Sources/AgentCoding/HTTPProxy.swift | 18 +++---
+        session ec0b1592-369c-4f63-b5af-174c02268e1d resumed at 2026-10-04T14:07:53Z
+          1427\tlet timeout = 30_000
+          1428\treturn try await relay(id: "7481E5C0-1E90-48AB-AD4A-0CACE93E191B")
+        build 4679-9731 took 3.2s; pid 72598; port 2331; sha256 b99s0mix6
+        """
+        let msgs: [[String: Any]] = [
+            ["role": "system", "content": "You are Kimi, a coding agent. Session 0DE95A8B-6211-4509-875F-D9CB17B420D8."],
+            ["role": "user", "content": "Show me the last commit and the log"],
+            ["role": "assistant", "content": "", "tool_calls": [["id": "Shell:12", "type": "function",
+                "function": ["name": "Shell", "arguments": #"{"command":"git log -1 --stat && tail -n 4 run.log"}"#]]]],
+            ["role": "tool", "tool_call_id": "Shell:12", "content": toolOut],
+        ]
+        let tools: [[String: Any]] = [["type": "function", "function": ["name": "Shell",
+            "description": "Run a command. Example id: 3F81AB1D, phone format 555-0100.",
+            "parameters": ["type": "object", "properties": ["command": ["type": "string"]]]]]]
+        let body = try JSONSerialization.data(withJSONObject: ["model": "kimi-for-coding", "messages": msgs, "tools": tools, "stream": true])
+        let vault = PIIVault(secret: Data(repeating: 5, count: 32))
+        let o = await PIIRewriter.rewriteRequest(body, policy: PIIPolicy(enabled: true), vault: vault)
+        #expect(o.total == 0)
+        #expect(o.body == body)
+    }
+}
+
+@Suite("PII name repair")
+struct PIINameRepairTests {
+    /// The repaired spans' text, for model spans given as (substring, label, score).
+    private func repaired(_ text: String, _ parts: [(String, PIILabel, Double)]) -> [String] {
+        let ns = text as NSString
+        let spans = parts.map { p -> PIISpan in
+            let r = ns.range(of: p.0)
+            return PIISpan(start: r.location, end: NSMaxRange(r), label: p.1, score: p.2, heuristic: false)
+        }
+        return PIIText.repair(text, PIIText.merge(spans), anchor: 0.5)
+            .map { ns.substring(with: NSRange(location: $0.start, length: $0.end - $0.start)) }
+    }
+
+    @Test("A middle initial with its period stays inside one name (QA: 'Jane Q. Example' came back 'Jane Q')")
+    func middleInitials() {
+        let jane = "Please remember this contact: Jane Q. Example, email jane@example.org."
+        // The model stopped at the initial and missed the surname.
+        #expect(repaired(jane, [("Jane Q", .givenName, 0.9)]) == ["Jane Q. Example"])
+        // Given name and surname found, the initial between them not.
+        #expect(repaired(jane, [("Jane", .givenName, 0.9), ("Example", .surname, 0.8)]) == ["Jane Q. Example"])
+        let jfk = "The memo was signed by John F. Kennedy in 1961."
+        #expect(repaired(jfk, [("John", .givenName, 0.95), ("Kennedy", .surname, 0.9)]) == ["John F. Kennedy"])
+        #expect(repaired(jfk, [("John F", .givenName, 0.95)]) == ["John F. Kennedy"])
+    }
+
+    @Test("Hyphens and apostrophes join a name's parts across given name and surname")
+    func hyphensAndApostrophes() {
+        let t = "The new customer is Mary-Ann O'Neil from Dublin."
+        #expect(repaired(t, [("Mary", .givenName, 0.9), ("Ann", .givenName, 0.7), ("O'Neil", .surname, 0.85)])
+                == ["Mary-Ann O'Neil"])
+        #expect(repaired(t, [("Mary-Ann", .givenName, 0.9), ("O", .surname, 0.6), ("Neil", .surname, 0.6)])
+                == ["Mary-Ann O'Neil"])
+    }
+
+    @Test("A name next to other data is not stretched over it")
+    func noOverreach() {
+        let t = "Please ask Alex. Then call 555-0100."
+        #expect(repaired(t, [("Alex", .givenName, 0.9)]) == ["Alex"])
+        // A city after a name is not part of it (different labels, not names).
+        let c = "Jane Example, Springfield"
+        #expect(repaired(c, [("Jane Example", .givenName, 0.9), ("Springfield", .city, 0.9)]) == ["Jane Example", "Springfield"])
+    }
 }

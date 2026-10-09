@@ -259,6 +259,13 @@ final class FileExplorerModel {
     /// file must not clobber the current one.
     private var refreshGeneration = 0
     private var detailGeneration = 0
+    /// A refresh of the folder on show is out (not yet answered). The pane's
+    /// 4 s poll skips while one is: a poll that started a fresh refresh
+    /// orphaned the slow one in flight — over a fat client, or against a
+    /// guest still waking, every answer arrived after the next poll had
+    /// bumped the generation, so none was ever applied and the first
+    /// listing's spinner never went away.
+    @ObservationIgnored private(set) var refreshInFlight = false
     /// "path|mode" the detail currently shows — a poll-driven reload of the
     /// same selection keeps the content up (no spinner flash every 4s).
     private var shownDetailKey: String?
@@ -282,29 +289,72 @@ final class FileExplorerModel {
     /// tmux window index of the active tab WHEN its front process is a
     /// coding agent — nil hides the commenting UI. Kept fresh by the pane.
     var agentTabIndex: Int?
+    /// That tab's identity (its `@display` / `@worktree` markers), kept
+    /// fresh with `agentTabIndex`.
+    var agentTabTarget: PaneTarget?
+    /// Where the drafts on hand go: the agent tab as it was when the first
+    /// one was written (pinned to its window id once resolved) — never
+    /// whatever tab took its index since.
+    private(set) var reviewTarget: PaneTarget?
     var sendingReview = false
 
     func addReviewDraft(file: String, line: Int, text: String) {
+        if reviewDrafts.isEmpty { pinReviewTarget() }
         reviewDrafts.append(ReviewDraft(file: file, line: line, text: text))
     }
 
     func removeReviewDraft(_ id: UUID) {
         reviewDrafts.removeAll { $0.id == id }
+        if reviewDrafts.isEmpty { reviewTarget = nil }
+    }
+
+    /// Fix the drafts' destination to the current agent tab, and resolve
+    /// its stable window id in the background.
+    private func pinReviewTarget() {
+        guard var t = agentTabTarget ?? agentTabIndex.map({ PaneTarget.index($0) }) else {
+            reviewTarget = nil
+            return
+        }
+        reviewTarget = t
+        guard case .index(let i) = t.ref else { return }
+        Task { [weak self] in
+            guard let self,
+                  let out = try? await self.exec(
+                    "tmux display-message -p -t bromure:\(i) '#{window_id}' 2>/dev/null", timeout: 8)
+            else { return }
+            let id = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Still the same batch, still unpinned.
+            guard PaneTypeGuard.isWindowID(id), !self.reviewDrafts.isEmpty,
+                  self.reviewTarget == t else { return }
+            t.ref = .windowID(id)
+            t.expectWindowID = id
+            self.reviewTarget = t
+        }
     }
 
     /// Batch every draft into one feedback message and type it into the
-    /// active tab's agent session. Clears the drafts on success.
+    /// agent tab the drafts were written for. Clears the drafts on success.
     func submitReviewDrafts() async -> Bool {
-        guard let index = agentTabIndex, !reviewDrafts.isEmpty else { return false }
+        guard !reviewDrafts.isEmpty,
+              let target = reviewTarget ?? agentTabTarget ?? agentTabIndex.map({ PaneTarget.index($0) })
+        else { return false }
         var msg = "Review feedback on your current changes — address each point:"
         for d in reviewDrafts {
             msg += "\n- In \(d.file), line \(d.line): \(d.text)"
         }
         sendingReview = true
         defer { sendingReview = false }
-        let cmd = CodingTaskEngine.typeCommand(tabIndex: index, text: msg)
-        guard (try? await exec(cmd, timeout: 25)) != nil else { return false }
+        // Guarded: typed only into that window, still carrying its markers,
+        // while an agent holds it (a shell would run the feedback as
+        // commands); the drafts stay otherwise.
+        // A menu or dialog up in the tab holds it too (`held`), and a type
+        // that didn't go through is no success: the drafts stay.
+        let out = await PaneTypeGuard.runType(target: target, text: msg) { [weak self] in
+            try? await self?.exec($0, timeout: 25)
+        }
+        guard let out, PaneTypeGuard.typed(in: out) else { return false }
         reviewDrafts.removeAll()
+        reviewTarget = nil
         return true
     }
 
@@ -385,8 +435,16 @@ final class FileExplorerModel {
         loadError = nil
         truncated = false
         loading = newRoot != nil
+        refreshInFlight = false   // the orphaned one's answer no longer counts
         guard newRoot != nil else { return }
         Task { await refresh() }
+    }
+
+    /// The periodic re-list: skipped while a refresh is still out, so a slow
+    /// link answers instead of being superseded forever.
+    func pollRefresh() async {
+        guard !refreshInFlight else { return }
+        await refresh()
     }
 
     /// Re-list the folder (one level, plus every unfolded folder), find the
@@ -400,6 +458,8 @@ final class FileExplorerModel {
         guard let root else { return }
         refreshGeneration += 1
         let generation = refreshGeneration
+        refreshInFlight = true
+        defer { if generation == refreshGeneration { refreshInFlight = false } }
         let dirs = [root] + expandedDirs.sorted().map { (root as NSString).appendingPathComponent($0) }
         // Each folder: "\002<path>\001<type><name>\0…" — `find -L` so a
         // symlinked folder (a shared folder) reads as a folder; .git hidden.

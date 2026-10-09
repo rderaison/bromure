@@ -48,23 +48,72 @@ final class BrowserImageInstaller {
 
     // MARK: - Presence
 
-    enum ImageSource {
+    enum ImageSource: Equatable, Sendable {
         /// Bromure Web's image dir — AC only reads it.
         case sharedWithBromureWeb
         /// AC's own downloaded copy.
         case downloadedByAC
     }
 
-    /// Where a complete boot set currently lives (same resolution order
-    /// the browser controller boots with), or nil when none exists.
+    /// Where the browser boots from (same resolution the browser controller
+    /// boots with), or nil when no complete boot set exists. Bromure Web's
+    /// shared image is preferred — unless AC's own copy is NEWER (the shared
+    /// one is stale because Bromure Web hasn't updated it yet), in which case
+    /// AC's copy wins.
     var installedSource: ImageSource? {
-        if WorkspaceBrowserController.hasAllBootFiles(in: VMConfig.defaultStorageDirectory) {
-            return .sharedWithBromureWeb
+        Self.resolve(
+            sharedComplete: WorkspaceBrowserController.hasAllBootFiles(in: VMConfig.defaultStorageDirectory),
+            sharedVersion: Self.stampedVersion(in: VMConfig.defaultStorageDirectory),
+            acComplete: WorkspaceBrowserController.hasAllBootFiles(in: storageDir),
+            acVersion: Self.stampedVersion(in: storageDir))
+    }
+
+    /// Storage dir of `installedSource`.
+    var installedDir: URL? {
+        switch installedSource {
+        case .sharedWithBromureWeb: return VMConfig.defaultStorageDirectory
+        case .downloadedByAC: return storageDir
+        case nil: return nil
         }
-        if WorkspaceBrowserController.hasAllBootFiles(in: storageDir) {
-            return .downloadedByAC
+    }
+
+    /// Version stamp of the image the browser boots from (nil: none/unstamped).
+    var installedVersion: Int? { installedDir.flatMap(Self.stampedVersion(in:)) }
+
+    /// The image version this build of AC ships against.
+    nonisolated static var currentVersion: Int { Int(LinuxImageManager.imageVersion) ?? 0 }
+
+    /// True when the image the browser boots from is older than this build's.
+    var installedIsOutdated: Bool {
+        installedSource != nil && Self.isOutdated(installedVersion, current: Self.currentVersion)
+    }
+
+    // MARK: Pure resolution policy (unit-tested)
+
+    /// `image-version` stamp in a storage dir, as an integer.
+    nonisolated static func stampedVersion(in dir: URL) -> Int? {
+        guard let raw = try? String(contentsOf: dir.appendingPathComponent("image-version"),
+                                    encoding: .utf8) else { return nil }
+        return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Shared (Bromure Web) image first; AC's own copy only when the shared
+    /// one is missing or strictly older (an unstamped image counts as oldest).
+    nonisolated static func resolve(sharedComplete: Bool, sharedVersion: Int?,
+                                    acComplete: Bool, acVersion: Int?) -> ImageSource? {
+        switch (sharedComplete, acComplete) {
+        case (true, true):
+            return (acVersion ?? 0) > (sharedVersion ?? 0) ? .downloadedByAC : .sharedWithBromureWeb
+        case (true, false): return .sharedWithBromureWeb
+        case (false, true): return .downloadedByAC
+        case (false, false): return nil
         }
-        return nil
+    }
+
+    /// Older than `current` (unstamped = outdated).
+    nonisolated static func isOutdated(_ version: Int?, current: Int) -> Bool {
+        guard let version else { return true }
+        return version < current
     }
 
     var imageInstalled: Bool { installedSource != nil }
@@ -72,12 +121,7 @@ final class BrowserImageInstaller {
     /// Logical size of the installed disk image, human-formatted — for
     /// the Settings caption. nil when not installed.
     var installedDiskSize: String? {
-        let dir: URL
-        switch installedSource {
-        case .sharedWithBromureWeb: dir = VMConfig.defaultStorageDirectory
-        case .downloadedByAC: dir = storageDir
-        case nil: return nil
-        }
+        guard let dir = installedDir else { return nil }
         let disk = dir.appendingPathComponent("linux-base.img")
         guard let bytes = (try? FileManager.default.attributesOfItem(
             atPath: disk.path))?[.size] as? Int64 else { return nil }

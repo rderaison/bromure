@@ -1,0 +1,2326 @@
+{
+  "browser": "Chrome/154.0.8037.57",
+  "renderer": "ANGLE (Mesa, llvmpipe (LLVM 20.1.2 128 bits), OpenGL 4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.3)",
+  "clips": {
+    "generator": "FFmpeg 7.1",
+    "clips": [
+      {
+        "name": "h264_1080p60",
+        "file": "h264_1080p60.mp4",
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "durationSeconds": 10,
+        "codec": "libx264",
+        "bytes": 8968476,
+        "sha256": "950683cab054fc9b9d18206a19ad63af0b13c1743fae6f613248a790dae6fc48",
+        "command": [
+          "/private/tmp/bromure-video-tools/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=size=1920x1080:rate=60",
+          "-t",
+          "10",
+          "-an",
+          "-c:v",
+          "libx264",
+          "-threads",
+          "4",
+          "-preset",
+          "veryfast",
+          "-crf",
+          "23",
+          "-profile:v",
+          "high",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          "/private/tmp/bromure-video-clips/h264_1080p60.mp4"
+        ]
+      },
+      {
+        "name": "h264_4k60",
+        "file": "h264_4k60.mp4",
+        "width": 3840,
+        "height": 2160,
+        "fps": 60,
+        "durationSeconds": 10,
+        "codec": "libx264",
+        "bytes": 31502513,
+        "sha256": "7e0ad660b5df6214394d8dc59f756e3bf9796c491d8735c192049d0c8d1ef160",
+        "command": [
+          "/private/tmp/bromure-video-tools/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=size=3840x2160:rate=60",
+          "-t",
+          "10",
+          "-an",
+          "-c:v",
+          "libx264",
+          "-threads",
+          "4",
+          "-preset",
+          "veryfast",
+          "-crf",
+          "23",
+          "-profile:v",
+          "high",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          "/private/tmp/bromure-video-clips/h264_4k60.mp4"
+        ]
+      },
+      {
+        "name": "av1_1080p60",
+        "file": "av1_1080p60.mp4",
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "durationSeconds": 10,
+        "codec": "libsvtav1",
+        "bytes": 13278484,
+        "sha256": "32582ec2d3222faf0a7309a3a11ff526e412943350c6e6cddcf79f952c173230",
+        "command": [
+          "/private/tmp/bromure-video-tools/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=size=1920x1080:rate=60",
+          "-t",
+          "10",
+          "-an",
+          "-c:v",
+          "libsvtav1",
+          "-threads",
+          "4",
+          "-preset",
+          "10",
+          "-crf",
+          "35",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          "/private/tmp/bromure-video-clips/av1_1080p60.mp4"
+        ]
+      }
+    ]
+  },
+  "secondsPerTrial": 60,
+  "trials": 5,
+  "samples": [
+    {
+      "case": "h264_1080p60",
+      "trial": 1,
+      "elapsedSeconds": 60.0009,
+      "totalVideoFrames": 3595,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08344923504867872,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.005331,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002388,
+          "samples": 0
+        },
+        "wall": 4091.9000000000015,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3781,
+        "dropped": 4,
+        "currentTime": 2.923548,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.920375,
+          "lastTime": 2.922763,
+          "samples": 600
+        },
+        "wall": 64092.8,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.86576868013646,
+      "mediaSecondsAdvanced": 59.92116,
+      "playbackSpeedRatio": 0.998671019934701,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "D821F9D5458EFCEA5F29E2FFAF6702DB": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790895690.515017,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.3078068623831163,
+          "virtualMachine": 46.83703011485525
+        },
+        "totalPercent": 50.14483697723837,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 1,
+      "elapsedSeconds": 60.0029,
+      "totalVideoFrames": 3591,
+      "droppedVideoFrames": 4,
+      "dropRatePercent": 0.1113895850737956,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 0,
+        "currentTime": 3.011561,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.011085,
+          "samples": 0
+        },
+        "wall": 4093.800000000003,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 4,
+        "currentTime": 2.861916,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.85073599999999,
+          "lastTime": 2.861821,
+          "samples": 600
+        },
+        "wall": 64096.7,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.78044394520932,
+      "mediaSecondsAdvanced": 59.85083099999999,
+      "playbackSpeedRatio": 0.9974656391607738,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "00FA06B8B36E4B487D2800D5BB47CD06": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790895754.615173,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.5560515025477843,
+          "virtualMachine": 82.35875327345772
+        },
+        "totalPercent": 84.91480477600551,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 1,
+      "elapsedSeconds": 60.0014,
+      "totalVideoFrames": 3591,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.0835421888053467,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 0,
+        "currentTime": 3.002647,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002034,
+          "samples": 0
+        },
+        "wall": 4043.100000000006,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3776,
+        "dropped": 3,
+        "currentTime": 2.850473,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.847973,
+          "lastTime": 2.850007,
+          "samples": 600
+        },
+        "wall": 64044.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.79860469922369,
+      "mediaSecondsAdvanced": 59.848439000000006,
+      "playbackSpeedRatio": 0.9974507094834455,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "4E76F7114E96A746EFF10FA02E74D8F7": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected Dav1dVideoDecoder for video decoding, config: codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790895818.6622794,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.1322049440251454,
+          "virtualMachine": 66.07012334760954
+        },
+        "totalPercent": 69.20232829163469,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 2,
+      "elapsedSeconds": 60.00180000000002,
+      "totalVideoFrames": 3591,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.0835421888053467,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.007707,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.007293,
+          "samples": 0
+        },
+        "wall": 4093.7999999999884,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 4,
+        "currentTime": 2.854612,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.84682599999994,
+          "lastTime": 2.854119,
+          "samples": 600
+        },
+        "wall": 64095.600000000006,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.79820605381837,
+      "mediaSecondsAdvanced": 59.84731899999994,
+      "playbackSpeedRatio": 0.9974253939048483,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "73F06A8F83109CC3C3AA865452FBA2D5": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790895882.7609594,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.5576343068005465,
+          "virtualMachine": 82.30353602583432
+        },
+        "totalPercent": 84.86117033263487,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 2,
+      "elapsedSeconds": 60.00409999999998,
+      "totalVideoFrames": 3590,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08356545961002786,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.002176,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.001612,
+          "samples": 0
+        },
+        "wall": 4048.7999999999884,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3776,
+        "dropped": 4,
+        "currentTime": 2.849004,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.845594000000034,
+          "lastTime": 2.847206,
+          "samples": 600
+        },
+        "wall": 64052.899999999965,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.779248418024785,
+      "mediaSecondsAdvanced": 59.847392000000035,
+      "playbackSpeedRatio": 0.9973883784608061,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "75080EB3E4C66D65E763445099B18A9B": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected Dav1dVideoDecoder for video decoding, config: codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790895946.816509,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.1698040459200216,
+          "virtualMachine": 65.69757967204215
+        },
+        "totalPercent": 68.86738371796217,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 2,
+      "elapsedSeconds": 60.00090000000002,
+      "totalVideoFrames": 3595,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08344923504867872,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.004037,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.003498,
+          "samples": 0
+        },
+        "wall": 4037.2999999999884,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3781,
+        "dropped": 4,
+        "currentTime": 2.91824,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.91401700000001,
+          "lastTime": 2.917515,
+          "samples": 600
+        },
+        "wall": 64038.20000000001,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.86576868013644,
+      "mediaSecondsAdvanced": 59.91474200000001,
+      "playbackSpeedRatio": 0.9985640548725101,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "E8980047D7090D65D8EED9A064C4DCC8": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896010.858236,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.1831270346908087,
+          "virtualMachine": 45.20513779810626
+        },
+        "totalPercent": 48.38826483279706,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 3,
+      "elapsedSeconds": 60.00090000000002,
+      "totalVideoFrames": 3592,
+      "droppedVideoFrames": 2,
+      "dropRatePercent": 0.0556792873051225,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 0,
+        "currentTime": 3.003396,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002757,
+          "samples": 0
+        },
+        "wall": 4051.899999999965,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 2,
+        "currentTime": 2.85102,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.846792999999955,
+          "lastTime": 2.84955,
+          "samples": 600
+        },
+        "wall": 64052.79999999999,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.83243584679561,
+      "mediaSecondsAdvanced": 59.84826299999995,
+      "playbackSpeedRatio": 0.9974560881586765,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "E52AF4386AC9E45AA92B522108588B9C": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected Dav1dVideoDecoder for video decoding, config: codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896074.9138296,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.145906199514937,
+          "virtualMachine": 65.2352539800499
+        },
+        "totalPercent": 68.38116017956484,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 3,
+      "elapsedSeconds": 60.006099999999975,
+      "totalVideoFrames": 3594,
+      "droppedVideoFrames": 1,
+      "dropRatePercent": 0.027824151363383415,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.0026,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.001898,
+          "samples": 0
+        },
+        "wall": 4026.3000000000466,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3780,
+        "dropped": 2,
+        "currentTime": 2.908216,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.80327999999993,
+          "lastTime": 2.805178,
+          "samples": 599
+        },
+        "wall": 64032.40000000002,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.877245813342334,
+      "mediaSecondsAdvanced": 59.90631799999993,
+      "playbackSpeedRatio": 0.9983371357245339,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "5FA5ACCA6D4910125B2E23A2CD10AF64": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896138.9496484,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.2372512606803903,
+          "virtualMachine": 45.14655539460673
+        },
+        "totalPercent": 48.38380665528712,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 3,
+      "elapsedSeconds": 60.00090000000002,
+      "totalVideoFrames": 3591,
+      "droppedVideoFrames": 2,
+      "dropRatePercent": 0.0556947925368978,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.005489,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.005067,
+          "samples": 0
+        },
+        "wall": 4052.5999999999767,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 3,
+        "currentTime": 2.862295,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.85690400000004,
+          "lastTime": 2.861971,
+          "samples": 600
+        },
+        "wall": 64053.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.815769430125194,
+      "mediaSecondsAdvanced": 59.85722800000004,
+      "playbackSpeedRatio": 0.9976055025841283,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "A5EC4701B67C3FBD5F88B5E48DB481F3": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896203.0083392,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.523689957097517,
+          "virtualMachine": 81.8766946789274
+        },
+        "totalPercent": 84.40038463602491,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 4,
+      "elapsedSeconds": 60.00509999999998,
+      "totalVideoFrames": 3596,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08342602892102335,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 0,
+        "currentTime": 3.0049,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.004358,
+          "samples": 0
+        },
+        "wall": 4038.9000000000233,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3781,
+        "dropped": 3,
+        "currentTime": 2.92639,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.92096400000006,
+          "lastTime": 2.925322,
+          "samples": 600
+        },
+        "wall": 64044,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.87824368262034,
+      "mediaSecondsAdvanced": 59.92203200000006,
+      "playbackSpeedRatio": 0.9986156510029994,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "B397D0CA49CF740727A18F54DCFF7359": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896267.0548992,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.2179022578486034,
+          "virtualMachine": 45.648202052260544
+        },
+        "totalPercent": 48.86610431010915,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 4,
+      "elapsedSeconds": 60.00089999999991,
+      "totalVideoFrames": 3591,
+      "droppedVideoFrames": 2,
+      "dropRatePercent": 0.0556947925368978,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.005045,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.004624,
+          "samples": 0
+        },
+        "wall": 4087.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 3,
+        "currentTime": 2.846856,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.840944999999934,
+          "lastTime": 2.845569,
+          "samples": 600
+        },
+        "wall": 64088.39999999991,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.81576943012531,
+      "mediaSecondsAdvanced": 59.84223199999993,
+      "playbackSpeedRatio": 0.9973555729997388,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "202504C0CB5036F0B3D491913D02473D": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896331.1465504,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.556539251137451,
+          "virtualMachine": 82.35490930449429
+        },
+        "totalPercent": 84.91144855563174,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 4,
+      "elapsedSeconds": 60.00109999999998,
+      "totalVideoFrames": 3590,
+      "droppedVideoFrames": 2,
+      "dropRatePercent": 0.055710306406685235,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.00338,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.002656,
+          "samples": 0
+        },
+        "wall": 4034.600000000093,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3776,
+        "dropped": 3,
+        "currentTime": 2.839527,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.835101000000066,
+          "lastTime": 2.837757,
+          "samples": 600
+        },
+        "wall": 64035.70000000007,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.79890368676576,
+      "mediaSecondsAdvanced": 59.836871000000066,
+      "playbackSpeedRatio": 0.9972629001801648,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "3FF377E40BB1BE24BF1515413AF60727": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected Dav1dVideoDecoder for video decoding, config: codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896395.1853204,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.1378489194245347,
+          "virtualMachine": 65.47066757390405
+        },
+        "totalPercent": 68.60851649332858,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_4k60",
+      "trial": 5,
+      "elapsedSeconds": 60.003099999999975,
+      "totalVideoFrames": 3592,
+      "droppedVideoFrames": 3,
+      "dropRatePercent": 0.08351893095768374,
+      "trialSucceeded": true,
+      "before": {
+        "total": 185,
+        "dropped": 0,
+        "currentTime": 3.003995,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.003586,
+          "samples": 0
+        },
+        "wall": 4093.5999999999767,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 3,
+        "currentTime": 2.857096,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.852966999999985,
+          "lastTime": 2.856553,
+          "samples": 600
+        },
+        "wall": 64096.69999999995,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.81357629855793,
+      "mediaSecondsAdvanced": 59.853509999999986,
+      "playbackSpeedRatio": 0.9975069621402896,
+      "setup": {
+        "width": 3840,
+        "height": 2160,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "324FA07E2A4444E8DE27EE994C870A4A": {
+          "kBitrate": "25202010",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "true",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 3840x2160\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "false",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "3840x2160",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x1e0b0b1",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [3840,2160], visible rect: [0,0,3840,2160], natural size: [3840,2160], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896459.2847,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 2.5159157816837174,
+          "virtualMachine": 82.00333242746254
+        },
+        "totalPercent": 84.51924820914626,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "av1_1080p60",
+      "trial": 5,
+      "elapsedSeconds": 60.00240000000002,
+      "totalVideoFrames": 3591,
+      "droppedVideoFrames": 4,
+      "dropRatePercent": 0.1113895850737956,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.004528,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.003723,
+          "samples": 0
+        },
+        "wall": 4040.0999999999767,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3777,
+        "dropped": 5,
+        "currentTime": 2.865506,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.86167599999997,
+          "lastTime": 2.865399,
+          "samples": 600
+        },
+        "wall": 64042.5,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.780942095649486,
+      "mediaSecondsAdvanced": 59.86178299999997,
+      "playbackSpeedRatio": 0.9976564770742494,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "89A1D34BBDDA60DE04A79437B4468A8D": {
+          "kBitrate": "10622787",
+          "kVideoDecoderName": "Dav1dVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"av1\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"UNSPECIFIED\",\"primaries\":\"UNSPECIFIED\",\"range\":\"LIMITED\",\"transfer\":\"UNSPECIFIED\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"av1 profile main\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0xca9d14",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected Dav1dVideoDecoder for video decoding, config: codec: av1, profile: av1 profile main, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:INVALID, transfer:INVALID, matrix:INVALID, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896523.3296993,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.142318887252915,
+          "virtualMachine": 65.86137645960942
+        },
+        "totalPercent": 69.00369534686233,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    },
+    {
+      "case": "h264_1080p60",
+      "trial": 5,
+      "elapsedSeconds": 60.004599999999975,
+      "totalVideoFrames": 3595,
+      "droppedVideoFrames": 1,
+      "dropRatePercent": 0.027816411682892908,
+      "trialSucceeded": true,
+      "before": {
+        "total": 186,
+        "dropped": 1,
+        "currentTime": 3.007406,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 0,
+          "lastTime": 3.006715,
+          "samples": 0
+        },
+        "wall": 4032.8000000000466,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "after": {
+        "total": 3781,
+        "dropped": 2,
+        "currentTime": 2.925831,
+        "error": null,
+        "paused": false,
+        "readyState": 4,
+        "fullscreen": false,
+        "mediaClock": {
+          "mediaSeconds": 59.914338000000065,
+          "lastTime": 2.921053,
+          "samples": 600
+        },
+        "wall": 64037.40000000002,
+        "visibility": "visible",
+        "fullscreenEvents": []
+      },
+      "presentedFramesPerSecond": 59.89540801871859,
+      "mediaSecondsAdvanced": 59.919116000000066,
+      "playbackSpeedRatio": 0.9985753758878502,
+      "setup": {
+        "width": 1920,
+        "height": 1080,
+        "viewport": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        },
+        "screen": {
+          "width": 960,
+          "height": 540,
+          "dpr": 2
+        }
+      },
+      "mediaPlayers": {
+        "B65BBC37FAFF634911A456AA448309A7": {
+          "kBitrate": "7174780",
+          "kVideoDecoderName": "FFmpegVideoDecoder",
+          "kIsStreaming": "false",
+          "kVideoTracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"1920x1080\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"1920x1080\",\"orientation\":\"0\u00b0\",\"profile\":\"h264 high\",\"visible rect\":\"0,0 1920x1080\"}]",
+          "kIsPlatformVideoDecoder": "false",
+          "kFrameUrl": "http://127.0.0.1:31623/index.html",
+          "kIsRangeHeaderSupported": "true",
+          "kIsVideoDecryptingDemuxerStream": "false",
+          "kStartTime": "0.0",
+          "kResolution": "1920x1080",
+          "kRendererName": "RendererImpl",
+          "kTotalBytes": "0x88d91c",
+          "kMaxDuration": "10.0",
+          "kIsSingleOrigin": "true",
+          "kFrameTitle": ""
+        }
+      },
+      "mediaErrors": [],
+      "mediaMessages": [
+        {
+          "level": "info",
+          "message": "FFmpegDemuxer: created video stream, config codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select DecryptingVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedEncryptionMode"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select VpxVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedConfig"
+        },
+        {
+          "level": "info",
+          "message": "Cannot select Dav1dVideoDecoder for video decoding. status=DecoderStatus::Codes::kUnsupportedCodec"
+        },
+        {
+          "level": "info",
+          "message": "Effective playback rate changed from 0 to 1"
+        },
+        {
+          "level": "info",
+          "message": "Selected FFmpegVideoDecoder for video decoding, config: codec: h264, profile: h264 high, level: not available, alpha_mode: is_opaque, coded size: [1920,1080], visible rect: [0,0,1920,1080], natural size: [1920,1080], has extra data: true, encryption scheme: Unencrypted, rotation: 0\u00b0, flipped: 0, color space: {primaries:BT709, transfer:BT709, matrix:BT709, range:LIMITED}, spatial format: [projection_type: none, stereo_mode: mono]"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        },
+        {
+          "level": "debug",
+          "message": "FFmpegDemuxer: av_read_frame(): End of file"
+        }
+      ],
+      "wallTime": 1790896587.3702638,
+      "hostCPU": {
+        "percentByCategory": {
+          "browserHost": 3.217364103698409,
+          "virtualMachine": 45.6749693729145
+        },
+        "totalPercent": 48.892333476612905,
+        "oneCoreEqualsPercent": 100,
+        "method": "0.5s cumulative ps CPU snapshots, weighted boundary intervals; owned app, renderer broker/worker and unique newly started VZ service. Excludes WindowServer, kernel GPU work and shared system daemons; not total system energy."
+      }
+    }
+  ],
+  "summary": {
+    "h264_1080p60": {
+      "medianDropRatePercent": 0.08342602892102335,
+      "minDropRatePercent": 0.027816411682892908,
+      "maxDropRatePercent": 0.08344923504867872,
+      "failedTrials": 0,
+      "samplesDropRatePercent": [
+        0.08344923504867872,
+        0.08344923504867872,
+        0.027824151363383415,
+        0.08342602892102335,
+        0.027816411682892908
+      ],
+      "medianPresentedFramesPerSecond": 59.877245813342334,
+      "medianPlaybackSpeedRatio": 0.9985753758878502,
+      "medianHostCPUPercent": 48.86610431010915,
+      "samplesHostCPUPercent": [
+        50.14483697723837,
+        48.38826483279706,
+        48.38380665528712,
+        48.86610431010915,
+        48.892333476612905
+      ],
+      "samplesPresentedFramesPerSecond": [
+        59.86576868013646,
+        59.86576868013644,
+        59.877245813342334,
+        59.87824368262034,
+        59.89540801871859
+      ],
+      "samplesPlaybackSpeedRatio": [
+        0.998671019934701,
+        0.9985640548725101,
+        0.9983371357245339,
+        0.9986156510029994,
+        0.9985753758878502
+      ]
+    },
+    "h264_4k60": {
+      "medianDropRatePercent": 0.08351893095768374,
+      "minDropRatePercent": 0.0556947925368978,
+      "maxDropRatePercent": 0.1113895850737956,
+      "failedTrials": 0,
+      "samplesDropRatePercent": [
+        0.1113895850737956,
+        0.0835421888053467,
+        0.0556947925368978,
+        0.0556947925368978,
+        0.08351893095768374
+      ],
+      "medianPresentedFramesPerSecond": 59.81357629855793,
+      "medianPlaybackSpeedRatio": 0.9974656391607738,
+      "medianHostCPUPercent": 84.86117033263487,
+      "samplesHostCPUPercent": [
+        84.91480477600551,
+        84.86117033263487,
+        84.40038463602491,
+        84.91144855563174,
+        84.51924820914626
+      ],
+      "samplesPresentedFramesPerSecond": [
+        59.78044394520932,
+        59.79820605381837,
+        59.815769430125194,
+        59.81576943012531,
+        59.81357629855793
+      ],
+      "samplesPlaybackSpeedRatio": [
+        0.9974656391607738,
+        0.9974253939048483,
+        0.9976055025841283,
+        0.9973555729997388,
+        0.9975069621402896
+      ]
+    },
+    "av1_1080p60": {
+      "medianDropRatePercent": 0.0835421888053467,
+      "minDropRatePercent": 0.0556792873051225,
+      "maxDropRatePercent": 0.1113895850737956,
+      "failedTrials": 0,
+      "samplesDropRatePercent": [
+        0.0835421888053467,
+        0.08356545961002786,
+        0.0556792873051225,
+        0.055710306406685235,
+        0.1113895850737956
+      ],
+      "medianPresentedFramesPerSecond": 59.79860469922369,
+      "medianPlaybackSpeedRatio": 0.9974507094834455,
+      "medianHostCPUPercent": 68.86738371796217,
+      "samplesHostCPUPercent": [
+        69.20232829163469,
+        68.86738371796217,
+        68.38116017956484,
+        68.60851649332858,
+        69.00369534686233
+      ],
+      "samplesPresentedFramesPerSecond": [
+        59.79860469922369,
+        59.779248418024785,
+        59.83243584679561,
+        59.79890368676576,
+        59.780942095649486
+      ],
+      "samplesPlaybackSpeedRatio": [
+        0.9974507094834455,
+        0.9973883784608061,
+        0.9974560881586765,
+        0.9972629001801648,
+        0.9976564770742494
+      ]
+    }
+  },
+  "method": "Muted local synthetic clips looped and filling a controlled 960x540 CSS viewport at DPR2 (1920x1080 physical rendering); 3s warm-up, then fixed-duration counter deltas. DOM/OS fullscreen is not used because guest fullscreen exited during setup. Browser frame counters do not measure host display presentation latency or audio synchronization.",
+  "allTrialsSucceeded": true
+}

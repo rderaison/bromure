@@ -25,7 +25,7 @@
  *   node tools/release-upload.mjs \
  *        --file .build/release/Bromure-2.6.0.zip \
  *        --version 2.6.0 \
- *        [--product bromure|bromure-ac] \
+ *        [--product bromure|bromure-ac|bromure-sidecar] \
  *        [--channel stable] \
  *        [--min-system-version 14.0] \
  *        [--notes-file release-notes-2.6.0.html]
@@ -33,6 +33,9 @@
  * --product selects the DO Spaces prefix and appcast endpoint:
  *   bromure     → releases/                + /api/v1/release
  *   bromure-ac  → releases-agentic-coding/ + /api/v1/release-agentic-coding
+ *   bromure-sidecar → releases-sidecar/  + /api/v1/release-sidecar, plus a
+ *                 stable releases-sidecar/BromureSidecar.dmg for the
+ *                 download link (re-uploaded with every release).
  */
 
 import { createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
@@ -69,7 +72,7 @@ function die(msg) {
 
 if (!values.file) die("--file is required");
 if (!values.version) die("--version is required");
-if (!values.product) die("--product is required (one of: bromure, bromure-ac)");
+if (!values.product) die("--product is required (one of: bromure, bromure-ac, bromure-sidecar)");
 if (!/^\d+\.\d+(\.\d+)?(-[A-Za-z0-9._-]+)?$/.test(values.version)) {
   die(`invalid version string: ${values.version}`);
 }
@@ -94,6 +97,11 @@ const PRODUCT_CONFIG = {
     spacesPrefix: "releases-agentic-coding",
     apiURL: process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release-agentic-coding",
   },
+  "bromure-sidecar": {
+    spacesPrefix: "releases-sidecar",
+    apiURL: process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release-sidecar",
+    latestKey: "releases-sidecar/BromureSidecar.dmg",
+  },
 };
 if (!PRODUCT_CONFIG[PRODUCT]) {
   die(`unknown --product '${PRODUCT}'. Known: ${Object.keys(PRODUCT_CONFIG).join(", ")}`);
@@ -110,14 +118,17 @@ function env(name, required = true) {
   return v;
 }
 
-const SPARKLE_PRIVATE_KEY = env("SPARKLE_PRIVATE_KEY");
+// Upload-only products (no appcast) need neither the Sparkle key nor the
+// release token.
+const APPCAST = PRODUCT_CONFIG[PRODUCT].apiURL !== null;
+const SPARKLE_PRIVATE_KEY = env("SPARKLE_PRIVATE_KEY", APPCAST);
 const DO_SPACES_KEY = env("DO_SPACES_KEY");
 const DO_SPACES_SECRET = env("DO_SPACES_SECRET");
 const DO_SPACES_ENDPOINT = env("DO_SPACES_ENDPOINT");
 const DO_SPACES_REGION = env("DO_SPACES_REGION");
 const DO_SPACES_BUCKET = env("DO_SPACES_BUCKET");
 const DO_SPACES_PUBLIC_BASE = env("DO_SPACES_PUBLIC_BASE").replace(/\/+$/, "");
-const RELEASE_AUTH_TOKEN = env("RELEASE_AUTH_TOKEN");
+const RELEASE_AUTH_TOKEN = env("RELEASE_AUTH_TOKEN", APPCAST);
 // Per-product API URL (selected above based on --product). The
 // RELEASE_API_URL env var, if set, overrides the default for that
 // product — useful when pointing at a staging backend.
@@ -162,7 +173,7 @@ function signArtifact(path) {
 // 2. Upload to DigitalOcean Spaces
 // ---------------------------------------------------------------------------
 
-async function uploadToSpaces(path, key) {
+async function uploadToSpaces(path, key, cacheControl = "public, max-age=31536000, immutable") {
   const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
 
   console.log(`      endpoint=${DO_SPACES_ENDPOINT} region=${DO_SPACES_REGION} bucket=${DO_SPACES_BUCKET}`);
@@ -186,7 +197,7 @@ async function uploadToSpaces(path, key) {
       ContentType: "application/octet-stream",
       ContentLength: contentLength,
       ACL: "public-read",
-      CacheControl: "public, max-age=31536000, immutable",
+      CacheControl: cacheControl,
     }),
   );
 
@@ -232,10 +243,23 @@ async function registerRelease(payload) {
   console.log(`  spaces prefix:  ${SPACES_PREFIX}/`);
   console.log(`  spaces key:     ${spacesKey}`);
   console.log(`  public URL:     ${DO_SPACES_PUBLIC_BASE}/${spacesKey}`);
-  console.log(`  appcast API:    ${RELEASE_API_URL}`);
+  console.log(`  appcast API:    ${RELEASE_API_URL ?? "none (upload only)"}`);
   console.log(`  channel:        ${CHANNEL}`);
   console.log(`  version:        ${VERSION}`);
   console.log("=========================================================");
+
+  if (!APPCAST) {
+    // Upload only: the versioned file (immutable), then the stable name the
+    // download link points at (short cache — it moves with every release).
+    if (DRY_RUN) { console.log("dry run — skipping upload"); return; }
+    console.log(`[1/2] uploading to ${DO_SPACES_BUCKET}/${spacesKey}…`);
+    console.log(`      → ${await uploadToSpaces(FILE, spacesKey)}`);
+    const latest = PRODUCT_CONFIG[PRODUCT].latestKey;
+    console.log(`[2/2] uploading to ${DO_SPACES_BUCKET}/${latest}…`);
+    console.log(`      → ${await uploadToSpaces(FILE, latest, "public, max-age=300")}`);
+    console.log(`done: ${VERSION} is live`);
+    return;
+  }
 
   console.log(`[1/3] signing ${FILE}…`);
   const { signature, length } = signArtifact(FILE);
@@ -250,6 +274,11 @@ async function registerRelease(payload) {
   console.log(`[2/3] uploading to ${DO_SPACES_BUCKET}/${spacesKey}…`);
   const url = await uploadToSpaces(FILE, spacesKey);
   console.log(`      → ${url}`);
+  const latest = PRODUCT_CONFIG[PRODUCT].latestKey;
+  if (latest) {
+    // The stable download link (short cache — it moves with every release).
+    console.log(`      + ${await uploadToSpaces(FILE, latest, "public, max-age=300")}`);
+  }
 
   console.log(`[3/3] registering release with ${RELEASE_API_URL}…`);
   await registerRelease({

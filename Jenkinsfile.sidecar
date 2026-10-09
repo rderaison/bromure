@@ -1,0 +1,158 @@
+// Bromure Sidecar — the menu-bar app that attaches a plain Mac's agents to a
+// Bromure AC (Sources/AgentHost). Builds, signs and notarises the DMG
+// (package.sh sidecar); optionally uploads it to DO Spaces under
+// releases-sidecar/ and registers it on the Sidecar's Sparkle appcast
+// (bromure.io/api/v1/release-sidecar). The stable download link is
+// https://dl.bromure.io/releases-sidecar/BromureSidecar.dmg.
+pipeline {
+    agent { label 'macosx-builder' }
+
+    parameters {
+        booleanParam(
+            name: 'PUSH_RELEASE',
+            defaultValue: false,
+            description: 'Upload the signed DMG to DigitalOcean Spaces (versioned, plus the stable BromureSidecar.dmg) and publish it on the Sparkle appcast.'
+        )
+    }
+
+    environment {
+        KEYCHAIN_PASSWORD = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN    = "${HOME}/build.keychain"
+
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+    }
+
+    stages {
+        stage('Unlock Keychain') {
+            steps {
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
+        stage('Toolchain') {
+            steps {
+                sh '''
+                    set -euo pipefail
+                    xcode-select -p
+                    xcodebuild -version
+                    swift --version
+                    # make/cc/curl build tmux + libevent + utf8proc; node for the
+                    # Release stage.
+                    for tool in git curl tar make cc node; do
+                        command -v "$tool" >/dev/null 2>&1 || {
+                            echo "ERROR: required tool '$tool' is not on PATH" >&2
+                            exit 1
+                        }
+                    done
+
+                    # SwiftPM resolves the whole manifest, so the GhosttyKit
+                    # binaryTarget must exist even for this product (stamp-cached:
+                    # a no-op once built at the pinned commit).
+                    if ! /usr/bin/xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+                        xcodebuild -downloadComponent MetalToolchain
+                    fi
+                    ./tools/build-ghostty.sh
+
+                    # The bundled tmux, rebuilt when tools/tmux.version moves.
+                    if [ "$(cat vendor/tmux/VERSION 2>/dev/null)" != "$(. tools/tmux.version; echo "$TMUX_VERSION")" ]; then
+                        ./tools/build-tmux.sh
+                    fi
+                    echo "=== Toolchain OK ==="
+                '''
+            }
+        }
+
+        stage('Resolve version') {
+            steps {
+                script {
+                    env.SIDECAR_VERSION = sh(
+                        script: '''/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+                                       Sources/AgentHost/Info.plist''',
+                        returnStdout: true
+                    ).trim()
+                    // Sparkle compares CFBundleVersion: it must move with the
+                    // short version, or every install is offered the same update.
+                    def bundleVersion = sh(
+                        script: '''/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" \
+                                       Sources/AgentHost/Info.plist''',
+                        returnStdout: true
+                    ).trim()
+                    if (bundleVersion != env.SIDECAR_VERSION) {
+                        error("Sources/AgentHost/Info.plist: CFBundleVersion (${bundleVersion}) must equal CFBundleShortVersionString (${env.SIDECAR_VERSION})")
+                    }
+                    echo "Building Bromure Sidecar ${env.SIDECAR_VERSION}"
+                }
+            }
+        }
+
+        stage('Package') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DEVELOPER_ID', variable: 'DEVELOPER_ID'),
+                    string(credentialsId: 'APPLE_ID',     variable: 'APPLE_ID'),
+                    string(credentialsId: 'TEAM_ID',      variable: 'TEAM_ID'),
+                    string(credentialsId: 'APP_PASSWORD', variable: 'APP_PASSWORD')
+                ]) {
+                    // Same one-shot self-heal as Jenkinsfile.ac (a stale macro
+                    // plugin in the shared .build after a dependency bump).
+                    sh '''
+                        ./package.sh sidecar || {
+                            echo "=== package.sh failed — wiping .build and retrying once ==="
+                            rm -rf .build
+                            ./package.sh sidecar
+                        }
+                    '''
+                }
+            }
+        }
+
+        stage('Archive') {
+            steps {
+                sh '''
+                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+                    cp "$BUILD_DIR/BromureSidecar.dmg" "${WORKSPACE}/BromureSidecar-${SIDECAR_VERSION}.dmg"
+                '''
+                archiveArtifacts artifacts: "BromureSidecar-${SIDECAR_VERSION}.dmg", fingerprint: true
+            }
+        }
+
+        stage('Release') {
+            when { expression { return params.PUSH_RELEASE } }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',       variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET',    variable: 'DO_SPACES_SECRET'),
+                    string(credentialsId: 'SPARKLE_PRIVATE_KEY', variable: 'SPARKLE_PRIVATE_KEY'),
+                    string(credentialsId: 'RELEASES_TOKEN',      variable: 'RELEASE_AUTH_TOKEN')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        (cd tools && if [ -f package-lock.json ]; then \
+                                        npx --yes @socketsecurity/cli npm ci --silent; \
+                                     else \
+                                        npx --yes @socketsecurity/cli npm install --silent; \
+                                     fi)
+                        node tools/release-upload.mjs \
+                            --product bromure-sidecar \
+                            --file "${WORKSPACE}/BromureSidecar-${SIDECAR_VERSION}.dmg" \
+                            --version "${SIDECAR_VERSION}" \
+                            --min-system-version "14.0"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'security default-keychain -s login.keychain-db || true'
+        }
+    }
+}

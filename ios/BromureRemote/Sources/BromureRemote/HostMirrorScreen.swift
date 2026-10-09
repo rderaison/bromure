@@ -91,7 +91,7 @@ struct HostMirrorScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if !controller.connected { reconnectBanner }
+                if !controller.connected { reconnectBanner } else if controller.linkSlow { slowBanner }
 
                 if controller.supportsSessions {
                     MobileSessionsSection(controller: controller,
@@ -230,6 +230,9 @@ struct HostMirrorScreen: View {
                 if let err = controller.lastError, controller.hasSnapshot {
                     Text(err).font(.caption)
                 }
+                if controller.hasSnapshot, !controller.linkReadout.isEmpty {
+                    Text(controller.linkReadout).font(.caption2.monospacedDigit())
+                }
             }
             Spacer()
         }
@@ -238,6 +241,26 @@ struct HostMirrorScreen: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(Color.orange.opacity(0.14)))
+    }
+
+    /// The link is up but slow (high latency, or polls struggling): a calm
+    /// note with the measured numbers — content stays live.
+    private var slowBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tortoise")
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Slow connection").font(.footnote.weight(.semibold))
+                if !controller.linkReadout.isEmpty {
+                    Text(controller.linkReadout).font(.caption2.monospacedDigit())
+                }
+            }
+            Spacer()
+        }
+        .foregroundStyle(.secondary)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color.secondary.opacity(0.10)))
     }
 
     private var boardsRow: some View {
@@ -475,15 +498,21 @@ struct CodingBoardScreen: View {
                 jumpToRun: { _ in },
                 moveToTesting: { controller.taskCommand($0, "to-testing") },
                 backToInProgress: { controller.taskCommand($0, "to-in-progress") },
-                merge: { controller.taskCommand($0, "merge") },
+                merge: { controller.taskCommand($0, "land", body: ["mode": "merge"]) },
                 closeNoMerge: { controller.taskCommand($0, "close-no-merge") },
+                markDone: { controller.taskCommand($0, "mark-done") },
+                stop: { controller.taskCommand($0, "stop") },
+                startOver: { controller.taskCommand($0, "start-over") },
+                mergeNeedsConfirm: true,
                 delete: { controller.deleteTask($0) },
                 save: { controller.upsertTask($0) },
                 validate: { controller.upsertTask($0) },
                 openPlanSession: { _ in },
                 destroy: { controller.taskCommand($0, "destroy") },
                 resume: { controller.taskCommand($0, "resume") },
-                openTranscript: { openedTask = TranscriptTarget(id: $0) }))
+                openTranscript: { openedTask = TranscriptTarget(id: $0) },
+                retryLanding: { controller.taskCommand($0, "retry-landing") }),
+            sessionStore: controller.sessionStore)
         // Title, icon and "New Task" come from the board itself, straight into
         // this stack's navigation bar — one header, not two.
         .sheet(item: $openedTask) { t in
@@ -626,6 +655,9 @@ private struct AutomationEditorSheet: View {
             AutomationEditorView(
                 store: controller.automationStore,
                 profiles: controller.profiles,
+                credentials: { [controller] id in
+                    controller.credentials(for: id).map { ($0.github, $0.linear) }
+                },
                 editing: editing,
                 onSave: { auto in
                     controller.upsertAutomation(auto)

@@ -19,6 +19,15 @@ public protocol VMNetTCPInterceptor: AnyObject, Sendable {
     func handleDivertedPacket(portID: Int, profileID: UUID?, ipPacket: [UInt8])
     /// The VM port was detached — drop any flow state bound to it.
     func portClosed(portID: Int)
+    /// The firewall now denies the established diverted flow this packet (IP
+    /// header onward) belongs to — a rule was switched off, expired or added
+    /// mid-connection. Tear the flow down (and its upstream leg); the switch
+    /// has already sent the guest a RST.
+    func flowDenied(portID: Int, ipPacket: [UInt8])
+}
+
+extension VMNetTCPInterceptor {
+    public func flowDenied(portID: Int, ipPacket: [UInt8]) {}
 }
 
 /// Process-wide host-side L2 software switch that multiplexes many VMs onto a
@@ -99,17 +108,38 @@ public final class VMNetSwitch: @unchecked Sendable {
     public struct EgressEvent: Sendable {
         public let profileID: UUID?
         public let dstIP: UInt32
-        public let hostnames: [String]   // DNS-snooped names for dstIP (may be empty)
+        /// DNS-snooped names for dstIP (may be empty), the name the guest
+        /// queried first (see `DNSSnoopCache.names`), CNAME targets after.
+        public let hostnames: [String]
         public let proto: UInt8          // 6 = TCP, 17 = UDP
         public let port: UInt16
         public let denied: Bool          // true = blocked by the policy
         /// Container traffic the workspace exempts from interception (the
         /// guest sentry's DSCP mark): firewall applied, MiTM skipped.
         public var containerDirect: Bool = false
+        /// The rule that decided (its `EgressPolicy.Rule.text`); nil when the
+        /// default action did, or for a transport drop (`byPolicy` false).
+        public var rule: String? = nil
+        /// False for the drops that aren't a ruleset decision (IPv6, QUIC,
+        /// IP fragments on an inspected VM).
+        public var byPolicy: Bool = true
+        /// A denied TCP segment of a flow that was already open (not a fresh
+        /// SYN): the rules changed under an established connection. The app
+        /// folds it into the "connection closed" row the MiTM's cut wrote.
+        public var midFlow: Bool = false
+        /// A further new connection (TCP SYN) to a destination already
+        /// reported within the dedupe window: not a new row, just one more
+        /// to count on the allowed row it folds into.
+        public var isRepeat: Bool = false
     }
     public typealias EgressObserver = @Sendable (EgressEvent) -> Void
     private var egressObserver: EgressObserver?
-    private struct EgressKey: Hashable { let portID: Int; let dstIP: UInt32; let dstPort: UInt16; let proto: UInt8 }
+    /// One report per destination: by its name when the guest looked one up
+    /// (a host behind several addresses is one row, not one per IP), else by
+    /// IP. `dstIP` is 0 when `name` is set.
+    private struct EgressKey: Hashable {
+        let portID: Int; let name: String; let dstIP: UInt32; let dstPort: UInt16; let proto: UInt8
+    }
     /// When each flow was last reported: a repeat within `egressReportEvery`
     /// isn't re-reported (a busy connection would flood the log), but one
     /// after that is — every connection shows up in the timeline, not just
@@ -189,7 +219,9 @@ public final class VMNetSwitch: @unchecked Sendable {
     private static let dhcpServerMAC: [UInt8] = [0x02, 0x62, 0x72, 0x6d, 0x72, 0x01]
     private static let dhcpLeaseSeconds: UInt32 = 86_400  // 24h; VMs are ephemeral
 
-    private init() {}
+    /// Internal (not private) so tests can build a switch that never starts
+    /// vmnet — the interface only comes up on the first `attachPort`.
+    init() {}
 
     // MARK: - Configuration
 
@@ -238,6 +270,21 @@ public final class VMNetSwitch: @unchecked Sendable {
         defer { lock.unlock() }
         guard started else { return nil }
         return VmnetSubnet(gateway: gatewayIP, mask: subnetMask, poolEnd: dhcpPoolEnd)
+    }
+
+    /// Bring the shared interface up now (idempotent), for a caller that must
+    /// know the real gateway before its first VM boots. The fat client's
+    /// browser writes it into the VM's PAC: a subnet guessed from the pin was
+    /// wrong whenever the pin didn't hold (the switch already up on another
+    /// subnet, or the host already on the pinned one).
+    @discardableResult
+    public func startIfNeeded() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if started { return true }
+        guard startVmnetLocked() else { return false }
+        started = true
+        return true
     }
 
     // MARK: - Port lifecycle
@@ -982,14 +1029,34 @@ public final class VMNetSwitch: @unchecked Sendable {
 
     /// Set (or clear) the firewall rules for a VM's port. Live-updatable mid-
     /// session; nil = allow-all.
+    ///
+    /// The swap is atomic under `lock` — every frame snapshots its port's
+    /// policy under the same lock (`portGovernance`), so a frame sees either
+    /// the old or the new ruleset, never a mix. Every frame is evaluated, not
+    /// just a flow's first: new connections follow the new rules at once, and
+    /// an ESTABLISHED TCP flow the new rules deny is cut on its next guest
+    /// segment (dropped, RST to the guest, a diverted MiTM flow torn down — see
+    /// `handleEgress`). Hostnames come from the DNS-snoop cache, which holds
+    /// names (not verdicts), so nothing cached needs invalidating; the report
+    /// dedupe for the port is reset so the new verdicts show up in the
+    /// Security Timeline right away.
     public func setEgressPolicy(_ policy: EgressPolicy?, for handle: FileHandle) {
         lock.lock()
+        let id = portByHandle[ObjectIdentifier(handle)]
+        lock.unlock()
+        guard let id else { return }
+        setEgressPolicy(policy, forPortID: id)
+    }
+
+    /// `setEgressPolicy(_:for:)` by port id.
+    func setEgressPolicy(_ policy: EgressPolicy?, forPortID id: Int) {
+        lock.lock()
         defer { lock.unlock() }
-        guard let id = portByHandle[ObjectIdentifier(handle)] else { return }
         portEgressPolicy[id] = policy
         // Flows allowed for their executable were decided under the old
         // policy: each is re-attested on its next packet (see handleEgress).
         policyGeneration[id, default: 0] &+= 1
+        egressSeen = egressSeen.filter { $0.key.portID != id }
     }
 
     /// Quarantine a VM's port: drop every unicast IP frame it sends (see
@@ -1053,6 +1120,29 @@ public final class VMNetSwitch: @unchecked Sendable {
         return true
     }
 
+    /// The connection verdict a port's CURRENT policy gives a flow — the exact
+    /// snapshot `handleEgress` uses (tests).
+    func egressVerdict(portID: Int, ip: UInt32, hostnames: [String], proto: EgressPolicy.Proto,
+                       port: UInt16, now: Date = Date()) -> EgressPolicy.Verdict {
+        portGovernance(portID).policy?.verdict(ip: ip, hostnames: hostnames, proto: proto,
+                                               port: port, now: now) ?? .allow
+    }
+
+    /// How the switch answers a denied TCP segment from the guest, by its
+    /// flags: a bare SYN gets the classic RST+ACK (connect fails fast); a
+    /// segment of an established flow (ACK set) gets a RST whose sequence is
+    /// the guest's own ACK number — exactly the next byte it expects, so the
+    /// guest kernel accepts it (RFC 5961) and the socket errors out instead of
+    /// hanging on retransmits. A RST from the guest is never answered.
+    enum DenyReset: Equatable { case none, syn, established }
+    static func denyReset(tcpFlags: UInt8?) -> DenyReset {
+        guard let f = tcpFlags else { return .none }
+        if f & 0x04 != 0 { return .none }                      // RST
+        if f & 0x02 != 0, f & 0x10 == 0 { return .syn }        // SYN, not ACK
+        if f & 0x10 != 0 { return .established }               // ACK
+        return .none
+    }
+
     /// Toggle transparent interception for a VM's port mid-session. When
     /// disabled, off-subnet flows are never diverted into the MiTM (the L4
     /// firewall still applies).
@@ -1093,7 +1183,7 @@ public final class VMNetSwitch: @unchecked Sendable {
             let g = portGovernance(srcPortID)
             guard let pid = g.pid, g.inspected else { return false }
             fireEgress(portID: srcPortID, profileID: pid, dstIP: 0, hostnames: [],
-                       proto: 41, port: 0, denied: true)
+                       proto: 41, port: 0, denied: true, policy: nil)
             return true      // drop
         }
 
@@ -1138,7 +1228,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         if g.inspected,
            Self.isEgressBypassTransport(fragmented: fragmented, ipProto: ipProto, dport: dport) {
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                       proto: ipProto, port: dport, denied: true)
+                       proto: ipProto, port: dport, denied: true, policy: nil)
             return true      // drop QUIC / fragment
         }
 
@@ -1148,7 +1238,8 @@ public final class VMNetSwitch: @unchecked Sendable {
         guard let (proto, _, _) = l4 else { return false }
 
         let ep: EgressPolicy.Proto = proto == 6 ? .tcp : .udp
-        var verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport) ?? .allow
+        let now = Date()
+        var verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport, now: now) ?? .allow
         // `policy.local` (the OpenShell advisor) is answered by the MiTM itself.
         if proto == 6, dport == 80, dstIP == EgressPolicy.advisorAddress, g.policy?.openShell != nil,
            g.interceptor != nil {
@@ -1191,22 +1282,50 @@ public final class VMNetSwitch: @unchecked Sendable {
         }
         func dropDenied() -> Bool {
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                       proto: proto, port: dport, denied: true)
+                       proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now)
             if Self.isTCPSyn(buf, n) { injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n)) }
             return true
         }
 
+        let tcpFlags = proto == 6 ? Self.tcpFlags(buf, n) : nil
         if verdict == .deny {
+            // Any TCP segment but a fresh SYN belongs to a flow that was open.
+            let midFlow = tcpFlags.map { Self.denyReset(tcpFlags: $0) != .syn } ?? false
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                       proto: proto, port: dport, denied: true)
-            if proto == 6, Self.isTCPSyn(buf, n) {           // fail the connect fast
-                injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n))
+                       proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now,
+                       midFlow: midFlow)
+            if proto == 6 {
+                switch Self.denyReset(tcpFlags: tcpFlags) {
+                case .syn:                                     // fail the connect fast
+                    injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n))
+                case .established:
+                    // Allowed when it opened, denied now (a rule was switched
+                    // off, expired, or a deny was added): cut it rather than
+                    // let it hang, and drop the MiTM's half of a diverted flow
+                    // so its upstream connection closes too.
+                    injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n, established: true))
+                    if let intercept = g.interceptor, g.interceptPorts.contains(dport) {
+                        intercept.flowDenied(portID: srcPortID,
+                                             ipPacket: [UInt8](UnsafeBufferPointer(start: buf + 14, count: n - 14)))
+                    }
+                case .none:
+                    break
+                }
             }
             return true                                       // dropped
         }
 
-        fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                   proto: proto, port: dport, denied: false, containerDirect: containerDirect)
+        // Allow verdicts are only worth a log line / Timeline row when the
+        // firewall is actually on: with no rules (allow-all) every flow would
+        // otherwise be reported as "allowed" by a firewall that's off (B25).
+        // Container traffic the workspace exempts from the MiTM is always
+        // reported: that it skipped interception is the point of the row.
+        if containerDirect || Self.reportsAllowedFlows(g.policy) {
+            fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                       proto: proto, port: dport, denied: false, policy: g.policy, ep: ep, now: now,
+                       newConnection: Self.denyReset(tcpFlags: tcpFlags) == .syn,
+                       containerDirect: containerDirect)
+        }
 
         // Allowed: divert intercepted TCP into the MiTM (the SNI layer re-checks
         // the host + `web` rules); otherwise let the native switch forward it.
@@ -1252,23 +1371,66 @@ public final class VMNetSwitch: @unchecked Sendable {
         return (pid, policy, interceptor, ports, inspected)
     }
 
-    /// Fire the observer for a new flow, deduped per (port, dstIP, port, proto),
+    /// Whether allowed flows are reported to the egress observer. The
+    /// workspace's "Log allowed connections" choice (`logsAllowed`) when it
+    /// made one; otherwise only when a real ruleset is in force
+    /// (`EgressPolicy.isActive`) — a firewall that's off doesn't claim to
+    /// have "allowed" anything (B25). Denials always are.
+    static func reportsAllowedFlows(_ policy: EgressPolicy?) -> Bool {
+        policy?.reportsAllowed ?? false
+    }
+
+    /// Fire the observer for a new flow, deduped per (port, destination, port,
+    /// proto) — the destination being the looked-up name, else the IP —
     /// separately for allow vs deny so a state change re-logs.
+    /// `policy` (nil for a transport drop) names the deciding rule; it's only
+    /// looked up for a flow that actually gets reported.
+    /// `newConnection` (an allowed TCP SYN): a deduped repeat is still passed
+    /// on, flagged `isRepeat`, so the allowed row's ×N counts every
+    /// connection rather than one per dedupe window.
     private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
-                            proto: UInt8, port: UInt16, denied: Bool, containerDirect: Bool = false) {
-        let key = EgressKey(portID: portID, dstIP: dstIP, dstPort: port, proto: denied ? proto | 0x80 : proto)
+                            proto: UInt8, port: UInt16, denied: Bool,
+                            policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
+                            midFlow: Bool = false, newConnection: Bool = false,
+                            containerDirect: Bool = false) {
+        let name = hostnames.first ?? ""
+        let key = EgressKey(portID: portID, name: name, dstIP: name.isEmpty ? dstIP : 0,
+                            // A dying flow's trailing segments dedupe apart from
+                            // fresh connections: the app may fold them into the
+                            // "connection closed" row, and a new connect after
+                            // that must still get its own "deny" row.
+                            dstPort: port, proto: (denied ? proto | 0x80 : proto) | (midFlow ? 0x40 : 0))
         lock.lock()
         let now = Date()
-        guard let observer = egressObserver,
-              now.timeIntervalSince(egressSeen[key] ?? .distantPast) >= Self.egressReportEvery
-        else { lock.unlock(); return }
+        guard let observer = egressObserver else { lock.unlock(); return }
+        guard now.timeIntervalSince(egressSeen[key] ?? .distantPast) >= Self.egressReportEvery else {
+            lock.unlock()
+            if newConnection, !denied {
+                var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
+                                        proto: proto, port: port, denied: false)
+                event.rule = policy?.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep,
+                                                port: port, now: now)?.text
+                event.isRepeat = true
+                observer(event)
+            }
+            return
+        }
         if egressSeen.count > 8192 {
             egressSeen = egressSeen.filter { now.timeIntervalSince($0.value) < Self.egressReportEvery }
         }
         egressSeen[key] = now
         lock.unlock()
-        observer(EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
-                             proto: proto, port: port, denied: denied, containerDirect: containerDirect))
+        var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
+                                proto: proto, port: port, denied: denied)
+        event.midFlow = midFlow
+        event.containerDirect = containerDirect
+        if let policy {
+            event.rule = policy.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep,
+                                           port: port, now: now)?.text
+        } else {
+            event.byPolicy = false
+        }
+        observer(event)
     }
 
     /// (proto, dstIP, dstPort) for a unicast IPv4 TCP/UDP frame (first fragment
@@ -1318,11 +1480,15 @@ public final class VMNetSwitch: @unchecked Sendable {
         return .current
     }
 
-    private static func isTCPSyn(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+    /// The TCP flags byte of an IPv4/TCP frame, or nil when it's too short.
+    private static func tcpFlags(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> UInt8? {
         let ihl = Int(buf[14] & 0x0F) * 4
-        guard n >= 14 + ihl + 14 else { return false }
-        let flags = buf[14 + ihl + 13]
-        return (flags & 0x02) != 0 && (flags & 0x10) == 0               // SYN, not ACK
+        guard n >= 14 + ihl + 14 else { return nil }
+        return buf[14 + ihl + 13]
+    }
+
+    private static func isTCPSyn(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        denyReset(tcpFlags: tcpFlags(buf, n)) == .syn
     }
 
     /// True if an IPv6 frame's destination is a routable (global / ULA) unicast
@@ -1348,16 +1514,34 @@ public final class VMNetSwitch: @unchecked Sendable {
         let dnsOff = 14 + ihl + 8
         guard n > dnsOff else { return }
         let payload = [UInt8](UnsafeBufferPointer(start: buf + dnsOff, count: n - dnsOff))
-        for a in DNSSnoop.parseResponse(payload) { cache.record(ip: a.ip, name: a.name, ttl: a.ttl) }
+        for a in DNSSnoop.parseResponse(payload) { cache.record(ip: a.ip, name: a.name, ttl: a.ttl, query: a.query) }
     }
 
     /// Build an IPv4 TCP RST+ACK toward the guest in response to its SYN, so a
     /// firewall-denied connect fails immediately instead of retransmitting.
-    private static func buildTCPReset(_ syn: UnsafeMutablePointer<UInt8>, _ n: Int) -> [UInt8] {
+    /// The RST answering a denied guest segment (Ethernet frame in `syn`).
+    /// For a SYN: RST+ACK acknowledging it. For an established flow
+    /// (`established`): a bare RST with seq = the guest's ACK number, the one
+    /// sequence number its kernel accepts a reset at.
+    static func buildTCPReset(_ syn: UnsafeMutablePointer<UInt8>, _ n: Int,
+                              established: Bool = false) -> [UInt8] {
         let ihl = Int(syn[14] & 0x0F) * 4
         let gIP = u32(syn, 14 + 12), dIP = u32(syn, 14 + 16)             // guest, dst
         let sPort = u16(syn, 14 + ihl), dPort = u16(syn, 14 + ihl + 2)
         let gSeq = u32(syn, 14 + ihl + 4)
+        if established {
+            let gAck = u32(syn, 14 + ihl + 8)
+            var ip = [UInt8](repeating: 0, count: 20 + 20)
+            ip[0] = 0x45; ip[2] = 0; ip[3] = 40; ip[8] = 64; ip[9] = 6
+            putU32(&ip, 12, dIP); putU32(&ip, 16, gIP)
+            putU16(&ip, 10, ipChecksum(ip, 0, 20))
+            putU16(&ip, 20 + 0, dPort); putU16(&ip, 20 + 2, sPort)
+            putU32(&ip, 20 + 4, gAck); putU32(&ip, 20 + 8, 0)
+            ip[20 + 12] = 0x50
+            ip[20 + 13] = 0x04                                          // RST
+            putU16(&ip, 20 + 16, tcpChecksum(ip, dIP, gIP))
+            return ip
+        }
 
         var ip = [UInt8](repeating: 0, count: 20 + 20)
         // IPv4 header

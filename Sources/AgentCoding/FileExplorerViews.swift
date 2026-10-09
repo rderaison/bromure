@@ -149,7 +149,7 @@ struct FileExplorerPane: View {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 if Task.isCancelled { return }
                 updateAgentTab()
-                await model.refresh()
+                await model.pollRefresh()
             }
         }
     }
@@ -179,6 +179,11 @@ struct FileExplorerPane: View {
                 || Self.agentNames.contains { l.hasSuffix("(\($0))") }
             return (isAgent || tab.isWorktree) ? tab.index : nil
         }
+        let target = model.agentTabIndex.flatMap { i in
+            activeTab.map { PaneTarget.chat(window: i, windowID: nil, display: $0.display,
+                                            worktree: $0.worktreeBranch) }
+        }
+        if model.agentTabTarget != target { model.agentTabTarget = target }
     }
 
     /// IDE-style auto-show/auto-hide, both edge-triggered so the 0.7s roster
@@ -836,9 +841,7 @@ private struct DiffView: View {
                     Image(systemName: "text.bubble.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(.purple)
-                    Text(String(format: NSLocalizedString(
-                        "%d comment(s) drafted", comment: "diff pane"),
-                        model.reviewDrafts.count))
+                    Text(TaskPlurals.commentsDrafted(model.reviewDrafts.count))
                         .font(.system(size: 11))
                     Spacer(minLength: 8)
                     Button(NSLocalizedString("Discard", comment: "diff pane")) {

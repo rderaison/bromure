@@ -565,6 +565,18 @@ struct ProfileSettingsView: View {
             settingsDivider
 
             settingToggle(
+                "Metal Renderer",
+                description: MetalRendererPreference.isSupported
+                    ? "Accelerates this profile with Metal. Applies to new windows when Metal is also enabled in the app settings."
+                    : "Requires macOS 27 or later.",
+                isOn: $draft.settings.enableMetalRenderer
+            )
+            .disabled(!MetalRendererPreference.isSupported || !draft.settings.enableGPU)
+            .opacity(MetalRendererPreference.isSupported && draft.settings.enableGPU ? 1 : 0.5)
+
+            settingsDivider
+
+            settingToggle(
                 "WebGL",
                 description: "Lets websites display 3D graphics and interactive content. Required by some games, maps, and data visualizations.",
                 isOn: $draft.settings.enableWebGL
@@ -950,10 +962,10 @@ struct ProfileSettingsView: View {
             // User Agent
             VStack(alignment: .leading, spacing: 6) {
                 Text("User Agent").font(.headline)
-                Text("How this browser identifies itself to websites. By default Bromure appears as Chrome on macOS so sites don\u{2019}t see the Linux VM. Enter a custom user agent to override, or leave blank for the default.")
+                Text("How this browser identifies itself to websites. Leave blank to use Bromure’s default Linux Chrome user agent, or enter a custom value to override it.")
                     .settingDescription()
                 TextField(
-                    "Chrome on macOS (default)",
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
                     text: $draft.settings.userAgent,
                     axis: .vertical
                 )

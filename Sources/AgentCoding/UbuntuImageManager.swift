@@ -31,6 +31,26 @@ import SandboxEngine
 /// VZEFIBootLoader — no kernel extraction needed because GRUB is on the
 /// disk's EFI partition.
 public final class UbuntuImageManager {
+    /// The user's own customize script (File → Rebuild Base Image), run as
+    /// root inside the image after Bromure's setup and the agent installs —
+    /// on every full build (prebuilt download or local), never when only
+    /// amending the image with new packages. nil: none.
+    public var customizeScript: String?
+
+    /// Where the last customize run's output is kept (the whole postinstall
+    /// phase, the script's `bash -x` trace included).
+    public static var customizeLogURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/BromureAC/base-image-customize.log")
+    }
+
+    /// The step file for `script`: traced (`set -x`, each line tagged), so
+    /// the log shows every command it ran. Named so postinstall.sh runs it
+    /// last and only once.
+    static let customizeStepName = "9999-customize.sh"
+    static func customizeStep(_ script: String) -> String {
+        "# Your customize script\nexport PS4='+ [customize] '\nset -x\n" + script + "\n"
+    }
     /// Bump to force a base-image rebuild on next launch.
     /// **NEVER bump this without explicit user approval** — base-image
     /// rebuilds cost the user ~5 minutes of install time. Prefer landing
@@ -346,11 +366,12 @@ public final class UbuntuImageManager {
 
             // 3b. Apply the catalog's postinstall steps (agent installs)
             //     to the still-unpromoted disk.
-            if !postinstallSteps.isEmpty {
+            if !postinstallSteps.isEmpty || customizeScript != nil {
                 progress("Installing recommended packages (\(postinstallSteps.count) step(s))…")
                 try await runPostinstall(
                     steps: postinstallSteps,
                     targetDisk: scratchDisk,
+                    customize: true,
                     progress: progress,
                     output: output
                 )
@@ -534,9 +555,32 @@ public final class UbuntuImageManager {
         steps: [PostinstallStep],
         targetDisk: URL,
         environmentOverride: InstallerEnvironment? = nil,
+        customize: Bool = false,
         progress: @escaping (String) -> Void,
-        output: @escaping (String) -> Void
+        output originalOutput: @escaping (String) -> Void
     ) async throws {
+        // The user's script, last, and the whole phase kept in a log file.
+        let script = customize ? customizeScript : nil
+        var output = originalOutput
+        var logHandle: FileHandle?
+        if script != nil {
+            let url = Self.customizeLogURL
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: url.path,
+                                           contents: Data("Base image customize run — \(Date())\n".utf8))
+            logHandle = try? FileHandle(forWritingTo: url)
+            _ = try? logHandle?.seekToEnd()
+            let handle = logHandle
+            let failed = customizeFailed
+            output = { chunk in
+                try? handle?.write(contentsOf: Data(chunk.utf8))
+                if chunk.contains("attempt(s): Your customize script") { failed.set() }
+                originalOutput(chunk)
+            }
+            progress("Your customize script runs after the recommended packages (log: \(url.path))")
+        }
+        defer { try? logHandle?.close() }
         // Materialise the steps as NNNN-<uuid8>.sh files in a temp dir the
         // guest mounts as the `postinstall` virtiofs share; lexical order
         // is execution order. Line 1 of each file is the human description
@@ -554,6 +598,10 @@ public final class UbuntuImageManager {
             let title = step.description.replacingOccurrences(of: "\n", with: " ")
             let body = "# \(title)\nset -e\n\(step.command)\n"
             try body.write(to: file, atomically: true, encoding: .utf8)
+        }
+        if let script {
+            try Self.customizeStep(script).write(
+                to: stepsDir.appendingPathComponent(Self.customizeStepName), atomically: true, encoding: .utf8)
         }
 
         // Prefer the published provisioner (fetched alongside the image by
@@ -576,6 +624,8 @@ public final class UbuntuImageManager {
             environment = .netboot
         }
 
+        customizeFailed.reset()
+        do {
         try await runProvisioner(
             environment: environment,
             stage: "Customizing the image",
@@ -586,11 +636,29 @@ public final class UbuntuImageManager {
             extraShares: [("postinstall", shareDir, true)],
             successMarker: "SANDBOX_POSTINSTALL_DONE",
             failureMarker: "SANDBOX_POSTINSTALL_FAILED:",
-            markerTimeout: 20 * 60,
-            hardTimeout: 30 * 60,
+            // A customize script compiling a toolchain can take a while.
+            markerTimeout: (script == nil ? 20 : 90) * 60,
+            hardTimeout: (script == nil ? 30 : 120) * 60,
             progress: progress,
             output: output
         )
+        } catch UbuntuImageError.installerReportedFailure where customizeFailed.isSet {
+            // Say whose step it was: the guest's marker alone reads as
+            // Bromure's installer breaking.
+            throw UbuntuImageError.customizeScriptFailed(
+                log: (Self.customizeLogURL.path as NSString).abbreviatingWithTildeInPath)
+        }
+    }
+
+    /// Set when the guest reports the customize step failed (the output
+    /// arrives on another thread than the one that throws).
+    private let customizeFailed = CustomizeFailureFlag()
+    final class CustomizeFailureFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        func reset() { lock.lock(); value = false; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     /// Publish-pipeline step: turn the Alpine netboot into the
@@ -703,13 +771,14 @@ public final class UbuntuImageManager {
             : "192.168.64.1"
 
         let proxy = AlpinePackageProxy()
-        do { try proxy.start() } catch {
+        do { try proxy.start(guestGateway: guestGatewayHost) } catch {
             FileHandle.standardError.write(Data(
                 "[bake] Alpine package proxy failed to start (\(error)) — falling back to direct HTTP\n".utf8))
         }
         defer { proxy.stop() }
         let alpineRepoBase = proxy.guestBase(host: guestGatewayHost)?.absoluteString
             ?? "http://dl-cdn.alpinelinux.org"
+        FileHandle.standardError.write(Data("[bake] guest proxy URL = \(alpineRepoBase)\n".utf8))
 
         // Build (or refresh) the shimmed initrd so the MTU clamp runs
         // BEFORE Alpine's /init does its modloop / apkovl / APKINDEX
@@ -1253,6 +1322,8 @@ public enum UbuntuImageError: LocalizedError {
     case kernelExtractionFailed(String)
     case hostCommandFailed(String, Int32)
     case installerReportedFailure(String)
+    /// The user's customize script (Rebuild Base Image) failed.
+    case customizeScriptFailed(log: String)
     case installerStoppedEarly
     case installerTimeout
     /// Installer VM came up but couldn't obtain a DHCP lease from
@@ -1287,6 +1358,9 @@ public enum UbuntuImageError: LocalizedError {
         case .installerReportedFailure(let msg):
             return String(format: NSLocalizedString("Installer reported failure: %@",
                 comment: "Base-image build: the in-VM installer reported a failure"), msg)
+        case .customizeScriptFailed(let log):
+            return String(format: NSLocalizedString("Your customize script failed — the current image is kept. See %@",
+                comment: "base image customize"), log)
         case .installerStoppedEarly:
             return NSLocalizedString("Installer VM stopped before reporting completion.",
                 comment: "Base-image build: installer VM stopped unexpectedly")

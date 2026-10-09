@@ -40,6 +40,10 @@ final class TerminalSurfaceView: NSView {
     /// insertText *replaces* marked text, it doesn't send unmarkText first.
     private var preeditText: String?
 
+    /// The last right-click opened the terminal's menu instead of reaching
+    /// the pane (so its release isn't sent either).
+    private var rightClickOpenedMenu = false
+
     init?(command: String, workingDirectory: String? = nil, windowIndex: Int,
           profileID: Profile.ID? = nil, remoteHost: UUID? = nil) {
         guard let app = GhosttyRuntime.shared.app else { return nil }
@@ -344,8 +348,21 @@ final class TerminalSurfaceView: NSView {
         leftButtonDown = false
         send(button: GHOSTTY_MOUSE_LEFT, state: GHOSTTY_MOUSE_RELEASE, event: event)
     }
-    override func rightMouseDown(with event: NSEvent) { send(button: GHOSTTY_MOUSE_RIGHT, state: GHOSTTY_MOUSE_PRESS, event: event) }
-    override func rightMouseUp(with event: NSEvent) { send(button: GHOSTTY_MOUSE_RIGHT, state: GHOSTTY_MOUSE_RELEASE, event: event) }
+    /// A pane app tracking the mouse gets the right-click; otherwise it
+    /// opens the terminal's menu (Copy Pane History).
+    override func rightMouseDown(with event: NSEvent) {
+        if let surface, !ghostty_surface_mouse_captured(surface) {
+            rightClickOpenedMenu = true
+            super.rightMouseDown(with: event)
+            return
+        }
+        rightClickOpenedMenu = false
+        send(button: GHOSTTY_MOUSE_RIGHT, state: GHOSTTY_MOUSE_PRESS, event: event)
+    }
+    override func rightMouseUp(with event: NSEvent) {
+        if rightClickOpenedMenu { rightClickOpenedMenu = false; return }
+        send(button: GHOSTTY_MOUSE_RIGHT, state: GHOSTTY_MOUSE_RELEASE, event: event)
+    }
     override func otherMouseDown(with event: NSEvent) { send(button: GHOSTTY_MOUSE_MIDDLE, state: GHOSTTY_MOUSE_PRESS, event: event) }
     override func otherMouseUp(with event: NSEvent) { send(button: GHOSTTY_MOUSE_MIDDLE, state: GHOSTTY_MOUSE_RELEASE, event: event) }
 

@@ -78,9 +78,43 @@ struct SessionFailureTests {
         #expect(d.contains("exited with status") || d.contains("no model configured"))
     }
 
-    @Test("Kimi's real trust dialog IS a trust prompt, answerable inline with Enter")
+    @Test("Codex's trust dialog, however it's worded, is answered from its own options")
+    func codexTrustDialogIsAnswerable() {
+        let screen = """
+          > You are running Codex in /Users/me/Devel/bromure
+
+            Since this folder is version controlled, you may wish to allow Codex to work in this folder without asking for approval.
+
+          › 1. Yes, allow Codex to work in this folder without asking for approval
+            2. No, ask me to approve edits and commands
+
+            Press enter to continue
+        """
+        let p = TerminalPrompt.detect(inScreen: screen, agent: "codex")
+        #expect(p?.kind == .picker)
+        #expect(p?.options.map(\.index) == [1, 2])
+        #expect(p?.options.first?.label.hasPrefix("Yes, allow Codex") == true)
+        #expect(p?.detail == "/Users/me/Devel/bromure")
+        #expect(p?.selectedOption == 1)
+        #expect(p?.keys(picking: 1) == ["Enter"])
+        // The older "Do you trust the contents…" wording too.
+        let older = """
+          You are in /home/ubuntu/proj
+          Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.
+          › 1. Yes, continue
+            2. No, quit
+          Press enter to continue
+        """
+        let q = TerminalPrompt.detect(inScreen: older, agent: "codex")
+        #expect(q?.kind == .picker)
+        #expect(q?.options.map(\.label) == ["Yes, continue", "No, quit"])
+    }
+
+    @Test("Kimi's real trust dialog is answered from its own options")
     func kimiTrustDialogIsAnswerable() throws {
-        // Real capture (kimi 2.0.2) of the interactive dialog.
+        // Real capture (kimi 2.0.2) of the interactive dialog. Read from its
+        // shape (cursor row + aligned rows), so the card offers Kimi's own
+        // choices, not a guess at which key means "trust".
         let screen = """
           Trust this folder?
           ↑↓ navigate · Enter select · Esc exit
@@ -92,10 +126,10 @@ struct SessionFailureTests {
              Exit Kimi Code. Asked again next launch.
         """
         let p = try #require(TerminalPrompt.detect(inScreen: screen, agent: "kimi"))
-        #expect(p.kind == .trust)
+        #expect(p.kind == .picker)
         #expect(p.detail == "/home/ubuntu/trustprobe")
-        #expect(p.canAnswerTrust)
-        #expect(p.trustKeys == ["Enter"])
+        #expect(p.options.map(\.label) == ["Trust this folder", "Don't trust"])
+        #expect(p.keys(picking: 1) == ["Enter"])
     }
 
     @Test("Credit/usage banners are read as a quota failure")
@@ -179,7 +213,7 @@ struct SessionFailureTests {
         #expect(TerminalScan.classify(fullscreenUpsell) == .prompt(p!))
     }
 
-    @Test("AskUserQuestion and permission pickers are not generic picker prompts")
+    @Test("AskUserQuestion pickers are not generic picker prompts; permission prompts are cards the user answers")
     func genericPickerExclusions() {
         // AskUserQuestion's own card answers these ("Enter to select" footer).
         let question = """
@@ -189,7 +223,8 @@ struct SessionFailureTests {
          Enter to select · Esc to cancel
         """
         #expect(TerminalPrompt.detect(inScreen: question) == nil)
-        // A tool-permission prompt is never decided from a card.
+        // A tool-permission prompt: surfaced so the chat isn't stuck behind
+        // it — the user picks, the card only relays.
         let permission = """
          Bash command: rm -rf build
          Do you want to proceed?
@@ -198,7 +233,87 @@ struct SessionFailureTests {
            3. No
          Enter to confirm · Esc to cancel
         """
-        #expect(TerminalPrompt.detect(inScreen: permission) == nil)
+        let p = TerminalPrompt.detect(inScreen: permission)
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Do you want to proceed?")
+        #expect(p?.detail == "Bash command: rm -rf build")
+        #expect(p?.options.map(\.label) == ["Yes", "Yes, and don't ask again for rm commands", "No"])
+        #expect(p?.selectedOption == 1)
+    }
+
+    @Test("a numbered list in the agent's reply is not a dialog, whatever wording is around it")
+    func replyListIsNotADialog() {
+        let screen = """
+        ⏺ The picker used to hide "Do you want to proceed?" prompts; now they show.
+          When you want to test it, the Mac that hosts the VMs needs:
+          1. a Claude subscription login;
+          2. defaults write io.bromure.agentic-coding claude.accountFeatures -bool true;
+          3. a restart of Bromure and of a Claude workspace.
+          Then check /status, a normal conversation, remote control and artifacts.
+
+        ────────────────────────────────────────────────────────────
+        ❯\u{00a0}
+        ────────────────────────────────────────────────────────────
+          ? for shortcuts
+        """
+        #expect(TerminalPrompt.detect(inScreen: screen, agent: "claude") == nil)
+    }
+
+    @Test("Codex's command approval becomes a card")
+    func codexApproval() {
+        let screen = """
+          Would you like to run the following command?
+
+          Reason: fetch the release notes
+
+          $ curl -sL https://example.com/notes
+
+        › 1. Yes, proceed (y)
+          2. Yes, and don't ask again for this command (a)
+          3. No, and tell Codex what to do differently (esc)
+
+          Press enter to confirm or esc to cancel
+        """
+        let p = TerminalPrompt.detect(inScreen: screen, agent: "codex")
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Would you like to run the following command?")
+        #expect(p?.options.count == 3)
+        #expect(p?.options.first?.label == "Yes, proceed (y)")
+        #expect(p?.selectedOption == 1)
+        #expect(p?.detail.contains("$ curl -sL https://example.com/notes") == true)
+    }
+
+    @Test("Codex starts on its own: no approvals, no sandbox of its own inside the VM")
+    @MainActor
+    func codexAutonomy() {
+        let s = AgentSession(profileID: UUID(), tool: .codex, title: "t")
+        #expect(AgentSessionEngine.roleFlags(for: s).contains("--dangerously-bypass-approvals-and-sandbox"))
+        #expect(AgentSessionEngine.roleFlags(for: AgentSession(profileID: UUID(), tool: .claude, title: "t")).isEmpty)
+    }
+
+    @Test("auto mode paused by its classifier (boxed dialog) becomes a card")
+    func autoModePause() {
+        let pause = """
+         ● Reading the workspace's credentials…
+         ╭──────────────────────────────────────────────────────────────╮
+         │ Auto mode classifier requires confirmation for this command. │
+         │ 3 consecutive actions were blocked. Please review the        │
+         │ transcript before continuing.                                │
+         │                                                              │
+         │ Latest blocked action: [Credential Exploration]              │
+         │   cat ~/.bromure/api_key.env                                 │
+         │                                                              │
+         │ Do you want to proceed?                                      │
+         │ ❯ 1. Yes                                                     │
+         │   2. No, and tell Claude what to do differently (esc)        │
+         ╰──────────────────────────────────────────────────────────────╯
+        """
+        let p = TerminalPrompt.detect(inScreen: pause)
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Do you want to proceed?")
+        #expect(p?.options.map(\.label) == ["Yes", "No, and tell Claude what to do differently (esc)"])
+        #expect(p?.detail.contains("Latest blocked action: [Credential Exploration]") == true)
+        #expect(p?.keys(picking: 2) == ["Down", "Enter"])
     }
 
     // Verbatim `/login` method menu from a real `claude` run.
@@ -244,5 +359,19 @@ struct SessionFailureTests {
         // whole joined URL through to the trailing &state=… .
         #expect(p?.authURL?.hasPrefix("https://claude.com/cai/oauth/authorize?code=true") == true)
         #expect(p?.authURL?.hasSuffix("state=bA6KkQ") == true)
+    }
+
+    @Test("An auth banner can't be the state once the model answered the latest prompt")
+    func authGateOnModelAnswer() {
+        func item(_ k: TranscriptItem.Kind) -> TranscriptItem { TranscriptItem(id: 0, kind: k, timestamp: nil) }
+        let prompt = item(.userText("grep the sign-in detector"))
+        // Nothing after the prompt, or only Claude's logged API error: not answered.
+        #expect(!SessionFailure.modelAnswered(since: [prompt]))
+        #expect(!SessionFailure.modelAnswered(since: [prompt, item(.assistantText("API Error: 401 · Please run /login"))]))
+        // A tool call (whose output mentions "not logged in") proves the model is signed in.
+        #expect(SessionFailure.modelAnswered(since: [prompt, item(.toolUse(name: "Bash", summary: "grep", detail: "{}")),
+                                                     item(.toolResult(tool: "Bash", content: "not logged in", isError: false))]))
+        // An answer from an earlier turn doesn't count for the new prompt.
+        #expect(!SessionFailure.modelAnswered(since: [item(.assistantText("Done.")), prompt]))
     }
 }

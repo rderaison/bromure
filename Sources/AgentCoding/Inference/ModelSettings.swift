@@ -49,6 +49,20 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// The omp provider that is this one: omp reaches Anthropic, OpenAI,
+    /// xAI and z.ai natively with their API keys, and any OpenAI-compatible
+    /// server as `custom` (its base URL). nil = not one of omp's.
+    public var ompProvider: Profile.OmpProvider? {
+        switch self {
+        case .anthropic: return .anthropic
+        case .openai:    return .openai
+        case .xai:       return .xai
+        case .zai:       return .zai
+        case .custom:    return .custom
+        case .moonshot, .bedrock, .openrouter: return nil
+        }
+    }
+
     /// Claude Code's direct gateway route: OpenRouter serves the Anthropic
     /// Messages API at `/api/v1/messages` and z.ai at
     /// `/api/anthropic/v1/messages`, so Claude points ANTHROPIC_BASE_URL there
@@ -74,6 +88,11 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     /// OpenAI-compatible base (the external-engine route).
     public func canRoute(_ agent: ModelAgent, native: ModelProvider) -> Bool {
         if self == native || self == .bedrock { return true }
+        // omp speaks to every provider it has built in, each with its own
+        // key — switching it is a setting, not a route (the launch overlay
+        // switches it). Judging it by its default provider alone made a
+        // z.ai key "unable to power omp".
+        if agent == .omp, ompProvider != nil { return true }
         return agent == .claude ? anthropicGatewayBase != nil : openAICompatibleBase != nil
     }
 
@@ -267,6 +286,30 @@ public struct ModelCapabilities: Codable, Equatable, Sendable {
         self.inputs = inputs
     }
 
+    /// "1M", "128k", "200,000", "131072" → tokens; nil for anything else.
+    public static func parseTokens(_ raw: String) -> Int? {
+        var s = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            .replacingOccurrences(of: ",", with: "").replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        if s.hasSuffix("tokens") { s = String(s.dropLast(6)) }
+        var scale = 1.0
+        if s.hasSuffix("m") { scale = 1_000_000; s.removeLast() }
+        else if s.hasSuffix("k") { scale = 1_000; s.removeLast() }
+        guard let n = Double(s), n > 0 else { return nil }
+        let tokens = Int((n * scale).rounded())
+        return tokens >= 1_000 ? tokens : nil
+    }
+
+    /// 1000000 → "1M", 131072 → "131K", 128000 → "128K".
+    public static func formatTokens(_ n: Int) -> String {
+        if n >= 1_000_000, n % 100_000 == 0 {
+            let m = Double(n) / 1_000_000
+            return m == m.rounded() ? "\(Int(m))M" : String(format: "%.1fM", m)
+        }
+        if n >= 1_000 { return "\(Int((Double(n) / 1_000).rounded()))K" }
+        return "\(n)"
+    }
+
     /// True when at least one field is known (so the UI can show "not probed").
     public var isKnown: Bool { contextWindow != nil || reasoning != nil || inputs != nil }
     public var acceptsImages: Bool { inputs?.contains(.image) ?? false }
@@ -343,6 +386,10 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     /// Per-agent tier overrides. `agentTiers[.codex][.medium]` wins over
     /// `tiers[.medium]` for Codex only; an unset entry inherits the default.
     public var agentTiers: [ModelAgent: [ModelTier: ModelRef]]
+    /// The user's description of their environment — organization, repos,
+    /// domains, services — for the agents' safety checks (Claude's auto-mode
+    /// classifier). Global only: a workspace override never carries it.
+    public var agentEnvironment: String = ""
 
     public init(providers: [ProviderCredential] = [],
                 localServer: LocalServer? = nil,
@@ -360,7 +407,7 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     // field existed, e.g. `agentTiers`) still loads — a missing key defaults
     // rather than throwing and wiping the user's saved settings.
     enum CodingKeys: String, CodingKey {
-        case providers, localServer, localRunModels, tiers, agentTiers
+        case providers, localServer, localRunModels, tiers, agentTiers, agentEnvironment
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -370,6 +417,7 @@ public struct ModelSettings: Codable, Equatable, Sendable {
         tiers = try c.decodeIfPresent([ModelTier: ModelRef].self, forKey: .tiers) ?? [:]
         agentTiers = try c.decodeIfPresent([ModelAgent: [ModelTier: ModelRef]].self,
                                            forKey: .agentTiers) ?? [:]
+        agentEnvironment = try c.decodeIfPresent(String.self, forKey: .agentEnvironment) ?? ""
     }
 
     // MARK: Lookups
@@ -384,6 +432,16 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     /// default.
     public func ref(for agent: ModelAgent, tier: ModelTier) -> ModelRef? {
         agentTiers[agent]?[tier] ?? tiers[tier]
+    }
+
+    /// The context window set for a model the agents reach locally (a
+    /// custom server's, entered by the user when the server doesn't
+    /// advertise it, or probed): the first assignment of `modelID` that
+    /// carries one. nil when none does.
+    public func localContextWindow(forModel modelID: String) -> Int? {
+        let refs = Array(tiers.values) + agentTiers.values.flatMap { Array($0.values) }
+        return refs.first { $0.isLocal && $0.modelID == modelID && ($0.capabilities.contextWindow ?? 0) > 0 }?
+            .capabilities.contextWindow
     }
 
     /// The tiers an agent effectively runs with (overrides merged onto default).

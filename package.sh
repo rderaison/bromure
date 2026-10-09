@@ -15,7 +15,7 @@ case "$TARGET" in
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE="$SOURCE_DIR/Bromure.sdef"
         ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
-        ICON_COMPOSER=""
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/Bromure.icon"
         DMG_NAME="Bromure.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
         ;;
@@ -31,8 +31,23 @@ case "$TARGET" in
         DMG_NAME="BromureAgenticCoding.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure-ac.bundle"
         ;;
+    sidecar|native|agent-host)
+        # Bromure Sidecar: the menu-bar app that attaches a plain Mac's agents
+        # to a Bromure AC (Sources/AgentHost). Bundles its own tmux.
+        TARGET="sidecar"
+        PRODUCT_NAME="bromure-sidecar"
+        APP_NAME="Bromure Sidecar"
+        SOURCE_DIR="$SCRIPT_DIR/Sources/AgentHost"
+        ENTITLEMENTS="$SOURCE_DIR/AgentHost.entitlements"
+        INFO_PLIST="$SOURCE_DIR/Info.plist"
+        SDEF_FILE=""
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureSidecarIcon.icns"
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureSidecar.icon"
+        DMG_NAME="BromureSidecar.dmg"
+        RESOURCE_BUNDLE_NAME="bromure_bromure-sidecar.bundle"
+        ;;
     *)
-        echo "Usage: $0 [bromure|bromure-ac]" >&2
+        echo "Usage: $0 [bromure|bromure-ac|sidecar]" >&2
         exit 2
         ;;
 esac
@@ -42,6 +57,7 @@ esac
 #   DEVELOPER_ID   - signing identity, e.g. "Developer ID Application: Your Name (TEAM_ID)"
 #   APPLE_ID       - your Apple ID email for notarization
 #   TEAM_ID        - your Apple Developer team ID
+#   NOTARY_PROFILE - saved notarytool Keychain profile (preferred)
 #   APP_PASSWORD   - app-specific password for notarization
 #                    (generate at https://appleid.apple.com > Sign-In and Security > App-Specific Passwords)
 #
@@ -50,12 +66,13 @@ esac
 #   APPLE_ID="jane@example.com" \
 #   TEAM_ID="ABC123XYZ" \
 #   APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
-#   ./package.sh [bromure|bromure-ac]
+#   ./package.sh [bromure|bromure-ac|sidecar]
 
-DEVELOPER_ID="${DEVELOPER_ID:-}"
+DEVELOPER_ID="${DEVELOPER_ID:-${CODESIGN_IDENTITY:-}}"
 APPLE_ID="${APPLE_ID:-}"
 TEAM_ID="${TEAM_ID:-}"
 APP_PASSWORD="${APP_PASSWORD:-}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
 # --- Validation ---
 if [ -z "$DEVELOPER_ID" ]; then
@@ -66,14 +83,16 @@ if [ -z "$DEVELOPER_ID" ]; then
     echo "  APPLE_ID=\"you@example.com\" \\"
     echo "  TEAM_ID=\"ABC123XYZ\" \\"
     echo "  APP_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\" \\"
-    echo "  ./package.sh [bromure|bromure-ac]"
+    echo "  ./package.sh [bromure|bromure-ac|sidecar]"
     echo ""
     echo "List available identities with:"
     echo "  security find-identity -v -p codesigning"
     exit 1
 fi
 
-if [ -z "$APPLE_ID" ] || [ -z "$TEAM_ID" ] || [ -z "$APP_PASSWORD" ]; then
+if [ -n "$NOTARY_PROFILE" ]; then
+    NOTARIZE=true
+elif [ -z "$APPLE_ID" ] || [ -z "$TEAM_ID" ] || [ -z "$APP_PASSWORD" ]; then
     echo "WARNING: APPLE_ID, TEAM_ID, or APP_PASSWORD not set — will skip notarization."
     echo "         The app will be signed but may trigger Gatekeeper warnings on other Macs."
     NOTARIZE=false
@@ -81,15 +100,23 @@ else
     NOTARIZE=true
 fi
 
+notarize_artifact() {
+    local artifact="$1"
+    if [ -n "$NOTARY_PROFILE" ]; then
+        xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" --wait
+    else
+        xcrun notarytool submit "$artifact" --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" --password "$APP_PASSWORD" --wait
+    fi
+}
+
 # --- Build ---
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
 
-# GhosttyKit binaryTarget (never committed) — build from the pinned commit
-# when missing; cached under ~/.cache/bromure-ghostty (mirrors build.sh).
-if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
-    echo "vendor/GhosttyKit.xcframework missing — running tools/build-ghostty.sh…"
-    "$SCRIPT_DIR/tools/build-ghostty.sh"
-fi
+# GhosttyKit binaryTarget (never committed) — always checked against its
+# stamp (pinned commit + build flags), rebuilt when it doesn't match; cached
+# under ~/.cache/bromure-ghostty (mirrors build.sh).
+"$SCRIPT_DIR/tools/build-ghostty.sh"
 
 # Same backend as build.sh: Xcode 26's default `swiftbuild` backend fails in
 # macro packages ("unable to open dependencies file …-primary.d") and tries
@@ -133,26 +160,37 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
+"$SCRIPT_DIR/scripts/stamp-build-info.sh" "$CONTENTS/Info.plist"
 
 # SPM omits the standard app rpath; add it so dyld can resolve
 # @rpath/Sparkle.framework/... to Contents/Frameworks/.
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$PRODUCT_NAME" 2>/dev/null || true
+# Swift back-deployment shims (libswiftCompatibilitySpan…) into the bundle, and
+# no absolute Xcode-toolchain rpath — else macOS 14/15 can't load the binary
+# and Gatekeeper refuses the app ("Bad Load Command" from syspolicy_check).
+"$SCRIPT_DIR/scripts/embed-swift-backdeploy.sh" "$MACOS_DIR/$PRODUCT_NAME" "$CONTENTS/Frameworks" \
+    "$DEVELOPER_ID" --options runtime --timestamp
 
 # Embed provisioning profile (required for iCloud and other entitlements).
 # Per-product profile if present (e.g. bromure-ac.provisionprofile),
-# else fall back to the shared bromure.provisionprofile.
-PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
-[ -f "$PROVISION_PROFILE" ] || PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
-if [ ! -f "$PROVISION_PROFILE" ]; then
-    echo "ERROR: Provisioning profile not found at $PROVISION_PROFILE"
-    exit 1
+# else fall back to the shared bromure.provisionprofile. Bromure Sidecar has
+# no restricted entitlements (no keychain group, no virtualization): no
+# profile — another app's would only mismatch its bundle id.
+if [ "$TARGET" != "sidecar" ]; then
+    PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
+    [ -f "$PROVISION_PROFILE" ] || PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
+    if [ ! -f "$PROVISION_PROFILE" ]; then
+        echo "ERROR: Provisioning profile not found at $PROVISION_PROFILE"
+        exit 1
+    fi
+    cp "$PROVISION_PROFILE" "$CONTENTS/embedded.provisionprofile"
 fi
-cp "$PROVISION_PROFILE" "$CONTENTS/embedded.provisionprofile"
 
 # Fat-client privileged tunnel daemon (SMAppService, macOS 13+). Same plist
 # build.sh embeds: without it, SMAppService.daemon(plistName:).register()
 # throws and the network helper never appears in Login Items. Only meaningful
-# for the bromure-ac target; harmless elsewhere.
+# for the bromure-ac target.
+if [ "$TARGET" = "bromure-ac" ]; then
 LAUNCHD_DIR="$CONTENTS/Library/LaunchDaemons"
 mkdir -p "$LAUNCHD_DIR"
 cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
@@ -176,6 +214,7 @@ cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+fi
 
 if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
@@ -270,8 +309,25 @@ PLIST
     fi
 fi
 
+# Bromure Sidecar: the tmux it runs agents in (tools/build-tmux.sh, pinned in
+# tools/tmux.version; libevent + utf8proc static, system ncurses).
+if [ "$TARGET" = "sidecar" ]; then
+    if [ ! -x "$SCRIPT_DIR/vendor/tmux/bin/tmux" ]; then
+        echo "vendor/tmux missing — running tools/build-tmux.sh…"
+        "$SCRIPT_DIR/tools/build-tmux.sh"
+    fi
+    cp "$SCRIPT_DIR/vendor/tmux/bin/tmux" "$MACOS_DIR/tmux"
+    echo "Bundled tmux $(cat "$SCRIPT_DIR/vendor/tmux/VERSION" 2>/dev/null)."
+fi
+
 # --- Sign ---
 echo "=== Signing with: $DEVELOPER_ID ==="
+
+# Nested executables first (inside-out, hardened runtime + timestamp — both
+# required for notarisation).
+if [ -x "$MACOS_DIR/tmux" ]; then
+    codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$MACOS_DIR/tmux"
+fi
 
 # Sign nested code inside any embedded frameworks first (inside-out ordering
 # is required for notarisation). Sparkle.framework ships helper tools and
@@ -301,6 +357,11 @@ if [ -d "$FRAMEWORKS_DIR" ]; then
     done
 fi
 
+# The browser's sandboxed GPU renderer; Sidecar draws no VM and doesn't carry it.
+if [ "$TARGET" != "sidecar" ]; then
+    bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$DEVELOPER_ID"
+fi
+
 # Finally sign the outer app with entitlements.
 codesign --force --options runtime \
     --entitlements "$ENTITLEMENTS" \
@@ -320,11 +381,7 @@ if [ "$NOTARIZE" = true ]; then
     ditto -c -k --keepParent "$APP_BUNDLE" "$NOTARIZE_ZIP"
 
     echo "Submitting to Apple (this may take a few minutes)..."
-    xcrun notarytool submit "$NOTARIZE_ZIP" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$APP_PASSWORD" \
-        --wait
+    notarize_artifact "$NOTARIZE_ZIP"
 
     rm -f "$NOTARIZE_ZIP"
 
@@ -398,8 +455,12 @@ MOUNT_DIR=$(echo "$ATTACH_OUTPUT" | grep "/Volumes/$APP_NAME" | awk -F'\t' '{pri
 # Wait for Finder to register the volume
 sleep 2
 
-# Use AppleScript to set icon size, positions, and background
-osascript <<APPLESCRIPT
+# Write Finder settings directly for automation without Apple Events, or use
+# Finder on an interactive desktop. Both paths use the same release layout.
+if [[ -n ${BROMURE_DMG_LAYOUT_PYTHON:-} ]]; then
+    "$BROMURE_DMG_LAYOUT_PYTHON" "$SCRIPT_DIR/tools/dmg-layout.py" "$MOUNT_DIR" "$APP_NAME"
+elif [[ ${BROMURE_DMG_FINDER_LAYOUT:-1} == 1 ]]; then
+if ! osascript <<APPLESCRIPT
 tell application "Finder"
     tell disk "$APP_NAME"
         open
@@ -421,6 +482,10 @@ tell application "Finder"
     end tell
 end tell
 APPLESCRIPT
+then
+    echo "WARNING: Finder layout failed; continuing with the installable DMG."
+fi
+fi
 
 # Ensure .background and .DS_Store are hidden
 SetFile -a V "$MOUNT_DIR/.background" 2>/dev/null || true
@@ -455,11 +520,7 @@ codesign --force --sign "$DEVELOPER_ID" "$DMG_PATH"
 # Notarize the DMG too
 if [ "$NOTARIZE" = true ]; then
     echo "Notarizing DMG..."
-    xcrun notarytool submit "$DMG_PATH" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$APP_PASSWORD" \
-        --wait
+    notarize_artifact "$DMG_PATH"
 
     xcrun stapler staple "$DMG_PATH"
 fi

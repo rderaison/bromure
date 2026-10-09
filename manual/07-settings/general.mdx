@@ -1,6 +1,6 @@
 ---
 title: "General"
-description: "A machine's identity and window behavior: name, color, what closing the window does, start at login, notes, and which machines its agents may reach."
+description: "A machine's identity and window behavior: name, color, what closing the window does, how much Kimi Code asks, start at login, notes, and which machines its agents may reach."
 order: 7.1
 ---
 
@@ -19,6 +19,8 @@ The **General** pane holds a machine's identity and what happens when you close 
 | **Name** | The machine's name, shown in the sidebar's **Virtual Machines** section, the machine menu, session headers, and the editor's title. The only field required to save. New machines are pre-named `Default workspace` (numbered `Default workspace 2`, `3`, … if the name is taken). Hidden in Preferences, where the template is always named **Defaults**. |
 | **Color** | The machine's accent color: **Blue** (default), **Red**, **Green**, **Orange**, **Purple**, **Pink**, **Teal**, or **Gray**. It tints the machine's tile in the sidebar, the dot in the machine menu, and the machine's session avatars. |
 | **When closing the window** | What happens to the running VM when you close its window: **Run in the background**, **Suspend**, **Shut down**, or **Ask**. Default: **Ask**. |
+| **When a task is approved** | What the main button of a [coding task](../06i-coding-tasks.mdx)'s review does: **Merge into the branch** it came from, or **Open a pull request**. In Preferences this is the app-wide default (**Merge into the branch**); in a machine it reads **App default (…)** unless you override it there. Each task can still choose otherwise in its editor. |
+| **Kimi approvals** | How much Kimi Code asks before acting on this machine: **Never ask** (default) or **Ask when needed**. See [Kimi approvals](#kimi-approvals). |
 | **Start this VM at login** | Boots this machine when you log in to your Mac. Default: off. Hidden in Preferences. |
 | **Notes (optional)** | A free-form note kept with the machine. Default: empty. Hidden in Preferences. |
 | **Reach** | Which other machines this machine's agents may delegate to and ask by @nickname. **Every workspace** (default: on), or, with it off, a switch per other machine. Hidden in Preferences. |
@@ -33,6 +35,15 @@ Name and color apply to a running machine as soon as you save.
 - **Ask** (default) — the app asks each time, offering the three choices above.
 
 See [Machines](../06f-machines.mdx) for how running, suspended and stopped machines appear in the sidebar.
+
+## Kimi approvals
+
+Kimi Code asks before it acts unless it is told otherwise, and has no per-tool allow list Bromure could fill in. This setting picks its mode for every Kimi session the app starts on this machine — a new session, a resume, a relaunch, a coding task, a plan, a branch session, the Switchboard:
+
+- **Never ask** (default) — Kimi Code runs every command and every tool, Bromure's own included (delegation, the Switchboard, the board, the browser), without stopping to ask. It also stops asking multiple-choice questions and approves its own plans: when it needs your input it asks in plain text in the conversation, and you answer in the composer. The machine's VM and Bromure's host-side protections (credentials, guardrails, the firewall, supply-chain and prompt-injection scanning) are the safety boundary.
+- **Ask when needed** — routine edits and commands run on their own; risky actions, questions and plans still wait for you. Approvals show in the chat as a card with the panel's options, and a question as a card with its choices (see [Sign-in and status cards](../06a-chat.mdx#sign-in-and-status-cards)).
+
+The change applies the next time an agent starts or resumes; a Kimi Code already running keeps its mode. Inside a running session, Kimi's own `/permission` command switches it until the session ends. Automations run Kimi Code in its one-shot mode, which never asks, whatever this setting says. In Preferences, the setting is the default for new machines.
 
 ## Starting a machine at login
 

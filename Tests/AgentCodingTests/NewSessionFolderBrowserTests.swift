@@ -57,4 +57,18 @@ struct NewSessionFolderBrowserTests {
         // A missing folder is "unreadable", not an empty list.
         #expect(ACAppDelegate.ext4Folders(imagePath: img, path: "/no-such-folder-\(UUID().uuidString)") == nil)
     }
+    @Test("a machine that's off browses its Mac shared folders straight from the Mac")
+    func sharedFoldersOffline() {
+        let shares = SessionDisk.sharedFolders(["/Users/me/src", "/Volumes/ext/src", "/Users/me/notes"])
+        #expect(shares.map(\.mountName) == ["src", "src-2", "notes"])
+        func host(_ p: String) -> String? {
+            ACAppDelegate.hostShareDirectory(guestPath: p, shares: shares)?.path
+        }
+        #expect(host("/home/ubuntu/src") == "/Users/me/src")
+        #expect(host("/home/ubuntu/src-2/app/lib") == "/Volumes/ext/src/app/lib")
+        #expect(host("/mnt/bromure-share-3/x") == "/Users/me/notes/x")
+        #expect(host("/home/ubuntu/srcx") == nil)
+        #expect(host("/home/ubuntu") == nil)
+        #expect(host("/home/ubuntu/proj") == nil)
+    }
 }

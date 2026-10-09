@@ -15,14 +15,21 @@ import Combine
 public final class ModelSettingsStore: ObservableObject {
     public static let shared = ModelSettingsStore()
 
-    @Published public var settings: ModelSettings
+    @Published public var settings: ModelSettings {
+        didSet { if publishesEnvironment { ClaudeAutoMode.userText = settings.agentEnvironment } }
+    }
 
     private let url: URL
+    /// The app's own store (not a test's): its environment text is what
+    /// staging writes into the workspaces.
+    private let publishesEnvironment: Bool
 
     init(url: URL? = nil) {
         let resolved = url ?? Self.defaultURL
         self.url = resolved
+        self.publishesEnvironment = url == nil
         self.settings = Self.load(resolved) ?? ModelSettings()
+        if url == nil { ClaudeAutoMode.userText = settings.agentEnvironment }
         // One-time: clear the native-provider model pre-fills older builds
         // wrote on sign-in (never used at launch — see
         // `dropNativeCloudAgentRefs`), so the pane shows "<agent> default"
@@ -119,7 +126,16 @@ public final class ModelSettingsStore: ObservableObject {
     /// its override resolved over them — layered (its own providers, keys,
     /// subscriptions and model choices on top of the global ones, exclusions
     /// applied) or standalone (its own complete configuration).
+    /// A workspace that still names its own local engine on its record
+    /// (`Profile.legacyLocalEngineOverride`) runs on it: the workspace's
+    /// choice wins over the global default.
     public func effective(for profile: Profile) -> ModelSettings {
-        profile.modelOverride?.resolved(over: settings) ?? settings
+        Self.effective(for: profile, global: settings)
+    }
+
+    nonisolated static func effective(for profile: Profile, global: ModelSettings) -> ModelSettings {
+        if let own = profile.modelOverride { return own.resolved(over: global) }
+        if let legacy = profile.legacyLocalEngineOverride(global: global) { return legacy.resolved(over: global) }
+        return global
     }
 }

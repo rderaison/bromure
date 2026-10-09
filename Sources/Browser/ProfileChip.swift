@@ -60,6 +60,17 @@ enum ProfileSwatch {
 /// so the old launcher window is no longer needed for any of that.
 struct ProfileChip: View {
     @Bindable var model: NativeTabBarModel
+    /// Shared with Settings › General, so every window's chip agrees.
+    @AppStorage(AppState.launchProfileKey) private var launchProfileID = ""
+
+    /// "Open New Windows with “Work”": checked when this window's profile
+    /// is the one new windows open with; unchecking returns to the
+    /// last-used profile.
+    private var opensNewWindows: Binding<Bool> {
+        Binding(
+            get: { model.profileID.map { $0.uuidString == launchProfileID } ?? false },
+            set: { on in launchProfileID = on ? (model.profileID?.uuidString ?? "") : "" })
+    }
 
     var body: some View {
         // Reading the version ties this view to the delegate's bumps so
@@ -97,6 +108,13 @@ struct ProfileChip: View {
 
             Divider()
 
+            if model.profileID != nil {
+                Toggle(String(format: NSLocalizedString("Open New Windows with \u{201C}%@\u{201D}", comment: "Profile menu: make the current profile the one new windows open with"), name),
+                       isOn: opensNewWindows)
+                Divider()
+            }
+
+            Button(NSLocalizedString("Manage Profiles…", comment: "")) { model.onManageProfiles?() }
             Button(NSLocalizedString("New Profile\u{2026}", comment: "")) {
                 model.onNewProfile?()
             }

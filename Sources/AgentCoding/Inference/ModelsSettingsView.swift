@@ -36,6 +36,9 @@ struct ModelsSubscriptionHooks {
     /// Whether this host can log the provider out here (a hook is wired) —
     /// "Log out" is hidden rather than left as a button that does nothing.
     var canForget: (ModelProvider) -> Bool = { _ in true }
+    /// The saved sign-in's health (last host refresh, access-token expiry, an
+    /// unreadable store) — nil when the host can't tell.
+    var health: (ModelProvider) -> SubscriptionLoginHealth? = { _ in nil }
 }
 
 /// A workspace's LAYER over the global settings (see `ModelOverride`): the
@@ -160,6 +163,10 @@ struct ModelsSettingsView: View {
         .padding(18)
         .onAppear {
             if resolved.localServer != nil { probeLocalServer() }
+            // Doc/video captures: open the Custom server popover.
+            if ProcessInfo.processInfo.environment["BROMURE_DEMO_OPEN_SOURCE"] == "custom" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { openSource = .customServer }
+            }
             syncSubscriptions()
             fetchUsableProviderModels()
             // A provider registered outside this pane (an API key the
@@ -286,6 +293,7 @@ struct ModelsSettingsView: View {
                     hasCapture: provider.supportsSubscription && subscription != nil,
                     savedAt: { subscription?.savedAt(provider) },
                     reauthAt: { subscription?.reauthAt(provider) },
+                    health: { subscription?.health(provider) },
                     onSignIn: { subscription?.register(provider) },
                     onLogOut: (subscription?.canForget(provider) ?? false)
                         ? { subscription?.forget(provider) } : nil,
@@ -586,6 +594,26 @@ struct ModelsSettingsView: View {
                 .buttonStyle(.borderless)
                 .help(agent == nil ? (layer == nil ? "Clear" : "Inherit the global setting") : "Inherit Default")
             }
+            // A model on the user's own server: its context window, which
+            // the server may not advertise (then the agents assume 128K).
+            if let explicit, Self.takesContextWindow(explicit.source) {
+                ContextWindowControl(ref: explicit) { tokens in
+                    var r = explicit
+                    r.capabilities.contextWindow = tokens
+                    r.capabilitiesOverridden = tokens != nil
+                    assignRef(agent, tier, r)
+                    if tokens == nil { probeCapabilities(agent, tier) }
+                }
+            }
+        }
+    }
+
+    /// Sources whose context window can only come from the server or the
+    /// user (a catalog model's is known; a cloud provider's agents know theirs).
+    static func takesContextWindow(_ source: ModelRef.Source) -> Bool {
+        switch source {
+        case .localServer, .provider(.custom): return true
+        default: return false
         }
     }
 
@@ -902,6 +930,12 @@ struct ModelsSettingsView: View {
 
     private func probeLocalServer() {
         guard let s = resolved.localServer, let base = URL(string: s.baseURL) else { return }
+        // Doc/video captures: a stand-in model list, no network.
+        if let demo = ProcessInfo.processInfo.environment["BROMURE_DEMO_PROBE_MODELS"] {
+            localServerModels = demo.split(separator: ",").map(String.init)
+            localServerProbe = .ok(localServerModels.count)
+            return
+        }
         localServerProbe = .probing
         let key = s.apiKey
         Task {
@@ -1031,10 +1065,30 @@ struct ModelsSettingsView: View {
 /// `savedAt` here and flips the controls, without depending on the parent
 /// popover being re-evaluated.
 private struct ProviderConfigPopover: View {
+    /// "Last refreshed 3 minutes ago · access token expires in 2 hours" — the
+    /// host's view of the saved sign-in, no token data.
+    static func healthLine(_ h: SubscriptionLoginHealth) -> String {
+        var parts: [String] = []
+        if let at = h.lastRefreshedAt {
+            parts.append(String(format: NSLocalizedString("Last refreshed %@", comment: "subscription health: when the host last refreshed the login"),
+                                at.formatted(.relative(presentation: .named))))
+        } else {
+            parts.append(NSLocalizedString("Not refreshed since sign-in", comment: "subscription health"))
+        }
+        if let exp = h.accessExpiresAt {
+            parts.append(exp > Date()
+                ? String(format: NSLocalizedString("access token expires %@", comment: "subscription health: relative time, e.g. 'in 2 hours'"),
+                         exp.formatted(.relative(presentation: .named)))
+                : NSLocalizedString("access token renews on next use", comment: "subscription health"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     let provider: ModelProvider
     let hasCapture: Bool
     let savedAt: () -> Date?
     let reauthAt: () -> Date?
+    var health: () -> SubscriptionLoginHealth? = { nil }
     let onSignIn: () -> Void
     /// nil: this host can't log the provider out from here.
     let onLogOut: (() -> Void)?
@@ -1051,6 +1105,7 @@ private struct ProviderConfigPopover: View {
         let _ = tick
         let saved = hasCapture ? savedAt() : nil
         let expired = saved != nil ? reauthAt() : nil
+        let loginHealth = hasCapture ? health() : nil
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(provider.displayName).font(.headline)
@@ -1066,6 +1121,13 @@ private struct ProviderConfigPopover: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            if loginHealth?.storeUnreadable == true {
+                Label(NSLocalizedString("Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again.",
+                                        comment: "subscription store file exists but can't be decrypted"),
+                      systemImage: "exclamationmark.octagon.fill")
+                    .font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if hasCapture {
                 if let saved, expired != nil {
                     // The provider rejected the saved sign-in: nothing works
@@ -1092,6 +1154,10 @@ private struct ProviderConfigPopover: View {
                     Label("Signed in \(saved.formatted(.relative(presentation: .named)))",
                           systemImage: "checkmark.circle.fill")
                         .font(.callout).foregroundStyle(.green)
+                    if let loginHealth {
+                        Text(Self.healthLine(loginHealth))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         Button { onSignIn() } label: {
                             Label("Sign in again…", systemImage: "arrow.clockwise")
@@ -1334,3 +1400,75 @@ private extension Array {
     }
 }
 #endif
+
+
+/// The context window of a model on the user's own server: what the server
+/// advertised, or what the user entered (passed to every agent using it).
+private struct ContextWindowControl: View {
+    let ref: ModelRef
+    let onSet: (Int?) -> Void
+    @State private var editing = false
+    @State private var text = ""
+
+    private var tokens: Int? { ref.capabilities.contextWindow.flatMap { $0 > 0 ? $0 : nil } }
+
+    var body: some View {
+        Button {
+            text = tokens.map(ModelCapabilities.formatTokens) ?? ""
+            editing = true
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: tokens == nil ? "exclamationmark.triangle.fill" : "text.word.spacing")
+                    .font(.system(size: 9))
+                Text(tokens.map { String(format: NSLocalizedString("%@ context", comment: "models: context window chip"),
+                                         ModelCapabilities.formatTokens($0)) }
+                     ?? NSLocalizedString("Context?", comment: "models: context window chip, unknown"))
+                    .font(.caption)
+            }
+            .foregroundStyle(tokens == nil ? Color.orange : Color.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(tokens == nil
+              ? NSLocalizedString("The server doesn't say how much context this model takes — agents assume 128K. Click to enter it.", comment: "models: context window")
+              : NSLocalizedString("The context window agents are told this model has. Click to change it.", comment: "models: context window"))
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(NSLocalizedString("Context window", comment: "models: context window"))
+                    .font(.headline)
+                Text(String(format: NSLocalizedString("How many tokens %@ can take. Every agent using it is told, so it compacts at the right time.", comment: "models: context window"),
+                            ref.modelID))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField(NSLocalizedString("e.g. 1M, 256K or 131072", comment: "models: context window"), text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(save)
+                if !text.trimmingCharacters(in: .whitespaces).isEmpty, ModelCapabilities.parseTokens(text) == nil {
+                    Text(NSLocalizedString("Enter a number of tokens, like 1M or 200K.", comment: "models: context window"))
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                HStack {
+                    if ref.capabilitiesOverridden {
+                        Button(NSLocalizedString("Use the server's value", comment: "models: context window")) {
+                            editing = false
+                            onSet(nil)
+                        }
+                    }
+                    Spacer()
+                    Button(NSLocalizedString("Cancel", comment: "")) { editing = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button(NSLocalizedString("Save", comment: ""), action: save)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(ModelCapabilities.parseTokens(text) == nil)
+                }
+            }
+            .padding(14)
+            .frame(width: 320)
+        }
+    }
+
+    private func save() {
+        guard let n = ModelCapabilities.parseTokens(text) else { return }
+        editing = false
+        onSet(n)
+    }
+}

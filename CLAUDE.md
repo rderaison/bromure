@@ -27,6 +27,16 @@ swift build
 
 The `build.sh` script does: release build → create .app bundle → copy resources → ad-hoc codesign with virtualization entitlement. E2E tests expect the app bundle from `./build.sh` to exist.
 
+## User Manual
+
+The Bromure (web) manual is `manual-web/` (MDX; `manual/` is Bromure Agentic Coding's). When you change a pictured window — a profile-settings category, an app Settings pane, the setup window, the consent/enrollment windows, the trace viewer — re-render its screenshots in the same change and update the page's text:
+
+```bash
+./build.sh && SHOTS="profile-general settings-hardware" ./scripts/take-web-manual-screenshots.sh
+```
+
+The app renders each window offscreen (`bromure __shot-ui`, `Sources/Browser/ManualShots.swift`) with demo data in all 8 locales; no VM or base image is needed.
+
 ## Architecture
 
 **Three SPM targets** (defined in `Package.swift`):

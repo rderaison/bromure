@@ -56,10 +56,15 @@ final class LocalStreamEmitter {
     private var seq = 0                 // responses-wire sequence number
     private let turnID = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(20).lowercased()
 
-    init(fd: Int32, wire: Wire, model: String) {
+    /// Chat wire: the client asked for the usage frame
+    /// (`stream_options.include_usage`).
+    private let includeUsage: Bool
+
+    init(fd: Int32, wire: Wire, model: String, includeUsage: Bool = false) {
         self.fd = fd
         self.wire = wire
         self.model = model
+        self.includeUsage = includeUsage
     }
 
     // MARK: Low-level writes
@@ -92,10 +97,12 @@ final class LocalStreamEmitter {
         event(type, p)
     }
 
-    private func chatChunk(_ delta: [String: Any], _ finish: Any) {
-        event(nil, ["id": "chatcmpl-\(turnID)", "object": "chat.completion.chunk",
-                    "created": 0, "model": model,
-                    "choices": [["index": 0, "delta": delta, "finish_reason": finish]]])
+    private func chatChunk(_ delta: [String: Any], _ finish: Any, usage: [String: Any]? = nil) {
+        var obj: [String: Any] = ["id": "chatcmpl-\(turnID)", "object": "chat.completion.chunk",
+                                  "created": 0, "model": model,
+                                  "choices": [["index": 0, "delta": delta, "finish_reason": finish]]]
+        if let usage { obj["usage"] = usage }
+        event(nil, obj)
     }
 
     // MARK: Stream lifecycle
@@ -325,6 +332,12 @@ final class LocalStreamEmitter {
         case .chat:
             let choice = (final["choices"] as? [[String: Any]])?.first ?? [:]
             let message = choice["message"] as? [String: Any] ?? [:]
+            // The turn's token usage — the agent's token counter reads it only
+            // from the stream (it was dropped: omp's header never showed
+            // tokens). Its own `choices: []` frame when the client asked for
+            // it, else on the finishing chunk.
+            let usage = ToolCallRepair.chatUsage(final["usage"])
+            let onFinish = includeUsage ? nil : usage
             if let toolCalls = message["tool_calls"] as? [[String: Any]] {
                 for (i, tc) in toolCalls.enumerated() {
                     let fn = tc["function"] as? [String: Any] ?? [:]
@@ -333,9 +346,13 @@ final class LocalStreamEmitter {
                     chatChunk(["tool_calls": [["index": i,
                         "function": ["arguments": fn["arguments"] ?? "{}"]]]], NSNull())
                 }
-                chatChunk([:], "tool_calls")
+                chatChunk([:], "tool_calls", usage: onFinish)
             } else {
-                chatChunk([:], choice["finish_reason"] as? String ?? "stop")
+                chatChunk([:], choice["finish_reason"] as? String ?? "stop", usage: onFinish)
+            }
+            if includeUsage, let usage {
+                event(nil, ["id": "chatcmpl-\(turnID)", "object": "chat.completion.chunk",
+                            "created": 0, "model": model, "choices": [] as [Any], "usage": usage])
             }
             write("data: [DONE]\n\n")
         case .responses:

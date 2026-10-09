@@ -60,6 +60,89 @@ struct OmpAgentTests {
         #expect(rc.contains("$HOME/.omp/agent/models.yml"))
     }
 
+    /// The models.yml merge the guest runs at each shell start, lifted out
+    /// of the rendered .bashrc and run against a scratch home.
+    private func runModelsMerge(rc: String, mine: String?, staged: String?,
+                                overlay: String? = nil, composed: UnsafeMutablePointer<String?>? = nil) throws -> String? {
+        let lines = rc.components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.contains("<<'BROMURE_OMP_MODELS'") })
+        let end = try #require(lines[(start + 1)...].firstIndex { $0 == "BROMURE_OMP_MODELS" })
+        let script = lines[(start + 1)..<end].joined(separator: "\n")
+        let dir = try tempDir()
+        let dest = dir.appendingPathComponent("models.yml"), stagedURL = dir.appendingPathComponent("staged.yml")
+        if let mine { try mine.write(to: dest, atomically: true, encoding: .utf8) }
+        if let staged { try staged.write(to: stagedURL, atomically: true, encoding: .utf8) }
+        let overlaySrc = dir.appendingPathComponent("omp-config.yml"), overlayDest = dir.appendingPathComponent("bromure-overlay.yml")
+        if let overlay { try overlay.write(to: overlaySrc, atomically: true, encoding: .utf8) }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.arguments = ["-c", script, dest.path, stagedURL.path, overlaySrc.path, overlayDest.path]
+        let err = Pipe(); proc.standardError = err
+        try proc.run(); proc.waitUntilExit()
+        let diag = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        #expect(proc.terminationStatus == 0, Comment(rawValue: diag))
+        composed?.pointee = try? String(contentsOf: overlayDest, encoding: .utf8)
+        return try? String(contentsOf: dest, encoding: .utf8)
+    }
+
+    @Test("omp's picker offers every provider: its own, Settings → Models' others, and the user's (issue #37)")
+    func enabledModelsCoverEveryProvider() throws {
+        let overlay = SessionDisk.ompConfigOverlay(authMode: .token, provider: .custom, modelName: "big",
+                                                   extraProviders: ["zai", "bromure-openrouter", "bromure"])
+        #expect(overlay.contains("  - \"bromure/*\"\n  - \"zai/*\"\n  - \"bromure-openrouter/*\"\n"))
+        #expect(overlay.components(separatedBy: "\"bromure/*\"").count == 2)   // not twice
+        #expect(overlay.contains("modelRoles:\n  default: bromure/big"))         // still the default
+        // On the machine, the providers the user added in omp join them.
+        let rc = try renderBashrc(tool: .omp)
+        let user = "providers:\n  mine:\n    api: openai-completions\n  \"theirs\":\n    api: openai-completions\n"
+        var composed: String?
+        _ = try runModelsMerge(rc: rc, mine: user,
+                               staged: SessionDisk.ompModelsYAML(base: "http://x/v1", model: "big"),
+                               overlay: overlay, composed: &composed)
+        let c = try #require(composed)
+        #expect(c.contains("  - \"mine/*\"") && c.contains("  - \"theirs/*\"") && c.contains("  - \"zai/*\""))
+        #expect(!c.contains("bromure-managed"))
+        // A user provider named like a built-in omp would otherwise poll
+        // (here "mine" is not one, but "ollama" is): never left disabled.
+        var withOllama: String?
+        _ = try runModelsMerge(rc: rc, mine: "providers:\n  ollama:\n    api: openai-completions\n",
+                               staged: SessionDisk.ompModelsYAML(base: "http://x/v1", model: "big"),
+                               overlay: overlay, composed: &withOllama)
+        let o = try #require(withOllama)
+        #expect(o.contains("  - \"ollama/*\"") && !o.contains("  - \"ollama\"\n"))
+        #expect(o.contains("  - \"kilo\""))
+        // No staged overlay any more: the composed one goes too.
+        var gone: String? = "x"
+        _ = try runModelsMerge(rc: rc, mine: user, staged: nil, overlay: nil, composed: &gone)
+        #expect(gone == nil)
+    }
+
+    @Test("models.yml: Bromure's block is swapped in, the user's own providers survive")
+    func modelsYAMLMerge() throws {
+        let rc = try renderBashrc(tool: .omp)
+        let staged = SessionDisk.ompModelsYAML(base: "http://10.0.0.5:8888/v1", model: "big")
+        let user = "providers:\n  mine:\n    api: openai-completions\n    baseUrl: \"http://me\"\n"
+        // First launch next to the user's own file: both providers.
+        let merged = try #require(try runModelsMerge(rc: rc, mine: user, staged: staged))
+        #expect(merged.contains("  mine:") && merged.contains("  bromure:"))
+        #expect(merged.components(separatedBy: "providers:").count == 2)
+        // Next launch with another model: Bromure's block is replaced, not stacked.
+        let again = try #require(try runModelsMerge(
+            rc: rc, mine: merged, staged: SessionDisk.ompModelsYAML(base: "http://10.0.0.5:8888/v1", model: "bigger")))
+        #expect(again.contains("bigger") && !again.contains("\"big\""))
+        #expect(again.components(separatedBy: SessionDisk.ompManagedBegin).count == 2)
+        #expect(again.contains("  mine:"))
+        // Nothing staged any more (removed in Settings → Models): only the user's left.
+        let removed = try #require(try runModelsMerge(rc: rc, mine: again, staged: nil))
+        #expect(!removed.contains("bromure") && removed.contains("  mine:"))
+        // A file an older Bromure wrote whole (issue #36): dropped, not kept forever.
+        let legacy = "# Generated by Bromure AC; do not edit.\nproviders:\n  bromure:\n    baseUrl: \"http://old\"\n"
+        #expect(try runModelsMerge(rc: rc, mine: legacy, staged: nil) == nil)
+        // No file of the user's yet: just Bromure's.
+        let fresh = try #require(try runModelsMerge(rc: rc, mine: nil, staged: staged))
+        #expect(fresh.hasPrefix("providers:\n  " + SessionDisk.ompManagedBegin))
+    }
+
     @Test("bashrc merges the browser/user MCP into omp's user config folder")
     func bashrcWiresBrowserMCP() throws {
         // omp reads user-scope MCP from ~/.omp/agent/mcp.json (NOT ~/.claude.json),
@@ -162,6 +245,71 @@ struct OmpAgentTests {
             authMode: .token, provider: .openai, modelName: "default")
         #expect(bare.contains("- \"openai/*\""))
         #expect(!bare.contains("modelRoles:"))
+    }
+
+    @Test("omp-config overlay disables every unused built-in provider and update polling")
+    func configOverlayDisablesDiscovery() {
+        let local = SessionDisk.ompConfigOverlay(authMode: .local, provider: .anthropic,
+                                                 modelName: "glm-5.3-flash")
+        let disabled = local.components(separatedBy: "disabledProviders:\n")[1]
+            .components(separatedBy: "\n").prefix { $0.hasPrefix("  - ") }
+            .map { $0.dropFirst(5).dropLast() }.map(String.init)
+        // The catalogs QA saw polled (incl. Anthropic/z.ai/xAI with real keys).
+        for p in ["anthropic", "zai", "xai", "kilo", "venice", "zenmux", "commandcode",
+                  "charm-hyper", "alibaba-coding-plan", "openai"] {
+            #expect(disabled.contains(p), "\(p) should be disabled")
+        }
+        #expect(!disabled.contains("web") && !disabled.contains("local") && !disabled.contains("bromure"))
+        #expect(local.contains("startup:\n  checkUpdate: false\n"))
+        #expect(local.contains("marketplace:\n  autoUpdate: \"off\"\n"))
+        // Cloud omp keeps its own provider (and a configured extra) enabled.
+        let cloud = SessionDisk.ompConfigOverlay(authMode: .token, provider: .zai,
+                                                 modelName: "glm-5.3-flash", extraProviders: ["xai"])
+        #expect(!cloud.contains("  - \"zai\"\n") && !cloud.contains("  - \"xai\"\n"))
+        #expect(cloud.contains("  - \"anthropic\"\n"))
+    }
+
+    @Test("omp only sees the key env vars of the providers it's configured for")
+    func hiddenKeyEnvVars() {
+        // Local omp next to a Claude sibling: ANTHROPIC/XAI/ZAI hidden from omp,
+        // OPENAI_API_KEY (the engine key its models.yml reads) kept.
+        var p = Profile(name: "ws", tool: .claude, authMode: .token, apiKey: "k")
+        p.additionalTools = [Profile.ToolSpec(tool: .omp, authMode: .local)]
+        let hidden = SessionDisk.ompHiddenKeyEnvVars(profile: p)
+        #expect(hidden.contains("ANTHROPIC_API_KEY") && hidden.contains("ZAI_API_KEY")
+                && hidden.contains("XAI_API_KEY") && hidden.contains("ANTHROPIC_AUTH_TOKEN"))
+        #expect(!hidden.contains("OPENAI_API_KEY"))
+        // Cloud omp on z.ai with an xAI tier: both kept.
+        var z = Profile(name: "z", tool: .omp, authMode: .token, apiKey: "k")
+        z.ompProvider = .zai
+        z.ompExtraProviders = [Profile.OmpExtraProvider(provider: .xai, apiKey: "x", baseURL: nil, models: [])]
+        let zh = SessionDisk.ompHiddenKeyEnvVars(profile: z)
+        #expect(!zh.contains("ZAI_API_KEY") && !zh.contains("XAI_API_KEY"))
+        #expect(zh.contains("ANTHROPIC_API_KEY") && zh.contains("OPENAI_API_KEY"))
+        // No omp: nothing to hide.
+        #expect(SessionDisk.ompHiddenKeyEnvVars(profile: Profile(name: "c", tool: .claude, authMode: .token)).isEmpty)
+    }
+
+    @Test("bashrc omp() wrapper unsets the staged hidden key vars")
+    func wrapperUnsetsHiddenKeys() throws {
+        let rc = try renderBashrc(tool: .omp)
+        #expect(rc.contains("/mnt/bromure-meta/\(SessionDisk.ompEnvUnsetMetaFile)"))
+        #expect(rc.contains("command env \"${_u[@]}\" omp \"$@\""))
+        #expect(rc.contains("omp() { _bromure_omp_run --config"))
+    }
+
+    @Test("omp's local models.yml context window is the one on omp's Models row")
+    func localContextFromOmpRow() {
+        var s = ModelSettings()
+        s.localServer = LocalServer(baseURL: "http://10.0.0.5:8000")
+        // Another row names the same model with a different window: omp's wins.
+        s.tiers[.medium] = ModelRef(source: .localServer, modelID: "glm",
+                                    capabilities: ModelCapabilities(contextWindow: 128_000))
+        s.agentTiers[.omp] = [.medium: ModelRef(source: .localServer, modelID: "glm",
+                                                capabilities: ModelCapabilities(contextWindow: 1_000_000))]
+        let out = Profile(name: "t", tool: .omp, authMode: .token).overlaidWithGlobalModels(s)
+        #expect(out.ompContextWindow == 1_000_000)
+        #expect(SessionDisk.ompLocalContext(profile: out) == 1_000_000)
     }
 
     @Test("Token plan mints an omp fake shaped for the selected provider")

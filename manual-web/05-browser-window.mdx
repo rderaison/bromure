@@ -1,0 +1,321 @@
+---
+title: "The Browser Window"
+description: "The browser window and everything around the page: the native tab bar, the profile chip, the site-info popover, the titlebar buttons, the menus, keyboard shortcuts, drag and drop, printing, and the alerts you see when closing, restoring, and quitting."
+order: 5
+---
+
+# The Browser Window
+
+On macOS 27, with Metal enabled and an image that supports shared windows, windows of the same profile share one Linux VM and one Chromium browser process. Each macOS window has its own tabs and display. Closing one window leaves the others running; the VM stops when the last window closes or you quit Bromure. Other profiles use separate VMs. Older macOS versions and images keep the original window model. What you see in the window is that browser's page; the tabs, address bar, and buttons around it are drawn by macOS and talk to the browser inside the VM. This chapter describes that window chrome, the menus, the keyboard, and the dialogs you meet while browsing. It is for everyone who uses Bromure day to day.
+
+How windows relate to profiles — which profile a window runs, and how its windows share saved or temporary browsing data — is covered in [Profiles](06-profiles.mdx). What happens inside the VM is described in [Concepts & Architecture](04-concepts.mdx).
+
+## The window at a glance
+
+A browser window has three parts:
+
+1. **The titlebar**, which holds the native tab bar (when **Native Tabs** is on, the default) and a row of small buttons on the right for the file drawer, the VPN, session recording, and camera effects. Each button appears only when its feature is on for the window's profile.
+2. **The page**, which fills the rest of the window.
+3. **The file drawer**, a 280-point panel on the right side of the page. It is hidden until you open it, and exists only when file transfer is on for the profile. See [Files & Downloads](09-files-downloads.mdx).
+
+If the profile has a color, a thin border of that color (3 points) runs around the whole page, so you can tell at a glance which profile a window belongs to. Profiles without a color (such as the built-in **Private Browsing** profile) have no border.
+
+Bromure remembers the size of the last resized browser window for new windows and future launches. Fullscreen dimensions are not saved, and restored sizes fit the current screen. A window can't be made smaller than 800 × 600 points. Each new window opens centered, offset slightly from the previous one so they don't stack exactly on top of each other.
+
+With Native Tabs on, the window's title text is hidden, but it still appears in the **Window** menu and in Mission Control as **Bromure — *profile name*** (for example **Bromure — Work**).
+
+## Native Tabs and Chromium's own toolbar
+
+By default, Bromure hides the browser's own tab strip and address bar and draws them as a native macOS toolbar instead, so the page uses the whole window and the browser behaves like a Mac app. This is the **Native Tabs** setting in a profile's [Host Isolation](07-profile-settings/host-isolation.mdx) settings (on by default).
+
+Native Tabs is turned off automatically when you enable browser extensions for a profile ([Extensions](07-profile-settings/extensions.mdx)), because extensions need Chromium's own toolbar. Without Native Tabs:
+
+- Chromium's own tab strip and address bar appear inside the page area, and you use them as you would in any Chromium browser.
+- There is no profile chip. Use the **File** menu to switch or manage profiles.
+- The **Bookmarks** and **History** menus are dimmed; use Chromium's own menus instead.
+- Printing is not available.
+- The browser inside the VM receives every key you press while its window is in front, including system shortcuts such as ⌘Tab and ⌘Space.
+
+The rest of this chapter describes windows with Native Tabs on.
+
+## Address completion
+
+As you type a URL, Bromure uses the current profile's Chromium history to complete a matching address. The suggested suffix is selected: keep typing to replace it, or press Return to use the completed URL. Backspace does not immediately put a deleted suffix back. History remains inside that profile's VM; another profile's history is never used.
+
+## The native tab bar
+
+The tab bar sits in the titlebar and has three groups.
+
+### Left: profile chip and navigation
+
+- **The profile chip** — a pill with a person icon tinted in the profile's color, the profile's name, and a small chevron. Its tooltip reads **Profile: *name***. Click it to open the profile menu, described [below](#the-profile-chip). Managed profiles show a shield-and-lock icon instead of the person.
+- **Back** (tooltip **Back (⌘[)**) and **Forward** (tooltip **Forward (⌘])**) move through the active tab's history.
+
+### Center: the tabs
+
+All tabs sit inside one rounded capsule.
+
+The **active tab** is a wide white pill containing, from left to right:
+
+- A **close button** (a small dark circle with an ×, tooltip **Close tab (⌘W)**).
+- The site's **favicon**. Click it to open the [site-info popover](#the-site-info-popover).
+- The **address field**. When you're not typing in it, it shows the page's host and path without the `https://` prefix, centered. Click it (or press ⌘L) to edit: the full URL is swapped in so you can change it. Press Return to go. Click elsewhere to cancel your edit.
+- A **Reload** button (tooltip **Reload (⌘R)**).
+
+While a page loads, a translucent colored fill sweeps across the active pill from left to right and fades out when loading finishes.
+
+**Inactive tabs** show a favicon and the page title. Click one to switch to it. As you open more tabs they get narrower, and once a title no longer fits they collapse to just the favicon. A tab with no page yet is titled **New Tab**. Inactive tabs have no close button: switch to the tab and close it, or press ⌘W.
+
+A small **red dot** on a tab's favicon means that tab is using your camera or microphone. Its tooltip says which: **This tab is using the camera and microphone**, **This tab is using the camera**, or **This tab is using the microphone**. See [Camera & Effects](10-camera-effects.mdx).
+
+### Right: new tab and share
+
+- **+** (tooltip **New tab (⌘T)**) opens a new, empty tab and puts the cursor in its address field.
+- **Share** opens the standard macOS share menu (Mail, Messages, AirDrop, and so on) for the active tab's URL. It is dimmed when the active tab has no page.
+
+### What you can type in the address field
+
+The address field is placeholder-labeled **Search or enter URL**. When you press Return, Bromure decides what you meant:
+
+| You type | Bromure opens |
+|---|---|
+| Something starting with `http://`, `https://`, `about:`, `chrome:`, `file:`, or `data:` | That address, unchanged. |
+| Text with a dot and no spaces, such as `example.com/docs` | The same address with `https://` added in front. |
+| Anything else, such as `weather paris` | A Google search for the text. |
+
+An empty field opens a blank page.
+
+## The profile chip
+
+Click the profile chip to open its menu:
+
+- **Every profile**, each with a colored dot. The window's own profile is shown with a checkmark. A persistent profile that already has an open window reads **Work (open)**; choosing it brings that window to the front instead of opening a second one. Choosing any other profile opens a new window for it.
+- **Open New Windows with “*name*”** — make this window's profile the one Bromure opens on launch, on a Dock click, and on ⌘N with no window in front. Checked while it is; choose it again to go back to the last-used profile. Same setting as [Settings › General › Open New Windows With](08-app-settings/general.mdx#open-new-windows-with).
+- **New Profile…** — create a profile. See [Profiles](06-profiles.mdx#creating-a-profile).
+- **Edit “*name*”…** — open this window's profile in the profile settings window. For a managed profile the item reads **View “*name*” Settings…** and opens the settings read-only.
+- **Delete “*name*”…** — delete this window's profile. Dimmed for managed profiles. A profile can't be deleted while its window is open, so from the chip this item explains that you need to close the window first.
+
+The same commands are in the **File** menu.
+
+## The site-info popover
+
+Click the favicon in the active tab to see details about the page:
+
+- **The connection status**, with an icon:
+  - **Connection is secure** — the page uses HTTPS. "Information you send to this site (passwords, credit card numbers) is encrypted."
+  - **Connection is not secure** — the page uses plain HTTP. "Information you send to this site can be intercepted by others."
+  - **Connection details unavailable** — the page doesn't use a standard web URL (for example, a `chrome:` page).
+- **Site** — the host name, with a copy button (tooltip **Copy URL**) that copies the full URL to the Mac's clipboard.
+- **Certificate** (HTTPS pages only) — **Issued to**, **Issued by**, and **Valid** (the validity dates), fetched from the browser inside the VM when the popover opens. **View Full Certificate…** opens the standard macOS certificate panel with the whole chain. If the chain can't be fetched, the section says so instead.
+- **Page Title** — when the page has one.
+- **Full URL** — the complete address, which you can select and copy.
+
+## Titlebar buttons
+
+Up to four small buttons appear at the right end of the titlebar. Each one exists only when its feature is on for the window's profile.
+
+| Button | Icon | When it appears | What it does |
+|---|---|---|---|
+| **Toggle File Drawer** | A sidebar | **File Upload** or **File Download** is on ([File Transfer](07-profile-settings/file-transfer.mdx)) | Shows or hides the file drawer. The window widens by the drawer's width when it opens and shrinks back when it closes. See [Files & Downloads](09-files-downloads.mdx). |
+| **VPN** | A power plug | A VPN is chosen in [VPN & Ads](07-profile-settings/vpn-ads.mdx) | Shows the VPN's state and connects or disconnects it when clicked. |
+| **Record / pause** | A record circle | **Session Recording** is not **Disabled** ([Advanced](07-profile-settings/advanced.mdx)) | Starts or pauses the session recording. A **View trace** button next to it opens the Session Recording window. See [Session Recording](11-session-recording.mdx). |
+| **Camera Effects** | Sparkles | The profile shares the webcam and a page is currently using the camera | Opens the Camera Effects window. See [Camera & Effects](10-camera-effects.mdx). |
+
+### The VPN button
+
+The VPN button's color and tooltip show the tunnel's state:
+
+| Appearance | Tooltip | Meaning |
+|---|---|---|
+| Gray, outlined plug | **VPN: checking…** | The VPN agent in the VM hasn't reported yet. |
+| Orange, filled plug, pulsing | **VPN: Connecting…** | The tunnel is being set up. |
+| Green, filled plug | **VPN: Connected — click to disconnect** | Traffic from this window goes through the VPN. |
+| Gray, outlined plug | **VPN: Disconnected — click to connect** | The VPN is off for now. Click to connect. |
+| Red, outlined plug, disabled | **VPN: WARP not installed in this VM** | Cloudflare WARP isn't installed in the base image. |
+| Orange, outlined plug | **VPN Error: *message*** | The connection failed. A **VPN Connection Failed** sheet also appears with the error. |
+
+Whether the VPN connects by itself when the window opens is the profile's **Connect on Startup** setting. See [VPN & Ads](07-profile-settings/vpn-ads.mdx) and, for connection failures, [Troubleshooting](15-troubleshooting.mdx).
+
+### Managed recording banner
+
+On a managed profile whose administrator requires recording, a red banner with an eye icon appears at the left of the titlebar: **Recording — shared with *organization***. Its tooltip explains: "Every request in this window is recorded and sent to your organization's infosec team. This is required by your administrator and cannot be turned off." The record button is then red and disabled. See [Session Recording](11-session-recording.mdx#managed-recording).
+
+## Menus
+
+The menu bar has the Bromure (app) menu followed by **File**, **Edit**, **Bookmarks**, **History**, **View**, and **Window**. Commands that act on "the current window" use the window in front.
+
+### Bromure menu
+
+| Item | Shortcut | What it does |
+|---|---|---|
+| **About Bromure** | | Shows the version. |
+| **Check for Updates…** | | Checks for a new version of Bromure. |
+| **Settings...** | ⌘, | Opens the app [Settings](08-app-settings/index.mdx) window. |
+| **Hide Bromure** | ⌘H | Hides all Bromure windows. |
+| **Hide Others** | ⌥⌘H | Hides the other apps. |
+| **Show All** | | Shows all hidden apps. |
+| **Quit Bromure** | ⌘Q | Quits, closing every browser window. See [Quitting](#quitting). |
+
+### File menu
+
+| Item | Shortcut | What it does |
+|---|---|---|
+| **New Window** | ⌘N | Opens another window of the front window's profile. With no window in front, uses the profile chosen under **Settings › General › Open New Windows With** (by default, the one you used most recently). For a persistent profile that already has a window, brings that window forward instead. |
+| **New Private Window** | ⇧⌘N | Opens a window of the built-in **Private Browsing** profile (or, if you deleted it, the first profile that doesn't retain data). |
+| **New Window With Profile** ▸ | | Lists every profile with its color dot as **New *name* Window**, or **Show *name* Window** for a persistent profile that already has a window. |
+| **New Profile…** | | Creates a profile. See [Profiles](06-profiles.mdx#creating-a-profile). |
+| **Edit “*name*”…** | | Opens the front window's profile settings (**View “*name*” Settings…** for a managed profile). |
+| **Delete “*name*”…** | | Deletes the front window's profile. Dimmed for managed profiles. |
+| **Open Trace…** | ⌘O | Opens a saved session recording (`.json`). See [Session Recording](11-session-recording.mdx#opening-a-saved-recording). |
+| **Recreate Base Image…** | | Closes every window and rebuilds the Linux base image. See [Installation & First Run](02-installation.mdx). |
+| **Print…** | ⌘P | Prints the active tab. See [Printing](#printing). |
+| **Close Window** | ⌘W | Closes the window. (With Native Tabs, ⌘W closes the active tab first; see [Keyboard shortcuts](#keyboard-shortcuts).) |
+
+The window commands are dimmed while Bromure is still setting up or updating its base image.
+
+### Edit menu
+
+**Undo** (⌘Z), **Redo** (⇧⌘Z), **Cut** (⌘X), **Copy** (⌘C), **Paste** (⌘V), and **Select All** (⌘A). They act on the address field while you're typing in it, and on the page otherwise. Copying and pasting between the page and other Mac apps works only when the profile's **Shared Clipboard** is on ([Host Isolation](07-profile-settings/host-isolation.mdx)).
+
+### Bookmarks menu
+
+The browser's bookmarks live inside the VM, in the profile. The Bookmarks menu gives you Mac-style access to them:
+
+| Item | Shortcut | What it does |
+|---|---|---|
+| **Open Bookmarks Manager** | ⌥⌘B | Opens Chromium's bookmark manager (`chrome://bookmarks/`) in the active tab. |
+| **Toggle Bookmarks Bar** | ⇧⌘B | Shows or hides Chromium's bookmarks bar at the top of the page. |
+| **Bookmark This Tab** | ⌘D | Bookmarks the active tab. |
+
+Below these, the menu mirrors the browser's own bookmarks: bookmarks-bar items first, then an **Other Bookmarks** submenu. Folders become submenus; an empty folder shows **(Empty)**, and an unnamed one is titled **Untitled Folder**. Choosing a bookmark opens it in the active tab.
+
+Bookmarks are kept only in a profile that retains browsing data. In a profile that doesn't, they disappear with the window, like everything else.
+
+### History menu
+
+The History menu is rebuilt from the front window's browser each time you open it:
+
+- **Recently Closed** — tabs you closed recently.
+- **Recently Visited** — pages you visited recently.
+- **Show Full History** (⌘Y) — opens Chromium's history page (`chrome://history/`) in the active tab.
+
+Choosing an entry opens it in the active tab. The Bookmarks and History menus are dimmed when the front window doesn't use Native Tabs.
+
+### View menu
+
+- **Toggle File Drawer** — same as the titlebar button. Dimmed when the profile has no file transfer. It has no keyboard shortcut.
+- **VM Services** — opens a diagnostic window listing each window's host–guest services and whether they are connected. See [Troubleshooting](15-troubleshooting.mdx).
+
+### Window menu
+
+**Minimize** (⌘M) and the list of open windows.
+
+## Keyboard shortcuts
+
+With Native Tabs on, Bromure handles the browser shortcuts itself, whether the page or the address field has the keyboard.
+
+| Shortcut | Action |
+|---|---|
+| ⌘T | New tab, with the cursor in its address field. |
+| ⌘W | Close the active tab. With only one tab left, closes the window. |
+| ⌘L | Put the cursor in the address field (or select its text if it's already there). |
+| ⌘R | Reload. |
+| ⌘[ / ⌘] | Back / Forward. |
+| ⇧⌘[ / ⇧⌘] | Previous / next tab, wrapping around at the ends. |
+| ⌘1 – ⌘8 | Go to the first to eighth tab. |
+| ⌘9 | Go to the last tab. |
+| ⇧⌘H | Open the browser's history page (`chrome://history/`). |
+| ⌘Y | **History › Show Full History**. |
+| ⌥⌘B / ⇧⌘B / ⌘D | Bookmarks manager / bookmarks bar / bookmark this tab. |
+| ⌘P | **File › Print…** (when printing is allowed). |
+| ⌘F, ⌘G, ⇧⌘G | Find in page, find next, find previous. |
+| ⌘= (or ⌘+), ⌘-, ⌘0 | Zoom in, zoom out, reset zoom. |
+| ⌘C, ⌘V, ⌘X, ⌘A, ⌘Z, ⇧⌘Z | Copy, paste, cut, select all, undo, redo — in the page, or in the address field while you're editing it. |
+| ⌘H, ⌥⌘H, ⌘M, ⌘Q, ⌘, | Hide Bromure, hide others, minimize, quit, Settings — as in any Mac app. |
+| ⌃⌘F | Enter or leave full screen. |
+
+Any other ⌘ shortcut goes to Bromure's menus and is never passed to the browser. That stops browser shortcuts that would open Chromium's hidden toolbar UI (such as ⌘S or ⌘J) from doing anything invisible. System shortcuts such as ⌘Tab and ⌘Space keep working normally.
+
+Inside the page, the ⌘ key acts as the Control key that Linux applications expect, so ⌘C copies and ⌘V pastes in web pages as on a Mac. This is the **Use Command as Control** setting in [Input](08-app-settings/input.mdx) (on by default).
+
+A full list of shortcuts is in the [Appendix](17-appendix.mdx).
+
+## Trackpad and text input
+
+- **Scrolling** follows your trackpad precisely, including momentum.
+- **Pinch to zoom** zooms the page.
+- **Input methods** for Chinese, Japanese, and Korean work: compose with the macOS input method as usual, and the result is typed into the page.
+- **Keyboard layout** follows the layout you select on the Mac when **Match Keyboard Layout** is on ([Host Isolation](07-profile-settings/host-isolation.mdx)).
+
+## Drag and drop
+
+When file transfer is on for the profile, you can drag files from Finder onto the page. The files are copied into the VM and dropped on the spot where you release them, so upload areas on web pages ("drop files here") receive them as they would in any browser. While you drag, the page highlights drop areas under the pointer.
+
+You can also drag downloaded files out of the file drawer to Finder. See [Files & Downloads](09-files-downloads.mdx).
+
+## Printing
+
+To print, the profile needs **Allow Printing** on ([Host Isolation](07-profile-settings/host-isolation.mdx), off by default), which in turn requires Native Tabs. Then choose **File › Print…** or press ⌘P:
+
+1. The browser in the VM renders the active tab as a PDF.
+2. The PDF is handed to the standard macOS print dialog, where you pick a printer or choose **Save as PDF**.
+
+The PDF is kept in memory only; nothing is written to disk on the Mac or in the VM. With printing off, **Print…** is dimmed and ⌘P does nothing.
+
+If something goes wrong, a **Print failed** alert explains which step failed: "Couldn't get the page from the browser to print.", "The page data couldn't be opened for printing.", or "Couldn't start the print operation."
+
+## Idle windows
+
+A window in the background that has had no network traffic, camera, or microphone activity for three minutes can be paused to save energy, and resumes as soon as you bring it forward. Whether this happens depends on **Energy Mode** in [Hardware](08-app-settings/hardware.mdx): by default (**Automatic**) only while macOS Low Power Mode is on.
+
+## Window alerts
+
+### Closing a window
+
+Closing a window destroys its VM. Before it does, Bromure asks, in a sheet:
+
+> **Close this browser?**
+> All browsing data in this window will be permanently lost. This cannot be undone.
+
+Click **Close** to close it or **Cancel** to keep it. Check **Remember my decision** before clicking **Close** to stop asking for windows of that profile.
+
+For a profile with **Retain Browsing Data** on, the data kept on the profile's disk (bookmarks, history, cookies, passwords, open tabs) survives; only the rest of the VM is destroyed. See [Profiles](06-profiles.mdx) and [Concepts & Architecture](04-concepts.mdx).
+
+If the window was recording and captured any requests, a second alert, **Save session recording?**, offers to save the recording first. See [Session Recording](11-session-recording.mdx#saving-when-the-window-closes).
+
+If the browser inside the VM shuts down by itself, the window closes without asking.
+
+### Restoring tabs
+
+When you open a profile that retains browsing data and already has data from a previous window, Bromure asks:
+
+> **Restore previous tabs?**
+> This profile has data from a previous session. Would you like to restore your open tabs?
+
+Click **Restore** to reopen the tabs you had, or **Start Fresh** to open the profile's home page. Check **Remember my decision** to always make the same choice for this profile. See [Profiles](06-profiles.mdx#restoring-tabs).
+
+### Too many windows
+
+If the Mac can't start another VM, Bromure shows **Cannot open browser**: "Too many browser sessions are open. Close some windows and try again."
+
+### Quitting
+
+When you quit with windows open, Bromure asks:
+
+> **Quit Bromure?**
+> There is 1 open browser session. All session data will be lost.
+
+(or "There are *n* open browser sessions…"). Click **Quit** or **Cancel**. The question is skipped when a script asks Bromure to quit.
+
+Quitting closes every window without the per-window **Save session recording?** prompt, so save any recording you want to keep before you quit.
+
+Closing the last window doesn't quit Bromure. Click its Dock icon to open a window of your [startup profile](08-app-settings/general.mdx#open-new-windows-with) — by default, the one you used most recently.
+
+## Related chapters
+
+- [Profiles](06-profiles.mdx) — which profile a window runs and how to switch.
+- [Host Isolation](07-profile-settings/host-isolation.mdx) — Native Tabs, Shared Clipboard, keyboard layout, and printing.
+- [Files & Downloads](09-files-downloads.mdx) — the file drawer, uploads, and downloads.
+- [Session Recording](11-session-recording.mdx) — the record button and the recording window.
+- [Camera & Effects](10-camera-effects.mdx) — webcam sharing and the Camera Effects window.
+- [Appendix](17-appendix.mdx) — every keyboard shortcut in one table.

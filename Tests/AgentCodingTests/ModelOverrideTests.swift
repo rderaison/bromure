@@ -122,3 +122,29 @@ struct ModelOverrideTests {
         #expect(merged.localServer?.apiKey == "srv")
     }
 }
+
+@Suite("Live engine re-registration")
+struct LiveEngineRegistrationTests {
+    /// A workspace override moving its local server (:8888 → :8899) must
+    /// re-register the repair proxy's engine for that workspace.
+    @Test("A workspace override's local server move is an engine change")
+    func overrideServerMove() {
+        var global = ModelSettings()
+        global.providers = [ProviderCredential(provider: .anthropic, apiKey: "k")]
+        func profile(port: Int) -> Profile {
+            var p = Profile(name: "w", tool: .kimi, authMode: .token, apiKey: "")
+            var layer = ModelSettings()
+            layer.localServer = LocalServer(baseURL: "http://127.0.0.1:\(port)/v1")
+            layer.agentTiers[.kimi] = [.medium: ModelRef(source: .localServer, modelID: "qwen3")]
+            p.modelOverride = ModelOverride(inheritsGlobal: true, settings: layer)
+            return p
+        }
+        let a = profile(port: 8888), b = profile(port: 8899)
+        let sa = a.overlaidWithGlobalModels(ModelSettingsStore.effective(for: a, global: global))
+        let sb = b.overlaidWithGlobalModels(ModelSettingsStore.effective(for: b, global: global))
+        #expect(sa.localEngineBaseURL?.port == 8888)
+        #expect(sb.localEngineBaseURL?.port == 8899)
+        #expect(LiveModelRefresh.engineRegistrationChanged(from: sa, to: sb))
+        #expect(!LiveModelRefresh.engineRegistrationChanged(from: sa, to: sa))
+    }
+}

@@ -38,6 +38,11 @@ final class AppState: @unchecked Sendable {
     var initSteps: [InitStep] = []
     var consoleLog: String = ""
 
+    /// Why the image is being (re)installed — only changes the setup
+    /// window's wording; every path runs the same install.
+    enum InstallReason { case firstRun, rebuild, refresh, update }
+    var installReason: InstallReason = .firstRun
+
     /// Last-observed managed-profile sync state, surfaced in Settings.
     var managedSyncStatus: String = ""
     var managedLastSyncedAt: Date?
@@ -63,6 +68,16 @@ final class AppState: @unchecked Sendable {
     /// Profile management
     let profileManager: ProfileManager
     var selectedProfileID: UUID?
+
+    /// Preference: the profile a new window opens with when no browser
+    /// window is in front (launch, Dock click, ⌘N). Empty = the profile
+    /// used most recently. Set in Settings › General or the profile chip.
+    static let launchProfileKey = "launch.defaultProfileID"
+
+    var launchProfileID: UUID? {
+        get { UserDefaults.standard.string(forKey: Self.launchProfileKey).flatMap(UUID.init(uuidString:)) }
+        set { UserDefaults.standard.set(newValue?.uuidString ?? "", forKey: Self.launchProfileKey) }
+    }
 
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
@@ -120,6 +135,16 @@ final class AppState: @unchecked Sendable {
                 self.selectedProfileID = self.profileManager.allProfiles.first?.id
             }
         }
+    }
+
+    /// A state for offscreen renders (`bromure __shot-ui`): backed by a
+    /// scratch directory, with no migration, no default profile and no
+    /// managed-profile sync, so rendering never touches the user's profiles.
+    init(previewStorage dir: URL) {
+        self.storageDir = dir
+        self.imageManager = LinuxImageManager(storageDir: dir)
+        self.profileManager = ProfileManager(storageDir: dir, managedProfiles: false)
+        self.managedEnrollments = []
     }
 
     // MARK: - Managed profile sync
@@ -210,6 +235,7 @@ final class AppState: @unchecked Sendable {
             scheduleImageMaintenance()
         } else if imageManager.hasImageFiles {
             // Image files exist but version mismatch — auto-reinstall
+            installReason = .update
             deleteImageFiles()
             startInit()
         } else {
@@ -401,6 +427,7 @@ final class AppState: @unchecked Sendable {
         let oldPool = pool
         pool = nil
         Task { await oldPool?.shutdown() }
+        installReason = .refresh
         deleteImageFiles()
         startInit()
     }
@@ -420,8 +447,19 @@ final class AppState: @unchecked Sendable {
             "Install", comment: "Consent button of the new-postinstall-steps prompt"))
         alert.addButton(withTitle: NSLocalizedString(
             "Not Now", comment: "Decline button of the new-postinstall-steps prompt"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // A synchronous modal loop prevents the pool's MainActor startup task
+        // from resuming. Keep optional maintenance from blocking browser boot.
+        let response: NSApplication.ModalResponse
+        if let parent = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+            response = await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: parent) { continuation.resume(returning: $0) }
+            }
+        } else {
+            response = alert.runModal()
+        }
+        guard response == .alertFirstButtonReturn else { return }
 
+        installReason = .update
         phase = .initializing(status: "Installing packages...", progress: nil)
         do {
             try await imageManager.applyPostinstallSteps(steps) { [weak self] event in
@@ -497,6 +535,12 @@ final class AppState: @unchecked Sendable {
         return String(s)
     }
 
+    func setMetalRendererEnabled(_ enabled: Bool) {
+        guard MetalRendererPreference.isSupported, MetalRendererPreference.isEnabled != enabled else { return }
+        MetalRendererPreference.isEnabled = enabled
+        restartPool()
+    }
+
     /// Shut down the current pool and start a fresh one with updated config.
     /// No-op if an image build is in progress (no base image to warm up).
     func restartPool() {
@@ -522,7 +566,9 @@ final class AppState: @unchecked Sendable {
 
     func startPool() {
         let config = buildBaseConfig()
-        pool = VMPool(config: config, storageDir: storageDir)
+        let replenish: Bool
+        if #available(macOS 27.0, *) { replenish = false } else { replenish = true }
+        pool = VMPool(config: config, storageDir: storageDir, automaticallyReplenishes: replenish)
         poolReady = false
         let env = ProcessInfo.processInfo.environment
         if env["BROMURE_DEBUG"] != nil && env["BROMURE_DEBUG_PREWARM"] == nil {
@@ -614,12 +660,24 @@ final class AppState: @unchecked Sendable {
 
     /// Build a VMConfig from a profile's settings (merges with app-wide hardware settings).
     func buildConfig(for profile: Profile) -> VMConfig {
-        profile.settings.toVMConfig(profileID: profile.id)
+        sharedWindowConfig(profile.settings.toVMConfig(profileID: profile.id))
     }
 
     /// Build a default VMConfig when no profile is selected.
     func buildDefaultConfig() -> VMConfig {
-        ProfileSettings().toVMConfig()
+        sharedWindowConfig(ProfileSettings().toVMConfig())
+    }
+
+    private func sharedWindowConfig(_ original: VMConfig) -> VMConfig {
+        var config = original
+        if #available(macOS 27.0, *), config.enableMetalRenderer,
+           MetalRendererPreference.isEnabled, imageManager.supportsSharedWindows {
+            config.sharedWindowScanoutCount = 16
+            if !config.extraKernelOptions.split(separator: " ").contains(where: { $0.hasPrefix("bromure.shared_windows=") }) {
+                config.extraKernelOptions += " bromure.shared_windows=16"
+            }
+        }
+        return config
     }
 
     /// Close all sessions, delete the base image, and rebuild with new settings.
@@ -629,6 +687,7 @@ final class AppState: @unchecked Sendable {
         warmUpTask = nil
         initTask?.cancel()
         initTask = nil
+        installReason = .rebuild
 
         Task {
             // Close all browser sessions first

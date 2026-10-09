@@ -6,6 +6,7 @@
     "puppeteer-core": "^24.39.1"
   },
   "overrides": {
-    "ws": "^8.20.1"
+    "ws": "^8.20.1",
+    "ip-address": "^10.7.2"
   }
 }

@@ -35,6 +35,12 @@ public struct VMConfig {
     /// Memory in bytes.
     public var memorySize: UInt64
 
+    /// Experimental custom GPU devices in one VM. Production sessions use one.
+    public var experimentalGPUCount: Int = 1
+
+    /// Opt-in multiple outputs sharing one GPU and Chromium profile.
+    public var sharedWindowScanoutCount: Int = 1
+
     /// Display width in pixels.
     public var displayWidth: Int
 
@@ -144,9 +150,8 @@ public struct VMConfig {
     /// Home page URL for the browser.
     public var homePage: String
 
-    /// Custom User-Agent override. Empty = the guest presents as Chrome on
-    /// macOS (built from the real Chromium version). Non-empty is passed to
-    /// Chromium verbatim via `--user-agent`.
+    /// Custom User-Agent override. Empty uses the default Linux Chrome identity.
+    /// The resolved value is passed via `--user-agent`.
     public var userAgent: String
 
     /// Which browser the session launches (Chromium or Google Chrome).
@@ -158,6 +163,9 @@ public struct VMConfig {
 
     /// Whether GPU acceleration is enabled in the browser.
     public var enableGPU: Bool
+
+    /// Per-profile host renderer choice; still subject to host/image availability.
+    public var enableMetalRenderer: Bool
 
     /// Whether WebGL and WebGPU are enabled in the browser.
     public var enableWebGL: Bool
@@ -375,6 +383,7 @@ public struct VMConfig {
         browser: BrowserChoice = .chromium,
         chromeEnrollmentToken: String? = nil,
         enableGPU: Bool = true,
+        enableMetalRenderer: Bool = true,
         enableWebGL: Bool = false,
         enableZeroCopy: Bool = true,
         enableSmoothScrolling: Bool = true,
@@ -466,6 +475,7 @@ public struct VMConfig {
         self.browser = browser
         self.chromeEnrollmentToken = chromeEnrollmentToken
         self.enableGPU = enableGPU
+        self.enableMetalRenderer = enableMetalRenderer
         self.enableWebGL = enableWebGL
         self.enableZeroCopy = enableZeroCopy
         self.enableSmoothScrolling = enableSmoothScrolling

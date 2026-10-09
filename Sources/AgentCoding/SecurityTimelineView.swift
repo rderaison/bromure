@@ -1,5 +1,6 @@
 #if os(macOS)
 import SwiftUI
+import SandboxEngine
 
 /// The Security Timeline window: one chronological table of every decision the
 /// security engines made — credential brokering, the egress firewall, supply
@@ -16,6 +17,45 @@ struct SecurityPosture: Identifiable {
     let guardrails: Bool
     let promptInjection: Bool
     var pii: Bool = false
+}
+
+extension SecurityPosture {
+    /// A workspace's posture, one column per engine. Guardrails is the
+    /// CREDENTIAL engine only (write policies, ask-before-use) — the egress
+    /// ruleset is its own Firewall column and no longer lights Guardrails up.
+    /// Firewall is on when the user wrote a ruleset that restricts something
+    /// (a rule, or `default deny`), not merely when the text is non-empty.
+    @MainActor init(profile p: Profile) {
+        var credentialsOnly = p
+        credentialsOnly.egressRules = ""
+        let ruleset = p.egressRules.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(id: p.id, name: p.name, colorHex: p.color.hexInUI,
+                  firewall: !ruleset.isEmpty && ((try? EgressPolicy.parse(ruleset))?.isActive ?? false),
+                  supplyChain: p.supplyChain.isActive,
+                  guardrails: ACAppDelegate.guardrailsRestrict(credentialsOnly),
+                  promptInjection: p.promptInjection.isActive,
+                  pii: p.pii.isActive)
+    }
+}
+
+extension SecurityTimeline.Event {
+    /// How many identical routine events this coalesced row stands for, when
+    /// more than one (nil otherwise). `count` on a non-coalesced row means
+    /// something else (PII values in one request) and is not a repeat.
+    var repeats: Int? {
+        guard coalesceKey != nil, let n = count, n > 1 else { return nil }
+        return n
+    }
+}
+
+/// Opens a workspace's editor on one pane — the Overview's protection cells.
+@MainActor
+enum SecurityEditorLauncher {
+    static func open(profileID: UUID, category: EditorCategory) {
+        guard let d = NSApp.delegate as? ACAppDelegate,
+              let p = d.profiles.first(where: { $0.id == profileID }) else { return }
+        d.openEditorWindow(editing: p, category: category)
+    }
 }
 
 struct SecurityTimelineView: View {
@@ -38,7 +78,12 @@ struct SecurityTimelineView: View {
     @State private var outcomeFilter: SecurityTimeline.Decision?
     /// "" = this Mac; a host's name = that mirrored host; nil = all.
     @State private var machineFilter: String?
+    /// Selected rows (the context menu acts on the clicked one).
     @State private var selection = Set<SecurityTimeline.Event.ID>()
+    /// Bumped whenever a workspace's firewall rules change, so the firewall
+    /// rows re-evaluate "Allowed now" / "Blocked now" against the new rules
+    /// while the window stays open.
+    @State private var rulesGeneration = 0
     /// The row whose lineage is open (double-click a Network row).
     @State private var lineage: SecurityTimeline.Event?
 
@@ -97,6 +142,12 @@ struct SecurityTimelineView: View {
             NetworkLineageView(timeline: timeline, focus: e, onClose: { lineage = nil })
         }
         .onAppear { if startOnTimeline { tab = .timeline } }
+        .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallPolicyChanged)) { _ in
+            rulesGeneration &+= 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallRulesChanged)) { _ in
+            rulesGeneration &+= 1
+        }
         .onDisappear(perform: onClose)
     }
 
@@ -235,14 +286,17 @@ struct SecurityTimelineView: View {
         let iso = ISO8601DateFormatter()
         var out = "time,machine,workspace,engine,condition,decision,outcome\n"
         for e in (tab == .timeline ? rows.reversed() : timeline.allEvents) {
+            // Never export secret characters, whatever an older row carries.
             out += [iso.string(from: e.time), e.machine ?? "This Mac", e.workspace ?? "", e.engine,
-                    e.condition, e.decision, e.kind.wire].map(field).joined(separator: ",") + "\n"
+                    SecretFingerprint.redactLegacy(e.condition), SecretFingerprint.redactLegacy(e.decision),
+                    e.kind.wire].map(field).joined(separator: ",") + "\n"
         }
         try? out.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private var table: some View {
-        Table(rows, selection: $selection) {
+        let rows = rows
+        return Table(rows, selection: $selection) {
             TableColumn(NSLocalizedString("Time", comment: "")) { e in
                 Text(e.time, format: .dateTime.year().month(.twoDigits).day(.twoDigits)
                         .hour().minute().second())
@@ -270,9 +324,11 @@ struct SecurityTimelineView: View {
             .width(min: 140, ideal: 160, max: 190)
 
             TableColumn(NSLocalizedString("Condition", comment: "")) { e in
+                // The hover area is the whole cell (not just the glyphs), so
+                // a truncated host:port shows in full in the tooltip.
                 HStack(spacing: 6) {
                     Text(e.condition)
-                        .lineLimit(1).truncationMode(.tail)
+                        .lineLimit(1).truncationMode(.middle)
                         .textSelection(.enabled)
                     if e.detail != nil {
                         Spacer(minLength: 4)
@@ -280,23 +336,48 @@ struct SecurityTimelineView: View {
                             .font(.caption).foregroundStyle(.tertiary)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
                 .help(e.detail != nil
-                      ? e.condition + "\n" + NSLocalizedString("Double-click to see the whole chain", comment: "security timeline")
-                      : e.condition)
+                      ? Self.conditionHelp(e) + "\n" + NSLocalizedString("Double-click to see the whole chain", comment: "security timeline")
+                      : Self.conditionHelp(e))
             }
+            .width(min: 140, ideal: 240)
 
             TableColumn(NSLocalizedString("Decision", comment: "")) { e in
                 HStack(spacing: 5) {
                     Circle().fill(color(e.kind)).frame(width: 7, height: 7)
-                    Text(e.decision).foregroundStyle(color(e.kind)).lineLimit(1)
+                    Text(e.decision).foregroundStyle(color(e.kind)).lineLimit(1).truncationMode(.tail)
+                    if let n = e.repeats {
+                        Text(verbatim: "×\(n)")
+                            .font(.caption.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                            .fixedSize()
+                    }
                 }
-                .help(e.decision)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .help(e.repeats.map {
+                    String(format: NSLocalizedString("%1$@ (%2$d times, last one shown)", comment: "security timeline: coalesced row; 1 = decision, 2 = repeats"), e.decision, $0)
+                } ?? e.decision)
             }
-            .width(min: 120, ideal: 160, max: 260)
+            .width(min: 140, ideal: 260, max: 520)
+
+            // Firewall rows: allow a block / block an allow / switch the
+            // deciding rule off — applied live to the running workspace.
+            TableColumn("") { e in
+                FirewallRowActionButton(event: e, rulesGeneration: rulesGeneration)
+            }
+            .width(min: 64, ideal: 80, max: 110)
         }
         .contextMenu(forSelectionType: SecurityTimeline.Event.ID.self) { ids in
             if let e = event(ids), e.detail != nil {
                 Button(NSLocalizedString("Show the Whole Chain", comment: "security timeline")) { lineage = e }
+            }
+            if let e = event(ids), e.firewall != nil {
+                FirewallRowMenuItems(event: e, rulesGeneration: rulesGeneration)
             }
         } primaryAction: { ids in
             // Double-click (or Return): open a flow's lineage.
@@ -307,6 +388,14 @@ struct SecurityTimelineView: View {
     private func event(_ ids: Set<SecurityTimeline.Event.ID>) -> SecurityTimeline.Event? {
         guard let id = ids.first else { return nil }
         return rows.first { $0.id == id }
+    }
+    /// The condition in full, plus — for a firewall row — the destination's
+    /// other names (CDN / server names the quick actions don't offer).
+    static func conditionHelp(_ e: SecurityTimeline.Event) -> String {
+        guard let aliases = e.firewall?.aliases, !aliases.isEmpty else { return e.condition }
+        return e.condition + "\n" + String(
+            format: NSLocalizedString("Also seen as: %@", comment: "security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated"),
+            aliases.joined(separator: ", "))
     }
 
     private func color(_ kind: SecurityTimeline.Decision) -> Color {
@@ -335,6 +424,231 @@ struct SecurityTimelineView: View {
         }
     }
 }
+/// What the firewall quick actions on one timeline row can work with: the
+/// verdict, plus — for this Mac's own workspaces — the workspace's current
+/// rules (to offer only a rule that still exists).
+@MainActor
+private struct FirewallRowContext {
+    let event: SecurityTimeline.Event
+    let fw: SecurityTimeline.Firewall
+    /// nil: a mirrored (remote) host's row, or a workspace that's gone.
+    let profile: Profile?
+
+    init?(_ e: SecurityTimeline.Event) {
+        guard let fw = e.firewall, FirewallRuleActions.isActionable(fw) else { return nil }
+        event = e
+        self.fw = fw
+        profile = e.machine == nil
+            ? (NSApp.delegate as? ACAppDelegate)?.profiles.first(where: { $0.id == e.profileID })
+            : nil
+    }
+
+    var isRemote: Bool { event.machine != nil }
+
+    /// What the workspace's rules decide for this destination NOW, when that
+    /// differs from the row (a blocked host allowed since, or the reverse):
+    /// the row then says so instead of offering the same flip again.
+    var changedSince: (denied: Bool, rule: String?)? {
+        guard let profile,
+              let now = FirewallRuleActions.currentDecision(for: fw, policy: profile.resolvedEgressPolicy),
+              now.denied != fw.denied else { return nil }
+        return now
+    }
+
+    /// The deciding rule, when it's still in the workspace's rules.
+    var editableRule: String? {
+        guard let rule = fw.rule, let profile,
+              FirewallRuleActions.contains(ruleText: rule, in: profile.egressRules) else { return nil }
+        return rule
+    }
+
+    var portSuffix: String { (fw.port ?? 0) > 0 ? ":\(fw.port!)" : "" }
+
+    /// The inline button's title.
+    var buttonTitle: String {
+        if let now = changedSince {
+            return now.denied
+                ? NSLocalizedString("Blocked now", comment: "security timeline: firewall row whose destination the current rules block")
+                : NSLocalizedString("Allowed now", comment: "security timeline: firewall row whose destination the current rules allow")
+        }
+        if fw.denied { return NSLocalizedString("Allow…", comment: "security timeline: firewall quick action button") }
+        if fw.rule != nil { return NSLocalizedString("Rule…", comment: "security timeline: firewall quick action button") }
+        return NSLocalizedString("Block…", comment: "security timeline: firewall quick action button")
+    }
+
+    func perform(_ edit: FirewallRuleActions.Edit) {
+        guard let profile else { return }
+        (NSApp.delegate as? ACAppDelegate)?.applyFirewallEdit(edit, profileID: profile.id)
+    }
+}
+
+/// The firewall quick actions for one timeline row — shared by the row's
+/// context menu and its inline button.
+@MainActor
+private struct FirewallRowMenuItems: View {
+    let event: SecurityTimeline.Event
+    /// The rules' change count: a new value re-evaluates against them.
+    var rulesGeneration = 0
+    @ObservedObject private var ticker = FirewallRulesTicker.shared
+
+    var body: some View {
+        let _ = ticker.generation   // re-evaluate against the current rules
+        if let ctx = FirewallRowContext(event) {
+            if ctx.isRemote {
+                Text(NSLocalizedString("Change this workspace's firewall rules in its settings on the Mac that runs it.",
+                                       comment: "security timeline: firewall quick actions, remote row"))
+            } else if ctx.profile != nil {
+                items(ctx)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func items(_ ctx: FirewallRowContext) -> some View {
+        let targets = FirewallRuleActions.targets(for: ctx.fw)
+        if let now = ctx.changedSince {
+            // Already flipped by the current rules: say by what, don't offer
+            // to insert the same rule again.
+            let word = now.denied
+                ? NSLocalizedString("Blocked now by “%@”", comment: "security timeline: the current rules block this destination; %@ = rule")
+                : NSLocalizedString("Allowed now by “%@”", comment: "security timeline: the current rules allow this destination; %@ = rule")
+            Text(now.rule.map { String(format: word, $0) }
+                 ?? (now.denied
+                     ? NSLocalizedString("Blocked now by the default policy", comment: "security timeline: the current default policy blocks this destination")
+                     : NSLocalizedString("Allowed now by the default policy", comment: "security timeline: the current default policy allows this destination")))
+        } else if ctx.fw.denied {
+            ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
+                if let rule = FirewallRuleActions.allowRule(target: target.name, fw: ctx.fw) {
+                    Menu(target.wholeDomain
+                         ? String(format: NSLocalizedString("Allow all of %@", comment: "security timeline: allow a whole domain; %@ = domain:port"),
+                                  target.name + ctx.portSuffix)
+                         : String(format: NSLocalizedString("Allow %@", comment: "security timeline: allow a blocked destination; %@ = host:port"),
+                                  target.name + ctx.portSuffix)) {
+                        if let existing = ctx.profile.flatMap({ FirewallRuleActions.existing(rule, in: $0.egressRules) }) {
+                            // Re-allowing replaces this rule (moved first): show
+                            // its current state so a shorter time isn't picked
+                            // by accident.
+                            Text(Self.existingSummary(existing))
+                            Divider()
+                        }
+                        allowDurations(rule, ctx)
+                    }
+                }
+            }
+        } else if ctx.fw.rule == nil {
+            ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
+                if let rule = FirewallRuleActions.blockRule(target: target.name) {
+                    Button(target.wholeDomain
+                           ? String(format: NSLocalizedString("Block all of %@", comment: "security timeline: block a whole domain; %@ = domain"), target.name)
+                           : String(format: NSLocalizedString("Block %@", comment: "security timeline: block a destination; %@ = host"), target.name)) {
+                        ctx.perform(.insert(rule))
+                    }
+                }
+            }
+        }
+        if let rule = ctx.editableRule {
+            if ctx.fw.denied || ctx.changedSince != nil { Divider() }
+            Button(String(format: NSLocalizedString("Switch off rule “%@”", comment: "security timeline: disable the rule that decided; %@ = rule"), rule)) {
+                ctx.perform(.disable(ruleText: rule))
+            }
+            Button(String(format: NSLocalizedString("Remove rule “%@”", comment: "security timeline: delete the rule that decided; %@ = rule"), rule),
+                   role: .destructive) {
+                ctx.perform(.remove(ruleText: rule))
+            }
+        } else if !ctx.fw.denied, ctx.fw.rule != nil, ctx.changedSince == nil {
+            Text(NSLocalizedString("The rule that allowed this is no longer in the workspace's rules.",
+                                   comment: "security timeline: firewall quick actions"))
+        }
+    }
+
+    /// "“allow tcp a.com:443” is on until 14:05" — an identical rule's state.
+    static func existingSummary(_ r: EgressPolicy.Rule, now: Date = Date()) -> String {
+        if !r.isEffective(at: now) {
+            return String(format: NSLocalizedString("“%@” exists and is off", comment: "security timeline: an identical firewall rule exists, switched off; %@ = rule"), r.text)
+        }
+        if r.untilStop {
+            return String(format: NSLocalizedString("“%@” is on until the workspace stops", comment: "security timeline: an identical firewall rule exists; %@ = rule"), r.text)
+        }
+        if let e = r.expiresAt {
+            return String(format: NSLocalizedString("“%1$@” is on until %2$@", comment: "security timeline: an identical timed firewall rule exists; 1 = rule, 2 = time"),
+                          r.text, e.formatted(date: .omitted, time: .shortened))
+        }
+        return String(format: NSLocalizedString("“%@” is already on, with no time limit", comment: "security timeline: an identical permanent firewall rule exists; %@ = rule"), r.text)
+    }
+
+    @ViewBuilder
+    private func allowDurations(_ rule: EgressPolicy.Rule, _ ctx: FirewallRowContext) -> some View {
+        Button(NSLocalizedString("Always", comment: "security timeline: allow duration")) { insert(rule, .always, ctx) }
+        Button(NSLocalizedString("For 15 minutes", comment: "security timeline: allow duration")) { insert(rule, .fifteenMinutes, ctx) }
+        Button(NSLocalizedString("For 1 hour", comment: "security timeline: allow duration")) { insert(rule, .oneHour, ctx) }
+        Button(NSLocalizedString("Until the workspace stops", comment: "security timeline: allow duration")) { insert(rule, .untilStop, ctx) }
+    }
+
+    private func insert(_ rule: EgressPolicy.Rule, _ d: FirewallRuleActions.Duration, _ ctx: FirewallRowContext) {
+        var r = rule
+        d.apply(to: &r, now: Date())
+        ctx.perform(.insert(r))
+    }
+}
+
+/// Counts firewall rule changes (any save path). Table cells observe it
+/// themselves: an NSTable-backed SwiftUI Table doesn't redraw a cell whose
+/// row value is unchanged, so a generation passed down from the window never
+/// reached already-drawn rows ("Allowed now" only after a reopen).
+@MainActor
+final class FirewallRulesTicker: ObservableObject {
+    static let shared = FirewallRulesTicker()
+    @Published private(set) var generation = 0
+    private var observers: [NSObjectProtocol] = []
+
+    private init() {
+        for name in [Notification.Name.bromureFirewallPolicyChanged, .bromureFirewallRulesChanged] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { FirewallRulesTicker.shared.generation &+= 1 }
+            })
+        }
+    }
+}
+
+/// The inline quick-action button in a firewall row's last column. A
+/// mirrored host's row shows it disabled, with why in the tooltip: the fat
+/// client doesn't edit a remote workspace's rules from here.
+@MainActor
+private struct FirewallRowActionButton: View {
+    let event: SecurityTimeline.Event
+    /// The rules' change count: a new value re-evaluates against them.
+    var rulesGeneration = 0
+    @ObservedObject private var ticker = FirewallRulesTicker.shared
+
+    var body: some View {
+        let _ = ticker.generation   // re-evaluate against the current rules
+        if let ctx = FirewallRowContext(event) {
+            if ctx.isRemote {
+                Text(ctx.buttonTitle)
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .help(NSLocalizedString("Change this workspace's firewall rules in its settings on the Mac that runs it.",
+                                            comment: "security timeline: firewall quick actions, remote row"))
+            } else if ctx.profile != nil {
+                Menu {
+                    FirewallRowMenuItems(event: event, rulesGeneration: rulesGeneration)
+                } label: {
+                    Text(ctx.buttonTitle).font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(ctx.changedSince != nil
+                      ? NSLocalizedString("The workspace's rules have changed since this connection",
+                                          comment: "security timeline: firewall quick action help")
+                      : ctx.fw.denied
+                      ? NSLocalizedString("Add a rule allowing this destination — applies to the running workspace at once",
+                                          comment: "security timeline: firewall quick action help")
+                      : NSLocalizedString("Switch off the rule that allowed this, or block the destination — applies at once",
+                                          comment: "security timeline: firewall quick action help"))
+            }
+        }
+    }
+}
+
 /// The Overview tab: what the engines did in the last 24 hours, each
 /// workspace's protections, and the latest blocks.
 private struct SecurityOverview: View {
@@ -363,16 +677,19 @@ private struct SecurityOverview: View {
                          "hand.raised.fill", .red, engine: nil, outcome: .blocked)
                     tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.count,
                          "checkmark.seal.fill", .green, engine: nil, outcome: .allowed)
-                    tile(NSLocalizedString("Credentials brokered", comment: "security overview"),
-                         recent.filter { $0.engine == NSLocalizedString("Credential brokering", comment: "Security Timeline engine") }.count,
+                    // Tiles carry the engine names the Protections columns use.
+                    // Swaps, not rows: a coalesced row carries its repeat count.
+                    tile(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                         recent.filter { $0.engine == NSLocalizedString("Credential brokering", comment: "Security Timeline engine") }
+                             .reduce(0) { $0 + ($1.count ?? 1) },
                          "arrow.left.arrow.right", .blue,
                          engine: NSLocalizedString("Credential brokering", comment: "Security Timeline engine"))
-                    tile(NSLocalizedString("Packages checked", comment: "security overview"),
+                    tile(NSLocalizedString("Supply chain", comment: "Security Timeline engine"),
                          recent.filter { $0.engine == NSLocalizedString("Supply chain", comment: "Security Timeline engine") }.count,
                          "shippingbox.fill", .orange,
                          engine: NSLocalizedString("Supply chain", comment: "Security Timeline engine"))
                     // Values swapped, not requests: each row carries its count.
-                    tile(NSLocalizedString("PII swapped", comment: "security overview"),
+                    tile(NSLocalizedString("PII protection", comment: "Security Timeline engine"),
                          recent.filter { $0.engine == NSLocalizedString("PII protection", comment: "Security Timeline engine") }
                              .reduce(0) { $0 + ($1.count ?? 1) },
                          "person.crop.circle.badge.checkmark", .purple,
@@ -381,8 +698,12 @@ private struct SecurityOverview: View {
 
                 if !postures.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(NSLocalizedString("Protections", comment: "security overview"))
-                            .font(.system(size: 15, weight: .semibold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(NSLocalizedString("Protections", comment: "security overview"))
+                                .font(.system(size: 15, weight: .semibold))
+                            Text(NSLocalizedString("Click a protection that's off to turn it on in that workspace's settings.", comment: "security overview"))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         VStack(spacing: 0) {
                             postureHeader
                             ForEach(postures) { p in
@@ -465,6 +786,9 @@ private struct SecurityOverview: View {
                                   NSLocalizedString("Prompt injection", comment: "Security Timeline engine"),
                                   NSLocalizedString("PII protection", comment: "Security Timeline engine"),
                                   NSLocalizedString("Credential brokering", comment: "Security Timeline engine")]
+    /// The editor pane behind each column, in `columns` order.
+    private static let columnCategories: [EditorCategory] =
+        [.firewall, .supplyChain, .guardrails, .promptInjection, .pii, .credentials]
 
     private var postureHeader: some View {
         HStack(spacing: 0) {
@@ -487,15 +811,52 @@ private struct SecurityOverview: View {
                 Text(p.name).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true].enumerated()), id: \.offset) { _, on in
-                Image(systemName: on ? "checkmark.circle.fill" : "minus.circle")
-                    .foregroundStyle(on ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
-                    .frame(width: 96)
-                    .help(on ? NSLocalizedString("On", comment: "security overview") : NSLocalizedString("Off", comment: "security overview"))
+            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true].enumerated()), id: \.offset) { i, on in
+                PostureCell(on: on, workspace: p.name, column: Self.columns[i]) {
+                    SecurityEditorLauncher.open(profileID: p.id, category: Self.columnCategories[i])
+                }
+                .frame(width: 96)
             }
         }
         .font(.system(size: 12.5))
         .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+}
+
+/// One protection in the Overview's table. On: a green check. Off: a muted
+/// minus that turns into a "Turn on" pill on hover. Either way a click opens
+/// that workspace's editor on the protection's pane.
+private struct PostureCell: View {
+    let on: Bool
+    let workspace: String
+    let column: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if on {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                } else if hover {
+                    Text(NSLocalizedString("Turn on…", comment: "security overview: off protection, hovered"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.accentColor))
+                } else {
+                    Image(systemName: "minus.circle").foregroundStyle(.tertiary)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 20)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(on
+              ? String(format: NSLocalizedString("%1$@ is on for %2$@. Click to change it.", comment: "security overview: 1 = protection, 2 = workspace"), column, workspace)
+              : String(format: NSLocalizedString("%1$@ is off for %2$@. Click to turn it on.", comment: "security overview: 1 = protection, 2 = workspace"), column, workspace))
     }
 }
 #endif

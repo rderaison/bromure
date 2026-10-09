@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-02",
+  "fix": "Trusted operation tokens arm all active sibling views across complete guest topology mutation; exact-token defer releases eligibility on success/error, existing1.2s clear deadline unchanged",
+  "tests": {
+    "actualMetalTexture": "PASS normal dark, stationary clear/paint, anchored deadline, delayed modeset, overlap, duplicate/unknown completion",
+    "liveStationarySibling": {
+      "movieSeconds": 25,
+      "sampledMovieFrames": 244,
+      "blueCenterFrames": 244,
+      "blackCenterFrames": 0,
+      "gpuCommandRejections": 0,
+      "browserExitObserved": true,
+      "scope": "central region of native window movie; not exhaustive per-pixel/all-content proof"
+    },
+    "websiteLeg": {
+      "sites": 10,
+      "gpuProcessCrashes": 0,
+      "gpuCommandRejections": 0,
+      "audio": "explicitly omitted; user deferred audio to physical-machine testing",
+      "reddit": "anti-bot page, not authenticated feed/video acceptance"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/private/tmp/bromure-shared-sibling-handoff-results-final.log",
+      "sha256": "dbbad8f7e391381946e1095c0ae07827e6c197dd4320196a9f697be3b8c08c4d"
+    },
+    {
+      "path": "/private/tmp/bromure-shared-sibling-color-live-53.log",
+      "sha256": "76f2d6f680e410f9c4ebd1c43379323f29ac04a7a7f27171a73367188e9e1dfe"
+    },
+    {
+      "path": "/private/tmp/bromure-shared-sibling-resize-53.mov",
+      "sha256": "660db4c4b9a1f32e899b29733553a3de9285218f5a7820f454ff30d0a85bfa4f"
+    },
+    {
+      "path": "/private/tmp/bromure-shared-sibling-movie-results-53.log",
+      "sha256": "82cd92f8e62b60a5ddacb543fb5055320dcefc9d23259a2e2dd002a2c93a443f"
+    },
+    {
+      "path": "/private/tmp/bromure-shared-real-sites-no-audio-51.log",
+      "sha256": "c9f252e3c032ae1715be5cec8b293df1308a4ebac0947861701e79f534d87526"
+    }
+  ]
+}

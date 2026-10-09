@@ -27,7 +27,16 @@ struct ReviewSource {
     /// path → fingerprint of the diff seen.
     var viewed: () -> [String: String]
     var plan: () -> String? = { nil }
-    var fetch: (TaskReviewData.Base) async -> TaskReviewData?
+    /// What the agent the task was handed to said when it delivered
+    /// (who, and its words) — shown even when there's no diff to read.
+    var note: () -> (who: String, text: String)? = { nil }
+    /// Known to have no code to review (a task measured with nothing to
+    /// merge): the diff pane says so instead of waiting on a read.
+    var noCode: () -> Bool = { false }
+    /// The diff at `base`. The second argument: a file the review is about
+    /// (a turn's edit) — its git checkout is diffed, which may not be the
+    /// session's folder (a worktree the agent edits in).
+    var fetch: (TaskReviewData.Base, [String]) async -> TaskReviewData?
     var addComment: (_ text: String, _ file: String?, _ line: Int?) -> Void
     var removeComment: (UUID) -> Void
     var setViewed: (_ path: String, _ fingerprint: String?) -> Void
@@ -36,10 +45,13 @@ struct ReviewSource {
     var sendLabel: (Int) -> String
     var sendHelp: String
     /// The composer's key hint (⏎ adds a comment; ⇧⌘⏎ sends).
-    var composerHint = NSLocalizedString("⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent", comment: "review composer hint")
+    var composerHint = NSLocalizedString("⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent", comment: "review composer hint")
     var openTerminal: () -> Void
     /// The header's own controls (merge, …).
     var trailing: () -> AnyView = { AnyView(EmptyView()) }
+    /// A strip under the header (a task's summary and its ways out) — it
+    /// draws its own divider.
+    var banner: () -> AnyView = { AnyView(EmptyView()) }
     /// What the base picker says for a base (".branch" labels come from bases).
     static func standardBases(parent: String?) -> [(TaskReviewData.Base, String)] {
         var out: [(TaskReviewData.Base, String)] = []
@@ -62,9 +74,11 @@ final class ReviewWindowHost {
 
     /// `files`: a turn's edited paths (absolute or relative) — the window
     /// opens on just those, with a way to see everything.
-    func open(_ id: UUID, title: String, files: [String]? = nil, source: () -> ReviewSource) {
+    func open(_ id: UUID, title: String, files: [String]? = nil, since: Date? = nil,
+              source: () -> ReviewSource) {
         let f = focus[id] ?? ReviewFocus()
         f.files = files
+        f.since = since
         f.generation += 1
         focus[id] = f
         if let win = windows[id] { win.makeKeyAndOrderFront(nil); return }
@@ -74,9 +88,16 @@ final class ReviewWindowHost {
         win.title = String(format: NSLocalizedString("Review — %@", comment: "review window title"), title)
         win.center()
         win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 760, height: 460)
+        win.minSize = NSSize(width: 760, height: 520)
+        win.contentMinSize = NSSize(width: 760, height: 520)
         win.tabbingMode = .disallowed
-        win.contentView = NSHostingView(rootView: ReviewView(source: source(), focus: f))
+        let hosting = NSHostingView(rootView: ReviewView(source: source(), focus: f))
+        // The window keeps the size it opened at: letting the hosting view
+        // drive it (its intrinsic size) shrank a review with an empty diff
+        // to a strip.
+        hosting.sizingOptions = [.minSize]
+        win.contentView = hosting
+        win.setContentSize(NSSize(width: 1180, height: 780))
         NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: win, queue: .main) { _ in
             MainActor.assumeIsolated { f.refresh += 1 }
         }
@@ -104,7 +125,7 @@ final class ReviewWindowHost {
 final class SessionReviewWindowManager {
     struct Context {
         var session: (UUID) -> AgentSession?
-        var fetch: (UUID, TaskReviewData.Base) async -> TaskReviewData?
+        var fetch: (UUID, TaskReviewData.Base, [String]) async -> TaskReviewData?
         var addComment: (_ id: UUID, _ text: String, _ file: String?, _ line: Int?) -> Void
         var removeComment: (_ id: UUID, _ commentID: UUID) -> Void
         var setViewed: (_ id: UUID, _ path: String, _ fingerprint: String?) -> Void
@@ -121,10 +142,10 @@ final class SessionReviewWindowManager {
 
     func window(for id: UUID) -> NSWindow? { host.window(for: id) }
 
-    func open(sessionID id: UUID, files: [String]? = nil) {
+    func open(sessionID id: UUID, files: [String]? = nil, since: Date? = nil) {
         guard let s = context.session(id) else { return }
         let c = context
-        host.open(id, title: s.title, files: files) {
+        host.open(id, title: s.title, files: files, since: since) {
             ReviewSource(
                 title: { c.session(id)?.title ?? "" },
                 place: {
@@ -145,7 +166,7 @@ final class SessionReviewWindowManager {
                 },
                 comments: { c.session(id)?.reviewComments ?? [] },
                 viewed: { c.session(id)?.reviewViewed ?? [:] },
-                fetch: { base in await c.fetch(id, base) },
+                fetch: { base, focus in await c.fetch(id, base, focus) },
                 addComment: { text, file, line in c.addComment(id, text, file, line) },
                 removeComment: { c.removeComment(id, $0) },
                 setViewed: { c.setViewed(id, $0, $1) },
@@ -172,6 +193,9 @@ final class SessionReviewWindowManager {
 @Observable
 final class ReviewFocus {
     var files: [String]?
+    /// When the turn began (a "Changed N files" click): the review starts on
+    /// "This turn" — everything since, committed or not.
+    var since: Date?
     var generation = 0
     /// Bumped when the window comes back to the front.
     var refresh = 0
@@ -191,23 +215,37 @@ struct ReviewView: View {
     @State private var draftFile: String?
     @State private var baseChosen = false
     @State private var planOpen = true
+    @State private var noteOpen = true
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            source.banner()
+            if let note = source.note(), !note.text.isEmpty {
+                noteCard(note)
+                Divider()
+            }
             HSplitView {
                 fileList
-                    .frame(minWidth: 220, idealWidth: 270, maxWidth: 380)
+                    .frame(minWidth: 220, idealWidth: 270, maxWidth: 380, maxHeight: .infinity)
                 diffPane
-                    .frame(minWidth: 420)
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             commentsBar
         }
+        .frame(minWidth: 760, minHeight: 520)
         .background(Color.platformWindowBackground)
         .task(id: focus.generation) {
-            if !baseChosen { base = source.defaultBase() }
+            // A turn's changes: since the turn began, committed or not — the
+            // agent may well have committed them already. A new click re-aims.
+            if let t = focus.since, !baseChosen || { if case .since = base { return true } else { return false } }() {
+                base = .since(t)
+            } else if !baseChosen {
+                base = source.defaultBase()
+            }
             showAll = focus.files == nil
             await load()
         }
@@ -222,7 +260,8 @@ struct ReviewView: View {
 
     private func load(quiet: Bool = false) async {
         if !quiet { loading = true; loadFailed = false }
-        let fetched = await source.fetch(base)
+        // A turn's files: review the checkout they were edited in.
+        let fetched = await source.fetch(base, focus.files ?? [])
         loading = false
         if let fetched { data = fetched; loadFailed = false }
         else if !quiet { data = nil; loadFailed = true }
@@ -288,8 +327,19 @@ struct ReviewView: View {
             Button {
                 Task { await load() }
             } label: { Image(systemName: "arrow.clockwise") }
-                .help(NSLocalizedString("Refresh the diff", comment: ""))
                 .keyboardShortcut("r", modifiers: .command)
+                .plainAccessibilityButton(NSLocalizedString("Refresh the diff", comment: "")) { Task { await load() } }
+                .help(NSLocalizedString("Refresh the diff", comment: ""))
+                .accessibilityLabel(NSLocalizedString("Refresh the diff", comment: ""))
+            Button {
+                platformCopyToPasteboard(TaskDiffFile.patch(of: visibleFiles))
+            } label: { Image(systemName: "doc.on.doc") }
+                .disabled(visibleFiles.isEmpty)
+                .plainAccessibilityButton(NSLocalizedString("Copy Diff", comment: "review")) {
+                    platformCopyToPasteboard(TaskDiffFile.patch(of: visibleFiles))
+                }
+                .help(NSLocalizedString("Copy the whole diff shown here as a patch", comment: "review"))
+                .accessibilityLabel(NSLocalizedString("Copy Diff", comment: "review"))
             Button(NSLocalizedString("Open Terminal", comment: "review"), action: source.openTerminal)
             source.trailing()
         }
@@ -299,7 +349,9 @@ struct ReviewView: View {
     }
 
     private var basePicker: some View {
-        let options = source.bases()
+        let options = (focus.since.map { [(TaskReviewData.Base.since($0),
+                                           NSLocalizedString("This turn", comment: "review base"))] } ?? [])
+            + source.bases()
         return Picker("", selection: Binding(get: { base }, set: { v in
             base = v; baseChosen = true
             Task { await load() }
@@ -320,7 +372,11 @@ struct ReviewView: View {
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text(files.count == 1 ? NSLocalizedString("1 file", comment: "review")
+                    // No count until the diff is in: "0 files" under a summary
+                    // that says "1 file" read as "nothing changed".
+                    Text(data == nil || (loading && files.isEmpty)
+                         ? NSLocalizedString("Files", comment: "review: file list header while loading")
+                         : files.count == 1 ? NSLocalizedString("1 file", comment: "review")
                          : String(format: NSLocalizedString("%d files", comment: "review"), files.count))
                         .font(.system(size: 12, weight: .semibold))
                     Spacer()
@@ -407,6 +463,8 @@ struct ReviewView: View {
                 .buttonStyle(.plain)
                 .help(viewed ? NSLocalizedString("Viewed — click to unmark", comment: "review")
                              : NSLocalizedString("Mark as viewed", comment: "review"))
+                .accessibilityLabel(viewed ? NSLocalizedString("Viewed — click to unmark", comment: "review")
+                                           : NSLocalizedString("Mark as viewed", comment: "review"))
                 VStack(alignment: .leading, spacing: 0) {
                     Text(name)
                         .font(.system(size: 12, weight: selectedFile == f.path ? .semibold : .regular))
@@ -446,7 +504,10 @@ struct ReviewView: View {
     // MARK: Diff
 
     @ViewBuilder private var diffPane: some View {
-        if let data {
+        // A re-read under way keeps the spinner only while it may still find
+        // files: a diff already known to be empty says "No changes" at once
+        // (the spinner stayed up for a task with no code at all).
+        if let data, !(loading && visibleFiles.isEmpty && !data.files.isEmpty) {
             let files = visibleFiles
             if files.isEmpty {
                 emptyState(data)
@@ -478,6 +539,11 @@ struct ReviewView: View {
                     }
                 }
             }
+        } else if source.noCode() {
+            ContentUnavailableView(
+                NSLocalizedString("No code changes", comment: "review: a task that changed no files"),
+                systemImage: "checkmark.seal",
+                description: Text(NSLocalizedString("The agent's work is its report above — there is no diff to read.", comment: "review")))
         } else if loadFailed {
             ContentUnavailableView(
                 NSLocalizedString("Can't reach the machine", comment: "review"),
@@ -495,6 +561,46 @@ struct ReviewView: View {
     }
 
     /// A task's plan, above its diff — what the change set out to do.
+    /// The assignee's own account of the work, open by default (it's what
+    /// you read before the diff); scrolls past a few lines.
+    private func noteCard(_ note: (who: String, text: String)) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { noteOpen.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: noteOpen ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
+                    Label(String(format: NSLocalizedString("%@ says", comment: "review: the assignee's delivery"), note.who),
+                          systemImage: "text.bubble")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.indigo)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if noteOpen {
+                // As tall as its text, scrolling only past the cap.
+                ViewThatFits(in: .vertical) {
+                    MarkdownBlocks(text: note.text, compact: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ScrollView {
+                        MarkdownBlocks(text: note.text, compact: true)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .frame(maxHeight: 220)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.indigo.opacity(0.06)))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
     private func planCard(_ plan: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
@@ -550,6 +656,7 @@ struct ReviewView: View {
         case .uncommitted: return NSLocalizedString("Nothing uncommitted: the agent may have committed its work.", comment: "review")
         case .branch(let p): return String(format: NSLocalizedString("The branch has nothing %@ doesn't have.", comment: "review"), p)
         case .lastCommit: return NSLocalizedString("The last commit changed nothing that can be shown.", comment: "review")
+        case .since: return NSLocalizedString("Nothing has changed since this turn began.", comment: "review")
         }
     }
 
@@ -577,11 +684,18 @@ struct ReviewView: View {
                                         .textSelection(.enabled)
                                 }
                                 Spacer(minLength: 0)
+                                if c.sentAt == nil, c.undelivered == true {
+                                    Text(NSLocalizedString("not delivered", comment: "review comment tag"))
+                                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(.orange)
+                                        .help(NSLocalizedString("The agent handed the task back before this comment reached it.", comment: "review"))
+                                }
                                 if c.sentAt == nil {
                                     Button { source.removeComment(c.id) } label: {
                                         Image(systemName: "xmark.circle.fill").font(.system(size: 10)).foregroundStyle(.tertiary)
                                     }
                                     .buttonStyle(.plain)
+                                    .help(NSLocalizedString("Remove this comment", comment: "review"))
+                                    .accessibilityLabel(NSLocalizedString("Remove this comment", comment: "review"))
                                 } else {
                                     Text(NSLocalizedString("sent", comment: "review comment"))
                                         .font(.system(size: 9)).foregroundStyle(.tertiary)
@@ -600,6 +714,7 @@ struct ReviewView: View {
                             Image(systemName: "xmark.circle.fill").font(.system(size: 9))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(NSLocalizedString("Comment on the whole change instead", comment: "review"))
                     }
                     .padding(.horizontal, 6).padding(.vertical, 3)
                     .background(Capsule().fill(Color.purple.opacity(0.15)))
@@ -638,6 +753,7 @@ struct ReviewView: View {
         .buttonStyle(.plain)
         .disabled(n == 0)
         .keyboardShortcut(.return, modifiers: [.command, .shift])
+        .plainAccessibilityButton(source.sendLabel(n)) { source.send() }
         .help(n == 0
               ? NSLocalizedString("Add comments first — on a line, a file or the whole change", comment: "review")
               : source.sendHelp)

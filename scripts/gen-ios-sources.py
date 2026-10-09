@@ -25,16 +25,19 @@ SHARED = [
     # Transport + protocol
     "FatClient.swift",
     "FatClientTypes.swift",
+    "FatClientLinkHealth.swift",  # adaptive timeouts + reconnect hysteresis + link simulation
     "FatClientSSHDial.swift",
     "FatClientNIOSSH.swift",
     "FatClientFleet.swift",
     "FatClientPAC.swift",
     "ControlClient.swift",
+    "RequestLedger.swift",
     # Models + stores (the mirror reconciles /state into these)
     "SessionModels.swift",
     "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store
     "Profile.swift",
     "CodingTasks.swift",
+    "AgentScreen.swift",        # agent-screen shapes + per-agent wording (CodingTasks uses its menu regex)
     "ScheduledAutomations.swift",
     # Policy / token / routing types Profile.swift and the mirror reference.
     "Mitm/TraceRecord.swift",
@@ -54,6 +57,7 @@ SHARED = [
     "FatClientController.swift",
     "FatClientConnect.swift",
     "AgentSessions.swift",      # session model/store + shared row/section views (sessions home)
+    "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)
     "AgentDelegation.swift",    # delegation records + store + notice text (the engine/MCP stay macOS-only)
     "SessionStageViews.swift",  # header / launch / rest / new-session screens (AppKit bits #if'd)
     "ConsolePresence.swift",  # console-seat arbitration; AppKit monitor #if'd out, iOS reports always-active
@@ -63,6 +67,7 @@ SHARED = [
     # editor macOS shows for a remote profile.
     "ProfileViews.swift",
     "EnvFileImport.swift",
+    "ClaudeAutoMode.swift",           # autoMode.environment entries Profile.swift writes (pure Foundation)
     "Inference/ModelCatalog.swift",   # CatalogModel type (pure data)
     "Inference/ModelSettings.swift",  # provider/credential/Bedrock types the token plan routes on (pure data)
     "Mitm/OnePasswordCLI.swift",      # reference(in:) parsing; read() is mac-only
@@ -81,7 +86,8 @@ SHARED = [
     "AutomationRunArchive.swift",
     "ClaudeTranscriptView.swift",
     "TranscriptActivity.swift",
-    "MermaidFence.swift",  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback
+    "MermaidFence.swift",
+    "DisplayCards.swift",  # display-MCP cards (show_media / show_chart); vega bundled via gen-ios-project.py  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback
     "PushCrypto.swift",  # HPKE seal/open — shared by the Mac sender + iOS NSE
     "ConversationView.swift",
     "VMDashboard.swift",

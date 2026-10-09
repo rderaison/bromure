@@ -21,7 +21,7 @@ extension Profile.Tool {
         case .codex:  return "resume --last"
         case .kimi:   return "-c"
         case .omp:    return "--continue"
-        case .grok:   return ""
+        case .grok:   return "-c"
         }
     }
 }
@@ -40,6 +40,12 @@ final class AgentSessionEngine {
         self.delegate = delegate
         // A session that leaves the store takes its transcript copy along.
         store.onRemove = { [weak self] id in self?.transcripts.remove(id) }
+        // A new agent run in an ended session's tab became a session of its
+        // own: the window showing the old one follows the run.
+        store.onSucceeded = { [weak self] old, new in
+            guard let w = self?.delegate?.unifiedWindow, w.selectedSessionID == old else { return }
+            w.selectSession(new)
+        }
         // A merge that was being followed when the app quit.
         DispatchQueue.main.async { [weak self] in self?.resumeMergeWatches() }
     }
@@ -73,7 +79,15 @@ final class AgentSessionEngine {
         // itself.
         if cwd.isEmpty || cwd == "~" || cwd == "~/" {
             let named = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
-            cwd = "~/" + Self.syntheticFolderName(message: named ?? message, tool: req.tool)
+            // Two blank sessions in the same minute got the same folder
+            // ("claude-260928-1830"): one chat then read the other's
+            // transcript (a fresh agent isn't pinned to its own until its
+            // first prompt), and a wake-up's --continue resumed it for real.
+            let base = "~/" + Self.syntheticFolderName(message: named ?? message, tool: req.tool)
+            let taken = Set(store.sessions.filter { $0.profileID == req.profileID && !$0.isDeleted }.map(\.cwd))
+            cwd = base
+            var n = 2
+            while taken.contains(cwd) { cwd = "\(base)-\(n)"; n += 1 }
         }
         let title = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
             ?? (message?.nonEmpty).map(AgentSession.title(fromMessage:))
@@ -83,10 +97,18 @@ final class AgentSessionEngine {
                              openingMessage: message?.nonEmpty)
         s.role = req.role
         s.roomID = req.roomID
+        s.instructions = req.instructions?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         s.launchingSince = Date()
         store.upsert(s)
-        BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))")
-        launch(s.id, prompt: message ?? "", flags: "", attachments: req.attachments, remotely: remotely)
+        BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))"
+                     + (s.instructions == nil ? "" : " with instructions"))
+        // Grok has no way to take them for an interactive session: they open
+        // its first message instead (the session's own message stays clean).
+        var prompt = message ?? ""
+        if req.tool == .grok, let text = s.instructions {
+            prompt = Self.openingWithInstructions(text, message: prompt)
+        }
+        launch(s.id, prompt: prompt, flags: "", attachments: req.attachments, remotely: remotely)
         return s.id
     }
 
@@ -160,23 +182,41 @@ final class AgentSessionEngine {
     /// the kanban's worktrees use.
     static func worktreeSlug(_ name: String) -> String { AgentSession.worktreeSlug(name) }
 
-    /// "hello-260915-1830": a few words of the message (or the agent's name)
-    /// plus a timestamp, so folders never collide and still read at a glance.
+    /// "shell-command-1003-1204": the gist of the message — at most two
+    /// words, filler and verbs like "run"/"please"/"this" dropped — plus the
+    /// date, so folders stay short, never collide (the caller numbers a
+    /// repeat) and still read at a glance. The agent's name when the message
+    /// says nothing — or nothing in ASCII: the name is ASCII only (accents
+    /// folded, other scripts dropped), since the agents' stores mangle the
+    /// rest (Kimi's session bucket for "~/请用…-1004-2143" is
+    /// "wd_1004-2143_…", and the transcript was never found).
     static func syntheticFolderName(message: String?, tool: Profile.Tool, now: Date = Date()) -> String {
-        let words = (message ?? "").lowercased()
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init).filter { !$0.isEmpty }
+        let words = AgentSession.asciiFolded(message ?? "").lowercased()
+            .split(whereSeparator: { !($0.isASCII && ($0.isLetter || $0.isNumber)) })
+            .map(String.init)
+            .filter { $0.count > 1 && !folderNameFiller.contains($0) && !$0.allSatisfy(\.isNumber) }
         var slug = ""
-        for w in words {
+        for w in words.prefix(2) {
             let next = slug.isEmpty ? w : slug + "-" + w
-            if next.count > 28 { break }
+            if next.count > 20 { break }
             slug = next
         }
         if slug.isEmpty { slug = tool.rawValue }
         let f = DateFormatter()
-        f.dateFormat = "yyMMdd-HHmm"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMdd-HHmm"
         return slug + "-" + f.string(from: now)
     }
+
+    /// Words that never name what a session is about.
+    static let folderNameFiller: Set<String> = [
+        "a", "an", "the", "this", "that", "these", "those", "to", "of", "for", "in", "on", "at", "by",
+        "with", "and", "or", "but", "from", "into", "about", "as", "is", "are", "be", "it", "its",
+        "please", "pls", "can", "could", "would", "will", "you", "your", "me", "my", "i", "we", "our",
+        "us", "let", "lets", "just", "now", "then", "some", "any", "all", "so", "do", "does", "did",
+        "run", "make", "create", "write", "help", "want", "need", "use", "using", "try", "go", "get",
+        "hi", "hello", "hey", "exact", "exactly", "following", "here", "there", "what", "how", "why",
+    ]
 
     /// Reopen the agent's last conversation: in its tab when the tab is
     /// still there (a nudge if the agent is alive, the resume command if it
@@ -194,13 +234,29 @@ final class AgentSessionEngine {
         }
         let message = message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         // Picking it back up is what brings an archived conversation back.
-        store.mutate(id) { $0.lastError = nil; $0.archivedAt = nil }
+        // And it is under way from this moment: while the machine wakes (a
+        // fresh boot, often) the session reads "Waking up…" over its
+        // conversation — not "Finished" because the boot dropped its tab
+        // (see `AgentSessionStore.checkBoot`), not a bare launch screen.
+        let wasLaunching = s.isLaunching
+        store.mutate(id) {
+            $0.lastError = nil; $0.archivedAt = nil; $0.providerError = nil
+            if $0.launchingSince == nil { $0.launchingSince = Date(); $0.launchBaselineIndex = nil }
+        }
         BACDebug.log("sessions", "resume “\(s.title)”\(message == nil ? "" : " with a message")")
+        /// The resume didn't open a tab of its own (the agent was there, or
+        /// it was relaunched in its tab): no launch to wait for.
+        func settled() {
+            guard !wasLaunching else { return }
+            store.mutate(id) { if $0.launchBaselineIndex == nil { $0.launchingSince = nil } }
+        }
         Task { [weak self] in
             guard let self else { return }
             guard await self.ensureUp(s.profileID, quietly: quietly, remotely: remotely) else {
-                self.store.mutate(id) { $0.lastError = NSLocalizedString(
-                    "The workspace did not start in time", comment: "session resume") }
+                self.store.mutate(id) {
+                    $0.lastError = NSLocalizedString("The workspace did not start in time", comment: "session resume")
+                    if !wasLaunching { $0.launchingSince = nil; $0.launchBaselineIndex = nil }
+                }
                 return
             }
             if let w = s.windowIndex, let tab = delegate.pane(for: s.profileID)?.model.tabs
@@ -223,20 +279,41 @@ final class AgentSessionEngine {
                     self.relaunchInFreshTab(id, s, message: message)
                     return
                 }
+                settled()
                 let inlineMessage = s.tool == .claude || s.tool == .omp
                 if alive {
                     // Alive: the conversation is simply back on stage. Only
-                    // something the user actually said gets typed.
+                    // something the user actually said gets typed — through
+                    // the session's guarded queue, held until the agent is
+                    // idle (typed straight in, it landed during omp's own
+                    // retry of an error and was lost — S3-3).
                     if let message {
-                        _ = try? await delegate.guestExec(
-                            profileID: s.profileID,
-                            command: CodingTaskEngine.typeCommand(tabIndex: w, text: message),
-                            timeout: 15)
+                        let target = Self.paneTarget(self.store.session(id) ?? s) ?? .index(w)
+                        self.holdForAgent(id, message, target: target, window: w)
                     }
                 } else {
                     // The agent exited, its shell is still there: relaunch
                     // in place so the conversation history is right at hand.
-                    let words: [String] = [s.tool.rawValue, Self.resumeFlags(for: s), Self.roleFlags(for: s)]
+                    // Codex without a known conversation: its exit line names
+                    // it ("codex resume <uuid>") — read it off the tab.
+                    // Grok's names its own the same way ("grok --resume <id>").
+                    if s.tool == .codex || s.tool == .grok || s.tool == .omp,
+                       s.agentTranscriptID.map(Self.isTranscriptID) != true,
+                       let screen = try? await delegate.guestExec(
+                           profileID: s.profileID,
+                           command: "tmux capture-pane -p -J -S -300 -t bromure:\(w) 2>/dev/null; true",
+                           timeout: 8),
+                       let tid = s.tool == .codex ? Self.codexResumeID(inScreen: screen)
+                                : s.tool == .grok ? Self.grokResumeID(inScreen: screen)
+                                                  : Self.ompResumeID(inScreen: screen),
+                       !self.store.conversationsClaimed(tool: s.tool, profileID: s.profileID, besides: id)
+                           .contains(tid.lowercased()) {
+                        self.store.setTranscriptID(id, tid)
+                    }
+                    let s = self.store.session(id) ?? s
+                    let resume = Self.resumeFlags(for: s, sharedFolder: sharesFolder(s))
+                    self.noteKimiRun(id, flags: resume)
+                    let words: [String] = [s.tool.rawValue, resume, self.roleFlags(for: s)]
                     var cmd = words.filter { !$0.isEmpty }.joined(separator: " ")
                     // Claude and Oh My Pi take the message on the command
                     // line: typing it once the agent "looks alive" raced the
@@ -255,10 +332,34 @@ final class AgentSessionEngine {
                                 roomName: delegate.agentRoomStore.room(s.roomID)?.name),
                             timeout: 15)
                     }
-                    _ = try? await delegate.guestExec(
+                    // Ours, from this moment: the agent process the probe is
+                    // about to see start in this tab is this session's own
+                    // restart, not a stranger's new run to hand the tab to
+                    // (stamped after typing, a probe in between made a new
+                    // session of it — titled after this one's first message).
+                    self.store.mutate(id) { $0.resumedAt = Date() }
+                    // Into the session's own window, and only while its shell
+                    // (not an agent, which would take it as a message) is up.
+                    let target = Self.paneTarget(self.store.session(id) ?? s, foreground: .shell)
+                        ?? .index(w, foreground: .shell)
+                    let out = (try? await delegate.guestExec(
                         profileID: s.profileID,
-                        command: CodingTaskEngine.typeCommand(tabIndex: w, text: cmd),
-                        timeout: 15)
+                        command: CodingTaskEngine.shellLineCommand(target: target, line: cmd),
+                        timeout: 15)) ?? ""
+                    if let r = PaneTypeGuard.refusal(in: out) {
+                        if r == .agent {
+                            // It came back on its own: just the message, if any.
+                            BACDebug.log("sessions", "“\(s.title)”: agent is up in tab \(w) — no relaunch")
+                            if let message, let t = Self.paneTarget(self.store.session(id) ?? s) {
+                                self.holdForAgent(id, message, target: t, window: w)
+                            }
+                            return
+                        }
+                        BACDebug.log("sessions", "relaunch of “\(s.title)” in tab \(w) refused (\(r.rawValue)) — fresh tab instead")
+                        self.store.unbind(id)
+                        self.relaunchInFreshTab(id, s, message: message)
+                        return
+                    }
                 }
                 // A fresh start of the agent in the tab: the "exited" verdict
                 // waits until it has been seen running again, and the status
@@ -293,7 +394,7 @@ final class AgentSessionEngine {
         // to their resume flag; Codex and Kimi don't, so it's typed once
         // they're up.
         let inline = message != nil && (s.tool == .claude || s.tool == .omp)
-        launch(id, prompt: inline ? (message ?? "") : "", flags: Self.resumeFlags(for: s), alreadyUp: true)
+        launch(id, prompt: inline ? (message ?? "") : "", flags: Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)), alreadyUp: true)
         if !inline, let message { deliverWhenAlive(id, message) }
     }
 
@@ -307,6 +408,11 @@ final class AgentSessionEngine {
         store.mutate(id) { $0.needsSignIn = nil; $0.lastError = nil }
         BACDebug.log("sessions", "relaunch “\(s.title)” after sign-in")
         Task { [weak self] in
+            // Codex reads its login from a file the host writes at boot: put
+            // the fresh stand-in in before it starts again, or it comes back
+            // on the stale one and asks to sign in all over.
+            if s.tool == .codex { await delegate.pushCodexAuth(profileID: s.profileID) }
+            if s.tool == .claude { await delegate.pushClaudeStandIn(profileID: s.profileID) }
             if let w = s.windowIndex {
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,
@@ -327,25 +433,112 @@ final class AgentSessionEngine {
         }
     }
 
-    /// Type `text` into the session's tab as soon as its agent is seen
-    /// running (a relaunch takes a few seconds; a wake-up, a minute).
+    /// Hand `text` to the session's agent as soon as it is seen running (a
+    /// relaunch takes a few seconds; a wake-up, a minute) — through the
+    /// session's guarded queue, which types it once the agent is idle.
+    /// Never dropped: an agent that doesn't come up leaves it on the
+    /// session's strip, "Not sent", to send again or edit.
     private func deliverWhenAlive(_ id: UUID, _ text: String) {
         Task { [weak self] in
             let deadline = Date().addingTimeInterval(Self.bootTimeout + 60)
             while Date() < deadline {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self, let s = self.store.session(id) else { return }
-                guard let w = s.windowIndex, let delegate = self.delegate else { continue }
+                guard let w = s.windowIndex else { continue }
                 if await self.probeAlive(profileID: s.profileID, window: w) == true {
-                    // A beat for the TUI to draw its prompt before the text lands.
-                    try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    _ = try? await delegate.guestExec(
-                        profileID: s.profileID,
-                        command: CodingTaskEngine.typeCommand(tabIndex: w, text: text), timeout: 15)
+                    // Still this session's tab? (The probe may just have
+                    // found the binding stale.) Then into ITS window only —
+                    // its stamped id and launch name, an agent in front.
+                    guard let now = self.store.session(id), now.windowIndex == w,
+                          let target = Self.paneTarget(now) else { continue }
+                    // Kimi's process is up seconds before its input box is
+                    // (it connects its MCP servers first): text typed in
+                    // that moment is lost. The beat the guest's own fallback
+                    // gives it.
+                    if now.tool == .kimi { try? await Task.sleep(nanoseconds: Self.kimiInputSettle) }
+                    self.holdForAgent(id, text, target: target, window: w)
                     return
                 }
             }
+            guard let self, self.store.session(id) != nil else { return }
+            BACDebug.log("sessions", "message for session \(id) NOT typed: the agent never came up")
+            self.holdForAgent(id, text, target: nil, window: nil, failure: ChatQueueStore.notTypedText)
         }
+    }
+
+    /// How long after Kimi's process appears its input box takes to be up.
+    static let kimiInputSettle: UInt64 = 4_000_000_000
+
+    /// Put a message for session `id` on its chat queue, held by Bromure:
+    /// the session's chat (or, with none on screen, the queue store in the
+    /// background) types it — guarded: its window, an agent in front, no
+    /// dialog open — once the agent has been idle a moment, never during a
+    /// turn or the agent's own retry. Until then it shows on the session's
+    /// strip; one that can't be typed stays there, saying why.
+    func holdForAgent(_ id: UUID, _ text: String, target: PaneTarget?, window: Int?,
+                      failure: String? = nil, queue: ChatQueueStore? = nil) {
+        guard let s = store.session(id) else { return }
+        let queue = queue ?? .shared
+        let key = ChatQueueStore.sessionKey(id)
+        let baseline = Self.userTurns(in: transcripts.load(id), agent: s.tool.rawValue)
+        var q = QueuedMessage(text: text, held: true, editable: true, baseline: baseline,
+                              path: nil, target: target, failure: failure)
+        q.sessionID = id
+        if let w = window { queue.provideDriver(key, queueDriver(id, profileID: s.profileID, window: w)) }
+        queue.update(key) { $0.append(q) }
+        BACDebug.log("sessions", "message for “\(s.title)” held until its agent is idle")
+    }
+
+    /// User turns in a saved transcript: a queued message is looked for
+    /// only among the turns after it. A transcript too big to parse on the
+    /// spot counts as "all of them" — the message is then found by the
+    /// chat's later checks, never mistaken for an earlier identical turn.
+    nonisolated static func userTurns(in data: Data?, agent: String) -> Int {
+        guard let data, !data.isEmpty else { return 0 }
+        guard data.count <= 2_000_000 else { return Int.max / 4 }
+        return AgentTranscript.parse(data, agent: agent).reduce(0) { n, it in
+            if case .userText = it.kind { return n + 1 }
+            return n
+        }
+    }
+
+    /// How the queue store reaches session `id`'s agent while no chat
+    /// shows it: the tab's status, the guarded type, and only while the
+    /// session still holds `window`.
+    func queueDriver(_ id: UUID, profileID: UUID, window: Int) -> ChatQueueStore.Driver {
+        ChatQueueStore.Driver(
+            isWorking: { [weak self] in
+                guard let self, self.store.session(id)?.windowIndex == window else { return nil }
+                return self.delegate?.pane(for: profileID)?.chatIsWorking(window: window)
+            },
+            deliver: { [weak self] text, target in
+                guard let delegate = self?.delegate else { return .unreachable }
+                var t = target
+                t.foreground = .agent
+                let out = await PaneTypeGuard.runType(target: t, text: text) { cmd in
+                    try? await delegate.guestExec(profileID: profileID, command: cmd, timeout: 20)
+                }
+                return ChatQueueStore.Outcome.of(out)
+            },
+            accepts: { [weak self] q in
+                q.sessionID == id && self?.store.session(id)?.windowIndex == window
+            })
+    }
+
+    /// Where text typed for session `s` may go: its window (by the id the
+    /// probe stamped, else its index), still carrying the name we launched
+    /// it under, with — by default — an agent in the foreground.
+    static func paneTarget(_ s: AgentSession, foreground: PaneTarget.Foreground = .agent) -> PaneTarget? {
+        guard let w = s.windowIndex else { return nil }
+        var t = PaneTarget(ref: s.windowID.map { .windowID($0) } ?? .index(w), foreground: foreground)
+        t.expectDisplay = s.launchDisplay
+        // A renamed Bromure Sidecar session's tab shows its current title,
+        // not the launch one: without it every typed notice, Switchboard
+        // message and finding hand-over was refused as another's tab.
+        if let d = s.launchDisplay, !d.isEmpty, !s.title.isEmpty, s.title != d {
+            t.expectDisplayAlt = s.title
+        }
+        return t
     }
 
     /// End the session: close its tab (the agent with it). The record stays
@@ -420,6 +613,7 @@ final class AgentSessionEngine {
     private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false,
                         worktreeSlug: String? = nil, attachments: [DroppedFile] = [],
                         remotely: Bool = false) {
+        noteKimiRun(id, flags: flags)
         Task { [weak self] in
             guard let self, let delegate = self.delegate, let s = self.store.session(id) else { return }
             @MainActor func fail(_ reason: String) {
@@ -445,6 +639,13 @@ final class AgentSessionEngine {
                 let echoed = prompt
                 self.store.mutate(id) { $0.openingMessage = echoed }
             }
+            // Kimi takes no opening message on its command line but in its
+            // one-shot `--prompt` mode, which exits when the turn ends — the
+            // session went "Finished" after one answer. Start it
+            // interactively and type the message once it's up (as a resume
+            // already does).
+            let typeOnceUp = Self.typesOpeningMessage(s.tool) && !prompt.isEmpty ? prompt : nil
+            if typeOnceUp != nil { prompt = "" }
             let guestPath = ScheduledAutomationEngine.guestPath(s.cwd)
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
             if let worktreeSlug {
@@ -498,13 +699,17 @@ final class AgentSessionEngine {
                 self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
                 guard delegate.automationWorktreeCommand(
                     profileNameOrID: s.profileID.uuidString, action: "create",
-                    args: [guestPath, worktreeSlug, display, s.tool.rawValue, prompt,
-                           self.backgroundArg(id).first ?? "", self.worktreeBase.removeValue(forKey: id) ?? ""]) else {
+                    args: Self.worktreeCreateArgs(
+                        guestPath: guestPath, slug: worktreeSlug, display: display, session: s,
+                        prompt: prompt, background: self.backgroundArg(id).first ?? "",
+                        base: self.worktreeBase.removeValue(forKey: id) ?? "",
+                        kimi: self.kimiApprovals(s.profileID))) else {
                     fail(NSLocalizedString("Couldn't reach the workspace — is it running?", comment: "task start"))
                     return
                 }
                 BACDebug.log("sessions", "“\(s.title)”: worktree-create sent (baseline \(baseline))")
                 self.watchEarlyExit(id, display: display)
+                if let typeOnceUp { self.deliverWhenAlive(id, typeOnceUp) }
                 return
             }
             if let url = s.cloneURL, !url.isEmpty {
@@ -544,7 +749,25 @@ final class AgentSessionEngine {
             let baseline = await self.tabBaseline(profileID: s.profileID, delegate: delegate)
             let display = s.title
             self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
-            let allFlags = [flags, Self.roleFlags(for: s)].filter { !$0.isEmpty }.joined(separator: " ")
+            // The session's instructions, from a file rewritten on every
+            // launch (a resume gives them again). Before the resume flags:
+            // Codex resumes through a subcommand.
+            var instructionFlags = ""
+            if let text = s.instructions?.nonEmpty {
+                let path = Self.instructionsGuestPath(s.id)
+                let dir = (path as NSString).deletingLastPathComponent
+                let body = Data(Self.instructionsFile(text, tool: s.tool).utf8).base64EncodedString()
+                if (try? await delegate.guestFileOp(profileID: s.profileID, op: ["op": "mkdir", "path": dir], timeout: 15)) != nil,
+                   (try? await delegate.guestFileOp(profileID: s.profileID,
+                                                    op: ["op": "write", "path": path, "data": body], timeout: 15)) != nil {
+                    instructionFlags = Self.instructionFlags(tool: s.tool, text: text, path: path,
+                                                             resuming: !flags.isEmpty)
+                } else {
+                    BACDebug.log("sessions", "“\(s.title)”: couldn't write its instructions to \(path)")
+                }
+            }
+            let allFlags = [instructionFlags, flags, self.roleFlags(for: s)]
+                .filter { !$0.isEmpty }.joined(separator: " ")
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: s.profileID.uuidString, action: "agent-tab",
                 args: [guestPath, display, s.tool.rawValue, prompt, allFlags] + self.backgroundArg(id)) else {
@@ -553,8 +776,14 @@ final class AgentSessionEngine {
             }
             BACDebug.log("sessions", "“\(s.title)”: agent-tab sent (baseline \(baseline))")
             self.watchEarlyExit(id, display: display)
+            if let typeOnceUp { self.deliverWhenAlive(id, typeOnceUp) }
         }
     }
+
+    /// Agents whose opening message is typed into the running TUI instead
+    /// of riding on the launch command: Kimi's only command-line prompt is
+    /// its one-shot mode (`kimi --prompt`, exits after the turn).
+    nonisolated static func typesOpeningMessage(_ tool: Profile.Tool) -> Bool { tool == .kimi }
 
     /// The agent dying as it starts (a bad flag, a resume with nothing to
     /// resume, a config error): the launcher says so in the tab and drops
@@ -607,7 +836,10 @@ final class AgentSessionEngine {
         // What the agent printed since the launcher started it; an error
         // line wins over what follows it ("See log: …").
         let start = lines[..<i].lastIndex(where: { $0.contains("[bromure-ac] starting") }).map { $0 + 1 } ?? 0
-        let printed = lines[start..<i].filter { !$0.isEmpty && !$0.contains("[bromure-ac]") }
+        // Box art the TUI left behind ("╰────╯") says nothing.
+        let printed = lines[start..<i].filter {
+            !$0.isEmpty && !$0.contains("[bromure-ac]") && $0.contains(where: { $0.isLetter || $0.isNumber })
+        }
         let errorish = #"(?i)\b(error|failed|fatal|not found|no such|cannot|can't|invalid|no conversation|no model)\b"#
         let said = printed.last(where: { $0.range(of: errorish, options: .regularExpression) != nil }) ?? printed.last
         let exitLine = lines[i]
@@ -647,28 +879,217 @@ final class AgentSessionEngine {
 
     /// Each session's conversation as last read from the machine, so an
     /// asleep session still reads back in full.
-    let transcripts = SessionTranscriptCache()
+    let transcripts = SessionTranscriptCache.shared
     private var lastSnapshotAt: [UUID: Date] = [:]
     private var snapshotting: Set<UUID> = []
+    /// Where each session's last snapshot read stopped: the file and the
+    /// offset the next read continues from.
+    private var snapshotCursor: [UUID: (path: String, end: Int)] = [:]
+    /// A session's first snapshot (no cursor yet): this much of the file's
+    /// end, aligned to a record — the copy may already hold what's before.
+    static let snapshotFirstBytes = 8_000_000
 
     /// Copy the session's transcript from the machine (while it's alive, on
-    /// a timer; and once more when the agent goes away).
+    /// a timer; and once more when the agent goes away). Incremental: whole
+    /// records from where the last read stopped, in the file the tab's own
+    /// agent named — a byte window of the tail used to REPLACE the history
+    /// whenever it no longer overlapped what was held (one browser
+    /// screenshot fills 300 KB).
     private func snapshot(_ s: AgentSession) {
         guard let delegate, !snapshotting.contains(s.id) else { return }
         snapshotting.insert(s.id)
         lastSnapshotAt[s.id] = Date()
         Task { [weak self] in
             defer { self?.snapshotting.remove(s.id) }
-            guard let raw = await delegate.fetchSessionTranscript(s), !raw.isEmpty else { return }
-            self?.transcripts.save(s.id, Data(raw.utf8))
+            guard let self else { return }
+            // An attached Mac's agent: the one-shot tail (the chunk reader
+            // needs python3, which a plain Mac may not have). The cache
+            // keeps whole records and merges, so this can't shrink it.
+            if delegate.attachedMachines[s.profileID] != nil {
+                guard let raw = await delegate.fetchSessionTranscript(s), !raw.isEmpty else { return }
+                self.transcripts.save(s.id, Data(raw.utf8))
+                return
+            }
+            var known = self.snapshotCursor[s.id]
+            // Kimi's store is keyed by folder, not by tab: "the newest journal
+            // in the folder" (floor 0) was the PREVIOUS conversation there
+            // until this launch's own appeared — Kimi only creates it at the
+            // first prompt — and the copy took that conversation in, then
+            // the real one after it (B72). Read the session's pinned journal;
+            // until there is one, only a journal begun by this run.
+            var since = 0
+            // Grok / Codex pinned to their own conversation: its file, by id
+            // (a paused Grok read the folder's newest — an archived
+            // session's — into its copy after a relaunch).
+            var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
+            if (s.tool == .grok && pin.grokSession == nil) || (s.tool == .codex && pin.codexSession == nil)
+                || (s.tool == .omp && pin.ompSession == nil) {
+                pin.foreignConversations = self.store.conversationsClaimed(
+                    tool: s.tool, profileID: s.profileID, besides: s.id)
+            }
+            if s.tool == .grok, let id = pin.grokSession,
+               let k = known, Self.grokConversationID(inPath: k.path)?.lowercased() != id.lowercased() { known = nil }
+            if s.tool == .codex, let id = pin.codexSession,
+               let k = known, Self.codexConversationID(inPath: k.path)?.lowercased() != id.lowercased() { known = nil }
+            if s.tool == .omp, let id = pin.ompSession,
+               let k = known, Self.ompConversationID(inPath: k.path)?.lowercased() != id.lowercased() { known = nil }
+            // The tab's own Kimi session, learned from this read: by the id
+            // its process names, or as the journal this run began.
+            var learnsID = false
+            if s.tool == .kimi {
+                if let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+                    pin.kimiSession = id
+                    if let k = known, AgentSessionLocator.kimiSessionID(inPath: k.path) != id { known = nil }
+                } else {
+                    guard let w = s.windowIndex,
+                          let fp = AgentSessionLocator.parseFloorProbe(try? await delegate.guestExec(
+                            profileID: s.profileID, command: AgentSessionLocator.floorProbeCommand(window: w),
+                            timeout: 8)),
+                          fp.since > 0 || fp.kimiSession != nil else { return }   // never unfloored
+                    since = fp.since
+                    // How the agent started: as the engine launched it, else
+                    // (a tab started by hand, adopted; the app restarted
+                    // under it) as its command line says.
+                    let fresh = self.kimiFreshRun[s.id] ?? (fp.kimiSession == nil && !fp.resumed)
+                    // A fresh start: a journal begun before the agent was is
+                    // another conversation's, however recently it was written.
+                    // A resume reattaches an older one, so mtime alone there —
+                    // never one another session owns (two Kimi tabs in one
+                    // folder: the second was adopted with the first's
+                    // conversation and title).
+                    pin = .kimiUnpinned(argsSession: fp.kimiSession, resumed: !fresh, since: fp.since,
+                                        exclude: self.store.kimiSessionsClaimed(byAdoptee: s))
+                    if let id = pin.kimiSession {
+                        since = 0
+                        if let k = known, AgentSessionLocator.kimiSessionID(inPath: k.path) != id { known = nil }
+                    }
+                    // A resumed agent (`kimi -c`: the folder's latest
+                    // conversation) the engine didn't start in this app run
+                    // — the app relaunched under it, or the roster adopted
+                    // its tab — reads the newest journal nobody claims: its
+                    // own, as long as no other live Kimi tab in the folder
+                    // is still looking for its conversation too.
+                    learnsID = pin.kimiSession != nil || pin.kimiCreatedSince != nil
+                        || self.kimiFreshRun[s.id] != nil
+                        || (!fresh && self.store.isSoleUnpinnedKimi(s))
+                }
+            }
+            guard let cmd = CodingTaskEngine.transcriptChunkCommand(
+                    guestCwd: ScheduledAutomationEngine.guestPath(s.cwd), since: since,
+                    agent: s.tool.rawValue, pinnedWindow: s.windowIndex, pin: pin,
+                    knownPath: known?.path, knownOffset: known?.end ?? -1,
+                    bytes: Self.snapshotFirstBytes, earlier: false),
+                  let out = try? await delegate.guestExec(profileID: s.profileID, command: cmd, timeout: 30),
+                  let f = TranscriptFetch.parse(Data(out.utf8)) else { return }
+            // Another session's conversation (the folder's newest): not ours.
+            if Self.isForeignConversation(path: f.path, agent: s.tool.rawValue, pin: pin) { return }
+            // This run's journal: from now on the session reads it by id (and
+            // a resume reopens it by id, never "the last one here").
+            var newConversation = false
+            if s.tool == .kimi, learnsID, s.agentTranscriptID.map(AgentSessionLocator.isKimiSessionID) != true,
+               let id = AgentSessionLocator.kimiSessionID(inPath: f.path),
+               !self.store.kimiSessionsClaimed(byAdoptee: s).contains(id) {
+                self.store.setTranscriptID(s.id, id)
+                // An adoptee reading its original's conversation was folded
+                // back into it: the original's copy is the one to keep.
+                guard self.store.session(s.id) != nil else { return }
+                // Begun by this run (the creation floor held): the session's
+                // next conversation, carried on after what the copy holds.
+                newConversation = pin.kimiCreatedSince != nil && f.start == 0
+            }
+            // Codex whose hooks didn't name its rollout: a conversation this
+            // session began (its first record is newer than the session) is
+            // its own — resumed by id from now on, never "the last one here".
+            if s.tool == .codex, s.agentTranscriptID.map(Self.isTranscriptID) != true, f.start == 0,
+               let id = Self.codexConversationID(inPath: f.path),
+               let meta = Self.codexSessionMeta(f.chunk), meta.id.lowercased() == id.lowercased(),
+               let began = meta.started, began >= s.createdAt.addingTimeInterval(-120),
+               !self.store.codexConversationsClaimed(profileID: s.profileID, besides: s.id).contains(id.lowercased()) {
+                self.store.setTranscriptID(s.id, id)
+            }
+            // Grok: its session folder is named by a uuidv7, which carries
+            // when it began — one begun since this session is its own.
+            if s.tool == .grok, s.agentTranscriptID.map(Self.isTranscriptID) != true,
+               let id = Self.grokConversationID(inPath: f.path),
+               let began = Self.uuidV7Date(id), began >= s.createdAt.addingTimeInterval(-120),
+               !self.store.grokConversationsClaimed(profileID: s.profileID, besides: s.id).contains(id.lowercased()) {
+                self.store.setTranscriptID(s.id, id)
+            }
+            // omp: its session id is a uuidv7 (and its file name opens with
+            // when it began) — one begun since this session is its own.
+            if s.tool == .omp, s.agentTranscriptID.map(Self.isTranscriptID) != true,
+               let id = Self.ompConversationID(inPath: f.path),
+               let began = Self.ompConversationStart(inPath: f.path), began >= s.createdAt.addingTimeInterval(-120),
+               !self.store.conversationsClaimed(tool: .omp, profileID: s.profileID, besides: s.id).contains(id.lowercased()) {
+                self.store.setTranscriptID(s.id, id)
+            }
+            let continues = newConversation
+                || (known.map { $0.path == f.path && $0.end == f.start } ?? false)
+            self.snapshotCursor[s.id] = (f.path, f.end)
+            if s.tool == .kimi { self.noteJournal(s.id, f.chunk, continues: continues && !newConversation) }
+            guard !f.chunk.isEmpty else { return }
+            if let m = TranscriptSearchIndex.liveModel(in: f.chunk) { self.store.setLastModel(s.id, m) }
+            if continues {
+                self.transcripts.append(s.id, f.chunk)
+            } else {
+                self.transcripts.save(s.id, f.chunk)
+            }
         }
     }
     private static let snapshotEvery: TimeInterval = 30
+    /// Kimi sessions by how their agent last started: true = a new
+    /// conversation (no resume flags), false = resumed. Unknown (the app
+    /// restarted under a running agent) reads as resumed.
+    private var kimiFreshRun: [UUID: Bool] = [:]
+
+    /// Note how a Kimi session's agent is (re)started. A fresh start is a
+    /// new conversation: whatever the session was pinned to is not it.
+    private func noteKimiRun(_ id: UUID, flags: String) {
+        guard store.session(id)?.tool == .kimi else { return }
+        let fresh = !flags.split(separator: " ").contains { $0 == "-c" || $0 == "--continue" || $0 == "-S" || $0 == "--session" }
+        kimiFreshRun[id] = fresh
+        if fresh, store.session(id)?.agentTranscriptID != nil {
+            store.mutate(id) { $0.agentTranscriptID = nil }
+        }
+    }
+    private static let kimiSnapshotEvery: TimeInterval = 3
+
+    /// The end of each Kimi session's journal (what `KimiTranscriptParser.
+    /// turnInProgress` reads), kept from the snapshots' increments.
+    private var journalTail: [UUID: Data] = [:]
+    private static let journalTailBytes = 256_000
+
+    /// Kimi: whether its journal says a turn is under way — the sidebar and
+    /// header follow it (`AgentSession.transcriptWorking`).
+    private func noteJournal(_ id: UUID, _ chunk: Data, continues: Bool) {
+        var tail = continues ? (journalTail[id] ?? Data()) : Data()
+        tail.append(chunk)
+        if tail.count > Self.journalTailBytes { tail = Data(tail.suffix(Self.journalTailBytes)) }
+        journalTail[id] = tail
+        // A turn left open from before the agent was last (re)started was
+        // interrupted (killed, the app relaunched and the session resumed):
+        // not work under way.
+        store.setTranscriptWorking(id, KimiTranscriptParser.turnInProgress(
+            tail, notBefore: store.session(id)?.resumedAt))
+    }
+
+    /// The conversation to read back: the local copy, with what the
+    /// machine's file says now merged in when it can be read. The live
+    /// read is "the newest transcript in the folder" (it may be another
+    /// session's), so it only counts when it shares records with the copy.
+    func readableTranscript(_ s: AgentSession) async -> Data? {
+        let cached = transcripts.load(s.id)
+        guard let delegate, let live = await delegate.fetchSessionTranscript(s), !live.isEmpty else { return cached }
+        guard let cached, !cached.isEmpty else { return Data(live.utf8) }
+        return SessionTranscriptCache.merge(history: cached, incoming: Data(live.utf8), mode: .overlapOnly) ?? cached
+    }
 
     /// The tty process probe, one window: is an agent in its foreground?
     /// nil when the guest can't be asked.
     static let agentNames = "(claude|codex|kimi|grok|omp|aider|goose|amp|opencode|gemini|cursor)"
     private static let shellNames = "^-?(bash|sh|zsh|dash|login|tmux)( |$)"
+    /// `shellNames` on a `pid args` line.
+    private static let procShellNames = "^[0-9]+ -?(bash|sh|zsh|dash|login|tmux)( |$)"
     /// One line per window: `index<TAB>agent-or-none<TAB>transcript id<TAB>
     /// pane title`. The title is what the agent set on its terminal (OSC 2)
     /// — Claude Code and Oh My Pi both write a summary of the conversation
@@ -681,15 +1102,38 @@ final class AgentSessionEngine {
         // window indices are only meaningful within one boot.
         "printf 'boot\\t%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"; "
             + "h=$(hostname 2>/dev/null); "
-            + "tmux list-panes -s -t bromure -F '#{window_index} #{pane_tty} #{pane_title}' 2>/dev/null "
-            + "| while read -r i t title; do \(window.isEmpty ? "" : "[ \"$i\" = \(window) ] || continue; ")"
+            // For the agent's start time (its `proc` line): boot time and
+            // the clock tick, numbers or a safe default.
+            + "bt=$(awk '/^btime/{print $2}' /proc/stat 2>/dev/null); "
+            + "case \"$bt\" in ''|*[!0-9]*) bt=0;; esac; "
+            + "hz=$(getconf CLK_TCK 2>/dev/null); case \"$hz\" in ''|0|*[!0-9]*) hz=100;; esac; "
+            + "tmux list-panes -s -t bromure -F '#{window_index} #{window_id} #{pane_tty} #{pane_title}' 2>/dev/null "
+            + "| while read -r i wid t title; do \(window.isEmpty ? "" : "[ \"$i\" = \(window) ] || continue; ")"
+            // The window's stable id (its own line): an index is reused the
+            // moment its tab closes, the id never is.
+            + "printf 'win\\t%s\\t%s\\n' \"$i\" \"$wid\"; "
             + "[ \"$title\" = \"$h\" ] && title=''; "
             + "a=$(ps -t \"${t#/dev/}\" -o args= 2>/dev/null "
             + "| grep -v -E '\(shellNames)' "
             + "| grep -E -o -m1 '\(agentNames)' "
             + "| head -1); "
+            // When the agent process started (epoch seconds, its own line),
+            // its pid and its start in seconds since boot: a different
+            // process later in the same tab is a new run — a new session
+            // once the old one's agent had exited. The epoch start moves
+            // when a restored guest resyncs its clock; pid + uptime don't.
+            + "ap=$(ps -t \"${t#/dev/}\" -o pid=,args= 2>/dev/null | sed -E 's/^ +//' "
+            + "| grep -v -E '\(procShellNames)' "
+            + "| grep -E -m1 '\(agentNames)' | cut -d' ' -f1); "
+            + "if [ -n \"$ap\" ]; then st=$(sed 's/.*) //' /proc/$ap/stat 2>/dev/null | cut -d' ' -f20); "
+            + "case \"$st\" in ''|*[!0-9]*) ;; *) printf 'proc\\t%s\\t%s\\t%s\\t%s\\n' \"$i\" \"$(( bt + st / hz ))\" \"$ap\" \"$(( st / hz ))\";; esac; fi; "
             + AgentSessionLocator.pinnedTranscriptBlock(window: "$i", into: "tp")
+            // Pinned at SessionStart before anything was said: no
+            // conversation to resume by that id yet.
+            + "[ -f \"$tp\" ] || tp=\"\"; "
             + "tid=\"${tp##*/}\"; tid=\"${tid%.jsonl}\"; "
+            // Grok's transcript is `<session uuid>/updates.jsonl`.
+            + "[ \"$tid\" = updates ] && { tid=\"${tp%/*}\"; tid=\"${tid##*/}\"; }; "
             + "printf '%s\\t%s\\t%s\\t%s\\n' \"$i\" \"${a:-none}\" \"$tid\" \"$title\"; done"
     }
 
@@ -699,6 +1143,75 @@ final class AgentSessionEngine {
         var transcriptID: String? = nil
         let title: String
     }
+    /// index → when the tab's agent process started (guest epoch seconds),
+    /// from the probe's `proc` lines.
+    nonisolated static func parseAgentStarts(_ out: String) -> [Int: Int] {
+        var starts: [Int: Int] = [:]
+        for line in out.split(whereSeparator: \.isNewline) where line.hasPrefix("proc\t") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count >= 3, let i = Int(parts[1]),
+                  let t = Int(parts[2].trimmingCharacters(in: .whitespaces)), t > 0 else { continue }
+            if starts[i] == nil { starts[i] = t }
+        }
+        return starts
+    }
+
+    /// The agent process a probe's `proc` line describes: its start (guest
+    /// epoch seconds), and — from this build's probe — its pid and its
+    /// start in seconds since boot (both restore-stable).
+    struct AgentProc: Equatable {
+        let start: Int
+        var pid: Int? = nil
+        var uptime: Int? = nil
+    }
+
+    /// index → the tab's agent process, from the probe's `proc` lines.
+    nonisolated static func parseAgentProcs(_ out: String) -> [Int: AgentProc] {
+        var procs: [Int: AgentProc] = [:]
+        for line in out.split(whereSeparator: \.isNewline) where line.hasPrefix("proc\t") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count >= 3, let i = Int(parts[1]), let t = Int(parts[2]), t > 0,
+                  procs[i] == nil else { continue }
+            let pid = parts.count > 3 ? Int(parts[3]).flatMap { $0 > 0 ? $0 : nil } : nil
+            let up = parts.count > 4 ? Int(parts[4]).flatMap { $0 >= 0 ? $0 : nil } : nil
+            procs[i] = AgentProc(start: t, pid: pid, uptime: pid == nil ? nil : up)
+        }
+        return procs
+    }
+
+    /// index → tmux window id, from the probe's `win` lines.
+    nonisolated static func parseWindowIDs(_ out: String) -> [Int: String] {
+        var ids: [Int: String] = [:]
+        for line in out.split(whereSeparator: \.isNewline) where line.hasPrefix("win\t") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count >= 3, let i = Int(parts[1]) else { continue }
+            let id = parts[2].trimmingCharacters(in: .whitespaces)
+            if PaneTypeGuard.isWindowID(id), ids[i] == nil { ids[i] = id }
+        }
+        return ids
+    }
+
+    /// What becomes of an archived or deleted session's binding when the
+    /// probe shows a tab at its index. Only a tab PROVABLY its own — same
+    /// boot, same tmux window id as stamped while it was live, the name we
+    /// gave it, and not a board task's live tab — is ended; anything else is
+    /// a newcomer at the old index (a task resumed after Stop & Return to
+    /// Backlog reuses the index and the title) and the session just lets go.
+    enum ArchivedTabVerdict: Equatable { case end, unbind, wait }
+
+    nonisolated static func archivedTabVerdict(sessionBoot: String?, probeBoot: String?,
+                                   sessionWindowID: String?, probeWindowID: String?,
+                                   sessionDisplay: String?, tabDisplay: String?,
+                                   taskOwned: Bool) -> ArchivedTabVerdict {
+        guard let probeBoot, let probeWindowID else { return .wait }
+        guard sessionBoot == probeBoot else { return .unbind }
+        if let mine = sessionDisplay, let d = tabDisplay, !d.isEmpty, d != mine { return .unbind }
+        if taskOwned { return .unbind }
+        guard let sessionWindowID, sessionWindowID == probeWindowID else { return .unbind }
+        return .end
+    }
+
     /// The guest boot id the probe leads with (nil from an older probe, or
     /// when the guest couldn't read it).
     static func parseBootID(_ out: String) -> String? {
@@ -717,7 +1230,7 @@ final class AgentSessionEngine {
             let tid = parts.count == 4 ? String(parts[2]) : ""
             let title = parts.count == 4 ? String(parts[3]) : (parts.count == 3 ? String(parts[2]) : "")
             return ProbeLine(index: idx, alive: parts[1] != "none",
-                             transcriptID: Self.isTranscriptID(tid) ? tid : nil, title: title)
+                             transcriptID: Self.transcriptID(fromFileName: tid), title: title)
         }
     }
 
@@ -726,38 +1239,339 @@ final class AgentSessionEngine {
         s.count == 36 && UUID(uuidString: s) != nil
     }
 
+    /// The conversation id a transcript's file name (minus `.jsonl`)
+    /// carries: Claude's `<uuid>`, Codex's `rollout-<date>-<uuid>` (its hooks
+    /// name the rollout like Claude's name the transcript). What `--resume`
+    /// / `codex resume` take.
+    static func transcriptID(fromFileName name: String) -> String? {
+        if isTranscriptID(name) { return name }
+        // omp: `<timestamp>_<uuidv7>`.
+        if let id = ompConversationID(inFileName: name) { return id }
+        guard name.hasPrefix("rollout-"), name.count > 36 else { return nil }
+        let tail = String(name.suffix(36))
+        return isTranscriptID(tail) ? tail : nil
+    }
+
+    /// The Codex conversation id in a rollout path
+    /// (`…/rollout-2026-10-05T11-54-51-<uuid>.jsonl`), nil when it isn't one.
+    /// A read that landed on another session's Grok / Codex conversation
+    /// (`TranscriptPin.foreignConversations`): not this session's history.
+    static func isForeignConversation(path: String, agent: String?, pin: TranscriptPin) -> Bool {
+        guard !pin.foreignConversations.isEmpty else { return false }
+        let id: String?
+        switch agent {
+        case "codex": id = codexConversationID(inPath: path)
+        case "grok": id = grokConversationID(inPath: path)
+        case "omp": id = ompConversationID(inPath: path)
+        default: id = nil
+        }
+        guard let id else { return false }
+        return pin.foreignConversations.contains(id.lowercased())
+    }
+
+    static func codexConversationID(inPath path: String) -> String? {
+        var name = (path as NSString).lastPathComponent
+        if name.hasSuffix(".jsonl") { name = String(name.dropLast(6)) }
+        guard name.hasPrefix("rollout-") else { return nil }
+        return transcriptID(fromFileName: name)
+    }
+
+    /// A Codex rollout's opening `session_meta` record: the conversation id
+    /// and when it began. nil when the chunk doesn't start with one.
+    static func codexSessionMeta(_ chunk: Data) -> (id: String, started: Date?)? {
+        let end = chunk.firstIndex(of: UInt8(ascii: "\n")) ?? chunk.endIndex
+        guard let obj = try? JSONSerialization.jsonObject(with: chunk[chunk.startIndex..<end]) as? [String: Any],
+              obj["type"] as? String == "session_meta",
+              let p = obj["payload"] as? [String: Any],
+              let id = (p["id"] as? String) ?? (p["session_id"] as? String), isTranscriptID(id) else { return nil }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let stamp = (p["timestamp"] as? String) ?? (obj["timestamp"] as? String)
+        return (id, stamp.flatMap { iso.date(from: $0) ?? ISO8601DateFormatter().date(from: $0) })
+    }
+
+    /// The id Codex prints when it exits — "To continue this session, run
+    /// codex resume <uuid>" — in a capture of its pane.
+    static func codexResumeID(inScreen text: String) -> String? {
+        guard let r = text.range(of: "codex resume ", options: .backwards) else { return nil }
+        let id = String(text[r.upperBound...].prefix(36))
+        return isTranscriptID(id) ? id : nil
+    }
+
+    /// The Grok conversation id in a session path
+    /// (`~/.grok/sessions/<cwd>/<uuid>/updates.jsonl`, or the folder itself),
+    /// nil when it isn't one.
+    static func grokConversationID(inPath path: String) -> String? {
+        var comps = path.split(separator: "/").map(String.init)
+        if let last = comps.last, last.contains(".") { comps.removeLast() }
+        guard let id = comps.last, isTranscriptID(id),
+              comps.dropLast().contains(".grok") else { return nil }
+        return id
+    }
+
+    /// omp's session id in a session file's name (`<timestamp>_<uuid>`,
+    /// minus `.jsonl`), nil when it isn't one.
+    static func ompConversationID(inFileName name: String) -> String? {
+        guard let us = name.lastIndex(of: "_") else { return nil }
+        let id = String(name[name.index(after: us)...])
+        return isTranscriptID(id) ? id : nil
+    }
+
+    /// omp's session id in a session path
+    /// (`~/.omp/agent/sessions/<cwd>/<ts>_<uuid>.jsonl`), nil when it isn't one.
+    static func ompConversationID(inPath path: String) -> String? {
+        var name = (path as NSString).lastPathComponent
+        guard name.hasSuffix(".jsonl"), path.contains("/sessions/") else { return nil }
+        name = String(name.dropLast(6))
+        return ompConversationID(inFileName: name)
+    }
+
+    /// When an omp session began: its uuidv7, else the timestamp its file
+    /// name opens with (`2026-10-05T12-34-56-789Z_…`).
+    static func ompConversationStart(inPath path: String) -> Date? {
+        guard let id = ompConversationID(inPath: path) else { return nil }
+        if let d = uuidV7Date(id) { return d }
+        let name = (path as NSString).lastPathComponent
+        guard let us = name.lastIndex(of: "_") else { return nil }
+        let ts = String(name[..<us])   // 2026-10-05T12-34-56-789Z
+        let parts = ts.split(separator: "T", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        let t = parts[1].split(separator: "-").map(String.init)   // 12 34 56 789Z
+        guard t.count >= 3 else { return nil }
+        let iso = "\(parts[0])T\(t[0]):\(t[1]):\(t[2])Z"
+        return ISO8601DateFormatter().date(from: iso)
+    }
+
+    /// The id omp prints when it exits — "omp --resume <id>" (maybe with
+    /// `--profile <name>` before it) — in a capture of its pane.
+    static func ompResumeID(inScreen text: String) -> String? {
+        for marker in ["--resume ", " -r "] {
+            var search = text[...]
+            while let r = search.range(of: marker, options: .backwards) {
+                let id = String(search[r.upperBound...].prefix(36))
+                let line = search[..<r.lowerBound].split(separator: "\n", omittingEmptySubsequences: false).last ?? ""
+                if isTranscriptID(id), line.contains("omp") { return id }
+                search = search[..<r.lowerBound]
+            }
+        }
+        return nil
+    }
+
+    /// When a UUID version 7 was minted (its first 48 bits: Unix ms);
+    /// nil for any other version.
+    static func uuidV7Date(_ id: String) -> Date? {
+        guard isTranscriptID(id) else { return nil }
+        let hex = id.replacingOccurrences(of: "-", with: "")
+        guard hex.count == 32, hex[hex.index(hex.startIndex, offsetBy: 12)] == "7",
+              let ms = UInt64(hex.prefix(12), radix: 16) else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+
+    /// The id Grok prints when it exits — "grok --resume <id>" (or `-r`) —
+    /// in a capture of its pane.
+    static func grokResumeID(inScreen text: String) -> String? {
+        for marker in ["grok --resume ", "grok -r "] {
+            guard let r = text.range(of: marker, options: .backwards) else { continue }
+            let id = String(text[r.upperBound...].prefix(36))
+            if isTranscriptID(id) { return id }
+        }
+        return nil
+    }
+
     /// How the agent picks its conversation back up: by id when we know
     /// which conversation is this session's — two agents in one folder (a
     /// delegate beside its delegator) would otherwise `--continue` into
     /// each other's — else the tool's own "the latest".
     /// Flags a session's role adds to every launch of its agent (the
     /// Switchboard's MCP config), on top of any resume flags.
-    static func roleFlags(for s: AgentSession) -> String {
-        s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : ""
+    /// Where a session's instructions live in its machine.
+    static func instructionsGuestPath(_ id: UUID) -> String {
+        "/home/ubuntu/.bromure/instructions/\(id.uuidString).md"
     }
 
-    static func resumeFlags(for s: AgentSession) -> String {
+    /// The instructions file for `tool`: the text itself, or for Kimi an
+    /// agent file that keeps its default prompt (`${base_prompt}`) and adds
+    /// the text after it (the body is a template: a literal "${" is broken up).
+    static func instructionsFile(_ text: String, tool: Profile.Tool) -> String {
+        guard tool == .kimi else { return text + "\n" }
+        return "---\ndescription: Session instructions from Bromure\n---\n${base_prompt}\n\n"
+            + text.replacingOccurrences(of: "${", with: "$ {") + "\n"
+    }
+
+    /// The launch flags that add the instructions to the agent's system
+    /// prompt. Never a space in them: the launcher word-splits flags.
+    /// Claude and Oh My Pi read the file; Codex takes the text as a config
+    /// value; Kimi takes an agent file, on a fresh start only (it can't be
+    /// combined with a resume). Grok: none — see `openingWithInstructions`.
+    static func instructionFlags(tool: Profile.Tool, text: String, path: String, resuming: Bool) -> String {
+        switch tool {
+        case .claude: return "--append-system-prompt-file \(path)"
+        case .omp:    return "--append-system-prompt \(path)"
+        case .codex:  return "-c developer_instructions=" + tomlSpacelessString(text)
+        case .kimi:   return resuming ? "" : "--agent-file \(path)"
+        case .grok:   return ""
+        }
+    }
+
+    /// A TOML basic string with everything but letters, digits and a few
+    /// safe marks escaped (`\uXXXX`): no spaces for the launcher to split
+    /// on, nothing for the shell to glob.
+    static func tomlSpacelessString(_ s: String) -> String {
+        var out = "\""
+        for u in s.unicodeScalars {
+            if u.isASCII, u.properties.isAlphabetic || ("0"..."9").contains(Character(u)) || "-_.,:".unicodeScalars.contains(u) {
+                out.unicodeScalars.append(u)
+            } else if u.value <= 0xFFFF {
+                out += String(format: "\\u%04X", u.value)
+            } else {
+                out += String(format: "\\U%08X", u.value)
+            }
+        }
+        return out + "\""
+    }
+
+    /// Grok's first message when the session has instructions.
+    static func openingWithInstructions(_ text: String, message: String) -> String {
+        // Agent-facing, like the rest of what the agent is told: not localized.
+        let body = "Instructions for this whole session:\n\n" + text
+        return message.isEmpty ? body : body + "\n\n---\n\n" + message
+    }
+
+    /// The guest's `create` (a session on a branch of its own): where, the
+    /// branch slug, the tab's name, the agent, its opening message, whether
+    /// it opens behind, the base branch — and the same role/autonomy flags
+    /// as a session in a plain folder (Codex's bypass, Kimi's approval
+    /// mode). Launched without them, a branch session asked to approve
+    /// every command.
+    static func worktreeCreateArgs(guestPath: String, slug: String, display: String, session s: AgentSession,
+                                   prompt: String, background: String, base: String,
+                                   kimi: KimiApprovals = .neverAsk) -> [String] {
+        [guestPath, slug, display, s.tool.rawValue, prompt, background, base,
+         roleFlags(for: s, kimi: kimi)]
+    }
+
+    /// `kimi`: the workspace's Kimi approval mode (`Profile.kimiApprovals`).
+    static func roleFlags(for s: AgentSession, kimi: KimiApprovals = .neverAsk) -> String {
+        [s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : "", autonomyFlags(for: s.tool, kimi: kimi)]
+            .filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// The same, with the mode read from the session's workspace.
+    func roleFlags(for s: AgentSession) -> String {
+        Self.roleFlags(for: s, kimi: kimiApprovals(s.profileID))
+    }
+
+    /// The workspace's Kimi approval mode (the default when it's unknown).
+    func kimiApprovals(_ profileID: UUID) -> KimiApprovals {
+        delegate?.profile(for: profileID)?.kimiApprovals ?? .neverAsk
+    }
+
+    /// How an agent runs in a workspace: on its own, the VM (and the host's
+    /// egress policy) being the sandbox. Claude gets there through its auto
+    /// mode (settings.json); Codex has no such mode — without this it asked
+    /// to approve every command, and its own sandbox fought the VM's. Kimi
+    /// starts in "Always Ask" unless told otherwise, and a resume (`-c`,
+    /// `-S <id>`) does NOT keep the mode it ran in — so every launch and
+    /// every resume carries the workspace's mode (Never Ask by default).
+    static func autonomyFlags(for tool: Profile.Tool, kimi: KimiApprovals = .neverAsk) -> String {
+        switch tool {
+        case .codex: return "--dangerously-bypass-approvals-and-sandbox"
+        case .kimi:  return kimi.launchFlag
+        default:     return ""
+        }
+    }
+
+    // Codex's "Update available" dialog is turned off in ~/.codex/config.toml
+    // (`check_for_update_on_startup = false`: agentd's _pretrust_codex, and
+    // the local-inference config the guest .bashrc rewrites), NOT with a
+    // `-c` override on the command line: any `-c` makes Codex 0.157 skip its
+    // shared background server and show a permanent "1 warning: Running
+    // without the shared background server" banner.
+
+    /// `sharedFolder`: another session works in the same folder. With no
+    /// transcript id of its own, the agent's "continue the last one here"
+    /// would pick up THAT session's conversation — start fresh instead.
+    static func resumeFlags(for s: AgentSession, sharedFolder: Bool = false) -> String {
         if s.tool == .claude, let id = s.agentTranscriptID, isTranscriptID(id) {
             return "--resume \(id)"
         }
-        return s.tool.resumeFlags
+        // Kimi: its own session, by id — `-c` takes the folder's latest,
+        // which may be another session's.
+        if s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            return "-S \(id)"
+        }
+        // Codex: its own conversation, by id — `resume --last` takes the
+        // folder's latest, which may be another session's.
+        if s.tool == .codex, let id = s.agentTranscriptID, isTranscriptID(id) {
+            return "resume \(id)"
+        }
+        // Grok: likewise — `-c` takes the folder's latest.
+        if s.tool == .grok, let id = s.agentTranscriptID, isTranscriptID(id) {
+            return "--resume \(id)"
+        }
+        // omp: likewise — `--continue` takes the folder's latest.
+        if s.tool == .omp, let id = s.agentTranscriptID, isTranscriptID(id) {
+            return "--resume \(id)"
+        }
+        return sharedFolder ? "" : s.tool.resumeFlags
+    }
+
+    /// Whether a conversation id read off the tab's hook record is `s`'s.
+    /// Codex runs its hooks in a background server shared by every Codex on
+    /// the machine, with the tab of whichever one started it: its record
+    /// for that tab may name ANOTHER Codex session's rollout. Not taken
+    /// when another session owns it, nor — while a second, still unpinned
+    /// Codex session runs beside it — over the session's own conversation.
+    nonisolated static func acceptsProbedConversation(_ tid: String, for s: AgentSession,
+                                                      sessions: [AgentSession]) -> Bool {
+        guard s.tool == .codex else { return true }
+        let t = tid.lowercased()
+        let others = sessions.filter {
+            $0.id != s.id && $0.profileID == s.profileID && $0.tool == .codex && !$0.isDeleted
+        }
+        if others.contains(where: { $0.agentTranscriptID?.lowercased() == t }) { return false }
+        if let own = s.agentTranscriptID, AgentSessionLocator.isConversationUUID(own), own.lowercased() != t,
+           others.contains(where: { $0.windowIndex != nil && !$0.isArchived
+               && $0.agentTranscriptID.map(AgentSessionLocator.isConversationUUID) != true }) {
+            return false
+        }
+        return true
+    }
+
+    /// Whether another (not deleted) session on the same machine works in
+    /// `s`'s folder.
+    func sharesFolder(_ s: AgentSession) -> Bool {
+        store.sessions.contains {
+            $0.id != s.id && !$0.isDeleted && $0.profileID == s.profileID && $0.cwd == s.cwd
+        }
     }
 
     /// Apply one probe line to the session bound to that window.
     private func apply(_ p: ProbeLine, to s: AgentSession) {
         let wasAlive = s.agentAlive
         store.setLiveness(s.id, alive: p.alive)
-        if p.alive, let title = SessionHome.cleanAgentTitle(p.title, agent: s.tool.rawValue, cwd: s.cwd) {
+        if p.alive, let title = AgentSession.title(fromAgent: p.title, of: s) {
             store.setAgentTitle(s.id, title)
         }
-        if p.alive, let tid = p.transcriptID { store.setTranscriptID(s.id, tid) }
+        if p.alive, let tid = p.transcriptID,
+           Self.acceptsProbedConversation(tid, for: s, sessions: store.sessions) {
+            store.setTranscriptID(s.id, tid)
+            // An adoptee that turned out to be an unbound session's own tab
+            // was folded into it (`AgentSessionStore.foldTwin`).
+            guard store.session(s.id) != nil else { return }
+        }
         // Keep the local copy fresh while it runs; take its last words when
         // it stops.
         let now = Date()
         if p.alive {
-            if now.timeIntervalSince(lastSnapshotAt[s.id] ?? .distantPast) > Self.snapshotEvery { snapshot(s) }
-        } else if wasAlive == true {
-            snapshot(s)
+            // Kimi's turn state is read off its journal (its hooks leave
+            // "Ready" up while it works): at the probe's cadence, not 30 s.
+            let every = s.tool == .kimi ? Self.kimiSnapshotEvery : Self.snapshotEvery
+            if now.timeIntervalSince(lastSnapshotAt[s.id] ?? .distantPast) > every { snapshot(s) }
+        } else {
+            if wasAlive == true { snapshot(s) }
+            journalTail[s.id] = nil
+            store.setTranscriptWorking(s.id, nil)
         }
     }
 
@@ -774,6 +1588,13 @@ final class AgentSessionEngine {
                 // runs at this index now isn't its agent.
                 guard store.checkBoot(s.id, bootID: boot) else { return nil }
             }
+            // Same boot, but another window at the index: ours was closed.
+            if let wid = Self.parseWindowIDs(out)[window],
+               !store.checkWindow(s.id, windowID: wid) { return nil }
+            // A new agent started in the tab after the session's had
+            // exited: a new session's, not this one's.
+            if p.alive, let pr = Self.parseAgentProcs(out)[window],
+               !store.checkAgentProcess(s.id, start: pr.start, pid: pr.pid, uptime: pr.uptime) { return nil }
             apply(p, to: s)
         }
         return p.alive
@@ -801,6 +1622,8 @@ final class AgentSessionEngine {
     func probeLiveness(entries: [SessionListModel.VMEntry]) {
         guard let delegate else { return }
         sweepEnded()
+        // A machine that went off (or to sleep) took its agents with it.
+        store.clearLiveness(outside: Set(entries.map(\.id)))
         probeFolders(entries: entries)
         probeChanges(entries: entries)
         probeBranches(entries: entries)
@@ -808,23 +1631,8 @@ final class AgentSessionEngine {
         // was asleep when it was put away, and just woke): both meant "end
         // it". A deleted one keeps its binding until the roster drops the
         // tab — that's what purges it.
-        for s in store.sessions where (s.isArchived || s.isDeleted) && s.windowIndex != nil {
-            guard let entry = entries.first(where: { $0.id == s.profileID }), entry.model.rosterLive,
-                  let tab = entry.model.tabs.first(where: { $0.index == s.windowIndex })
-            else { continue }
-            // Kill only a tab that is provably this session's: bound in the
-            // boot the probe sees now (after a fresh boot the index belongs
-            // to whatever opened since — a new session's tab, once) and,
-            // when we named it, still carrying that name.
-            guard let boot = bootIDs[s.profileID], s.bootID == boot else { continue }
-            if let mine = s.launchDisplay, let d = tab.display, !d.isEmpty, d != mine { continue }
-            if s.isDeleted {
-                killTabIfShown(s)
-            } else {
-                BACDebug.log("sessions", "archived “\(s.title)” is back — ending it")
-                close(s.id)
-            }
-        }
+        // (Decided in the probe below, on that probe's fresh window ids —
+        // see `reapArchived`.)
         let now = Date()
         for entry in entries {
             let bound = store.sessions.filter { $0.profileID == entry.id && $0.windowIndex != nil }
@@ -842,12 +1650,61 @@ final class AgentSessionEngine {
                                        uniquingKeysWith: { a, _ in a })
                 let boot = Self.parseBootID(out)
                 if let boot { self.bootIDs[profileID] = boot }
+                let windowIDs = Self.parseWindowIDs(out)
+                let procs = Self.parseAgentProcs(out)
+                self.reapArchived(entry: entry, boot: boot, windowIDs: windowIDs)
                 for s in self.store.sessions where s.profileID == profileID {
-                    guard s.windowIndex != nil else { continue }
+                    guard s.windowIndex != nil, !s.isArchived, !s.isDeleted else { continue }
                     // A binding from an earlier boot is unbound, not probed.
                     if let boot, !self.store.checkBoot(s.id, bootID: boot) { continue }
-                    guard let w = s.windowIndex, let p = lines[w] else { continue }
+                    guard let w = s.windowIndex else { continue }
+                    // Another window at the index (ours closed): unbound too.
+                    if let wid = windowIDs[w], !self.store.checkWindow(s.id, windowID: wid) { continue }
+                    guard let p = lines[w] else { continue }
+                    // A new agent run in the tab of one that had exited:
+                    // let go — the roster adopts it as a session of its own.
+                    if p.alive, let pr = procs[w],
+                       !self.store.checkAgentProcess(s.id, start: pr.start, pid: pr.pid, uptime: pr.uptime) {
+                        BACDebug.log("sessions", "“\(s.title)”: a new agent was started in tab \(w) — a new session")
+                        continue
+                    }
                     self.apply(p, to: s)
+                }
+            }
+        }
+    }
+
+    /// An archived or deleted session whose tab is back (its workspace was
+    /// asleep when it was put away, and just woke): both meant "end it" —
+    /// but only a tab provably its own (`archivedTabVerdict`), judged on
+    /// the probe just taken, never a cached one: a tab killed and replaced
+    /// at the same index between two probes is a newcomer. A deleted one
+    /// keeps its binding until the roster drops the tab — that's what
+    /// purges it.
+    private func reapArchived(entry: SessionListModel.VMEntry, boot: String?, windowIDs: [Int: String]) {
+        let profileID = entry.id
+        guard let delegate, entry.model.rosterLive else { return }
+        for s in store.sessions where s.profileID == profileID && (s.isArchived || s.isDeleted) {
+            guard let w = s.windowIndex, let tab = entry.model.tabs.first(where: { $0.index == w })
+            else { continue }
+            let owned = tab.worktreeBranch.map {
+                delegate.codingTaskEngine.ownsLiveTab(profileID: profileID, branch: $0)
+            } ?? false
+            switch Self.archivedTabVerdict(sessionBoot: s.bootID, probeBoot: boot,
+                                           sessionWindowID: s.windowID, probeWindowID: windowIDs[w],
+                                           sessionDisplay: s.launchDisplay, tabDisplay: tab.display,
+                                           taskOwned: owned) {
+            case .wait:
+                continue
+            case .unbind:
+                BACDebug.log("sessions", "\(s.isDeleted ? "deleted" : "archived") “\(s.title)”: tab \(w) is someone else's now — letting go")
+                store.unbind(s.id)
+            case .end:
+                if s.isDeleted {
+                    killTabIfShown(s)
+                } else {
+                    BACDebug.log("sessions", "archived “\(s.title)” is back — ending it")
+                    close(s.id)
                 }
             }
         }

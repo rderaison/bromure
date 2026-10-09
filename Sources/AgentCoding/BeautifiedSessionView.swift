@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CryptoKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -29,6 +30,10 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     func activeTabIndex() -> Int?
     /// Run a guest command in the workspace, returning stdout (nil on failure).
     func execGuest(_ command: String, timeout: Int) async -> String?
+    /// Have the machine at the other end of a slow link type a message
+    /// itself (`PaneTypeGuard.runType` there): one request instead of one
+    /// per typing step. `.unsupported`: type it step by step from here.
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult
     /// Whether the agent is currently working. Cross-agent: bromure already
     /// computes this per tab — Claude via its per-window hooks, every other
     /// agent via MITM request activity — so it drives the "thinking" cue for
@@ -47,11 +52,70 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     /// How much history a first read takes, when less than the default suits
     /// (a slow link); "load earlier" fetches the rest. nil: the default.
     var historyBytesHint: Int? { get }
+    /// What ties the tab's transcript to its session's own conversation
+    /// when the agent's store can't tell by tab (Kimi: the session id the
+    /// engine pinned). Empty: the floor and the folder decide.
+    func transcriptPin(window: Int) -> TranscriptPin
+    /// Where text and keys for the chat in `window` may go: the window's
+    /// stable id when known, and the markers it carries (`@display`,
+    /// `@worktree`) — re-checked in the guest before every keystroke batch,
+    /// so a reused index never takes another session's input.
+    func paneTarget(window: Int) -> PaneTarget
+    /// Whether the agent in `window` is working; nil when that window isn't
+    /// known here (gone, roster not live). Drives delivery of the messages
+    /// a chat holds while it's off screen.
+    func isWorking(window: Int) -> Bool?
+    /// The workspace's shared-folder mounts and how they read
+    /// (`GuestSharePaths`). Empty: paths as logged.
+    var guestPathNames: [String: String] { get }
+}
+
+/// What a provider's `typeRemotely` came back with.
+enum RemoteTypeResult {
+    /// No such route (local, or an older server): type it from here.
+    case unsupported
+    /// The guard's output there; nil when that machine couldn't be asked.
+    case output(String?)
 }
 
 extension BeautifiedTranscriptProvider {
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult { .unsupported }
+    var guestPathNames: [String: String] { [:] }
     var historyCacheKey: String? { nil }
     var historyBytesHint: Int? { nil }
+    func transcriptPin(window: Int) -> TranscriptPin { TranscriptPin() }
+    func paneTarget(window: Int) -> PaneTarget { .index(window) }
+    func isWorking(window: Int) -> Bool? { activeTabIndex() == window ? isWorking() : nil }
+
+    /// `paneTarget(window:)` pinned to the window's stable id — resolved in
+    /// the guest when the target doesn't carry one yet. For text typed
+    /// later (a held message): by then the index may be another tab's.
+    func pinnedTarget(window: Int) async -> PaneTarget {
+        var t = paneTarget(window: window)
+        guard t.expectWindowID == nil, case .index(let i) = t.ref,
+              let out = await execGuest(
+                "tmux display-message -p -t bromure:\(i) '#{window_id}' 2>/dev/null", timeout: 8)
+        else { return t }
+        let id = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard PaneTypeGuard.isWindowID(id) else { return t }
+        t.ref = .windowID(id)
+        t.expectWindowID = id
+        return t
+    }
+
+    /// Type a held message into the agent, guarded — the window's identity
+    /// and an agent in front (`PaneTypeGuard`), and no menu open
+    /// (`guardedTypeCommand`) — before the text and again before Enter.
+    func deliverQueued(_ text: String, target: PaneTarget) async -> ChatQueueStore.Outcome {
+        var t = target
+        t.foreground = .agent
+        let out = await PaneTypeGuard.runType(target: t, text: text) { await self.execGuest($0, timeout: 20) }
+        let outcome = ChatQueueStore.Outcome.of(out)
+        if case .refused(let r) = outcome {
+            BACDebug.log("beautified", "queued message refused (\(r.rawValue)) — nothing typed")
+        }
+        return outcome
+    }
 }
 
 /// Where the host's copy of a transcript file ends: the file path and the
@@ -59,6 +123,56 @@ extension BeautifiedTranscriptProvider {
 typealias TranscriptCursor = (path: String, offset: Int)
 
 enum TranscriptFetchMode { case tail, earlier }
+
+/// How one transcript read ended (`readTranscript`).
+enum TranscriptRead {
+    case fetched(TranscriptFetch)
+    /// The machine answered: there is no transcript for the tab (yet), or
+    /// the tab is gone.
+    case none
+    /// The machine couldn't be asked, or didn't answer in time.
+    case failed
+}
+
+/// When an empty chat stops waiting and says what went wrong (`loadIssue`).
+/// A populated chat never does: a failed poll there keeps what's on show.
+struct TranscriptLoadTracker {
+    enum Issue: Equatable {
+        /// Reads keep failing (timing out over the link, the machine not
+        /// answering).
+        case failed
+        /// The agent has been working a while and no transcript turns up.
+        case notFound
+    }
+    private(set) var failStreak = 0
+    private(set) var missingSince: Date?
+    /// Consecutive failed reads before an empty chat says so — each one
+    /// already waited out its timeout.
+    nonisolated static let failuresBeforeError = 2
+    /// How long a working agent may go without a transcript before the
+    /// chat says it can't find one (a fresh agent writes its first record
+    /// within seconds of the prompt).
+    nonisolated static let missingGrace: TimeInterval = 20
+
+    mutating func record(_ read: TranscriptRead, at now: Date, showing: Bool, working: Bool) -> Issue? {
+        switch read {
+        case .fetched:
+            failStreak = 0
+            missingSince = nil
+            return nil
+        case .failed:
+            failStreak += 1
+            missingSince = nil
+            return !showing && failStreak >= Self.failuresBeforeError ? .failed : nil
+        case .none:
+            failStreak = 0
+            guard !showing, working else { missingSince = nil; return nil }
+            let since = missingSince ?? now
+            missingSince = since
+            return now.timeIntervalSince(since) >= Self.missingGrace ? .notFound : nil
+        }
+    }
+}
 
 /// One answer from `CodingTaskEngine.transcriptChunkCommand`.
 struct TranscriptFetch {
@@ -73,6 +187,9 @@ struct TranscriptFetch {
     let start: Int
     let end: Int
     let chunk: Data
+    /// When the tab's agent process started (epoch seconds; 0 unknown):
+    /// a turn the transcript left open before then was interrupted.
+    var agentStarted: Int = 0
 
     /// Header = 5 newline-terminated lines (path, pq, size, start, end),
     /// then the bytes. nil for empty output (no transcript file).
@@ -116,12 +233,30 @@ extension BeautifiedTranscriptProvider {
     /// floor to 0 so the reattached transcript shows immediately.
     func fetchTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode,
                          agent: String?) async -> TranscriptFetch? {
-        guard let idx = activeTabIndex() else { return nil }
-        let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
-        let lines = (meta ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard lines.count >= 2 else { return nil }
-        let cwd = lines[0].trimmingCharacters(in: .whitespaces)
-        let since = Int(lines[1].trimmingCharacters(in: .whitespaces)) ?? 0
+        if case .fetched(let f) = await readTranscript(known: known, mode: mode, agent: agent) { return f }
+        return nil
+    }
+
+    /// `fetchTranscript`, telling apart "there is no transcript (yet)" from
+    /// "the machine couldn't be asked" — a read that failed or timed out.
+    /// The chat shows the second as an error with Retry rather than an
+    /// empty conversation under an endless thinking cue.
+    func readTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode,
+                        agent: String?) async -> TranscriptRead {
+        guard let idx = activeTabIndex() else { return .none }
+        guard let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
+        else { return .failed }
+        guard let probe = AgentSessionLocator.parseFloorProbe(meta) else { return .none }
+        let cwd = probe.cwd
+        let since = probe.since
+        // Kimi keys its store by folder: until the session's own id is
+        // pinned, the tab's process names it (`-S`), or the read keeps to a
+        // journal no other session owns, begun by this run when it's fresh.
+        var pin = transcriptPin(window: idx)
+        if agent == "kimi", pin.kimiSession == nil {
+            pin = .kimiUnpinned(argsSession: probe.kimiSession, resumed: probe.resumed,
+                                since: since, exclude: pin.kimiExclude)
+        }
         guard !cwd.isEmpty,
               // Scope to the tab's OWN agent store. Passing nil here probed
               // every store and took the newest write across all of them —
@@ -133,19 +268,51 @@ extension BeautifiedTranscriptProvider {
               // probe-every-store path inside the locator.
               let cmd = CodingTaskEngine.transcriptChunkCommand(
                   guestCwd: cwd, since: since, agent: agent, pinnedWindow: idx,
+                  pin: pin,
                   knownPath: known?.path, knownOffset: known?.offset ?? -1,
                   bytes: mode == .earlier ? (historyBytesHint ?? BeautifiedSessionModel.earlierHistoryBytes)
                                           : (historyBytesHint ?? BeautifiedSessionModel.initialHistoryBytes),
-                  earlier: mode == .earlier),
-              let out = await execGuest(cmd, timeout: 30)
-        else { return nil }
-        return TranscriptFetch.parse(Data(out.utf8))
+                  earlier: mode == .earlier)
+        else { return .none }
+        guard let out = await execGuest(cmd, timeout: 30) else { return .failed }
+        // Empty output: no transcript file for this tab (yet).
+        guard var fetch = TranscriptFetch.parse(Data(out.utf8)) else { return .none }
+        // The folder's newest was another session's conversation: show (and
+        // copy, and count tokens from) nothing rather than its history.
+        if AgentSessionEngine.isForeignConversation(path: fetch.path, agent: agent, pin: pin) {
+            return .none
+        }
+        fetch.agentStarted = probe.started
+        return .fetched(fetch)
     }
 
     /// Type `text` into the running agent (base64 → tmux send-keys + Enter).
-    func send(_ text: String) async {
-        guard let idx = activeTabIndex() else { return }
-        _ = await execGuest(CodingTaskEngine.typeCommand(tabIndex: idx, text: text), timeout: 15)
+    /// Guarded in the guest, in the same command as the keystrokes: nothing
+    /// is typed unless an agent holds the tab's foreground (a shell would
+    /// run the text), and nothing while one of its menus or approval
+    /// dialogs is up (`.held` — a digit or Return would answer it).
+    @discardableResult
+    func send(_ text: String) async -> ChatQueueStore.Outcome {
+        guard let idx = activeTabIndex() else { return .refused(.gone) }
+        let target = paneTarget(window: idx)
+        let out: String?
+        if case .output(let o) = await typeRemotely(target, text) {
+            out = o
+        } else {
+            out = await PaneTypeGuard.runType(target: target, text: text) {
+                await self.execGuest($0, timeout: 20)
+            }
+        }
+        let outcome = ChatQueueStore.Outcome.of(out)
+        switch outcome {
+        case .refused(let r): BACDebug.log("beautified", "send refused (\(r.rawValue)) — nothing typed into tab \(idx)")
+        case .held: BACDebug.log("beautified", "send held — a menu or dialog is up in tab \(idx)")
+        case .failed, .unreachable: BACDebug.log("beautified", "send into tab \(idx) FAILED — not typed")
+        case .unconfirmed: BACDebug.log("beautified", "send into tab \(idx): the Enter never took — not delivered")
+        case .dropped: BACDebug.log("beautified", "send into tab \(idx): the Enter never took and the box is empty")
+        case .typed: break
+        }
+        return outcome
     }
 
     /// The active tab's visible terminal — for detecting states the transcript
@@ -165,8 +332,8 @@ extension BeautifiedTranscriptProvider {
     /// Named keys only, with a beat so the TUI's debounce doesn't swallow them.
     func pressKeys(_ keys: [String]) async {
         guard let idx = activeTabIndex(), !keys.isEmpty else { return }
-        let cmd = keys.map { "tmux send-keys -t bromure:\(idx) \($0)" }
-            .joined(separator: "; sleep 0.4; ")
+        let cmd = PaneTypeGuard.keysCommand(target: paneTarget(window: idx), keys: keys)
+        guard !cmd.isEmpty else { return }
         _ = await execGuest(cmd, timeout: 15)
     }
 
@@ -174,10 +341,10 @@ extension BeautifiedTranscriptProvider {
     /// field like `/login`'s "Paste code here >", not the chat composer.
     func typeText(_ text: String) async {
         guard let idx = activeTabIndex() else { return }
-        let quoted = "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
         _ = await execGuest(
-            "tmux send-keys -t bromure:\(idx) -l \(quoted); sleep 0.3; "
-            + "tmux send-keys -t bromure:\(idx) Enter", timeout: 15)
+            PaneTypeGuard.prelude(paneTarget(window: idx))
+            + "if _bg; then \(PaneTypeGuard.literalSend(text)) && sleep 0.3 && _bg && tmux send-keys -t \"$_bt\" Enter; fi",
+            timeout: 15)
     }
 
     /// Write dropped/attached files into the guest at deterministic paths and
@@ -245,12 +412,22 @@ enum GuestDrop {
     private static let imageExtensions: Set<String> = [
         "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tiff", "tif", "bmp",
     ]
+    /// A drop path as staged (`baseDir/<leaf>`), whatever home the turn
+    /// shows it under: a native Mac's agent reads `/Users/<you>/.bromure/
+    /// drops/<leaf>` (Bromure Sidecar maps the Linux home to the real one).
+    static func canonical(_ path: String) -> String {
+        guard !path.hasPrefix(baseDir + "/"), let r = path.range(of: "/.bromure/drops/"),
+              path.hasPrefix("/") else { return path }
+        return baseDir + "/" + path[r.upperBound...]
+    }
+
     /// The drop paths in a turn's text that name images, in order.
     static func imagePaths(in text: String) -> [String] {
         var out: [String] = []
         for tok in text.split(whereSeparator: { $0.isWhitespace }) {
             let path = String(tok)
-            guard path.hasPrefix(baseDir + "/") || path.hasPrefix(legacyBaseDir + "/"),
+            guard path.hasPrefix(baseDir + "/") || path.hasPrefix(legacyBaseDir + "/")
+                    || (path.hasPrefix("/") && path.contains("/.bromure/drops/")),
                   imageExtensions.contains((path as NSString).pathExtension.lowercased()),
                   !out.contains(path) else { continue }
             out.append(path)
@@ -358,6 +535,83 @@ struct WorkingGate {
     }
 }
 
+/// A message sent while the agent was busy (see `queued`).
+struct QueuedMessage: Identifiable, Equatable, Codable {
+    var id = UUID()
+    var text: String
+    var queuedAt = Date()
+    /// Bromure holds it: the agent's queue can't be edited, so it's typed in
+    /// when the turn ends. Otherwise it sits in the agent's own queue.
+    var held: Bool
+    /// The agent's own queue can give it back (Edit); a held one always can.
+    var editable: Bool
+    /// User turns in the transcript when it was queued.
+    var baseline: Int
+    /// Where the transcript file ended when it was queued: its delivery is
+    /// looked for in what was written after.
+    var path: String?
+    var offset: Int = 0
+    /// Where a held one is typed: the chat's window as it was when queued
+    /// (its stable id and markers) — never whatever tab has its index by
+    /// the time the agent is free.
+    var target: PaneTarget?
+    /// Why it couldn't be typed (shown on its row); nil while it waits.
+    var failure: String?
+    /// Being typed right now.
+    var sending = false
+    /// Held because the agent is asking the user something (a picker, an
+    /// approval dialog): typing would answer it. Delivered once it closes.
+    /// Optional so a queue saved before it existed still decodes.
+    var awaitingAnswer: Bool? = nil
+    var waitingOnDialog: Bool { awaitingAnswer == true }
+    /// The session it was written in, when known: its paused view lists
+    /// it, and the chat the session comes back in (maybe another tab)
+    /// takes it over.
+    var sessionID: UUID? = nil
+    /// A held one Bromure typed in: the agent has it (maybe in its own
+    /// queue — Kimi's "ctrl-s to steer"), the transcript doesn't yet. Shown
+    /// until it lands as a turn. Optional so an older saved queue decodes.
+    var delivered: Bool? = nil
+    var isDelivered: Bool { delivered == true }
+    /// Times Bromure typed it in without the agent ever taking it (typed as
+    /// a dialog closed, into a screen still redrawing): put back on hold
+    /// once, then shown as not delivered — never silently dropped.
+    var redeliveries: Int? = nil
+}
+
+/// What each agent does with a message submitted while it's busy, measured
+/// on each TUI (claude 2.1, codex 0.153, kimi 0.41, grok 1.0, omp 18.1):
+/// - claude: queues it and takes it in at the next tool boundary (steer);
+///   ↑ on an empty input pulls ALL queued messages back into the box.
+/// - omp: steers it in almost at once; Alt+↑ restores all queued ones.
+/// - codex: steers it in after the next tool call (seconds); an Enter-steer
+///   can't be recalled.
+/// - kimi, grok: queue it as a follow-up for after the turn, recallable only
+///   one at a time (kimi) or through a selection mode (grok) — the same
+///   timing as holding it here, which is fully editable, so they're held.
+enum AgentQueueSupport {
+    enum Mode: Equatable {
+        /// Into the agent's own queue at once. `recall`: the key (tmux name)
+        /// that pulls its whole queue back into the input box; nil = it can't.
+        case native(recall: String?)
+        /// Held by Bromure, typed in when the agent is idle.
+        case held
+    }
+
+    static func mode(for agent: String?) -> Mode {
+        switch agent {
+        case "claude": return .native(recall: "Up")
+        case "omp":    return .native(recall: "M-Up")
+        case "codex":  return .native(recall: nil)
+        default:       return .held
+        }
+    }
+
+    /// Whether Esc puts the agent's queue back into its input box, unsent
+    /// (omp's `restoreQueuedMessagesToEditor`).
+    static func escapeRestoresQueue(_ agent: String?) -> Bool { agent == "omp" }
+}
+
 /// Drives one beautified view: polls its provider for the live transcript and
 /// relays composer input. `@MainActor` — it only touches provider calls (main-
 /// actor) and SwiftUI state.
@@ -380,14 +634,31 @@ enum ComposerDrafts {
 @MainActor
 final class BeautifiedSessionModel: ObservableObject {
     @Published var items: [TranscriptItem] = []
-    @Published var composerText = "" {
-        didSet { if let draftKey { ComposerDrafts[draftKey].text = composerText } }
+    /// Long messages of yours opened in full (item ids; see
+    /// `TranscriptRow.userCollapses`). Kept here so a remount of the chat
+    /// (a layout switch, a zoom) doesn't fold them again.
+    @Published var expandedMessages: Set<Int> = []
+    /// What's typed in the composer. Kept in its own observable
+    /// (`composer`), NOT published by the model: every model change
+    /// re-renders the whole chat, transcript included, and a keystroke — or
+    /// a 200 KB paste — must only re-render the composer (`ComposerObserver`).
+    var composerText: String {
+        get { composer.text }
+        set {
+            composer.text = newValue
+            if let draftKey { ComposerDrafts[draftKey].text = newValue }
+        }
     }
+    let composer = ComposerTextStore()
     /// Where this chat's unsent draft is kept (`ComposerDrafts`): the machine
     /// and tab it's for. Setting it brings the draft back.
     var draftKey: String? {
         didSet {
-            guard let draftKey, draftKey != oldValue else { return }
+            guard draftKey != oldValue else { return }
+            // The queue follows the same key until the session is known
+            // (`ChatQueueStore`; then it's keyed by the session).
+            rekeyQueue()
+            guard let draftKey else { return }
             let d = ComposerDrafts[draftKey]
             composerText = d.text
             pendingAttachments = d.attachments
@@ -396,6 +667,19 @@ final class BeautifiedSessionModel: ObservableObject {
     @Published var sending = false
     /// True until the first transcript fetch resolves — drives the placeholder.
     @Published var loading = true
+    /// Why no conversation is on show, when reading it went wrong: an error
+    /// row with Retry instead of an empty chat under an endless thinking
+    /// cue (a long session over a slow tunnel, a machine that stopped
+    /// answering, a transcript the lookup can't find). nil once anything
+    /// shows.
+    @Published private(set) var loadIssue: TranscriptLoadTracker.Issue?
+    private var loadTracker = TranscriptLoadTracker()
+    /// The transcript file's size as last read: "n of m MB" while history
+    /// loads.
+    @Published private(set) var transcriptFileSize = 0
+    /// The live "working" cue shows — not over an empty chat that is
+    /// showing why its conversation couldn't be read.
+    var showsLiveCue: Bool { working && !(items.isEmpty && loadIssue != nil) }
     /// Bumped on every transcript mutation (poll replace + optimistic append),
     /// so the view scrolls to the tail even when the last item mutates in place
     /// (assistant streaming) without changing the item count.
@@ -409,7 +693,13 @@ final class BeautifiedSessionModel: ObservableObject {
     /// terminal but writes no turn for, leaving the view stuck on "Thinking…".
     /// When set it replaces the cue with a failure card and forces `working`
     /// false; cleared when the transcript makes progress or the user sends again.
-    @Published var failure: SessionFailure?
+    @Published var failure: SessionFailure? {
+        didSet { if failure != oldValue { failureChanged?(failure) } }
+    }
+    /// The failure card came up (or went away): the session's status
+    /// follows it — an agent retrying under an error card (omp on a 502)
+    /// read "Working" in the header and the sidebar for minutes.
+    var failureChanged: ((SessionFailure?) -> Void)?
     /// A blocking TUI prompt the agent is showing in its terminal that the
     /// beautified view otherwise hides — a folder-trust dialog or a `/login`
     /// flow. Surfaced so the user isn't left staring at a silent view while the
@@ -418,6 +708,53 @@ final class BeautifiedSessionModel: ObservableObject {
     /// When the current working spell began — drives the elapsed time on the
     /// cue, so a long turn reads as intentional and a hung one shows its age.
     @Published var workingSince: Date?
+    /// Messages sent while the agent was busy, not yet in the transcript.
+    /// The TUI queues them itself (they only land in the transcript when the
+    /// turn gets to them), so the plain echo aged out and they vanished.
+    /// A mirror of this chat's list in `queueStore`, which outlives the
+    /// model (a session switch rebuilds it) and keeps delivering the held
+    /// ones while the chat is off screen. Changed only through the store.
+    @Published private(set) var queued: [QueuedMessage] = []
+    /// Where the queue lives (tests pass their own).
+    var queueStore: ChatQueueStore = .shared {
+        didSet {
+            guard queueStore !== oldValue else { return }
+            if queueAttached, let k = attachedQueueKey {
+                oldValue.detach(k, owner: self); queueAttached = false; attachQueue()
+            }
+            bindQueue()
+        }
+    }
+    /// A chat with no draft key (demo, bench) still queues, in memory only.
+    private let anonymousQueueKey = ChatQueueStore.ephemeralPrefix + UUID().uuidString
+    /// Keyed by the session once it's known (a new session reusing the
+    /// tab must never see — let alone get — the last one's held messages),
+    /// by the tab until then.
+    var queueKey: String { boundSession.map(ChatQueueStore.sessionKey) ?? draftKey ?? anonymousQueueKey }
+    /// The session this chat's queue is keyed by (`queueKey`).
+    private(set) var boundSession: UUID? {
+        didSet { if boundSession != oldValue { rekeyQueue() } }
+    }
+    /// The key the chat is registered under with the store.
+    private var attachedQueueKey: String?
+    /// When this chat opened: an unattributed message queued since is its.
+    private let chatSince = Date()
+    private var queueSub: AnyCancellable?
+    /// Registered with the store as a chat showing `queueKey` (between
+    /// `start` and `stop`).
+    private var queueAttached = false
+    /// The window the store's driver was made for (nil until known).
+    private var queueDriverWindow: Int?
+    /// Since when the agent has been idle (nil while working).
+    private var idleSince: Date?
+    /// The dialog seen open at the last check, and when one last closed: a
+    /// held message waits for the agent's screen to settle after it (Codex
+    /// redraws its whole TUI after its update prompt; text typed in that
+    /// moment was lost, and the queue emptied with no turn).
+    private var dialogWasOpen = false
+    private var dialogClosedAt: Date?
+    /// How long after a dialog closes before a held message is typed.
+    static let settleAfterDialog: TimeInterval = 4
 
     /// Dropped image bytes keyed by their (deterministic) guest path, so the
     /// view can render a thumbnail wherever that path appears in the transcript
@@ -433,9 +770,17 @@ final class BeautifiedSessionModel: ObservableObject {
     var sessionStore: AgentSessionStore?
     /// The session this chat is, as of now (a tab binds to its record a
     /// beat after launch).
-    var currentSession: (() -> AgentSession?)?
+    var currentSession: (() -> AgentSession?)? { didSet { bindQueue() } }
+    /// The session's conversation as last copied to this Mac (the engine's
+    /// `SessionTranscriptCache`, a mirror's last download): shown the moment
+    /// the chat mounts, until its first read of the live file lands.
+    var cachedTranscript: ((UUID) async -> Data?)?
     /// Put another session on stage (the other end of a delegation).
     var openSession: ((UUID) -> Void)?
+    /// The board task this chat's session works on, when it is one: its
+    /// opening brief (shown at the top of the chat) and the board's own
+    /// "Restart Session" (the failure card offers it, as the card does).
+    var boardTask: (() -> BoardTaskLink?)?
     /// The user answers a delegate's question on the agent's behalf:
     /// (delegation, ask, text). nil = read-only (a mirror).
     var answerDelegation: ((UUID, UUID, String) -> Void)?
@@ -455,6 +800,57 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The agent's slash commands for the "/" palette: built-ins at once,
     /// the user's own (custom commands, skills) once read from the guest.
     @Published var slashCommands: [SlashCommand] = []
+
+    // MARK: Scratch terminal (/term)
+
+    /// This session's scratch terminal — a shell of its own in the session's
+    /// folder, on the same machine — created on first use (nil: this chat
+    /// can't have one). Hiding it keeps it running.
+    var scratchTerminal: (() -> NSView?)?
+    /// The guest tmux session behind it (to end it for good).
+    var scratchSessionName: String?
+    /// The drawer is up.
+    @Published var terminalShown = false
+    /// A shell is running for it (shown or hidden).
+    @Published var terminalAlive = false
+    var canOpenTerminal: Bool { scratchTerminal != nil }
+
+    /// What the "/" palette lists: Bromure's own commands, then the agent's.
+    var paletteSlashCommands: [SlashCommand] {
+        (canOpenTerminal ? [Self.termCommand] : []) + slashCommands
+    }
+    static let termCommand = SlashCommand(
+        name: "term",
+        description: NSLocalizedString("Open a terminal here, in this session's folder", comment: "slash palette"),
+        source: .bromure, tag: "Bromure")
+    static func isTerminalCommand(_ text: String) -> Bool {
+        ["/term", "/terminal"].contains(text.lowercased())
+    }
+
+    func showTerminal() {
+        guard canOpenTerminal else { return }
+        terminalAlive = true
+        terminalShown = true
+    }
+
+    func hideTerminal() { terminalShown = false }
+
+    func toggleTerminal() { terminalShown ? hideTerminal() : showTerminal() }
+
+    /// End the shell: its tmux session goes, the surface follows.
+    func closeTerminal() {
+        terminalShown = false
+        terminalAlive = false
+        guard let name = scratchSessionName else { return }
+        let q = "'" + name.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        Task { [provider] in _ = await provider.execGuest("tmux kill-session -t \(q) 2>/dev/null; true", timeout: 10) }
+    }
+
+    /// The shell ended on its own (`exit`): fold the drawer away.
+    func scratchTerminalEnded() {
+        terminalShown = false
+        terminalAlive = false
+    }
     @Published var agentDisplayName: String = ""
     /// Every transcript read is handed here too (the session's local copy,
     /// readable once the machine sleeps).
@@ -476,11 +872,35 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The tab shows (or stopped showing) a sign-in screen — the sidebar
     /// reflects it.
     var loginPromptChanged: ((Bool) -> Void)?
+    /// The tab shows (or stopped showing) a dialog waiting on the user — a
+    /// picker, a checklist, a trust question: the sidebar says so.
+    var dialogPromptChanged: ((Bool) -> Void)?
+
+    /// A prompt that waits on the user's answer (sign-in has its own state).
+    static func isDialog(_ p: TerminalPrompt?) -> Bool {
+        switch p?.kind {
+        case .picker?, .checklist?, .trust?: return true
+        default: return false
+        }
+    }
+    /// The agent's transcript now ends on a refused turn (auth, quota…).
+    /// Codex fires no hook for a failed turn — only the prompt's — so its
+    /// tab would read "working" forever; the host turns this into "needs you".
+    /// Fired for every new one (an agent may retry and fail again).
+    var recordedFailureAppeared: (() -> Void)?
     /// What the host sign-in is doing right now, for the card. nil = idle.
     @Published var hostSignInStatus: String?
     /// Why the last host sign-in didn't land, shown in the card under the
     /// button until the next attempt.
     @Published var hostSignInError: String?
+    /// The attached machine (Bromure Sidecar) this tab runs on: its sign-in
+    /// happens there, unsandboxed — the card says so. nil for a VM.
+    var hostSignInMachine: String?
+    /// A machine sign-in's link and code, while it waits for the user.
+    @Published var hostSignInDevice: HostSignInDevice?
+    /// Claude's paste-back code, and giving up, for a machine sign-in.
+    var submitHostSignInCode: ((String) -> Void)?
+    var cancelHostSignIn: (() -> Void)?
 
     /// "Claude", "ChatGPT", "Grok", "Kimi" — the account, not the tool.
     var signInAccountName: String {
@@ -507,8 +927,13 @@ final class BeautifiedSessionModel: ObservableObject {
                 switch event {
                 case .status(let text):
                     self.hostSignInStatus = text
+                case .device(let d):
+                    self.hostSignInDevice = d
+                    self.hostSignInStatus = NSLocalizedString("Waiting for you to approve…", comment: "sign-in")
                 case .finished(let ok, let message):
+                    self.hostSignInDevice = nil
                     if ok {
+                        self.settleRecordedFailure()
                         self.hostSignInStatus = String(format: NSLocalizedString(
                             "Signed in. Starting %@ again…", comment: "sign-in"), self.agentDisplayName)
                         self.relaunchAfterSignIn?()
@@ -543,11 +968,25 @@ final class BeautifiedSessionModel: ObservableObject {
 
     private let provider: BeautifiedTranscriptProvider
     private var pollTask: Task<Void, Never>?
+    /// How a display card (an agent's show_media) reads its file: the same
+    /// guest file ops as the rest of the chat — local, or over the tunnel.
+    lazy var displayFileReader: DisplayFileReader = {
+        var r = DisplayFileReader.chunked { [weak self] op in await self?.provider.guestFileOp(op) }
+        // Which machine: two machines' /tmp/screenshot.png are two pictures.
+        r.scope = provider.historyCacheKey ?? "\(ObjectIdentifier(self).hashValue)"
+        return r
+    }()
     /// Ids for optimistic (locally-added) items — descend from Int.max so they
     /// never collide with the parser's ascending ids.
     private var nextOptimisticID = Int.max
     /// The parsed transcript (source of truth).
     private var parsedItems: [TranscriptItem] = []
+    /// The recorded refusal the user has moved past — sent something, or
+    /// signed in again — so it stops being the state while the transcript
+    /// still ends on it (a slash command or a restart writes no new turn).
+    private var settledFailureID: Int?
+    /// The refused turn last reported to the host (`recordedFailureAppeared`).
+    private var reportedFailureID: Int?
     /// Consecutive polls that parsed to EMPTY while we already had a transcript.
     /// A populated transcript that suddenly reads empty is almost always a
     /// transient fetch glitch — the session-floor probe momentarily resolving a
@@ -619,6 +1058,14 @@ final class BeautifiedSessionModel: ObservableObject {
         let env = ProcessInfo.processInfo.environment["BROMURE_TRANSCRIPT_RENDER_STEP"]
         return max(1, env.flatMap(Int.init) ?? 300)
     }()
+    /// How much text (`BeautifiedSessionView.renderWeight`) the eager rows
+    /// hold at most: a few screens — what keeps a scroll frame cheap
+    /// without a lazy stack. Widened with `renderLimit`.
+    @Published var renderChars = BeautifiedSessionModel.renderCharStep
+    nonisolated static let renderCharStep: Int = {
+        let env = ProcessInfo.processInfo.environment["BROMURE_TRANSCRIPT_RENDER_CHARS"]
+        return max(1, env.flatMap(Int.init) ?? 30_000)
+    }()
     /// The view's last measured scroll geometry, for the debug hook.
     var debugGeometry: [String: Double] = [:]
     /// Throttle for the terminal-state scan (capture-pane). It runs on its own
@@ -657,6 +1104,21 @@ final class BeautifiedSessionModel: ObservableObject {
 
     /// The seeded "working" holds until the agent has answered (an assistant
     /// turn in the real transcript) or the seed times out.
+    /// The transcript's own "a turn is under way", for agents whose journal
+    /// records turn boundaries (Kimi) — their hooks alone left the header
+    /// on "Ready" while the agent worked.
+    /// Kimi's own "turn open" record, as a fallback signal — only for a
+    /// turn this agent process began: one left open by a process that was
+    /// killed or restarted since (a relaunch + resume) was interrupted, and
+    /// its "Running sleep 120…" isn't work going on.
+    private func transcriptSaysWorking() -> Bool {
+        guard agentKind == "kimi", let path = currentPath, let buf = buffers[path] else { return false }
+        let floor = agentStartedAt > 0 ? Date(timeIntervalSince1970: TimeInterval(agentStartedAt)) : nil
+        return KimiTranscriptParser.turnInProgress(buf.data, notBefore: floor)
+    }
+    /// When the tab's agent process started (`TranscriptFetch.agentStarted`).
+    private var agentStartedAt = 0
+
     private func seedHolds() -> Bool {
         guard let until = seededUntil else { return false }
         let answered = parsedItems.contains {
@@ -670,9 +1132,98 @@ final class BeautifiedSessionModel: ObservableObject {
 
     init(provider: BeautifiedTranscriptProvider) {
         self.provider = provider
+        bindQueue()
+    }
+
+    // MARK: Queue store wiring
+
+    private func bindQueue() {
+        let key = queueKey
+        // Still keyed by the tab (the session isn't known yet): what an
+        // earlier session left there is never shown as this one's.
+        // One written in the session that holds the tab now (held while a
+        // card was up, before the chat's first poll bound it) is this
+        // chat's: hiding it left the strip empty under an approval card.
+        let screen = boundSession == nil && currentSession != nil
+        let since = chatSince
+        let current = currentSession
+        queueSub = queueStore.$queues
+            .map { ($0[key] ?? []).filter { q in
+                guard screen else { return true }
+                if q.sessionID == nil { return q.queuedAt >= since }
+                return q.sessionID == current?()?.id
+            } }
+            .removeDuplicates()
+            .sink { [weak self] list in
+                guard let self, self.queued != list else { return }
+                self.queued = list
+                self.localRevision &+= 1
+            }
+    }
+
+    /// The store's way to this chat's agent once it's off screen: status and
+    /// guarded typing for its own window, through the same provider.
+    private func queueDriver(window: Int) -> ChatQueueStore.Driver {
+        let p = provider
+        return ChatQueueStore.Driver(
+            isWorking: { p.isWorking(window: window) },
+            deliver: { text, target in await p.deliverQueued(text, target: target) },
+            accepts: { [current = currentSession] q in Self.mayDeliver(q, current: current) })
+    }
+
+    private func attachQueue() {
+        queueDriverWindow = provider.activeTabIndex()
+        attachedQueueKey = queueKey
+        queueStore.attach(queueKey, owner: self, driver: queueDriverWindow.map { queueDriver(window: $0) })
+        queueAttached = true
+    }
+
+    private func detachQueue() {
+        guard queueAttached else { return }
+        queueAttached = false
+        queueStore.detach(attachedQueueKey ?? queueKey, owner: self)
+        attachedQueueKey = nil
+    }
+
+    /// The key changed (the tab, or the session became known): register
+    /// under the new one and mirror its list.
+    private func rekeyQueue() {
+        if queueAttached, attachedQueueKey != queueKey {
+            detachQueue()
+            attachQueue()
+        }
+        bindQueue()
+    }
+
+    /// Whether a held message may be typed into this chat's tab: only one
+    /// written in the session that holds the tab right now (asked live —
+    /// the store delivers with the chat gone, and the tab may hold a new
+    /// session by then). A chat with no session records takes its own.
+    private func mayDeliver(_ q: QueuedMessage) -> Bool { Self.mayDeliver(q, current: currentSession) }
+    private static func mayDeliver(_ q: QueuedMessage, current: (() -> AgentSession?)?) -> Bool {
+        guard let current else { return true }
+        guard let sid = current()?.id else { return false }
+        return q.sessionID == sid
+    }
+
+    /// The session holding the tab is known: key the queue by it, and sort
+    /// what the tab key still holds (`ChatQueueStore.claim`).
+    private func bindSessionQueue() {
+        guard let sid = currentSession?()?.id else { return }
+        if boundSession != sid { boundSession = sid }
+        if let tab = draftKey {
+            queueStore.claim(tabKey: tab, session: sid,
+                             agentStarted: agentStartedAt > 0
+                                ? Date(timeIntervalSince1970: TimeInterval(agentStartedAt)) : nil,
+                             chatSince: chatSince)
+        }
     }
 
     private func rebuild() {
+        // Where this session's time went (the flamegraph, the room timeline).
+        if let sid = currentSession?()?.id {
+            SessionTimelineStore.shared.update(sid, items: parsedItems)
+        }
         let combined = parsedItems + pending.map(\.item)
         guard combined != items else { return }
         items = combined
@@ -680,24 +1231,326 @@ final class BeautifiedSessionModel: ObservableObject {
     }
 
     /// Echo a locally-authored turn instantly (kept until the poll confirms it).
-    private func appendOptimistic(_ kind: TranscriptItem.Kind) {
-        pending.append(Pending(item: TranscriptItem(id: nextOptimisticID, kind: kind, timestamp: nil),
+    @discardableResult
+    private func appendOptimistic(_ kind: TranscriptItem.Kind) -> Int {
+        let id = nextOptimisticID
+        pending.append(Pending(item: TranscriptItem(id: id, kind: kind, timestamp: nil),
                                added: Date()))
         nextOptimisticID -= 1
         rebuild()
         localRevision &+= 1
+        return id
+    }
+
+    /// Take back an echo whose message never went in (held, refused).
+    private func removeOptimistic(_ id: Int) {
+        pending.removeAll { $0.item.id == id }
+        rebuild()
+        localRevision &+= 1
+    }
+
+    // MARK: Queued messages
+
+    /// User turns in the transcript so far — a queued message is looked for
+    /// only among the turns after it was queued (an earlier identical one
+    /// isn't it).
+    private var userTurnCount: Int {
+        parsedItems.reduce(0) { n, it in if case .userText = it.kind { return n + 1 }; return n }
+    }
+
+    /// Drop queued messages the transcript now carries; deliver held ones
+    /// once the agent is idle.
+    private func reconcileQueued() {
+        let now = Date()
+        // The opening message's echo holds the thinking cue up until the
+        // agent answers — but when that message is still HELD here (Kimi's
+        // is typed once its TUI is up), the agent hasn't got it: nothing is
+        // under way, and waiting for "idle" waited on the seed itself (a
+        // fresh Kimi sat on "Crafting…" with its message queued, its TUI
+        // saying "No session yet").
+        let busy = working && !(seededUntil != nil && !provider.isWorking() && !transcriptSaysWorking())
+        if busy { idleSince = nil } else if idleSince == nil { idleSince = now }
+        let open = dialogOpen
+        if dialogWasOpen, !open { dialogClosedAt = now }
+        dialogWasOpen = open
+        // What was held for this session while it was paused (or in the
+        // tab it had before) is this chat's to deliver now.
+        bindSessionQueue()
+        if let sid = currentSession?()?.id, let w = provider.activeTabIndex() {
+            queueStore.adopt(session: sid, into: queueKey, target: provider.paneTarget(window: w))
+        }
+        guard !queued.isEmpty else { return }
+        let turns: [String] = parsedItems.compactMap {
+            if case .userText(let t) = $0.kind { return t }
+            return nil
+        }
+        // The window became known after the chat started: give the store
+        // its way to the agent for when the chat goes off screen.
+        if queueAttached, queueDriverWindow == nil, let w = provider.activeTabIndex() {
+            queueDriverWindow = w
+            queueStore.setDriver(queueKey, queueDriver(window: w))
+        }
+        queueStore.update(queueKey) { queued in
+          var lost: Set<UUID> = []
+          queued.removeAll { q in
+            // One marked "Not delivered" that a turn carries after all (the
+            // user pressed Return in the terminal, the agent took it late):
+            // delivered — its stale banner goes.
+            if q.held, q.failure == ChatQueueStore.notDeliveredText || q.failure == Self.notTakenText,
+               turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) || Self.typedBecame(q.text, turn: $0) }) {
+                return true
+            }
+            guard !q.held else { return false }
+            // A TUI may merge several queued messages into one turn.
+            if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
+            // One Bromure typed in that came out a little changed (a
+            // composer completion rewrote its end, the agent re-flowed it):
+            // the turn it became still resolves the row.
+            if q.isDelivered, turns.dropFirst(q.baseline).contains(where: { Self.typedBecame(q.text, turn: $0) }) {
+                return true
+            }
+            // Or take it in as something other than a user turn (Claude's
+            // mid-turn `queued_command`): any record written since it was
+            // queued that carries the text — bar Claude's own queue log.
+            if deliveredInRaw(q) { return true }
+            // Idle a while and still not in the transcript: the agent never
+            // took it (cleared, interrupted) — stop showing it. Unless
+            // Bromure typed it and the agent took NO turn since: then it
+            // was lost on the way in, and it goes back on hold.
+            if let idle = idleSince, now.timeIntervalSince(idle) > 20,
+               now.timeIntervalSince(q.queuedAt) > 20 {
+                if q.isDelivered, turns.count <= q.baseline, !transcriptGrew(since: q) {
+                    lost.insert(q.id); return false
+                }
+                return true
+            }
+            return false
+          }
+          for i in queued.indices where lost.contains(queued[i].id) {
+              queued[i].delivered = nil
+              queued[i].editable = true
+              queued[i].held = true
+              queued[i].redeliveries = (queued[i].redeliveries ?? 0) + 1
+              if (queued[i].redeliveries ?? 0) > 1 {
+                  queued[i].failure = Self.notTakenText
+              }
+          }
+        }
+        // The dialog a message waited on is answered and the agent is back
+        // at work: it now just waits for the turn to end.
+        if !dialogOpen, working, queued.contains(where: \.waitingOnDialog) {
+            queueStore.update(queueKey) { l in
+                for i in l.indices where l[i].waitingOnDialog { l[i].awaitingAnswer = nil }
+            }
+        }
+        // Held here: the turn ended — type the next one in now, alone (the
+        // one after waits for this turn to end the same way).
+        // Only the chat the store says delivers (two can show one session).
+        // Never while the agent is asking something (the guest would hold
+        // it anyway — that's the backstop, not the plan).
+        if let idle = idleSince, now.timeIntervalSince(idle) > 1.5, !sending, !open,
+           dialogClosedAt.map({ now.timeIntervalSince($0) > Self.settleAfterDialog }) ?? true,
+           queued.contains(where: { ChatQueueStore.deliverable($0) && mayDeliver($0) }),
+           queueStore.isOwner(queueKey, self) {
+            deliverHeld()
+        }
+    }
+
+    /// Whether a recorded turn is a message Bromure typed, altered on the
+    /// way in: the two share most of their opening (whitespace aside).
+    nonisolated static func typedBecame(_ typed: String, turn: String) -> Bool {
+        let a = Array(typed.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        let b = Array(turn.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        guard a.count >= 16, !b.isEmpty else { return false }
+        var n = 0
+        while n < min(a.count, b.count), a[n] == b[n] { n += 1 }
+        return n >= 16 && Double(n) >= Double(a.count) * 0.6
+    }
+
+    /// A held message typed in twice without the agent taking it.
+    nonisolated static var notTakenText: String {
+        NSLocalizedString("Not delivered — the agent didn't take it in. Edit it or send it again.",
+                          comment: "queued message: typed into the session twice, never became a turn")
+    }
+
+    /// Whether the agent wrote anything after `q` was typed in (its
+    /// transcript grew past the offset recorded then). Unknown — another
+    /// file, no offset — counts as yes: a message is never typed twice on a
+    /// guess.
+    private func transcriptGrew(since q: QueuedMessage) -> Bool {
+        // Still no transcript at all (a fresh Kimi begins its journal only
+        // with its first prompt): nothing came of it.
+        guard let path = q.path else { return currentPath != nil }
+        guard path == currentPath, let buf = buffers[path] else { return true }
+        return buf.end > q.offset
+    }
+
+    private func deliveredInRaw(_ q: QueuedMessage) -> Bool {
+        guard let path = q.path, path == currentPath, let buf = buffers[path],
+              let needle = Self.jsonFragment(q.text) else { return false }
+        let from = max(0, min(buf.data.count, q.offset - buf.base))
+        let tail = buf.data[buf.data.startIndex + from ..< buf.data.endIndex]
+        for line in tail.split(separator: UInt8(ascii: "\n")) where line.count >= needle.count {
+            guard line.range(of: needle) != nil else { continue }
+            if line.range(of: Data("\"queue-operation\"".utf8)) != nil { continue }
+            return true
+        }
+        return false
+    }
+
+    /// `text` as it appears inside a JSON string (no slash escaping, as the
+    /// agents write it).
+    private static func jsonFragment(_ text: String) -> Data? {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.withoutEscapingSlashes]
+        guard let d = try? enc.encode(text), d.count >= 2 else { return nil }
+        return d.subdata(in: 1 ..< d.count - 1)
+    }
+
+    /// Type the held messages in, as one, into the window they were
+    /// queued for (guarded: its identity, an agent in front, no menu up).
+    /// A refusal leaves them on the strip, saying why.
+    private func deliverHeld() {
+        guard let w = queueDriverWindow ?? provider.activeTabIndex(),
+              let next = ChatQueueStore.nextHeld(queued.filter { !ChatQueueStore.deliverable($0) || mayDeliver($0) })
+        else { return }
+        let text = next.text
+        sending = true
+        Task { [weak self] in
+            guard let self else { return }
+            // Where the transcript stands as it goes in: its arrival (or
+            // that nothing came of it) is judged from here.
+            let path = self.currentPath
+            let offset = path.flatMap { self.buffers[$0]?.end } ?? 0
+            let outcome = await self.queueStore.deliverHeld(
+                self.queueKey, driver: self.queueDriver(window: w),
+                fallback: self.provider.paneTarget(window: w))
+            self.sending = false
+            guard outcome == .typed || outcome == .dropped else { return }
+            self.queueStore.update(self.queueKey) { l in
+                for i in l.indices where l[i].id == next.id && l[i].isDelivered {
+                    l[i].path = path
+                    l[i].offset = offset
+                }
+            }
+            self.gate.userSent()
+            self.setWorking(true)
+            // No echo bubble: the strip keeps the row ("Delivered") until
+            // the transcript carries the turn — an echo too showed it twice.
+            _ = text
+            await self.poll()
+        }
+    }
+
+    /// Take a queued message back into the composer to change it. One the
+    /// agent itself holds is pulled out of its queue through its TUI (which
+    /// recalls ALL of its queued messages at once), so they all come back.
+    func editQueued(_ id: UUID) {
+        guard let q = queued.first(where: { $0.id == id }), !q.sending else { return }
+        guard q.editable || q.failure != nil else { return }
+        var back: [QueuedMessage] = [q]
+        if !q.held, case .native(let recall?) = AgentQueueSupport.mode(for: agentKind) {
+            // The TUI hands back its whole queue: take all of ours with it,
+            // then empty the input box (one line per C-u, and the recall
+            // joins them with blank lines).
+            back = queued.filter { !$0.held && !$0.isDelivered }
+            let lines = back.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
+            let keys = [[recall]] + Array(repeating: ["C-u"], count: lines + 1)
+            Task { [weak self] in await self?.runKeys(keys) }
+        }
+        let ids = Set(back.map(\.id))
+        queueStore.update(queueKey) { $0.removeAll { ids.contains($0.id) } }
+        let text = back.map(\.text).joined(separator: "\n\n")
+        composerText = composerText.isEmpty ? text : text + "\n\n" + composerText
+        localRevision &+= 1
+    }
+
+    /// Drop a queued message. Only one Bromure holds (or one that couldn't
+    /// be typed) can be dropped alone.
+    func deleteQueued(_ id: UUID) {
+        guard let q = queued.first(where: { $0.id == id }), q.held || q.failure != nil, !q.sending
+        else { return }
+        queueStore.update(queueKey) { $0.removeAll { $0.id == id } }
+        localRevision &+= 1
+    }
+
+    /// Keystrokes into the agent's tab, one `tmux send-keys` per step.
+    private func runKeys(_ steps: [[String]]) async {
+        guard let idx = provider.activeTabIndex() else { return }
+        let target = provider.paneTarget(window: idx)
+        for keys in steps {
+            let safe = keys.filter { k in !k.isEmpty && k.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" } }
+            guard !safe.isEmpty else { continue }
+            let out = await provider.execGuest(
+                PaneTypeGuard.prelude(target)
+                    + "if _bg; then tmux send-keys -t \"$_bt\" \(safe.joined(separator: " ")); fi",
+                timeout: 10) ?? ""
+            if PaneTypeGuard.refusal(in: out) != nil { return }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
     }
 
     /// Drop pending echoes the real transcript now contains (matched by text),
     /// or that have aged out (the agent never recorded them).
+    /// Each text normalized once per call (`EchoKey`): it runs on every poll,
+    /// and comparing every pending echo with every recorded turn afresh
+    /// re-normalized a 200 KB paste once per turn of the conversation.
     private func reconcilePending() {
+        guard !pending.isEmpty else { return }
+        let now = Date()
+        var recorded: [EchoKey]?
         pending.removeAll { p in
-            if Date().timeIntervalSince(p.added) > p.ttl { return true }
+            if now.timeIntervalSince(p.added) > p.ttl { return true }
             guard case .userText(let t) = p.item.kind else { return true }
-            return parsedItems.contains {
-                if case .userText(let rt) = $0.kind { return rt == t }
-                return false
+            if recorded == nil {
+                recorded = parsedItems.compactMap {
+                    if case .userText(let rt) = $0.kind { return EchoKey(rt) } else { return nil }
+                }
             }
+            let key = EchoKey(t)
+            return recorded!.contains { key.matches($0) }
+        }
+    }
+
+    /// Whether a recorded user turn is the echo sent from the composer —
+    /// the agent may wrap a paste (`<pasted_content>`), turn CRLF into LF,
+    /// or trim the ends; none of that makes it another message.
+    /// A very large paste may be recorded cut short (omp kept 500,000 of
+    /// 778,131 characters) or re-flowed: past `echoProbe` characters, the
+    /// two are the same message when one's opening text (whitespace aside)
+    /// is the other's.
+    nonisolated static func echoMatches(_ echo: String, recorded: String) -> Bool {
+        if echo == recorded { return true }
+        return EchoKey(echo).matches(EchoKey(recorded))
+    }
+    nonisolated static let echoProbe = 4096
+
+    /// A message as `echoMatches` compares it: normalized (paste wrapper,
+    /// line ends, the ends trimmed) and, when long, its opening text with
+    /// the whitespace taken out. Made once per text.
+    struct EchoKey {
+        let text: String
+        let length: Int
+        let head: Substring?
+
+        init(_ s: String) {
+            text = ClaudeTranscriptParser.unwrapPasted(s)
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            length = text.utf8.count
+            let probe = BeautifiedSessionModel.echoProbe
+            head = length >= probe
+                ? Substring(text.prefix(probe * 4).filter { !$0.isWhitespace }.prefix(probe)) : nil
+        }
+
+        func matches(_ other: EchoKey) -> Bool {
+            // Byte-equal first (cheap, and instant on a length mismatch); then
+            // Swift's equality, which also takes a composed "é" for a
+            // decomposed one.
+            if ComposerText.same(text, other.text) || text == other.text { return true }
+            guard let ha = head, let hb = other.head else { return false }
+            return ha.count >= BeautifiedSessionModel.echoProbe / 2 && ha == hb
         }
     }
 
@@ -706,26 +1559,94 @@ final class BeautifiedSessionModel: ObservableObject {
     /// what the user notices), relaxed once it's idle.
     func start() {
         guard pollTask == nil else { return }
+        attachQueue()
         // Shown again (a room, a click back): start from what was downloaded
         // last time; the first read then only asks for what's new.
+        var restored = false
         if buffers.isEmpty, let key = provider.historyCacheKey, let hit = Self.historyCache[key] {
             buffers[hit.path] = hit.buffer
             bufferOrder = [hit.path]
             currentPath = hit.path
             parseDirty = true
+            restored = true
         }
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.poll()
-                let busy = self?.working ?? false
-                try? await Task.sleep(nanoseconds: busy ? 400_000_000 : 1_200_000_000)
+        // The history on hand shows at once — over a tunnel the first poll
+        // (terminal scan, then the fetch) is seconds away — with a quiet
+        // "catching up" until that poll brings it current.
+        // Nothing downloaded yet this run: the conversation shown a moment
+        // ago (launch page, read-back) or this Mac's copy of it, so a chat
+        // that just bound doesn't flash blank until its first read.
+        var seedID: UUID?
+        if !restored, parsedItems.isEmpty, let sid = currentSession?()?.id {
+            if let memo = StageTranscriptMemo.get(sid) {
+                applyParsed(memo)
+                rebuild()
+                loading = false
+            } else if cachedTranscript != nil {
+                seedID = sid
             }
         }
+        if restored || !parsedItems.isEmpty || seedID != nil { catchingUp = true }
+        pollTask = Task { [weak self] in
+            if restored { await self?.showCached() }
+            if let seedID { await self?.showCopy(seedID) }
+            while !Task.isCancelled {
+                await self?.poll()
+                if self?.catchingUp == true { self?.catchingUp = false }
+                let busy = self?.working ?? false
+                let background = self?.background ?? false
+                try? await Task.sleep(nanoseconds: background ? 5_000_000_000 : busy ? 400_000_000 : 1_200_000_000)
+            }
+        }
+    }
+
+    /// The downloaded history, parsed and shown before any network round trip.
+    private func showCached() async {
+        let parsed = await parseCurrent()
+        guard !parsed.isEmpty else { return }
+        applyParsed(parsed)
+        rebuild()
+        if loading { loading = false }
+    }
+
+    /// This Mac's copy of the conversation, before the first read — unless
+    /// something real is already on show.
+    private func showCopy(_ id: UUID) async {
+        guard let data = await cachedTranscript?(id), !data.isEmpty, parsedItems.isEmpty else { return }
+        let agent = agentKind ?? currentSession?()?.tool.rawValue
+        let names = provider.guestPathNames
+        let parsed = await Task.detached(priority: .userInitiated) {
+            GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
+        }.value
+        guard !parsed.isEmpty, parsedItems.isEmpty else { return }
+        applyParsed(parsed)
+        rebuild()
+        if loading { loading = false }
+    }
+
+    /// Showing what's on hand while the first read of this showing lands.
+    @Published var catchingUp = false
+
+    /// Off stage but kept warm (the fat client keeps a few recent chats):
+    /// the transcript keeps streaming, slowly, so coming back is a render
+    /// rather than a download. No terminal scans meanwhile.
+    private(set) var background = false
+
+    func setBackground(_ on: Bool) {
+        guard background != on else { return }
+        background = on
+        guard !on else { return }
+        // Back on stage: read now, not at the end of a slow sleep.
+        pollTask?.cancel()
+        pollTask = nil
+        start()
     }
 
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        // Off screen: the store keeps delivering what this chat held.
+        detachQueue()
         flushSink(force: true)
         if let key = provider.historyCacheKey, let path = currentPath, let buf = buffers[path] {
             Self.remember(key, path: path, buffer: buf)
@@ -755,7 +1676,10 @@ final class BeautifiedSessionModel: ObservableObject {
     private func setWorking(_ w: Bool) {
         // The gate suppresses a stuck `isWorking()` after an interrupt, releasing
         // once the agent truly reports idle.
-        let effective = gate.effective(w) && failure == nil && prompt == nil
+        // A notice (Grok's data-retention banner) waits on nothing: the agent
+        // works under it — the cue must still show (it read "not working"
+        // while Grok's spinner ran).
+        let effective = gate.effective(w) && failure == nil && (prompt == nil || prompt?.kind == .notice)
         if effective {
             if workingSince == nil { workingSince = Date() }
         } else if workingSince != nil {
@@ -765,20 +1689,39 @@ final class BeautifiedSessionModel: ObservableObject {
     }
 
     private func poll() async {
-        let isWorking = provider.isWorking() || seedHolds()
+        let isWorking = provider.isWorking() || seedHolds() || screenSaysBusy
+            || (compactingUntil.map { Date() < $0 } ?? false)
         // Terminal-state scan FIRST and unconditionally: a trust/login prompt (or
         // an auth error) can be on screen before any transcript store exists, so
-        // it must not sit behind the transcript fetch's early return.
-        await scanTerminal()
+        // it must not sit behind the transcript fetch's early return. (Kept
+        // warm off stage: skipped — nobody sees its cards until it's back.)
+        if !background { await scanTerminal() } else { screenSaysBusy = false; await scanDialogOffStage() }
+        // The session's own agent wins over the tab label's guess (an omp
+        // under bun reads "bash", and fell back to the workspace's main
+        // agent: "Message Kimi Code…" over an omp chat).
+        if let s = currentSession?(), s.tool.rawValue != agentKind {
+            loadSlashCommands(agent: s.tool.rawValue, cwd: s.cwd)
+        }
         let known: TranscriptCursor? = currentPath.flatMap { p in buffers[p].map { (p, $0.end) } }
         // Published fields are written only when they change: every write
         // re-renders the whole chat (transcript included), and a poll runs
         // every 0.4–1.2 s — five chats in a room re-laid out their text
         // continuously for nothing.
-        guard let fetch = await provider.fetchTranscript(known: known, mode: .tail, agent: agentKind) else {
-            setWorking(isWorking); if loading { loading = false }; return
+        let read = await provider.readTranscript(known: known, mode: .tail, agent: agentKind)
+        let issue = loadTracker.record(read, at: Date(), showing: !parsedItems.isEmpty, working: isWorking)
+        if issue != loadIssue { loadIssue = issue }
+        guard case .fetched(let fetch) = read else {
+            setWorking(isWorking)
+            // A failed read keeps "Loading…" up until it is called an error;
+            // "no transcript" settles the placeholder at once.
+            let failedRead: Bool = { if case .failed = read { return true }; return false }()
+            if loading, !failedRead || issue != nil { loading = false }
+            reconcileQueued()
+            return
         }
         if loading { loading = false }
+        if transcriptFileSize != fetch.size { transcriptFileSize = fetch.size }
+        if fetch.agentStarted > 0 { agentStartedAt = fetch.agentStarted }
         ingest(fetch)
         flushSink(force: false)
         // Nothing new: nothing to parse. A long history parses off the main
@@ -803,7 +1746,38 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         reconcilePending()
         rebuild()
-        setWorking(provider.isWorking() || seedHolds())
+        setWorking(provider.isWorking() || seedHolds() || transcriptSaysWorking() || screenSaysBusy
+                   || (compactingUntil.map { Date() < $0 } ?? false))
+        reconcileQueued()
+        settleBlockIfIdle()
+        if !background { await backfillContinuity() }
+    }
+
+    /// A first read is a byte window from the file's end — 1.5 MB over a
+    /// fat-client tunnel, which a couple of tool-heavy turns fill — so a
+    /// new or re-read conversation could open on its last exchange alone,
+    /// everything before it behind "Load earlier conversation". Keep the
+    /// last few prompts in view: fetch earlier history until it holds
+    /// `continuityPrompts` of the user's, or `continuityBytes`.
+    private func backfillContinuity() async {
+        for _ in 0..<8 {
+            guard canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
+                  held.data.count < Self.continuityBytes,
+                  Self.userPrompts(in: parsedItems) < Self.continuityPrompts
+            else { return }
+            await loadEarlier()
+            guard let now = buffers[path], now.base < held.base else { return }   // no progress
+        }
+    }
+    nonisolated static let continuityPrompts = 5
+    /// 12 MB (scaled down with `BROMURE_TRANSCRIPT_HISTORY_BYTES`, so the E2E
+    /// "load earlier" checks still find something to load).
+    nonisolated static let continuityBytes = initialHistoryBytes / 2
+    nonisolated static func userPrompts(in items: [TranscriptItem]) -> Int {
+        items.reduce(0) { n, item in
+            if case .userText = item.kind { return n + 1 }
+            return n
+        }
     }
 
     /// Bank one read into the per-file history: append when it continues
@@ -828,6 +1802,7 @@ final class BeautifiedSessionModel: ObservableObject {
             currentPath = f.path
             parseDirty = true
             renderLimit = Self.renderStep
+            renderChars = Self.renderCharStep
             localRevision &+= 1   // another conversation: show its tail
         }
         buffers[f.path] = buf
@@ -864,22 +1839,49 @@ final class BeautifiedSessionModel: ObservableObject {
             input.append(0x0A)
         }
         let t0 = Date()
-        let items = await Task.detached(priority: .userInitiated) { AgentTranscript.parse(input) }.value
+        let names = provider.guestPathNames
+        let items = await Task.detached(priority: .userInitiated) {
+            GuestSharePaths.rewrite(AgentTranscript.parse(input), names: names)
+        }.value
         lastParseAt = Date()
         lastParseDuration = lastParseAt.timeIntervalSince(t0)
-        return items
+        // A bare 451 (Grok's error text names no engine): which block it
+        // was, from the proxy's own record for this workspace.
+        return BromureBlockLog.shared.annotate(items, profileID: currentSession?()?.profileID)
     }
 
     private func applyParsed(_ parsed: [TranscriptItem]) {
         guard parsed != parsedItems else { return }
         TranscriptMarkdownCache.prewarm(parsed)
         parsedItems = parsed
+        noteLiveModel()
         ensureDropImages()
-        // Real transcript progress ⇒ any earlier terminal card is stale.
-        if failure != nil || prompt != nil {
+        // Real transcript progress ⇒ any earlier terminal card is stale —
+        // unless that progress IS the agent recording a refused turn, which
+        // is the failure, typed, in no particular language.
+        let recorded = recordedFailure(in: parsed)
+        // Each NEW refused turn — not only the first of a streak: an agent
+        // that retries on its own (omp on a 502) went back to "working" on
+        // the host after the first one, and the session read "Working"
+        // under four error cards.
+        if recorded != nil {
+            let lastError = parsed.last(where: { if case .agentError = $0.kind { true } else { false } })?.id
+            if lastError != reportedFailureID {
+                reportedFailureID = lastError
+                recordedFailureAppeared?()
+            }
+        }
+        if failure != nil || prompt != nil || recorded != nil {
             let wasLogin = prompt?.kind == .login
-            withAnimation(.easeOut(duration: 0.2)) { failure = nil; prompt = nil }
+            let wasDialog = Self.isDialog(prompt)
+            // A Bromure block is its own row in the transcript ("Blocked by
+            // Bromure"): no red card for it as well.
+            withAnimation(.easeOut(duration: 0.2)) { failure = Self.cardFailure(recorded); prompt = nil }
             if wasLogin { loginPromptChanged?(false) }
+            if wasDialog || awaitingDialogReported != false {
+                awaitingDialogReported = false
+                dialogPromptChanged?(false)
+            }
             hostSignInStatus = nil
         }
     }
@@ -911,8 +1913,24 @@ final class BeautifiedSessionModel: ObservableObject {
                 "held": buf?.data.count ?? 0, "budget": buf?.budget ?? 0,
                 "canLoadEarlier": canLoadEarlier, "items": items.count,
                 "buffers": buffers.count, "lastParseMs": Int(lastParseDuration * 1000),
+                "fileSize": transcriptFileSize, "loading": loading,
+                "loadIssue": loadIssue.map { $0 == .failed ? "failed" : "notFound" } ?? "",
                 "geometry": debugGeometry]
     }
+
+    /// Read again now — the error row's Retry.
+    func retryLoad() {
+        loadTracker = TranscriptLoadTracker()
+        loadIssue = nil
+        if parsedItems.isEmpty { loading = true }
+        guard pollTask != nil else { return }
+        pollTask?.cancel()
+        pollTask = nil
+        start()
+    }
+
+    /// Held history / file size, for the "Load earlier" progress label.
+    var historyHeldBytes: Int { currentPath.flatMap { buffers[$0]?.data.count } ?? 0 }
 
     /// Fetch the conversation before what's held (`earlierHistoryBytes` at a
     /// time) and put it in front.
@@ -949,6 +1967,9 @@ final class BeautifiedSessionModel: ObservableObject {
         guard now.timeIntervalSince(lastScanAt) > Self.scanInterval else { return }
         lastScanAt = now
         guard let screen = await provider.captureScreen() else { return }
+        // The agent's own busy line on screen (Grok's "[stop]", an "esc to
+        // interrupt" hint): working, even when its hooks didn't say so.
+        screenSaysBusy = Self.screenShowsBusy(screen)
         // A host sign-in in flight owns the card: the screen still shows the
         // login menu (or the error that led here) until the agent restarts.
         guard hostSignInStatus == nil else { return }
@@ -964,6 +1985,25 @@ final class BeautifiedSessionModel: ObservableObject {
         // happens to carry a needle is the conversation, not a banner. The
         // transcript holds the same words in that case.
         if let f = newFailure, transcriptEchoes(f.detail) { newFailure = nil }
+        // A failed sign-in means the model can't answer at all: once it has
+        // answered since the latest prompt, any auth wording on screen is
+        // something it printed or ran (a grep through this very detector
+        // raised the card), not the agent's state.
+        if newFailure?.kind == .auth, SessionFailure.modelAnswered(since: parsedItems) { newFailure = nil }
+        // What the agent recorded in its transcript beats any banner read
+        // off the screen: typed by the agent, and still true once the
+        // banner scrolls away.
+        if newPrompt == nil, let recorded = recordedFailure(in: parsedItems) { newFailure = recorded }
+        // A block the transcript carries is shown by its row, not a card.
+        if newFailure?.kind == .blocked, Self.endsOnBlock(parsedItems) { newFailure = nil }
+        // The sidebar's "Asking you something" follows the screen on every
+        // scan (level, not edge): an edge lost to an unmount, a hook or a
+        // restart left it stale for minutes. The store dedupes.
+        let dialogNow = Self.isDialog(newPrompt)
+        if dialogNow != awaitingDialogReported || dialogNow {
+            awaitingDialogReported = dialogNow
+            dialogPromptChanged?(dialogNow)
+        }
         guard newPrompt != prompt || newFailure != failure else { return }
         let wasLogin = prompt?.kind == .login
         withAnimation(.easeOut(duration: 0.2)) {
@@ -972,6 +2012,115 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         let isLogin = newPrompt?.kind == .login
         if isLogin != wasLogin { loginPromptChanged?(isLogin) }
+    }
+
+    /// The last scan saw the agent's busy line.
+    private var screenSaysBusy = false
+
+    /// A `/compact` just went in: working a few seconds even before the
+    /// screen shows its busy line.
+    private var compactingUntil: Date?
+
+    /// `/compact` (with or without instructions).
+    nonisolated static func isCompactCommand(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespaces).lowercased()
+        return t == "/compact" || t.hasPrefix("/compact ")
+    }
+
+    /// A working agent's own line at the bottom of its screen: Grok's
+    /// "◆ Run … 1m22s ↓20.6k [↓][stop]" (its "[stop]" button), Claude's /
+    /// Kimi's "esc to interrupt", "ctrl+c to interrupt". Never a dialog's
+    /// footer ("Ctrl+c:cancel") or an idle hint.
+    nonisolated static func screenShowsBusy(_ screen: String) -> Bool {
+        let tail = screen.split(whereSeparator: \.isNewline).suffix(14)
+        return tail.contains { raw in
+            let l = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            return l.hasSuffix("[stop]") || l == "[stop]" || l.contains("esc to interrupt")
+                || l.contains("ctrl+c to interrupt")
+        }
+    }
+
+    /// Off stage the full scan is skipped, so a dialog answered (or gone)
+    /// while the user looked elsewhere kept the session on "Asking you
+    /// something" for good. A light check every few seconds: only whether a
+    /// dialog is still on screen, for the sidebar — no cards.
+    private func scanDialogOffStage() async {
+        // Also while a message waits on a dialog: one that came up off stage
+        // (a slash command's menu, an approval) is found here, so the session
+        // reads "Asking you something" and its card is ready on return.
+        guard Self.isDialog(prompt) || awaitingDialogReported != false
+                || queued.contains(where: \.waitingOnDialog) else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastOffStageScanAt) > 5 else { return }
+        lastOffStageScanAt = now
+        guard let screen = await provider.captureScreen() else { return }
+        let state = TerminalScan.classify(screen, agent: agentKind)
+        let p: TerminalPrompt? = { if case .prompt(let p) = state { return p } else { return nil } }()
+        if Self.isDialog(p) {
+            if p != prompt { prompt = p }
+            if awaitingDialogReported != true {
+                awaitingDialogReported = true
+                dialogPromptChanged?(true)
+            }
+            return
+        }
+        awaitingDialogReported = false
+        if Self.isDialog(prompt) { prompt = nil }
+        dialogPromptChanged?(false)
+    }
+    private var lastOffStageScanAt = Date.distantPast
+    /// The last verdict handed to `dialogPromptChanged` (nil: none yet, so
+    /// the first scan reports either way — a flag left by an earlier chat
+    /// for this session is corrected).
+    private var awaitingDialogReported: Bool?
+
+    /// Tell the header which model this chat's transcript names (see
+    /// `TranscriptSearchIndex.liveModels`). Throttled; off the main actor.
+    private func noteLiveModel() {
+        let now = Date()
+        guard now.timeIntervalSince(lastModelScanAt) > 10, let sid = currentSession?()?.id,
+              let path = currentPath, let data = buffers[path]?.data, !data.isEmpty else { return }
+        lastModelScanAt = now
+        Task { @MainActor in
+            let m = await Task.detached(priority: .utility) {
+                TranscriptSearchIndex.liveModel(in: data)
+            }.value
+            if let m { TranscriptSearchIndex.shared.noteLiveModel(sid, m) }
+        }
+    }
+    private var lastModelScanAt = Date.distantPast
+
+    /// The card for a recorded failure: none for a Bromure block (its
+    /// transcript row says it — the two showed for every block).
+    nonisolated static func cardFailure(_ f: SessionFailure?) -> SessionFailure? {
+        f?.kind == .blocked ? nil : f
+    }
+
+    /// The conversation's last word is a Bromure block.
+    nonisolated static func endsOnBlock(_ items: [TranscriptItem]) -> Bool {
+        guard let last = items.last, case .agentError(let e) = last.kind else { return false }
+        return e.kind == .blocked
+    }
+
+    /// After a block the agent is back at its prompt with nothing to ask:
+    /// "Needs you" (its StopFailure, the refused-turn signal) is stale.
+    /// Level, every poll, once it's been idle a few seconds with no dialog.
+    var blockSettled: (() -> Void)?
+    private func settleBlockIfIdle() {
+        guard blockSettled != nil, Self.endsOnBlock(parsedItems), !working, !dialogOpen, prompt == nil,
+              let idle = idleSince, Date().timeIntervalSince(idle) > 3 else { return }
+        blockSettled?()
+    }
+
+    /// `SessionFailure.recorded(in:)`, unless the user has moved past it.
+    private func recordedFailure(in items: [TranscriptItem]) -> SessionFailure? {
+        guard let last = items.last(where: { if case .agentError = $0.kind { true } else { false } }),
+              last.id != settledFailureID else { return nil }
+        return SessionFailure.recorded(in: items)
+    }
+
+    private func settleRecordedFailure() {
+        settledFailureID = parsedItems.last(where: { if case .agentError = $0.kind { true } else { false } })?.id
     }
 
     /// Whether a terminal line is a fragment of something the conversation
@@ -1018,6 +2167,18 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Answer a generic modal picker with one of its options, or dismiss it
     /// (Esc — every Claude Code nudge takes it as "not now"). Optimistic:
     /// the card goes, the next scan confirms the screen moved on.
+    /// Answer a checklist with the boxes the user left ticked (Space on each
+    /// row that changes, then its button), or dismiss it (Esc).
+    func answerChecklist(_ want: [Bool]?) {
+        guard let p = prompt, p.kind == .checklist, let list = p.checklist else { return }
+        withAnimation(.easeOut(duration: 0.2)) { prompt = nil }
+        let keys = want.map { AgentScreen.checklistKeys(list, want: $0) } ?? ["Escape"]
+        Task { [weak self] in
+            await self?.provider.pressKeys(keys)
+            await self?.rescanSoon()
+        }
+    }
+
     func answerPicker(_ index: Int?) {
         guard let p = prompt, p.kind == .picker else { return }
         withAnimation(.easeOut(duration: 0.2)) { prompt = nil }
@@ -1064,10 +2225,51 @@ final class BeautifiedSessionModel: ObservableObject {
         // Force the cue off now; the next poll feeds the real `isWorking()` to
         // the gate, which keeps it suppressed until the agent reports idle.
         withAnimation(.easeOut(duration: 0.15)) { working = false; workingSince = nil }
+        // omp hands its whole queue back to the input box on Esc — not sent,
+        // and our rows for it then aged out of the strip unseen. Ours are
+        // taken back and held here, typed in (and confirmed) once it's idle.
+        let restored = AgentQueueSupport.escapeRestoresQueue(agentKind)
+            ? queued.filter { !$0.held && !$0.isDelivered && !$0.sending } : []
         Task { [weak self] in
             await self?.provider.pressKeys(["Escape"])
+            if !restored.isEmpty { await self?.reclaimAfterEscape(restored) }
             await self?.rescanSoon()
         }
+    }
+
+    /// After Esc: when the agent put our queued messages back into its input
+    /// box, empty the box and hold them here instead.
+    private func reclaimAfterEscape(_ restored: [QueuedMessage]) async {
+        guard let first = restored.first, let w = provider.activeTabIndex() else { return }
+        let target = provider.paneTarget(window: w)
+        let probe = PaneTypeGuard.resolve(target)
+            + "[ -n \"$_bt\" ] && tmux capture-pane -p -e -t \"$_bt\" 2>/dev/null | tail -n 30"
+        var inBox = false
+        for _ in 0..<8 {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            let screen = await provider.execGuest(probe, timeout: 8) ?? ""
+            if case .text(let d) = AgentInputBox.content(screen), AgentInputBox.isOwn(d, of: first.text) {
+                inBox = true
+                break
+            }
+        }
+        guard inBox else {
+            BACDebug.log("beautified", "after Esc: queued text not in the input box — left as is")
+            return
+        }
+        // One C-u per line (the restore joins them with blank lines).
+        let lines = restored.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
+        await runKeys(Array(repeating: ["C-u"], count: lines + 1))
+        let pinned = await provider.pinnedTarget(window: w)
+        let ids = Set(restored.map(\.id))
+        queueStore.update(queueKey) { l in
+            for i in l.indices where ids.contains(l[i].id) {
+                l[i].held = true
+                l[i].editable = true
+                l[i].target = pinned
+            }
+        }
+        BACDebug.log("beautified", "after Esc: \(restored.count) queued message(s) taken back to hold")
     }
 
     /// The AskUserQuestion round the agent is waiting on right now: the
@@ -1097,7 +2299,10 @@ final class BeautifiedSessionModel: ObservableObject {
         guard await provider.execGuest(CodingTaskEngine.pickerVisibleCommand(tabIndex: idx), timeout: 8) != nil
         else { return false }
         setWorking(true)
-        let ok = await provider.execGuest(CodingTaskEngine.answerKeysCommand(tabIndex: idx, keys: keys), timeout: 60) != nil
+        // The session's own window, re-checked before every key.
+        let ok = await provider.execGuest(
+            PaneTypeGuard.answerKeysCommand(target: provider.paneTarget(window: idx), keys: keys),
+            timeout: 60) != nil
         await rescanSoon()
         return ok
     }
@@ -1124,7 +2329,7 @@ final class BeautifiedSessionModel: ObservableObject {
         for item in parsedItems {
             guard case .userText(let text) = item.kind else { continue }
             for path in GuestDrop.imagePaths(in: text) where imagesByPath[path] == nil {
-                if let kept = DropImageStore.load(path) { imagesByPath[path] = kept }
+                if let kept = DropImageStore.load(GuestDrop.canonical(path)) { imagesByPath[path] = kept }
             }
         }
     }
@@ -1148,13 +2353,31 @@ final class BeautifiedSessionModel: ObservableObject {
         let raw = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         let atts = pendingAttachments
         guard !raw.isEmpty || !atts.isEmpty, !sending else { return }
+        // /term is Bromure's, not the agent's: the terminal drawer opens.
+        if atts.isEmpty, Self.isTerminalCommand(raw), canOpenTerminal {
+            composerText = ""
+            showTerminal()
+            return
+        }
         // A slash command: the TUI answers on screen, not in the transcript.
         let isCommand = raw.hasPrefix("/") && atts.isEmpty && !raw.contains("\n")
+        // The agent is asking the user something (an approval, a picker):
+        // typing now would answer it — a "1" picks "Approve once", a Return
+        // the highlighted option — so the message waits on the strip until
+        // the card is answered. The guest re-checks the screen right before
+        // every keystroke too (`PaneTypeGuard.typeCommand`).
+        if dialogOpen {
+            composerText = ""
+            pendingAttachments = []
+            holdForDialog(raw, attachments: atts)
+            return
+        }
         dismissCommandOutput()
         composerText = ""
         pendingAttachments = []
         failure = nil
         prompt = nil
+        settleRecordedFailure()
         gate.userSent()                   // a fresh send supersedes any prior stop
         // A slash command (/model, /cost, /help…) drives the TUI's own overlay;
         // it does NOT start an agent turn. Marking it "working" showed the
@@ -1163,7 +2386,19 @@ final class BeautifiedSessionModel: ObservableObject {
         // ever cleared it, so the chat sat on a phantom "Thinking…" while the
         // TUI was really waiting on the user inside a menu (the reported
         // desync). Only a real message marks the agent as working.
-        if !isCommand { setWorking(true) }
+        // Busy: this message waits its turn — in the agent's own queue, or
+        // (an agent whose queue can't be edited) held here until it's idle.
+        let queuing = working && !isCommand
+        let mode = AgentQueueSupport.mode(for: agentKind)
+        let native = queuing && mode != .held
+        let editable = !native || mode != .native(recall: nil)
+        let queuedPath = currentPath
+        let queuedOffset = currentPath.flatMap { buffers[$0]?.end } ?? 0
+        let queuedWindow = provider.activeTabIndex()
+        // `/compact` is a turn of its own (the model summarizes): working
+        // until the screen's busy line goes — it fires no hook to say so.
+        if Self.isCompactCommand(raw) { compactingUntil = Date().addingTimeInterval(8) }
+        if !isCommand || Self.isCompactCommand(raw) { setWorking(true) }
         sending = true
 
         // Deterministic guest paths for this batch (computed before staging so
@@ -1190,18 +2425,185 @@ final class BeautifiedSessionModel: ObservableObject {
             // transcript never carries it as plain text (Claude Code writes
             // a tagged record the parser drops), so an echo would sit there
             // until it aged out.
-            if !isCommand { self.appendOptimistic(.userText(text)) }
+            if queuing {
+                if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
+                // A held one is typed later — maybe with this chat off
+                // screen and the index someone else's: it carries the
+                // window it is for, pinned to its stable id.
+                var target: PaneTarget?
+                if !native, let w = queuedWindow { target = await self.provider.pinnedTarget(window: w) }
+                var entry = QueuedMessage(text: text, held: !native, editable: editable,
+                                          baseline: self.userTurnCount,
+                                          path: queuedPath, offset: queuedOffset, target: target)
+                entry.sessionID = self.currentSession?()?.id
+                self.bindSessionQueue()
+                let key = self.queueKey
+                self.queueStore.update(key) { $0.append(entry) }
+                let outcome: ChatQueueStore.Outcome = native ? await self.provider.send(text) : .typed
+                if outcome != .typed {
+                    // Never typed (a dialog came up, or typing failed):
+                    // Bromure holds it, saying why when it can't retry.
+                    var pinned: PaneTarget?
+                    if let w = queuedWindow { pinned = await self.provider.pinnedTarget(window: w) }
+                    self.queueStore.update(key) { l in
+                        guard let i = l.firstIndex(where: { $0.id == entry.id }) else { return }
+                        l[i].held = true
+                        l[i].editable = true
+                        l[i].target = pinned
+                        switch outcome {
+                        case .held: l[i].awaitingAnswer = true
+                        case .refused(let r): l[i].failure = ChatQueueStore.failureText(r)
+                        case .unconfirmed: l[i].failure = ChatQueueStore.notDeliveredText
+                        case .dropped: l[i].failure = Self.notTakenText
+                        default: l[i].failure = ChatQueueStore.notTypedText
+                        }
+                    }
+                    await self.rescanSoon()
+                }
+                self.sending = false
+                return
+            }
+            let echo: Int? = isCommand ? nil : self.appendOptimistic(.userText(text))
             if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
             let before = isCommand ? await self.provider.captureScreen() : nil
             // Sent exactly as typed: the TUIs run the completion their popup
             // highlights, which is the exact match when the name is right —
             // hence the palette offers only names the agent really has (a
             // trailing space would turn it into a plain message for some).
-            await self.provider.send(text)
+            let outcome = await self.provider.send(text)
             self.sending = false
+            switch outcome {
+            case .held:
+                // A menu or dialog was up after all: nothing went in. The
+                // message waits on the strip until it's answered.
+                if let echo { self.removeOptimistic(echo) }
+                self.setWorking(false)
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: true)
+                await self.rescanSoon()
+                return
+            case .refused(let r):
+                // Nothing typed (the tab is gone or someone else's, or no
+                // agent holds it): never a phantom bubble — and never
+                // silent. Quietly putting the text back in the composer
+                // read as "it emptied and nothing happened" (a renamed
+                // Sidecar session refused every send). On the strip, with
+                // why, to edit or drop.
+                if let echo { self.removeOptimistic(echo) }
+                self.setWorking(false)
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                                       failure: ChatQueueStore.failureText(r))
+                return
+            case .unconfirmed:
+                // In the agent's box, but its Enter never took: not shown as
+                // sent — on the strip, "Not delivered".
+                if let echo { self.removeOptimistic(echo) }
+                self.setWorking(false)
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                                       failure: ChatQueueStore.notDeliveredText)
+                return
+            case .dropped:
+                // Its Enter never took and the box is empty: the agent
+                // didn't keep it. On the strip, "Not delivered" — and gone
+                // from it on its own if a turn turns out to carry it.
+                if let echo { self.removeOptimistic(echo) }
+                self.setWorking(false)
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                                       failure: Self.notTakenText)
+                return
+            case .failed, .unreachable:
+                // Typing it failed (tmux refused it, the machine didn't
+                // answer): never shown as sent — it stays on the strip,
+                // "Not sent", to edit or drop.
+                if let echo { self.removeOptimistic(echo) }
+                self.setWorking(false)
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                                       failure: ChatQueueStore.notTypedText)
+                return
+            case .typed:
+                break
+            }
             if isCommand { self.watchCommand(raw, before: before) }
             await self.poll()
         }
+    }
+
+    /// The agent is asking the user something right now — an approval or a
+    /// picker card, a checklist, a trust dialog, a pending question, a
+    /// sign-in method menu — so text typed into its tab would answer it.
+    var dialogOpen: Bool {
+        if !pendingQuestionItems.isEmpty { return true }
+        guard let p = prompt else { return false }
+        switch p.kind {
+        case .picker, .checklist, .trust: return true
+        case .login: return !p.loginMethods.isEmpty || p.awaitingCode
+        case .notice: return false
+        }
+    }
+
+    /// The dialog a held message waits on has a card here to answer it:
+    /// a recognized dialog, or the agent's terminal inline.
+    var dialogCardShown: Bool { dialogOpen || commandOutput?.live == true }
+
+    /// Close whatever menu holds the queue (the row's "Dismiss (Esc)"):
+    /// Esc into the agent's tab, then a fresh look — the held message goes
+    /// in once the agent is back at its prompt.
+    func dismissAgentDialog() {
+        // A command card whose menu is up closes it itself (with Esc).
+        if commandOutput?.menu == true || commandOutput?.live == true {
+            dismissCommandOutput()
+            Task { [weak self] in await self?.rescanSoon() }
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.provider.pressKeys(["Escape"])
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            await self.rescanSoon()
+        }
+    }
+
+    /// Hold a composer message (and its attachments) because a dialog is
+    /// up: staged now, typed once the dialog has closed and the agent is
+    /// free.
+    private func holdForDialog(_ raw: String, attachments atts: [DroppedFile]) {
+        let window = provider.activeTabIndex()
+        let stamp = GuestDrop.stamp()
+        let prefixed = atts.map {
+            DroppedFile(name: "\(stamp)_\($0.name)", data: $0.data, isImage: $0.isImage, folder: $0.folder)
+        }
+        let attPaths = prefixed.enumerated().map { GuestDrop.path(index: $0.offset, name: $0.element.name) }
+        for (i, f) in prefixed.enumerated() where f.isImage {
+            imagesByPath[attPaths[i]] = f.data
+            DropImageStore.store(f.data, for: attPaths[i])
+        }
+        sending = true
+        Task { [weak self] in
+            guard let self else { return }
+            var text = await self.translateHostFiles(in: raw)
+            if !attPaths.isEmpty {
+                text = text.isEmpty ? attPaths.joined(separator: " ")
+                                    : text + " " + attPaths.joined(separator: " ")
+            }
+            if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
+            await self.enqueueHeld(text, window: window, awaitingAnswer: true)
+            self.sending = false
+        }
+    }
+
+    /// Put `text` on the strip as held by Bromure, for the window it is for
+    /// (pinned to its stable id).
+    private func enqueueHeld(_ text: String, window: Int?, awaitingAnswer: Bool,
+                             failure: String? = nil) async {
+        var target: PaneTarget?
+        if let w = window { target = await provider.pinnedTarget(window: w) }
+        // Keyed by the session once it's known, so the strip shows it now.
+        bindSessionQueue()
+        var q = QueuedMessage(text: text, held: true, editable: true, baseline: userTurnCount,
+                              path: currentPath, offset: currentPath.flatMap { buffers[$0]?.end } ?? 0,
+                              target: target, failure: failure, awaitingAnswer: awaitingAnswer ? true : nil)
+        q.sessionID = currentSession?()?.id
+        queueStore.update(queueKey) { $0.append(q) }
+        localRevision &+= 1
     }
 
     // MARK: Slash commands → what the terminal printed
@@ -1220,6 +2622,27 @@ final class BeautifiedSessionModel: ObservableObject {
         var live: Bool
         /// The watch is over; what's here is what the command printed.
         var settled: Bool
+        /// The user opened the inline terminal themselves (the card's toggle),
+        /// rather than the watch bringing it up for a menu.
+        var byHand = false
+
+        /// The card only repeats a dialog the choice card below already
+        /// offers (Codex's `/model` showed twice — the inline terminal the
+        /// watch had brought up for the menu, then the card): hidden while
+        /// that card is up. A terminal the user opened by hand always shows.
+        func isRedundant(with prompt: TerminalPrompt?) -> Bool {
+            guard !(live && byHand), let prompt else { return false }
+            return prompt.kind == .picker || prompt.kind == .checklist
+        }
+
+        /// Whether the watch should bring the terminal inline for a menu on
+        /// `screen`: not when the menu reads as a choice card (a picker or a
+        /// checklist) — the card answers it, natively.
+        static func goesLive(menu: Bool, screen: String, agent: String?) -> Bool {
+            guard menu else { return false }
+            guard let p = TerminalPrompt.detect(inScreen: screen, agent: agent) else { return true }
+            return !(p.kind == .picker || p.kind == .checklist)
+        }
     }
     @Published var commandOutput: CommandOutput?
     private var commandWatch: Task<Void, Never>?
@@ -1261,10 +2684,40 @@ final class BeautifiedSessionModel: ObservableObject {
         }
     }
 
+    /// Grok's data-retention banner, answered from its card: a click on its
+    /// own "[Opt out]" / "[Opt in]" button (the only way it takes an answer).
+    /// The card goes once the banner leaves the screen (the next scan).
+    func answerPrivacyNotice(optIn: Bool) {
+        Task { [weak self] in
+            guard let self, let idx = self.provider.activeTabIndex() else { return }
+            let label = optIn ? AgentScreen.optInButton : AgentScreen.optOutButton
+            _ = await self.provider.execGuest(
+                PaneTypeGuard.prelude(self.provider.paneTarget(window: idx))
+                + "if _bg; then \(AgentScreen.clickLabelCommand(label)); fi; true", timeout: 15)
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            self.lastScanAt = .distantPast
+        }
+    }
+
+    /// A dialog that didn't fit (`TerminalPrompt.partial`): the agent's own
+    /// terminal, inline, to answer it there. Goes away once the dialog does.
+    func answerInTerminal() {
+        guard inlineTerminal != nil else { return }
+        commandWatch?.cancel(); commandWatch = nil
+        commandBaseline = []
+        withAnimation(.easeOut(duration: 0.15)) {
+            commandOutput = CommandOutput(command: "", lines: [], menu: true, live: true,
+                                          settled: false, byHand: true)
+        }
+        setInlineMouse(true)
+        watchLive("")
+    }
+
     /// Show the terminal inline for the current command (or fold it back).
     func toggleLiveCommand() {
         guard var out = commandOutput else { return }
         out.live.toggle()
+        out.byHand = out.live
         commandWatch?.cancel(); commandWatch = nil
         withAnimation(.easeOut(duration: 0.15)) { commandOutput = out }
         setInlineMouse(out.live)
@@ -1293,10 +2746,14 @@ final class BeautifiedSessionModel: ObservableObject {
                 let last = i == gaps.count - 1
                 if let screen = await self.provider.captureScreen() {
                     out.menu = Self.looksLikeMenu(screen)
+                    // Not the conversation re-wrapped by the redraw: only
+                    // what the command printed.
                     out.lines = Self.commandLines(screen, excluding: self.commandBaseline, command: command)
+                        .filter { !self.transcriptEchoes($0) }
                     // A menu is answered in the terminal — so bring the
                     // terminal here, the moment it shows.
-                    if out.menu, self.inlineTerminal != nil {
+                    if self.inlineTerminal != nil,
+                       CommandOutput.goesLive(menu: out.menu, screen: screen, agent: self.agentKind) {
                         out.live = true
                         withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = out }
                         self.setInlineMouse(true)
@@ -1344,11 +2801,18 @@ final class BeautifiedSessionModel: ObservableObject {
                 guard sawMenu else { continue }
                 calm += 1
                 guard calm >= 2 else { continue }
+                if command.isEmpty {
+                    // Opened to answer a dialog: nothing to show once it's gone.
+                    self.setInlineMouse(false)
+                    withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = nil }
+                    return
+                }
                 out.live = false
                 out.menu = false
                 out.settled = true
                 self.setInlineMouse(false)
                 out.lines = Self.commandLines(screen, excluding: self.commandBaseline, command: command)
+                    .filter { !self.transcriptEchoes($0) }
                 withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = out }
                 return
             }
@@ -1388,43 +2852,36 @@ final class BeautifiedSessionModel: ObservableObject {
     /// to exit", "↑/↓ providers · Esc close"). Never the idle prompt's own
     /// hints ("? for shortcuts", "esc to interrupt").
     nonisolated static func menuHints(_ screen: String) -> Bool {
-        let tail = screen.split(whereSeparator: \.isNewline).suffix(30).joined(separator: "\n").lowercased()
-        return tail.contains("↑/↓") || tail.contains("↑↓") || tail.contains("enter to select")
-            || tail.contains("enter to confirm") || tail.contains("esc to cancel") || tail.contains("esc to close")
-            || tail.contains("esc to exit") || tail.contains("esc close")
-            || (tail.contains("arrow") && tail.contains("select"))
+        let tail = screen.split(whereSeparator: \.isNewline).suffix(30).joined(separator: "\n")
+        let low = AgentPhrases.normalize(tail)
+        return AgentPhrases.matches(tail, .footer, agent: nil)
+            || (low.contains("arrow") && low.contains("select"))
     }
 
-    /// A menu is open: its footer hints, or a highlighted row ("❯ …") that
-    /// sits inside a list — not Claude Code's input prompt, which starts
-    /// with the same glyph but has nothing but chrome and "? for shortcuts"
-    /// under it.
+    /// A menu is open: its footer hints, or the shape of one — a cursor on
+    /// one of sibling options at the bottom of the screen (`AgentScreen`),
+    /// never the agent's input box, which starts with the same glyph.
     nonisolated static func looksLikeMenu(_ screen: String) -> Bool {
         if menuHints(screen) { return true }
-        let lines = Array(screen.split(whereSeparator: \.isNewline).suffix(40)).map { String($0) }
-        for (i, raw) in lines.enumerated() {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("❯ ") else { continue }
-            let below = lines[(i + 1)..<min(lines.count, i + 4)]
-            let listy = below.contains { r in
-                let t = r.trimmingCharacters(in: .whitespaces)
-                return !t.isEmpty && !isChrome(t) && !t.lowercased().contains("for shortcuts")
-                    && !t.lowercased().contains("esc to interrupt")
-            }
-            if listy { return true }
-        }
-        return false
+        let lines = screen.split(whereSeparator: \.isNewline).suffix(40).map(String.init)
+        return AgentScreen.liveMenu(lines, after: -1) != nil
     }
 
-    /// Rewrite host file paths in `text` to guest paths, uploading each file.
-    /// Returns `text` unchanged (fast, no I/O) when it names no host files.
+    /// Rewrite host file paths in `text` to guest paths, uploading each file
+    /// — only files the user dropped or pasted as files (`offeredHostPaths`);
+    /// a typed path is text, never an upload. Returns `text` unchanged (fast,
+    /// no I/O) when it names no such file.
     private func translateHostFiles(in text: String) async -> String {
-        var tokens = Set(text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init))
-        tokens.insert(text)   // whole-string case: composer holds just the path
+        let offered = DroppedFile.offeredHostPaths()
+        guard !offered.isEmpty else { return text }
+        // Only pieces naming an offered file, short enough for a path (a big
+        // paste is tens of thousands of tokens, each a file-system lookup).
+        // Lines too: the whole-string case (the composer holds just a path,
+        // maybe with spaces).
         var hits: [(token: String, file: DroppedFile)] = []
         let stamp = GuestDrop.stamp()
-        for tok in tokens {
-            guard let url = Self.hostFileURL(tok),
+        for tok in DroppedFile.pathCandidates(in: text, offered: offered) {
+            guard let url = DroppedFile.hostFileURL(tok, offered: offered),
                   let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= DroppedFile.maxBytes else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             hits.append((tok, DroppedFile(name: "\(stamp)_\(url.lastPathComponent)", data: data, isImage: isImg)))
@@ -1441,18 +2898,6 @@ final class BeautifiedSessionModel: ObservableObject {
             }
         }
         return out
-    }
-
-    /// A readable host FILE for `token` (absolute path, `~`, or `file://`), or nil.
-    private static func hostFileURL(_ token: String) -> URL? {
-        var path = token
-        if path.hasPrefix("file://"), let u = URL(string: path) { path = u.path }
-        else if path.hasPrefix("~") { path = (path as NSString).expandingTildeInPath }
-        guard path.hasPrefix("/") else { return nil }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue
-        else { return nil }
-        return URL(fileURLWithPath: path)
     }
 }
 
@@ -1486,6 +2931,23 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
     }
 
     func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
+
+    func isWorking(window: Int) -> Bool? { pane?.chatIsWorking(window: window) }
+
+    var guestPathNames: [String: String] {
+        guard let pane else { return [:] }
+        return GuestSharePaths.names(mountNames: SessionDisk.sharedFolders(pane.profile.folderPaths).map(\.mountName))
+    }
+
+    /// The Kimi session the engine pinned for the session in this tab (B72):
+    /// its own journal, never the folder's newest.
+    func transcriptPin(window: Int) -> TranscriptPin {
+        pane?.chatTranscriptPin(window: window) ?? TranscriptPin()
+    }
+
+    func paneTarget(window: Int) -> PaneTarget {
+        pane?.chatPaneTarget(window: window) ?? .index(window)
+    }
 }
 
 /// The last messages of a chat, bottom-anchored: what shows (and re-flows)
@@ -1562,6 +3024,10 @@ private struct DelegationPanelHost: View {
 private final class TailFollow {
     /// Follow the tail through layout drift.
     var sticky = true
+    /// The tail marker's last reported position (nil: unloaded by the lazy
+    /// stack). The watchdog reads it: a view stuck blank reports nothing
+    /// new, so the preference callback alone never gets to fix it.
+    var lastMarker: CGFloat?
     /// The user is scrolling this transcript: a wheel or drag over it
     /// just now (a wheel notch scrolls on for a few frames after it).
     var userScrolling: Bool {
@@ -1570,6 +3036,65 @@ private final class TailFollow {
         return v.bounds.contains(v.convert(e.location, from: nil))
     }
     let probe = TailFollowProbe.Box()
+    /// The transcript's laid-out height. Kept here, not in view state: it
+    /// changes on every re-measure of the lazy rows, and as state each
+    /// change re-rendered the view that re-measures them.
+    var contentHeight: CGFloat = 0
+
+    // MARK: Corrective scrolls
+    //
+    // Every scroll the view makes on its own (follow the tail, snap back
+    // from past the end, the watchdog) goes through `snap`: never inside
+    // the layout pass that noticed the drift (a scroll there re-runs the
+    // lazy placement in the same transaction — at a narrow column, where
+    // rows re-measure by whole screens, it never converged and the app
+    // froze), at most one pending, and only so many in a row before it
+    // waits for something new (B23).
+
+    private var snapPending = false
+    private var snapAnimated = false
+    private var snapsInBurst = 0
+    private var burstStart = Date.distantPast
+    /// Snaps allowed per burst before backing off; a burst is `burstWindow`.
+    static let snapBudget = 6
+    static let burstWindow: TimeInterval = 1.0
+    /// Snaps given up on: the next is allowed after `backoffUntil`.
+    private(set) var backoffUntil = Date.distantPast
+    /// How many snaps were refused for the budget (debug geometry).
+    private(set) var refused = 0
+
+    /// Scroll to the tail on the next turn of the main queue. Coalesced
+    /// (one pending at a time) and budgeted: a layout that keeps moving
+    /// the tail gets `snapBudget` tries a second, then a pause.
+    func snap(_ perform: @escaping (_ animated: Bool) -> Void, animated: Bool = false) {
+        if animated { snapAnimated = true }
+        guard !snapPending else { return }
+        let now = Date()
+        guard now >= backoffUntil else { refused += 1; return }
+        if now.timeIntervalSince(burstStart) > Self.burstWindow {
+            burstStart = now
+            snapsInBurst = 0
+        }
+        snapsInBurst += 1
+        if snapsInBurst > Self.snapBudget {
+            backoffUntil = now.addingTimeInterval(Self.burstWindow)
+            refused += 1
+            return
+        }
+        snapPending = true
+        DispatchQueue.main.async { [self] in
+            snapPending = false
+            let a = snapAnimated
+            snapAnimated = false
+            perform(a)
+        }
+    }
+
+    /// Something new happened (content, the user, a size): a fresh budget.
+    func resetBudget() {
+        snapsInBurst = 0
+        backoffUntil = .distantPast
+    }
 
     private struct UserEvent { let at: Date; weak var window: NSWindow?; let location: NSPoint }
     private static var lastEvent: UserEvent?
@@ -1584,8 +3109,63 @@ private final class TailFollow {
     }
 }
 
+/// "Catching up…" over a chat shown from its cached history.
+private struct CatchingUpPill: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini)
+            Text(NSLocalizedString("Catching up…", comment: "beautified: cached history shown, fetching the latest"))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(.regularMaterial))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+        .shadow(color: .black.opacity(0.10), radius: 6, y: 2)
+    }
+}
+
 /// An inert view behind a transcript's scroll view: where it sits is where
 /// the user's scrolling counts as theirs.
+/// Drops a click on a card that moved a moment ago: the pointer was aimed
+/// at what sat there before the layout shifted (a queue row came in and
+/// pushed the approval card up a row — "Approve once" became "Reject").
+final class LayoutShiftGuard {
+    /// How long after a move clicks are refused.
+    static let settle: TimeInterval = 0.45
+    private(set) var movedAt = Date.distantPast
+    private var lastY: CGFloat?
+
+    /// The card's position now. Appearing counts as a move (it came in
+    /// under a pointer aimed at something else).
+    func note(_ y: CGFloat, now: Date = Date()) {
+        if lastY.map({ abs($0 - y) > 1 }) ?? true { movedAt = now }
+        lastY = y
+    }
+
+    func allows(now: Date = Date()) -> Bool { now.timeIntervalSince(movedAt) >= Self.settle }
+}
+
+/// The chat's rows for the last inputs: a render with the same items,
+/// width step and expanded messages reuses them instead of cutting every
+/// reply again (the body runs on every model change).
+final class TranscriptRowsMemo {
+    private var items: [TranscriptItem] = []
+    private var chunkLimit = -1
+    private var expanded: Set<Int> = []
+    private var cached = TranscriptLayout()
+
+    func layout(_ items: [TranscriptItem], chunkLimit: Int, expanded: Set<Int>) -> TranscriptLayout {
+        if chunkLimit == self.chunkLimit, expanded == self.expanded, items == self.items { return cached }
+        self.items = items
+        self.chunkLimit = chunkLimit
+        self.expanded = expanded
+        cached = TranscriptRow.layout(items, chunkLimit: chunkLimit, expanded: expanded)
+        return cached
+    }
+}
+
 private struct TailFollowProbe: NSViewRepresentable {
     final class Box { weak var view: NSView? }
     final class Inert: NSView {
@@ -1634,6 +3214,42 @@ struct BeautifiedSessionView: View {
     /// The transcript's size, and the size it holds during a drag.
     @State private var transcriptSize: CGSize = .zero
     @State private var resizeFrozen: CGSize?
+    /// The chat's rows, kept between renders (a reference: never re-renders).
+    @State private var rowsMemo = TranscriptRowsMemo()
+
+    /// The newest items the chat lays out: at most `limit` of them, and
+    /// newer-to-older until about `chars` of text (`renderWeight`) — the
+    /// item that crosses the budget still shows (a huge reply is never
+    /// cut off), and so do at least two.
+    static func renderWindow(_ items: [TranscriptItem], limit: Int, chars: Int,
+                             expanded: Set<Int> = []) -> [TranscriptItem] {
+        var total = 0
+        var n = 0
+        for item in items.suffix(max(0, limit)).reversed() {
+            if n >= 2, total >= chars { break }
+            total += renderWeight(item, expanded: expanded.contains(item.id))
+            n += 1
+        }
+        return Array(items.suffix(n))
+    }
+
+    /// What an item costs the eager rows: what of it shows — the agent's
+    /// reply up to its Show all (`TranscriptRow.expandedChars`, all of it
+    /// opened); a message of yours, its collapsed preview or opened start;
+    /// a tool call, its result or a thought folds into an activity line, a
+    /// small fixed cost.
+    static func renderWeight(_ item: TranscriptItem, expanded: Bool = false) -> Int {
+        switch item.kind {
+        case .assistantText(let t): return expanded ? t.utf16.count : min(t.utf16.count, TranscriptRow.expandedChars)
+        case .userText(let t):
+            return min(t.utf16.count, expanded ? TranscriptRow.expandedChars : TranscriptRow.chunkChars * 3 / 2)
+        default: return 120
+        }
+    }
+
+    static func renderWeight<S: Sequence>(_ items: S) -> Int where S.Element == TranscriptItem {
+        items.reduce(0) { $0 + renderWeight($1) }
+    }
 
     /// The last messages up to about two screens of text (by characters;
     /// at most 12, at least 2): what re-flows while a window is dragged.
@@ -1648,10 +3264,12 @@ struct BeautifiedSessionView: View {
         return Array(items.suffix(n))
     }
     @State private var viewportHeight: CGFloat = 0
-    @State private var contentHeight: CGFloat = 0
     /// Keeps the tail on show through layout drift until the user scrolls
     /// (a reference: flipping it must not re-render the view).
     @State private var tailFollow = TailFollow()
+    /// ⌃` → this chat's terminal drawer, when the keys are inside this chat.
+    @State private var terminalHotkey = ChatTerminalHotkey()
+    @State private var chatHeight: CGFloat = 0
     private static let scrollSpace = "beautified-scroll"
 
     /// What's typed after a leading "/" — the palette shows for it until a
@@ -1678,8 +3296,8 @@ struct BeautifiedSessionView: View {
     private var mentionMode: Bool { paletteQuery == nil && mentionQuery != nil }
     private var paletteCommands: [SlashCommand] {
         if mentionMode { return mentionMatches }
-        guard let q = paletteQuery, !model.slashCommands.isEmpty else { return [] }
-        return SlashCommandCatalog.matches(q, in: model.slashCommands)
+        guard let q = paletteQuery, !model.paletteSlashCommands.isEmpty else { return [] }
+        return SlashCommandCatalog.matches(q, in: model.paletteSlashCommands)
     }
     private var paletteVisible: Bool { !paletteCommands.isEmpty }
     private var paletteCurrent: SlashCommand? {
@@ -1736,16 +3354,65 @@ struct BeautifiedSessionView: View {
         }
     }
 
+    /// While the agent asks something (an approval, a picker), the queue
+    /// strip sits ABOVE the transcript: a held message landing there takes
+    /// its room from the top, and the bottom-anchored card stays put. Under
+    /// the transcript it pushed the card up a row per message, so a click
+    /// aimed at "Approve once" landed on "Reject".
+    private var queueStripOnTop: Bool { parts == .all && model.dialogOpen }
+
+    @ViewBuilder
+    private var queueStrip: some View {
+        QueuedMessagesStrip(queued: model.queued, agent: model.agentDisplayName,
+                            accent: model.accent,
+                            onEdit: { model.editQueued($0) },
+                            onDelete: { model.deleteQueued($0) },
+                            dialogCardShown: model.dialogCardShown,
+                            onAnswerInTerminal: model.inlineTerminal != nil ? { model.answerInTerminal() } : nil,
+                            onDismissDialog: { model.dismissAgentDialog() })
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            if queueStripOnTop, !model.queued.isEmpty {
+                queueStrip
+                Divider().opacity(0.5)
+            }
             if parts != .composer {
                 transcriptParts
                     .environment(\.changesSessionID, model.currentSession?()?.id)
             }
-            if parts != .transcript { composerParts }
+            if parts != .transcript {
+                // Its own observer: typing re-renders the composer, never
+                // the transcript above it (`BeautifiedSessionModel.composer`).
+                ComposerObserver(composer: model.composer) {
+                    VStack(spacing: 0) { composerParts }
+                        .animation(.easeOut(duration: 0.15), value: paletteVisible)
+                        .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
+                }
+            }
         }
-        .animation(.easeOut(duration: 0.15), value: paletteVisible)
-        .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: model.terminalShown)
+        .background {
+            GeometryReader { g in
+                Color.clear
+                    .onAppear { chatHeight = g.size.height }
+                    .onChange(of: g.size.height) { _, h in chatHeight = h }
+            }
+        }
+        .background(ChatFrameAnchor(box: terminalHotkey.anchor))
+        .onAppear {
+            guard parts != .composer else { return }
+            terminalHotkey.install { [weak model] in
+                guard let model, model.canOpenTerminal else { return false }
+                if model.terminalShown { hideTerminalAndRefocus() } else { model.showTerminal() }
+                return true
+            }
+        }
+        .onDisappear { terminalHotkey.remove() }
+        .onChange(of: model.terminalShown) { _, shown in
+            if !shown { terminalHotkey.focusComposer() }
+        }
         // A chat surface, not a terminal: opaque so it never picks up the
         // window's terminal-translucency (which reads as a gray scrim here).
         // The canvas tone — the composer card is the white thing on it.
@@ -1788,6 +3455,24 @@ struct BeautifiedSessionView: View {
                         .opacity(liveResizing ? 1 : 0)
                         .allowsHitTesting(false)
                 }
+                // Shown from what was on hand; the latest round is on its way.
+                // In the top-right corner, clear of where a line begins (centred
+                // it sat on the first transcript line right after a switch).
+                .overlay(alignment: .topTrailing) {
+                    ZStack {
+                        if model.catchingUp, !model.items.isEmpty {
+                            CatchingUpPill()
+                                .padding(.top, 8)
+                                .padding(.trailing, 14)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    // The pill only: the history lands in the same update,
+                    // and animating the transcript's layout with it fought
+                    // the tail follow.
+                    .animation(.easeOut(duration: 0.2), value: model.catchingUp)
+                }
                 .clipped()
                 .background {
                     GeometryReader { g in
@@ -1823,6 +3508,17 @@ struct BeautifiedSessionView: View {
             // which change with every mirror push — only the panel should
             // re-render then, not the whole transcript above it.
             if delegations { DelegationPanelHost(model: model) }
+            // /term: a shell in this session's folder, right above the composer.
+            if model.terminalShown {
+                ScratchTerminalDrawer(model: model,
+                                      maxHeight: max(160, chatHeight * 0.72),
+                                      onHide: { hideTerminalAndRefocus() })
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+    }
+
+    private func hideTerminalAndRefocus() {
+        model.hideTerminal()
     }
 
     @ViewBuilder
@@ -1847,6 +3543,7 @@ struct BeautifiedSessionView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             Divider().opacity(0.5)
+            if !model.queued.isEmpty, !queueStripOnTop { queueStrip }
             if !model.pendingAttachments.isEmpty {
                 PendingAttachmentChips(files: model.pendingAttachments,
                                        onRemove: { model.removeAttachment(at: $0) })
@@ -1855,8 +3552,8 @@ struct BeautifiedSessionView: View {
             }
             ChatComposer(
                 placeholder: placeholder ?? (model.agentDisplayName.isEmpty
-                    ? NSLocalizedString("Message the agent…  (or drop files)", comment: "beautified composer")
-                    : String(format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
+                    ? NSLocalizedString("Message the agent… (or drop files)", comment: "beautified composer")
+                    : String(format: NSLocalizedString("Message %@… (or drop files)", comment: "beautified composer"),
                              model.agentDisplayName)),
                 text: $model.composerText,
                 autofocus: true,
@@ -1879,11 +3576,68 @@ struct BeautifiedSessionView: View {
             .padding(.vertical, 10)
     }
 
+    /// A board task's opening brief, shown at the top while the chat has no
+    /// turn of the user's to carry it (the agent died at launch, or Kimi's
+    /// brief is typed in once it's up).
+    private var taskBrief: BoardTaskLink? {
+        guard !model.canLoadEarlier,
+              !model.items.contains(where: { if case .userText = $0.kind { true } else { false } }),
+              let link = model.boardTask?(), !(link.brief.isEmpty && link.title.isEmpty) else { return nil }
+        return link
+    }
+
+    /// "Loading conversation…", or why it couldn't be read with Retry —
+    /// for a chat with nothing on show yet.
+    @ViewBuilder
+    private var historyStatusRow: some View {
+        if let issue = model.loadIssue {
+            VStack(spacing: 8) {
+                Image(systemName: issue == .failed ? "exclamationmark.triangle" : "questionmark.folder")
+                    .font(.system(size: 22)).foregroundStyle(.secondary)
+                Text(issue == .failed
+                     ? NSLocalizedString("Couldn't load this conversation — the machine didn't answer in time.",
+                                         comment: "beautified: transcript reads keep failing or timing out")
+                     : NSLocalizedString("This session's conversation wasn't found on its machine.",
+                                         comment: "beautified: the agent works but no transcript file is found"))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button(NSLocalizedString("Retry", comment: "beautified: read the conversation again")) {
+                    model.retryLoad()
+                }
+                .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        } else {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(NSLocalizedString("Loading conversation…", comment: "beautified: first transcript read in flight"))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        }
+    }
+
+    /// "12.3 MB".
+    nonisolated static func megabytes(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    @ViewBuilder
+    private var taskBriefRow: some View {
+        if let brief = taskBrief {
+            TaskBriefCard(link: brief, accent: model.accent).id("beautified-task-brief")
+        }
+    }
+
     @ViewBuilder
     private var transcript: some View {
-        if model.items.isEmpty && !model.working && model.failure == nil && model.prompt == nil {
+        if model.items.isEmpty && !model.working && model.failure == nil && model.prompt == nil && taskBrief == nil {
             VStack(spacing: 10) {
-                if model.loading {
+                if model.loadIssue != nil {
+                    historyStatusRow
+                } else if model.loading {
                     ProgressView()
                     Text(NSLocalizedString("Loading transcript…", comment: "beautified"))
                         .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -1903,19 +3657,29 @@ struct BeautifiedSessionView: View {
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
-                    // Lazy: only the rows on screen exist, so a scroll frame
-                    // lays out and tracks a screenful, not the whole history
-                    // (eager was ~17 ms a frame on a long chat, lazy ~3 ms —
-                    // `__bench-scroll`). It once went blank on a reply several
-                    // screens tall; long replies are now cut into ~2000-char
-                    // rows (`TranscriptRow.split`), so no row is that tall.
-                    LazyVStack(alignment: .leading, spacing: 14) {
+                    // EAGER rows, windowed by `renderWindow` (a few screens of
+                    // text; "Show earlier" widens it). Never a LazyVStack: its
+                    // rows' heights are estimates until drawn (a long chat's
+                    // estimate was 75 % off), and every placement that drew
+                    // one moved the content under the scroll anchor, so the
+                    // next placement drew a different set — rows inserted
+                    // and removed, their transition phases committed as new
+                    // transactions, the selectable text's AppKit field
+                    // re-measured each time — and SwiftUI looped in ONE
+                    // flush of the hosting view, forever (P0: the app at
+                    // 100 % CPU with its control socket dead; a 21 KB ⌘V
+                    // that grew the composer set it off). An eager stack
+                    // has no visible set to flip. Scrolling stays cheap
+                    // because the window is bounded by text, not by items
+                    // (`__bench-scroll … --chat --scroll-timing`).
+                    VStack(alignment: .leading, spacing: 14) {
                         // While the window is being resized, only the last
                         // couple of screens re-flow live; the rest comes back
                         // when the drag ends.
                         let visible = !settled
                             ? Self.resizeTail(model.items, limit: model.renderLimit)
-                            : Array(model.items.suffix(model.renderLimit))
+                            : Self.renderWindow(model.items, limit: model.renderLimit, chars: model.renderChars,
+                                                expanded: model.expandedMessages)
                         let hidden = model.items.count - visible.count
                         if hidden > 0 || model.canLoadEarlier {
                             HStack {
@@ -1928,6 +3692,7 @@ struct BeautifiedSessionView: View {
                                     tailFollow.sticky = false
                                     if hidden > 0 {
                                         model.renderLimit += BeautifiedSessionModel.renderStep
+                                        model.renderChars += BeautifiedSessionModel.renderCharStep
                                         DispatchQueue.main.async {
                                             if let anchor { proxy.scrollTo(anchor, anchor: .top) }
                                         }
@@ -1939,9 +3704,23 @@ struct BeautifiedSessionView: View {
                                     }
                                 } label: {
                                     if model.loadingEarlier {
-                                        ProgressView().controlSize(.small)
+                                        HStack(spacing: 6) {
+                                            ProgressView().controlSize(.small)
+                                            if model.transcriptFileSize > 0 {
+                                                Text(String(format: NSLocalizedString(
+                                                    "Loading earlier conversation… (%@ of %@)",
+                                                    comment: "beautified history: bytes held of the transcript file's size"),
+                                                    Self.megabytes(model.historyHeldBytes),
+                                                    Self.megabytes(model.transcriptFileSize)))
+                                            }
+                                        }
                                     } else if hidden > 0 {
-                                        let n = min(hidden, BeautifiedSessionModel.renderStep)
+                                        let n = max(1, Self.renderWindow(
+                                            model.items,
+                                            limit: model.renderLimit + BeautifiedSessionModel.renderStep,
+                                            chars: model.renderChars + BeautifiedSessionModel.renderCharStep,
+                                            expanded: model.expandedMessages).count
+                                            - visible.count)
                                         Label(n == 1
                                               ? NSLocalizedString("Show 1 earlier message",
                                                                   comment: "beautified history")
@@ -1962,6 +3741,7 @@ struct BeautifiedSessionView: View {
                             }
                             .id("beautified-load-earlier")
                         }
+                        taskBriefRow
                         // The round the agent is waiting on is one live card
                         // (pick, then Submit) instead of its static questions.
                         let live = model.pendingQuestionItems
@@ -1969,22 +3749,26 @@ struct BeautifiedSessionView: View {
                         // The consolidated todo is shown pinned above the
                         // composer, not inline (where it scrolls away). Tool
                         // calls and thinking fold into one line per run.
-                        let rows = TranscriptRow.rows(visible.filter { !Self.isTodo($0) && !liveIDs.contains($0.id) })
+                        // Long replies cut to about a screen at THIS width
+                        // (a narrow column wraps a piece into many screens).
+                        // Built once per change of the items, width step or
+                        // expanded messages — not on every render.
+                        let chunkLimit = TranscriptRow.chunkLimit(forWidth: transcriptSize.width - 40)
+                        let layout = rowsMemo.layout(visible.filter { !Self.isTodo($0) && !liveIDs.contains($0.id) },
+                                                     chunkLimit: chunkLimit, expanded: model.expandedMessages)
+                        let rows = layout.rows
                         let liveRun = model.working ? rows.last.flatMap { r -> Int? in
                             if case .activity = r { return r.id } else { return nil }
                         } : nil
                         let lastUserID = visible.last(where: {
                             if case .userText(let t) = $0.kind { return !DelegationNotice.isHostAside(t) } else { return false }
                         })?.id
-                        // A reply cut into rows: its first row carries the
-                        // tools, and Copy takes the whole reply.
-                        let replies: [Int: String] = Dictionary(visible.compactMap { item -> (Int, String)? in
-                            if case .assistantText(let t) = item.kind { return (item.id, t) } else { return nil }
-                        }, uniquingKeysWith: { a, _ in a })
+                        // A reply cut into rows: Copy on ANY of its rows
+                        // takes the whole reply (`layout.replies`).
                         ForEach(rows) { row in
                             switch row {
                             case .item(let item):
-                                itemRow(item, lastUserID: lastUserID, replies: replies)
+                                itemRow(item, lastUserID: lastUserID, layout: layout)
                             case .activity(let run):
                                 ActivityGroupView(items: run, live: row.id == liveRun)
                                     .id(row.id)
@@ -1992,6 +3776,9 @@ struct BeautifiedSessionView: View {
                                 TurnChangesView(changes: c).id(row.id)
                             }
                         }
+                        // A picture or chart the agent shows (display MCP)
+                        // reads its file off the agent's machine.
+                        .environment(\.displayFileReader, model.displayFileReader)
                         if !live.isEmpty {
                             let questions = live.compactMap {
                                 if case .question(let q) = $0.kind { q } else { nil }
@@ -2003,7 +3790,7 @@ struct BeautifiedSessionView: View {
                             // (consecutive rounds can reuse item indices).
                             .id("q:" + questions.map(\.question).joined(separator: "\u{1f}"))
                         }
-                        if let out = model.commandOutput {
+                        if let out = model.commandOutput, !out.isRedundant(with: model.prompt) {
                             CommandCard(output: out,
                                         terminal: out.live ? model.inlineTerminal?() : nil,
                                         canGoLive: model.inlineTerminal != nil,
@@ -2012,29 +3799,54 @@ struct BeautifiedSessionView: View {
                                 .id("beautified-command")
                                 .transition(.opacity)
                         }
+                        if let notice = model.prompt?.privacyNotice, model.prompt?.kind != .notice {
+                            PromptCard(prompt: TerminalPrompt.privacyCard(notice),
+                                       onPrivacy: { model.answerPrivacyNotice(optIn: $0) })
+                                .id("beautified-privacy")
+                                .transition(.opacity)
+                        }
                         if let prompt = model.prompt {
                             PromptCard(prompt: prompt,
                                        providerName: model.signInAccountName,
                                        hostSignInAvailable: model.hostSignIn != nil && model.signInProvider != nil,
                                        signInStatus: model.hostSignInStatus,
                                        signInError: model.hostSignInError,
+                                       machineName: model.hostSignInMachine,
+                                       agentName: model.agentDisplayName,
+                                       device: model.hostSignInDevice,
                                        onHostSignIn: { model.startHostSignIn() },
+                                       onSubmitSignInCode: model.submitHostSignInCode,
+                                       onCancelSignIn: model.cancelHostSignIn,
                                        onOpenProviderSettings: model.signInProvider == nil ? model.openProviderSettings : nil,
                                        onTrust: { model.trustFolder() },
                                        onPick: { model.answerPicker($0) },
+                                       onChecklist: { model.answerChecklist($0) },
                                        onMethod: { model.chooseLoginMethod($0) },
                                        onOpenURL: { model.openLoginURL() },
-                                       onSubmitCode: { model.submitLoginCode($0) })
+                                       onSubmitCode: { model.submitLoginCode($0) },
+                                       onOpenTerminal: model.inlineTerminal != nil
+                                           ? { model.answerInTerminal() } : nil,
+                                       onPrivacy: prompt.kind == .notice
+                                           ? { model.answerPrivacyNotice(optIn: $0) } : nil)
                                 .id("beautified-prompt")
                                 .transition(.opacity)
                         } else if let failure = model.failure {
                             FailureCard(failure: failure,
                                         providerName: model.signInAccountName,
                                         onSignIn: model.hostSignIn != nil && model.signInProvider != nil
-                                            ? { model.startHostSignIn() } : nil)
+                                            ? { model.startHostSignIn() } : nil,
+                                        agentName: model.agentDisplayName,
+                                        onRestart: model.boardTask?()?.restart,
+                                        taskError: model.boardTask?()?.lastError ?? model.currentSession?()?.lastError)
                                 .id("beautified-failure")
                                 .transition(.opacity)
-                        } else if model.working, model.commandOutput == nil,
+                        } else if model.items.isEmpty, model.loadIssue != nil || model.loading {
+                            // Nothing on show yet: say so — loading, or why
+                            // it couldn't be read (with Retry) — rather than
+                            // a bare thinking cue over an empty chat.
+                            historyStatusRow.id("beautified-history-status")
+                            if model.showsLiveCue { liveCue.id("beautified-thinking") }
+                        } else if model.showsLiveCue, model.commandOutput == nil,
                                   !(model.items.last.map(TranscriptRow.isActivity) ?? false) {
                             // A run in progress shows its own step; otherwise the cue.
                             liveCue.id("beautified-thinking")
@@ -2059,30 +3871,47 @@ struct BeautifiedSessionView: View {
                     // until the conversation outgrew the window.
                     .frame(maxWidth: .infinity, minHeight: max(0, viewportHeight), alignment: .bottom)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                        contentHeight = h
+                        tailFollow.contentHeight = h
                         model.debugGeometry["content"] = h
                     }
                 }
-                // Keep the tail anchored through content-size changes: a
-                // shorter transcript swapped in, or a re-wrap when the pane
-                // narrows, used to leave the offset past the end — a blank
-                // view until the user scrolled.
-                .defaultScrollAnchor(.bottom)
+                // No `defaultScrollAnchor(.bottom)` — not even for the
+                // initial offset only. On a lazy stack of rows of very
+                // different heights (a reply that is screens of code, a
+                // one-word answer) SwiftUI's own bottom anchoring never
+                // converges once something changes the content's or the
+                // viewport's size — the "Thinking…" cue landing on a send,
+                // the composer growing on a paste: the main thread looped in
+                // one transaction placing the lazy rows (P0 beach ball;
+                // `__bench-scroll … --chat --composer --working` hangs with
+                // it). Following the tail is `TailFollow`'s job (async,
+                // coalesced, budgeted — the first jump is `snapToTail` on
+                // appear); the overshoot snap and the watchdog catch a
+                // transcript that shrank under the offset, and a short one
+                // sits at the bottom by filling the viewport (`minHeight`).
                 .background(TailFollowProbe(box: tailFollow.probe))
                 .coordinateSpace(name: Self.scrollSpace)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                    viewportHeight = h
-                    model.debugGeometry["viewport"] = h
+                    // Whole points: a sub-point wobble isn't a new size (it
+                    // re-laid the whole transcript through the min height).
+                    let r = h.rounded()
+                    if r != viewportHeight { viewportHeight = r; tailFollow.resetBudget() }
+                    model.debugGeometry["viewport"] = r
                 }
                 .onPreferenceChange(TailOffsetKey.self) { marker in
+                    // Runs inside the layout pass that moved the marker:
+                    // record, decide, and leave every scroll to `snap`
+                    // (async, coalesced, budgeted — see `TailFollow`).
+                    tailFollow.lastMarker = marker
+                    model.debugGeometry["refused"] = Double(tailFollow.refused)
                     // Following the tail and the user didn't scroll: the
                     // tail moved because rows were measured — go again.
-                    // (See `TailFollow`.)
                     let byUser = tailFollow.userScrolling
+                    if byUser { tailFollow.resetBudget() }
                     if !byUser, tailFollow.sticky, viewportHeight > 0,
                        marker.map({ $0 > viewportHeight + 2 || $0 < viewportHeight - 40 }) ?? true {
                         if !pinnedToBottom { pinnedToBottom = true }
-                        DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                        snapToTail(proxy)
                         return
                     }
                     // The marker unloaded by the lazy stack: scrolled far up.
@@ -2109,8 +3938,25 @@ struct BeautifiedSessionView: View {
                     // past the content (rows re-measured shorter than their
                     // estimate, or trimmed away) and what shows is blank.
                     // Snap back to the tail.
-                    if viewportHeight > 0, contentHeight > viewportHeight, tailY < viewportHeight - 40 {
-                        proxy.scrollTo(Self.tailID, anchor: .bottom)
+                    if viewportHeight > 0, tailFollow.contentHeight > viewportHeight, tailY < viewportHeight - 40 {
+                        snapToTail(proxy)
+                    }
+                }
+                .task {
+                    // Watchdog: following the tail, yet the tail isn't on
+                    // screen (unloaded, or the offset drifted past it) and
+                    // nothing re-reports — the chat sat blank until the user
+                    // scrolled. Look again every beat; never while the user
+                    // scrolls, never once they've scrolled up to read.
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        let v = viewportHeight
+                        guard tailFollow.sticky, !tailFollow.userScrolling, v > 0, !liveResizing else { continue }
+                        let m = tailFollow.lastMarker
+                        if m == nil || m! > v + 2 || m! < v - 40 {
+                            model.debugGeometry["watchdog"] = (model.debugGeometry["watchdog"] ?? 0) + 1
+                            snapToTail(proxy)
+                        }
                     }
                 }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
@@ -2119,14 +3965,17 @@ struct BeautifiedSessionView: View {
                 // content BEFORE the append — a big answer landing would
                 // otherwise push the marker out of the slack first and read
                 // as "scrolled up".
-                .onReceive(model.$revision.dropFirst()) { _ in if pinnedToBottom { scrollToTail(proxy) } }
+                .onReceive(model.$revision.dropFirst()) { _ in
+                    tailFollow.resetBudget()
+                    if pinnedToBottom { scrollToTail(proxy) }
+                }
                 .onChange(of: model.localRevision) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.working) { _, _ in if pinnedToBottom { scrollToTail(proxy) } }
                 .onChange(of: model.failure) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.prompt) { _, _ in scrollToTail(proxy) }
                 .onAppear {
                     tailFollow.sticky = true
-                    proxy.scrollTo(Self.tailID, anchor: .bottom)
+                    snapToTail(proxy)
                 }
                 // Shown (a click, a switch back): the latest, once the whole
                 // history is laid out — the first jump lands on the tail only.
@@ -2139,6 +3988,7 @@ struct BeautifiedSessionView: View {
                 .onChange(of: model.items.count) { _, _ in applyFind(proxy) }
                 // Scrolled up while it keeps going: one click back down.
                 .overlay(alignment: .bottom) {
+                  ZStack {
                     if !pinnedToBottom {
                         Button {
                             scrollToTail(proxy)
@@ -2155,8 +4005,12 @@ struct BeautifiedSessionView: View {
                         .padding(.bottom, 12)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
+                  }
+                  // Only the button animates: on the scroll view, the flip
+                  // (decided from the tail marker mid-layout) animated the
+                  // lazy rows' own re-measure, which moved the marker again.
+                  .animation(.easeOut(duration: 0.18), value: pinnedToBottom)
                 }
-                .animation(.easeOut(duration: 0.18), value: pinnedToBottom)
             }
         }
     }
@@ -2181,6 +4035,8 @@ struct BeautifiedSessionView: View {
         pendingFind = nil
         let needed = model.items.count - i
         if needed > model.renderLimit { model.renderLimit = needed }
+        let weight = Self.renderWeight(model.items.suffix(needed))
+        if weight > model.renderChars { model.renderChars = weight }
         let id = model.items[i].id
         tailFollow.sticky = false
         DispatchQueue.main.async {
@@ -2228,17 +4084,26 @@ struct BeautifiedSessionView: View {
     }
 
     private func scrollToTail(_ proxy: ScrollViewProxy) {
-        // Twice: once now, once after the lazy rows have been measured — a
-        // single animated scroll against estimated row heights could stop
-        // short of, or past, the real tail. Rows measured later still are
-        // caught by `tailFollow`.
+        // Twice: once now-ish, once after the lazy rows have been measured
+        // — a single animated scroll against estimated row heights could
+        // stop short of, or past, the real tail. Rows measured later still
+        // are caught by `tailFollow`. Both through `snap` (never inside the
+        // update that asked; coalesced with any correction already queued).
         tailFollow.sticky = true
-        proxy.scrollTo(Self.tailID, anchor: .bottom)
-        DispatchQueue.main.async {
-            withAnimation(.easeOut(duration: 0.15)) {
+        tailFollow.resetBudget()
+        snapToTail(proxy)
+        DispatchQueue.main.async { snapToTail(proxy, animated: true) }
+    }
+
+    /// The one way this view scrolls itself to the tail (see `TailFollow.snap`).
+    private func snapToTail(_ proxy: ScrollViewProxy, animated: Bool = false) {
+        tailFollow.snap({ animate in
+            if animate {
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+            } else {
                 proxy.scrollTo(Self.tailID, anchor: .bottom)
             }
-        }
+        }, animated: animated)
     }
 
     /// One transcript item. A user turn that references pictures this Mac
@@ -2246,29 +4111,57 @@ struct BeautifiedSessionView: View {
     /// (persists after the poll, since the real user turn carries the same
     /// guest paths the drop echoed).
     @ViewBuilder
-    private func itemRow(_ item: TranscriptItem, lastUserID: Int?, replies: [Int: String]) -> some View {
+    private func itemRow(_ item: TranscriptItem, lastUserID: Int?, layout: TranscriptLayout) -> some View {
         if case .userText(let text) = item.kind, DelegationNotice.isHostAside(text) {
             // The host's aside: a system line, no timestamp/edit chrome.
             TranscriptItemView(item: item).id(item.id)
         } else if case .userText(let text) = item.kind {
+            // A long message of yours shows its start (or, opened, comes in
+            // pieces): Copy and Edit take all of it.
+            let long = layout.longUsers[item.id]
+            let whole = long?.whole ?? text
             let paths = GuestDrop.imagePaths(in: text).filter { model.imagesByPath[$0] != nil }
             // Your last message can be taken back into the composer to redo.
-            MessageChrome(item: item, onEdit: item.id == lastUserID ? { model.composerText = text } : nil) {
-                TranscriptItemView(item: item,
-                                   attachments: paths.compactMap { model.imagesByPath[$0] },
-                                   hiddenPaths: paths)
+            MessageChrome(item: item, copyText: long?.whole,
+                          onEdit: item.id == lastUserID ? { model.composerText = whole } : nil) {
+                VStack(alignment: .leading, spacing: 4) {
+                    TranscriptItemView(item: item,
+                                       attachments: paths.compactMap { model.imagesByPath[$0] },
+                                       hiddenPaths: paths)
+                    if let long, long.controls {
+                        LongUserMessageBar(message: long) {
+                            if long.expanded { model.expandedMessages.remove(long.itemID) } else { model.expandedMessages.insert(long.itemID) }
+                        }
+                    }
+                }
             }
             .id(item.id)
         } else if case .assistantText = item.kind {
-            if let whole = replies[item.id] {
-                MessageChrome(item: item, copyText: whole) { TranscriptItemView(item: item) }
+            if let whole = layout.replies[item.id] {
+                MessageChrome(item: item, copyText: whole, wholeReply: whole) { replyRow(item, layout: layout) }
                     .id(item.id)
             } else {
-                TranscriptItemView(item: item).id(item.id)   // a later piece of a long reply
+                replyRow(item, layout: layout).id(item.id)
             }
         } else {
             TranscriptItemView(item: item)
                 .id(item.id)
+        }
+    }
+
+    /// A piece of the agent's reply; the last one shown of a reply of
+    /// many screens carries its Show all / Show less.
+    @ViewBuilder
+    private func replyRow(_ item: TranscriptItem, layout: TranscriptLayout) -> some View {
+        if let long = layout.longUsers[item.id], long.controls {
+            VStack(alignment: .leading, spacing: 4) {
+                TranscriptItemView(item: item)
+                LongUserMessageBar(message: long) {
+                    if long.expanded { model.expandedMessages.remove(long.itemID) } else { model.expandedMessages.insert(long.itemID) }
+                }
+            }
+        } else {
+            TranscriptItemView(item: item)
         }
     }
 
@@ -2290,27 +4183,43 @@ struct BeautifiedSessionView: View {
     }
 }
 
-/// Pending-attachment chips above the composer: image thumbnails / file chips,
-/// each removable. What Send transmits alongside the text.
+/// The composer's text (`BeautifiedSessionModel.composer`), observed by the
+/// composer alone.
+final class ComposerTextStore: ObservableObject {
+    @Published var text = ""
+}
+
+/// Re-renders `content` when the composer's text changes — and only it: the
+/// chat view around it doesn't observe the text.
+private struct ComposerObserver<Content: View>: View {
+    @ObservedObject var composer: ComposerTextStore
+    @ViewBuilder let content: () -> Content
+    var body: some View { content() }
+}
+
 /// A blinking caret shown at the tail of streaming assistant prose — the "still
 /// writing" cue, the beautified-view counterpart to a terminal cursor. Shown in
 /// place of `ThinkingRow` while the last turn is assistant text being extended.
+///
+/// It blinks in steps off a timeline, not with a repeat-forever animation:
+/// one started in `onAppear` inside the lazy transcript took the row's
+/// placement with it, re-laying the whole chat out every frame (100 % of a
+/// core on a long chat, `__bench-scroll --chat --composer --working`).
 private struct StreamingCaret: View {
-    @State private var lit = true
     var body: some View {
-        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-            .fill(Color.accentColor)
-            .frame(width: 8, height: 16)
-            .opacity(lit ? 0.9 : 0.12)
-            .padding(.vertical, 2)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
-                    lit = false
-                }
-            }
-            .accessibilityHidden(true)
+        TimelineView(.periodic(from: .now, by: 0.55)) { context in
+            let lit = Int(context.date.timeIntervalSinceReferenceDate / 0.55) % 2 == 0
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(Color.accentColor)
+                .frame(width: 8, height: 16)
+                .opacity(lit ? 0.9 : 0.12)
+        }
+        .frame(width: 8, height: 16)
+        .padding(.vertical, 2)
+        .accessibilityHidden(true)
     }
 }
+
 
 /// The "agent is working" cue — a spinner with a gently cycling gerund, plus a
 /// live elapsed readout once a turn runs long (so a genuinely-long turn reads as
@@ -2366,115 +4275,154 @@ private struct ThinkingRow: View {
 /// otherwise leaves the beautified view stuck on "Thinking…". Detected by
 /// sniffing the tail of the tab's terminal for high-signal error banners.
 struct SessionFailure: Equatable {
-    enum Kind: Equatable { case auth, quota, generic }
+    /// `blocked`: Bromure's own proxy refused the request (`BromureBlock`).
+    enum Kind: Equatable { case auth, quota, generic, blocked }
     let kind: Kind
     /// A short human line lifted verbatim from the terminal (what the agent
     /// actually said), shown under the headline.
     let detail: String
+    /// Which engine, when `kind == .blocked`.
+    var blockedBy: BromureBlock? = nil
 
     var headline: String {
         switch kind {
         case .auth:    return NSLocalizedString("The agent couldn't authenticate", comment: "failure")
         case .quota:   return NSLocalizedString("The agent hit a usage limit", comment: "failure")
         case .generic: return NSLocalizedString("The agent stopped with an error", comment: "failure")
+        case .blocked: return (blockedBy ?? .unknown).headline
         }
     }
 
-    // High-signal banners, calibrated against every supported agent's real
-    // wording (Claude prints "401 API key is invalid" — note the word order, the
-    // reason the first cut missed it; Codex "Incorrect API key provided" /
-    // "401 Unauthorized"; xAI/Grok, Kimi and omp echo their provider's message).
-    // Deliberately phrase-specific — bare "error"/"401" are NOT triggers — and a
-    // false positive self-heals the instant real transcript content returns.
-    private static let authNeedles = [
-        // invalid / missing key — both word orders, across CLIs
-        "api key is invalid", "invalid api key", "invalid x-api-key", "incorrect api key",
-        "api key not valid", "no api key", "didn't provide an api key", "missing api key",
-        "invalid_api_key", "x-api-key header is invalid", "invalid access token",
-        // authentication / authorization
-        "authentication_error", "authentication error", "authentication failed",
-        "invalid authentication", "401 unauthorized", "not authenticated",
-        "invalid bearer token", "could not refresh token", "permission_error",
-        // login / session / subscription
-        "please run /login", "run `/login`", "please log in", "not logged in",
-        "login expired", "session expired", "token has expired", "token expired",
-        "oauth token", "sign in again", "re-authenticate",
-        "subscription has expired", "subscription is invalid", "subscription expired",
-        // Kimi Code at startup: `Skipped refreshing managed:kimi-code: OAuth
-        // provider "managed:kimi-code" requires login before it can be used.`
-        // Without this the beautified view never saw the agent was blocked and
-        // sat on "Thinking…" forever. ("requires login" alone is specific
-        // enough; a real answer doesn't say it.)
-        "requires login", "requires you to log in", "run login",
-    ]
-    // "rate limit" on its own is NOT a needle: an answer that merely talks
-    // about one (a firewall's "3-per-minute rate limit") is on the same
-    // screen, and read as the agent being throttled.
-    private static let quotaNeedles = [
-        "credit balance is too low", "usage limit reached", "reached your usage limit",
-        "you've reached your usage", "hit your limit", "insufficient_quota",
-        "rate_limit", "rate-limit", "rate limit reached", "rate limit exceeded",
-        "rate limited", "being rate limit",
-        "quota exceeded", "exceeded your current quota", "overloaded_error",
-        "session limit reached", "out of credits", "too many requests",
-    ]
+    // High-signal banners live in `AgentPhrases` (.auth / .quota / .generic),
+    // per agent. They're the fallback: a refusal the agent RECORDS comes from
+    // its transcript, typed (`recorded(in:)`); the screen is read for what
+    // never reaches it — a retry loop in progress, a logged-out banner at
+    // startup. Deliberately phrase-specific — bare "error"/"401" are NOT
+    // triggers — and a false positive self-heals the instant real
+    // transcript content returns.
 
-    static func detect(inScreen screen: String) -> SessionFailure? {
-        detect(tail: terminalTail(screen))
+    static func detect(inScreen screen: String, agent: String? = nil) -> SessionFailure? {
+        detect(tail: terminalTail(screen), agent: agent)
+    }
+
+    init(kind: Kind, detail: String) {
+        self.kind = kind
+        self.detail = detail
+    }
+
+    init(_ error: AgentAPIError) {
+        switch error.kind {
+        case .auth: kind = .auth
+        case .quota, .rateLimit: kind = .quota
+        case .overloaded, .other: kind = .generic
+        case .blocked: kind = .blocked; blockedBy = error.blockedBy ?? .unknown
+        }
+        let line = error.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        detail = line.isEmpty ? (error.status.map { "HTTP \($0)" } ?? "") : Self.clean(line)
+    }
+
+    /// The refusal the agent recorded for its latest turn — the transcript's
+    /// last word, with nothing (a new prompt, an answer) after it. Read from
+    /// the agent's own error enum / HTTP status, so it holds in any locale
+    /// and through any rewording of the banner.
+    static func recorded(in items: [TranscriptItem]) -> SessionFailure? {
+        for item in items.reversed() {
+            switch item.kind {
+            case .agentError(let e): return SessionFailure(e)
+            case .todo: continue
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    /// Whether the model has answered since the user's latest prompt — a
+    /// call, a thought, or text that isn't itself an auth error (Claude logs
+    /// "API Error: 401 …" as an assistant message).
+    static func modelAnswered(since items: [TranscriptItem]) -> Bool {
+        for item in items.reversed() {
+            switch item.kind {
+            case .userText: return false
+            case .toolUse, .thinking, .question, .todo: return true
+            case .assistantText(let t):
+                if !AgentPhrases.matches(t, .auth, agent: nil) { return true }
+            default: continue
+            }
+        }
+        return false
     }
 
     /// Scan a pre-split terminal tail (shared with `TerminalScan`, which splits
     /// once). Bottom-up: the lowest matching line is the current state.
-    static func detect(tail: [String]) -> SessionFailure? {
-        func match(_ needles: [String]) -> String? {
+    /// `agent`: the tab's agent, for the wording only it uses (nil = any).
+    static func detect(tail: [String], agent: String? = nil) -> SessionFailure? {
+        func match(_ topic: AgentPhrases.Topic) -> String? {
             for raw in tail.reversed() {
                 let line = raw.trimmingCharacters(in: .whitespaces)
                 guard !line.isEmpty else { continue }
-                let low = line.lowercased()
-                if needles.contains(where: { low.contains($0) }) { return clean(line) }
+                if AgentPhrases.matches(line, topic, agent: agent) { return clean(line) }
             }
             return nil
         }
-        if let d = match(quotaNeedles) { return SessionFailure(kind: .quota, detail: d) }
-        if let d = match(authNeedles)  { return SessionFailure(kind: .auth,  detail: d) }
+        // Bromure's own block, as the agent printed it (its body names us).
+        for raw in tail.reversed() {
+            if let b = BromureBlock.of(raw) {
+                var f = SessionFailure(kind: .blocked, detail: clean(raw))
+                f.blockedBy = b
+                return f
+            }
+        }
+        if let d = match(.quota) { return SessionFailure(kind: .quota, detail: d) }
+        if let d = match(.auth)  { return SessionFailure(kind: .auth,  detail: d) }
         // The launcher's "<tool> exited with status N": what the agent said
         // before it went is the useful part.
         if let d = AgentSessionEngine.earlyExitReason(tail.joined(separator: "\n")) {
             return SessionFailure(kind: .generic, detail: clean(d))
         }
-        if let d = match(genericNeedles) { return SessionFailure(kind: .generic, detail: d) }
+        // The agent stopped before it could start a turn — a run that died
+        // on configuration (Kimi: "No model configured") or a launcher that
+        // reported a non-zero exit.
+        if let d = match(.generic) { return SessionFailure(kind: .generic, detail: d) }
         return nil
     }
 
-    // The agent stopped before it could start a turn — a run that died on
-    // configuration (Kimi: "No model configured", "failed to run prompt") or a
-    // launcher that reported a non-zero exit. Without these the chat sat on
-    // "Thinking…" (or, worse, mis-read a nearby warning as a trust dialog).
-    private static let genericNeedles = [
-        "no model configured", "failed to run prompt", "exited with status",
-    ]
+    /// Strip a TUI box/bullet gutter (either end) and clamp length so the
+    /// line reads cleanly. A line that is nothing but box art (a frame's
+    /// "╰────╯" scraped off the screen) is no reason at all: "".
+    static func clean(_ line: String) -> String {
+        let gutter = Set("│┃|>•*✗✘⎿⏺●─╮╯╭╰ ")
+        func isArt(_ c: Character) -> Bool {
+            gutter.contains(c) || c.unicodeScalars.allSatisfy {
+                (0x2500...0x259F).contains($0.value) || $0.properties.isWhitespace
+            }
+        }
+        var s = Substring(line)
+        while let f = s.first, isArt(f) { s.removeFirst() }
+        while let l = s.last, isArt(l) { s.removeLast() }
+        let out = s.trimmingCharacters(in: .whitespaces)
+        guard out.contains(where: { $0.isLetter || $0.isNumber }) else { return "" }
+        return out.count > 160 ? String(out.prefix(160)) + "…" : out
+    }
 
-    /// Strip a TUI box/bullet gutter and clamp length so the line reads cleanly.
-    private static func clean(_ line: String) -> String {
-        let gutter = Set("│┃|>•*✗✘⎿⏺●─╮╯ ")
-        let stripped = String(line.drop(while: { gutter.contains($0) }))
-            .trimmingCharacters(in: .whitespaces)
-        let s = stripped.isEmpty ? line : stripped
-        return s.count > 160 ? String(s.prefix(160)) + "…" : s
+    /// What the card says under its headline: a board task's recorded
+    /// reason (`CodingTask.lastError`) wins — it names the exit status —
+    /// over the terminal scrape (a sign-in or usage-limit card keeps the
+    /// agent's own words); "" when neither says anything.
+    static func body(_ f: SessionFailure, taskError: String?) -> String {
+        if f.kind == .generic, let e = taskError?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !e.isEmpty { return e }
+        return clean(f.detail)
     }
 }
 
 /// The last N lines of a terminal snapshot — "now". Split once and shared by
 /// both detectors (an old banner scrolled above this isn't the current state).
+/// Blank lines inside are kept — they separate a dialog from what's around
+/// it — and the empty rows below the content are not.
 func terminalTail(_ screen: String, _ n: Int = 45) -> [String] {
-    Array(screen.split(whereSeparator: \.isNewline).map(String.init).suffix(n))
-}
-
-/// One selectable method in the `/login` menu ("1. Claude account with…").
-struct LoginOption: Equatable, Identifiable {
-    let index: Int
-    let label: String
-    var id: Int { index }
+    var lines = screen.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+    while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+    return Array(lines.suffix(n))
 }
 
 /// A blocking TUI prompt the agent is showing that the beautified view hides —
@@ -2484,7 +4432,9 @@ struct LoginOption: Equatable, Identifiable {
 /// Claude's trust dialog is likewise answerable inline (its arrow list puts
 /// "Yes, I trust this folder" one Down from the default "No, exit").
 struct TerminalPrompt: Equatable {
-    enum Kind: Equatable { case trust, login, picker }
+    /// `notice`: something the agent shows that isn't a dialog (Grok's
+    /// data-retention banner) — told, not answered here.
+    enum Kind: Equatable { case trust, login, picker, checklist, notice }
     let kind: Kind
     /// Trust: the folder path. (Login carries its state in the fields below.)
     var detail: String = ""
@@ -2500,18 +4450,33 @@ struct TerminalPrompt: Equatable {
     var authURL: String? = nil
     /// Login — the agent is waiting for the verification code ("Paste code here").
     var awaitingCode: Bool = false
+    /// Login — a device-code sign-in: the code to confirm on the page.
+    var deviceCode: String? = nil
     /// Picker — any other modal the agent put up ("Try the new fullscreen
     /// renderer?"): its title, its numbered options, and which one the
     /// cursor sits on (so an answer is arrow moves from there, then Enter).
     var title: String = ""
     var options: [LoginOption] = []
     var selectedOption: Int? = nil
+    /// Checklist — a multi-select ("Select any you wish to enable."): its
+    /// rows (`options`) and their check boxes as they stand on screen.
+    var checklist: AgentScreen.Checklist? = nil
+    /// Grok's data-retention banner, up with (or without) a dialog: what it
+    /// says. Its own card, never mixed into a dialog's.
+    var privacyNotice: String? = nil
+    /// Picker — a dialog that's up but didn't fit the agent's terminal (its
+    /// options cut off): `detail` holds what IS visible; the card offers the
+    /// terminal instead of options it can't name.
+    var partial: Bool = false
 
     var headline: String {
         switch kind {
         case .trust: return NSLocalizedString("The agent is waiting for you to trust this folder", comment: "prompt")
         case .login: return NSLocalizedString("Sign in to Claude", comment: "prompt")
-        case .picker: return title.isEmpty ? NSLocalizedString("The agent is asking", comment: "prompt") : title
+        case .picker, .checklist:
+            return title.isEmpty ? NSLocalizedString("The agent is asking", comment: "prompt") : title
+        case .notice:
+            return title
         }
     }
 
@@ -2524,136 +4489,153 @@ struct TerminalPrompt: Equatable {
         return Array(repeating: moves > 0 ? "Down" : "Up", count: abs(moves)) + ["Enter"]
     }
 
-    private static let trustNeedles = [
-        "trust the files in this", "do you trust", "trust this folder",
-        "trust this directory", "trust this workspace", "is this a project you created",
-        "yes, i trust this folder", "trust the authors of", "quick safety check",
-    ]
+    /// An option that approves more than this one action — Grok's "Yes, and
+    /// don't ask again for anything (always-approve mode)", "always allow…",
+    /// "approve for this session". The agent's own cursor often starts on
+    /// it; the card never pushes it.
+    static func isBlanketApproval(_ label: String) -> Bool {
+        let l = AgentPhrases.normalize(label)
+        return ["don't ask again", "always-approve", "always approve", "always allow",
+                "for this session", "for the rest of the session", "yolo"].contains { l.contains($0) }
+    }
+
+    /// The options in the order the card lists them: one-off answers first,
+    /// the blanket approvals last. Each keeps its own index (what the keys
+    /// pick on screen).
+    var cardOptions: [LoginOption] {
+        options.filter { !Self.isBlanketApproval($0.label) } + options.filter { Self.isBlanketApproval($0.label) }
+    }
+
+    /// The option the card marks as the default: the agent's cursor row,
+    /// unless that is a blanket approval — then the safest yes (allow once)
+    /// when there is one, else none (all rows look alike).
+    var cardHighlight: Int? {
+        let current = selectedOption ?? options.first?.index
+        guard let current, let row = options.first(where: { $0.index == current }) else { return nil }
+        guard Self.isBlanketApproval(row.label) else { return current }
+        return options.first(where: { o in
+            let l = AgentPhrases.normalize(o.label)
+            return !Self.isBlanketApproval(o.label) && (l.contains("once") || l.hasPrefix("yes"))
+        })?.index
+    }
 
     static func detect(inScreen screen: String, agent: String? = nil) -> TerminalPrompt? {
         detect(tail: terminalTail(screen), agent: agent)
     }
 
-    /// `agent`: the tab's agent kind, for the wording only it uses (Oh My Pi
-    /// has no account — a missing provider key is its "sign-in").
+    /// `agent`: the tab's agent kind, for the wording only it uses (nil =
+    /// any agent's). Shapes first — a sign-in URL, a live menu — wording
+    /// only to name what a shape is (a sign-in method list, a trust dialog
+    /// we can answer in one click).
     static func detect(tail: [String], agent: String? = nil) -> TerminalPrompt? {
-        let trimmed = tail.map { $0.trimmingCharacters(in: .whitespaces) }
-        let low = trimmed.joined(separator: "\n").lowercased()
+        let lines = tail.map { String($0.reversed().drop(while: \.isWhitespace).reversed()) }
+        let notice = AgentScreen.dataRetentionNotice(lines)
+        guard var p = detectDialog(tail: tail, agent: agent) else {
+            return notice.map(privacyCard)
+        }
+        p.privacyNotice = notice
+        return p
+    }
 
-        // Sign-in screens: Claude's `/login` flow (the method menu, then the
-        // OAuth URL + code prompt), Codex's first-run picker, and the
-        // logged-out banners Grok / Kimi print.
-        let looksLikeLogin = low.contains("select login method")
-            || low.contains("browser didn't open")
-            || low.contains("paste code here")
-            || trimmed.contains { $0.contains("/oauth/authorize") }
-            || low.contains("sign in with chatgpt")
-            || low.contains("sign in with your chatgpt")
-            || low.contains("grok login") || low.contains("kimi login")
-            || low.contains("not logged in") || low.contains("please log in")
-            || low.contains("login required")
-            // Grok's first run: its own device-code screen.
-            || low.contains("approve in your browser")
-            // Oh My Pi's first-run wizard ("Setup step 1 of 5 · Set up your
-            // providers"), or a run with no provider key at all.
-            || (agent == "omp" && (low.contains("set up your providers") || low.contains("select provider to login")
-                                   || low.contains("no api key") || low.contains("api key is not set")
-                                   || low.contains("missing api key") || low.contains("anthropic_api_key")))
-        if looksLikeLogin {
+    /// The data-retention banner on its own.
+    static func privacyCard(_ text: String) -> TerminalPrompt {
+        TerminalPrompt(kind: .notice, detail: text,
+                       title: NSLocalizedString("Grok asks whether xAI may keep your coding data",
+                                                comment: "prompt: Grok data-retention banner"),
+                       privacyNotice: text)
+    }
+
+    private static func detectDialog(tail: [String], agent: String?) -> TerminalPrompt? {
+        // Indentation kept (it aligns an unnumbered menu); trailing blanks off.
+        let lines = tail.map { String($0.reversed().drop(while: \.isWhitespace).reversed()) }
+        let screen = lines.joined(separator: "\n")
+        let low = AgentPhrases.normalize(screen)
+
+        // Sign-in: a sign-in URL or a device code on screen (any agent, any
+        // wording), or the agent's own login wording — Claude's `/login`
+        // method menu, Codex's first-run picker, the logged-out banners.
+        let url = AgentScreen.signInURL(lines)
+        let loginWords = AgentPhrases.matches(screen, .login, agent: agent)
+        if url != nil || loginWords {
             return TerminalPrompt(
                 kind: .login,
-                loginMethods: trimmed.compactMap(loginOption),
-                authURL: trimmed.compactMap(authorizeURL).first,
-                awaitingCode: low.contains("paste code here"))
+                loginMethods: AgentScreen.numberedOptions(lines),
+                authURL: url,
+                awaitingCode: url.map(AgentScreen.wantsPastedCode) == true
+                    || low.contains("paste code here") || low.contains("paste the authorization code"),
+                deviceCode: AgentScreen.deviceCode(lines))
         }
 
-        // Folder-trust dialog (Claude's picker, Codex's "Do you trust the
-        // contents of this directory?").
-        // Kimi's ONE-SHOT runs never ask — they print a warning ("this
-        // folder is not trusted; skipped N project-level MCP servers … Run
-        // `kimi` here and choose Trust") and carry on. That text hits the
-        // trust needles but there is nothing to answer, and the real state is
-        // whatever error follows (e.g. "No model configured"). Only a live
-        // dialog (its option rows on screen) is a trust prompt.
+        // Folder trust we know well enough to answer in one click (Claude's
+        // "Yes, I trust this folder" is one Down from "No, exit"). Kimi's
+        // ONE-SHOT runs never ask: they print a warning that names the
+        // dialog ("this folder is not trusted; … choose Trust this folder")
+        // and carry on — no options on screen, nothing to answer.
         let kimiWarningOnly = low.contains("folder is not trusted")
             && !low.contains("don't trust") && !low.contains("❯ trust")
-        if trustNeedles.contains(where: { low.contains($0) }), !kimiWarningOnly {
-            // The folder: a line that is just a path (Claude), else the first
-            // absolute path mentioned ("You are in /home/…" — Codex). Never a
-            // file the screen happens to mention (a log path).
-            let isFile: (Substring) -> Bool = { $0.hasSuffix(".log") || $0.contains("/logs/") }
-            let folder = trimmed.first(where: { $0.hasPrefix("/") && !$0.contains(" ") && !isFile($0[...]) })
-                ?? trimmed.joined(separator: " ").split(separator: " ")
-                    .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") })
-                    .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,:;)")) }
-                ?? NSLocalizedString("this folder", comment: "prompt")
-            let claudePicker = low.contains("yes, i trust this folder")
-            let codexPicker = low.contains("yes, continue")
-            // Kimi's picker defaults to "Trust this folder" (Enter picks it).
-            let kimiPicker = low.contains("don't trust") && low.contains("trust this folder")
+        if AgentPhrases.matches(screen, .trust, agent: agent), !kimiWarningOnly {
+            let folder = AgentScreen.folder(lines) ?? NSLocalizedString("this folder", comment: "prompt")
+            if low.contains("yes, i trust this folder") {
+                return TerminalPrompt(kind: .trust, detail: folder, canAnswerTrust: true,
+                                      trustKeys: ["Down", "Enter"])
+            }
+            // Anyone else's trust dialog is answered from its own options.
+            if let menu = AgentScreen.liveMenu(lines, after: -1) {
+                let asked = AgentScreen.title(lines, before: menu.firstOffset)
+                return TerminalPrompt(kind: .picker, detail: folder,
+                                      title: asked.isEmpty
+                                          ? NSLocalizedString("Trust this folder?", comment: "prompt") : asked,
+                                      options: menu.options, selectedOption: menu.selected)
+            }
+            // Codex's older dialog defaults to "Yes, continue": Enter takes it.
+            // Grok's (1.0.46: "y  Yes, proceed / n  No, quit — Enter or y to
+            // trust") has letter-keyed rows, no cursor: Enter takes it too.
             return TerminalPrompt(kind: .trust, detail: folder,
-                                  canAnswerTrust: claudePicker || codexPicker || kimiPicker,
-                                  trustKeys: claudePicker ? ["Down", "Enter"] : ["Enter"])
+                                  canAnswerTrust: low.contains("yes, continue")
+                                      || low.contains("enter or y to trust"),
+                                  trustKeys: ["Enter"])
         }
 
-        // Any other modal picker — a numbered list under a title with a
-        // picker footer ("Try the new fullscreen renderer?" → 1. Yes, try it
-        // / 2. Not now). Surfaced generically so nothing ever blocks the
-        // chat unseen; the user picks here, or dismisses (Esc). Not the
-        // AskUserQuestion pickers (their own card answers those; footers
-        // "Enter to select" / "Space to toggle") and not tool-permission
-        // prompts, which auto mode never shows and a card must not decide.
-        if BeautifiedSessionModel.menuHints(trimmed.joined(separator: "\n")),
-           !low.contains("enter to select"), !low.contains("space to toggle"),
-           !low.contains("don't ask again"), !low.contains("do you want to proceed") {
-            let optionLines = trimmed.enumerated().filter { loginOption($0.element) != nil }
-            let options = optionLines.compactMap { loginOption($0.element) }
-            if options.count >= 2, options.map(\.index) == Array(1...options.count),
-               let first = optionLines.first {
-                let selected = optionLines.first { $0.element.hasPrefix("❯") }
-                    .flatMap { loginOption($0.element)?.index }
-                return TerminalPrompt(kind: .picker,
-                                      title: pickerTitle(trimmed, before: first.offset),
-                                      options: options, selectedOption: selected)
-            }
+        // Any other dialog up right now — a permission prompt, auto mode's
+        // pause, an upsell, a quota menu — read from its SHAPE: a cursor on
+        // one of sibling options at the bottom of the screen. What it says
+        // doesn't matter, so it holds in any language and through rewording.
+        // The card shows what's asked and relays the user's pick; it never
+        // answers on its own.
+        // A checklist ("2 new MCP servers found in this project — Select any
+        // you wish to enable."): Enter on a row only ticks it there, so a
+        // one-pick card could never submit it. Its own card holds the ticks
+        // and relays them, then the button.
+        if let list = AgentScreen.checklist(lines) {
+            // Its heading is the box's first line ("2 new MCP servers found
+            // in this project"), the rest what it explains.
+            let body = AgentScreen.context(lines, before: list.firstOffset, title: "")
+                .split(separator: "\n").map(String.init)
+            return TerminalPrompt(kind: .checklist,
+                                  detail: body.dropFirst().joined(separator: "\n"),
+                                  title: body.first ?? "", options: list.options, checklist: list)
+        }
+        if let menu = AgentScreen.liveMenu(lines, after: -1) {
+            // Claude's AskUserQuestion picker: its own card answers it.
+            let footer = lines[(menu.lastOffset + 1)...].joined(separator: " ")
+            if AgentPhrases.matches(footer, .questionFooter, agent: agent) { return nil }
+            let title = AgentScreen.title(lines, before: menu.firstOffset)
+            return TerminalPrompt(kind: .picker,
+                                  detail: AgentScreen.context(lines, before: menu.firstOffset, title: title),
+                                  title: title, options: menu.options, selectedOption: menu.selected)
+        }
+        // A dialog too big for the pane: still a card — what's visible of it,
+        // and the terminal to answer in — never a bare "Needs you".
+        if let partial = AgentScreen.partialDialog(lines) {
+            let title = AgentScreen.title(lines, before: partial.firstRow)
+            let context = AgentScreen.context(lines, before: partial.firstRow, title: title)
+            let rows = lines[partial.firstRow..<partial.footer]
+                .map { AgentScreen.unboxed($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !AgentScreen.isRule($0) && !AgentScreen.isKeyHintLine($0) }
+            let detail = ([context] + rows).filter { !$0.isEmpty }.joined(separator: "\n")
+            return TerminalPrompt(kind: .picker, detail: detail, title: title, partial: true)
         }
         return nil
-    }
-
-    /// The dialog's title: the nearest question above the options, else the
-    /// nearest line of prose — never a bullet, box art, or the footer.
-    private static func pickerTitle(_ lines: [String], before end: Int) -> String {
-        let above = lines[0..<end].suffix(12).reversed()
-        func prose(_ l: String) -> String? {
-            let t = l.trimmingCharacters(in: CharacterSet(charactersIn: " │┃|"))
-            guard !t.isEmpty, t.count <= 90, t.contains(where: \.isLetter),
-                  !t.hasPrefix("·"), !t.hasPrefix("•"), !t.hasPrefix("-"), !t.hasPrefix("—")
-            else { return nil }
-            return t
-        }
-        if let q = above.compactMap(prose).first(where: { $0.hasSuffix("?") }) { return q }
-        return above.compactMap(prose).first ?? ""
-    }
-
-    /// "❯ 1. Claude account with subscription · Pro, Max…" → (1, "Claude account
-    /// with subscription"). The part after " · " is a tagline we drop.
-    private static func loginOption(_ line: String) -> LoginOption? {
-        let s = line.drop(while: { $0 == "❯" || $0 == " " })
-        guard let dot = s.firstIndex(of: "."),
-              let n = Int(s[s.startIndex..<dot]), (1...9).contains(n) else { return nil }
-        var label = s[s.index(after: dot)...].trimmingCharacters(in: .whitespaces)
-        if let sep = label.range(of: " · ") { label = String(label[..<sep.lowerBound]) }
-        guard !label.isEmpty else { return nil }
-        return LoginOption(index: n, label: label)
-    }
-
-    /// The OAuth authorize URL on a (tmux `-J`-joined) line — not the changelog
-    /// link or the percent-encoded redirect_uri buried inside it.
-    private static func authorizeURL(_ line: String) -> String? {
-        guard let r = line.range(of: "https://") else { return nil }
-        let url = String(line[r.lowerBound...])
-            .split(whereSeparator: { $0 == " " }).first.map(String.init) ?? ""
-        return url.contains("/oauth/authorize") ? url : nil
     }
 }
 
@@ -2669,7 +4651,7 @@ enum TerminalScan {
     static func classify(_ screen: String, agent: String? = nil) -> TerminalState? {
         let tail = terminalTail(screen)
         if let p = TerminalPrompt.detect(tail: tail, agent: agent) { return .prompt(p) }
-        if let f = SessionFailure.detect(tail: tail) { return .failure(f) }
+        if let f = SessionFailure.detect(tail: tail, agent: agent) { return .failure(f) }
         return nil
     }
 }
@@ -2733,12 +4715,13 @@ private struct CommandCard: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(output.lines.joined(separator: "\n"))
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: true, vertical: true)
-                }
+                // Wrapped to the card, never cut at its right edge (a wide
+                // terminal's line ran past it, its end unreadable).
+                Text(output.lines.joined(separator: "\n"))
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                 if output.menu, !canGoLive {
                     Text(NSLocalizedString("This command opened a menu in the terminal — make your pick there (⌥⌘U).", comment: "command card"))
                         .font(.system(size: 11))
@@ -2757,7 +4740,7 @@ private struct CommandCard: View {
 /// of an interactive command. The surface is the same one the Linux view
 /// mounts — one tmux client, re-parented — and goes back to being unmounted
 /// when the card folds.
-private struct InlineTerminalView: NSViewRepresentable {
+struct InlineTerminalView: NSViewRepresentable {
     let terminal: NSView
 
     func makeNSView(context: Context) -> NSView {
@@ -2794,7 +4777,79 @@ private struct InlineTerminalView: NSViewRepresentable {
 /// What a host-run sign-in reports to the card that started it.
 enum HostSignInEvent: Equatable {
     case status(String)
+    /// A headless sign-in on an attached machine: the page to open here and
+    /// the one-time code to enter there (or, for Claude, a code to paste back).
+    case device(HostSignInDevice)
     case finished(success: Bool, message: String?)
+}
+
+struct HostSignInDevice: Equatable {
+    var url: URL
+    var code: String?
+    var paste: Bool
+}
+
+/// A session's sign-in on a Bromure Sidecar machine: the agent's own
+/// device-code login runs there (AgentLogin), this side shows its link and
+/// code and waits for it to land. `call` POSTs one of the session's actions
+/// (signin, signin-state, …) and hands back the reply.
+enum MachineSignIn {
+    typealias Call = (_ action: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])?
+
+    static func run(_ call: @escaping Call, events: @escaping (HostSignInEvent) -> Void) {
+        Task {
+            guard let first = await call("signin", nil) else {
+                events(.finished(success: false, message: NSLocalizedString(
+                    "The machine didn't answer. Check that Bromure Sidecar is running there.", comment: "sign-in")))
+                return
+            }
+            guard first.status == 200 else {
+                events(.finished(success: false, message: first.json["error"] as? String))
+                return
+            }
+            var shown: HostSignInDevice?
+            let deadline = Date().addingTimeInterval(31 * 60)
+            var state = first.json
+            var misses = 0
+            while Date() < deadline {
+                let phase = state["phase"] as? String ?? ""
+                switch phase {
+                case "done":
+                    events(.finished(success: true, message: nil))
+                    return
+                case "failed":
+                    events(.finished(success: false, message: state["message"] as? String))
+                    return
+                case "idle":
+                    events(.finished(success: false, message: NSLocalizedString(
+                        "The sign-in stopped on the machine. You can try again.", comment: "sign-in")))
+                    return
+                case "waiting":
+                    if let u = (state["url"] as? String).flatMap(URL.init(string:)) {
+                        let d = HostSignInDevice(url: u, code: state["code"] as? String,
+                                                 paste: state["needsPaste"] as? Bool ?? false)
+                        if d != shown { shown = d; events(.device(d)) }
+                    }
+                default:
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if let r = await call("signin-state", nil), r.status == 200 {
+                    state = r.json
+                    misses = 0
+                } else {
+                    misses += 1
+                    if misses >= 20 {
+                        events(.finished(success: false, message: NSLocalizedString(
+                            "Lost touch with the machine during the sign-in.", comment: "sign-in")))
+                        return
+                    }
+                }
+            }
+            _ = await call("signin-cancel", nil)
+            events(.finished(success: false, message: NSLocalizedString("The sign-in timed out.", comment: "sign-in")))
+        }
+    }
 }
 
 private struct FailureCard: View {
@@ -2802,6 +4857,11 @@ private struct FailureCard: View {
     /// Auth failures: the host sign-in, when this window can offer it.
     var providerName: String = ""
     var onSignIn: (() -> Void)? = nil
+    /// A board task's session: the board's Restart Session, same words.
+    var agentName: String = ""
+    var onRestart: (() -> Void)? = nil
+    /// The board's recorded reason the task's agent couldn't start.
+    var taskError: String? = nil
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -2810,15 +4870,40 @@ private struct FailureCard: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(failure.headline)
                     .font(.system(size: 12.5, weight: .semibold))
-                Text(failure.detail)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                let bodyText = SessionFailure.body(failure, taskError: taskError)
+                if !bodyText.isEmpty {
+                    Text(bodyText)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if failure.kind == .auth, let onSignIn {
                     Button(action: onSignIn) {
                         Label(String(format: NSLocalizedString("Sign in to %@…", comment: "login"), providerName),
                               systemImage: "person.badge.key.fill")
+                    }
+                    .controlSize(.small).buttonStyle(.borderedProminent).tint(.red)
+                    .padding(.top, 3)
+                } else if failure.kind == .blocked {
+                    // The provider was never reached: Bromure stopped it.
+                    Text((failure.blockedBy ?? .unknown).recoveryHint ?? NSLocalizedString(
+                        "Nothing reached the provider. The Security Timeline has the details; send again once it's resolved.",
+                        comment: "failure hint: Bromure's proxy blocked the agent's request"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 1)
+                } else if let onRestart {
+                    Text(String(format: NSLocalizedString(
+                        "Restart Session relaunches %@ on this task's worktree.",
+                        comment: "failure hint: a board task's session"),
+                        agentName.isEmpty ? NSLocalizedString("the agent", comment: "failure hint") : agentName))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 1)
+                    Button(action: onRestart) {
+                        Label(NSLocalizedString("Restart Session", comment: ""), systemImage: "arrow.clockwise")
                     }
                     .controlSize(.small).buttonStyle(.borderedProminent).tint(.red)
                     .padding(.top, 3)
@@ -2846,6 +4931,27 @@ private struct FailureCard: View {
 /// the user never touches the terminal: Claude's folder-trust dialog gets a
 /// one-click "Trust & continue"; `/login` becomes method buttons → an "Open
 /// sign-in page" button → a paste-the-code field.
+/// `__shot-ui machine-signin`: a machine sign-in card in its three states.
+enum MachineSignInPreview {
+    @MainActor static var cards: some View {
+        let login = TerminalPrompt(kind: .login)
+        return VStack(alignment: .leading, spacing: 14) {
+            PromptCard(prompt: login, providerName: "ChatGPT", hostSignInAvailable: true,
+                       machineName: "macdev2-native", agentName: "Codex")
+            PromptCard(prompt: login, providerName: "ChatGPT", hostSignInAvailable: true,
+                       signInStatus: "Waiting for you to approve…", machineName: "macdev2-native", agentName: "Codex",
+                       device: HostSignInDevice(url: URL(string: "https://auth.openai.com/codex/device")!,
+                                                code: "6URM-HUYT1", paste: false),
+                       onCancelSignIn: {})
+            PromptCard(prompt: login, providerName: "Claude", hostSignInAvailable: true,
+                       signInStatus: "Waiting for you to approve…", machineName: "macdev2-native", agentName: "Claude Code",
+                       device: HostSignInDevice(url: URL(string: "https://claude.com/cai/oauth/authorize")!,
+                                                code: nil, paste: true),
+                       onSubmitSignInCode: { _ in }, onCancelSignIn: {})
+        }
+    }
+}
+
 private struct PromptCard: View {
     let prompt: TerminalPrompt
     /// "Claude", "ChatGPT"… — the account the sign-in is for.
@@ -2854,23 +4960,51 @@ private struct PromptCard: View {
     var hostSignInAvailable = false
     var signInStatus: String? = nil
     var signInError: String? = nil
+    /// Signing in on an attached machine (not sandboxed): its name.
+    var machineName: String? = nil
+    var agentName: String = ""
+    var device: HostSignInDevice? = nil
     var onHostSignIn: () -> Void = {}
+    var onSubmitSignInCode: ((String) -> Void)? = nil
+    var onCancelSignIn: (() -> Void)? = nil
     /// No account to sign into (Oh My Pi): the machine's provider settings.
     var onOpenProviderSettings: (() -> Void)? = nil
     var onTrust: () -> Void = {}
     /// Picker: the option's index, or nil to dismiss (Esc).
     var onPick: (Int?) -> Void = { _ in }
+    /// Checklist: the boxes to leave ticked, or nil to dismiss (Esc).
+    var onChecklist: ([Bool]?) -> Void = { _ in }
     var onMethod: (Int) -> Void = { _ in }
     var onOpenURL: () -> Void = {}
     var onSubmitCode: (String) -> Void = { _ in }
+    /// A cut-off dialog: bring the agent's terminal here to answer it (nil
+    /// when this pane has no terminal surface).
+    var onOpenTerminal: (() -> Void)? = nil
+    /// Grok's data-retention banner: true = opt in (nil: no buttons).
+    var onPrivacy: ((Bool) -> Void)? = nil
 
     @State private var code = ""
+    /// The checklist's boxes as the user sets them here (start: the screen's).
+    @State private var ticks: [Bool] = []
+    /// A click that lands just after the card moved was aimed at what was
+    /// there before (a strip row came in, the chat re-anchored): dropped.
+    @State private var shiftGuard = LayoutShiftGuard()
+
+    /// `action`, unless the card has just moved under the pointer.
+    private func guarded(_ action: @escaping () -> Void) -> () -> Void {
+        { [shiftGuard] in
+            guard shiftGuard.allows() else { NSSound.beep(); return }
+            action()
+        }
+    }
 
     private var icon: String {
         switch prompt.kind {
         case .login: return "person.badge.key.fill"
         case .trust: return "hand.raised.fill"
         case .picker: return "questionmark.circle.fill"
+        case .checklist: return "checklist"
+        case .notice: return "hand.raised.circle.fill"
         }
     }
 
@@ -2885,6 +5019,8 @@ private struct PromptCard: View {
                 case .trust: trustBody
                 case .login: loginBody
                 case .picker: pickerBody
+                case .checklist: checklistBody
+                case .notice: noticeBody
                 }
             }
             Spacer(minLength: 0)
@@ -2895,6 +5031,9 @@ private struct PromptCard: View {
             .fill(Color.orange.opacity(0.08)))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
             .strokeBorder(Color.orange.opacity(0.3)))
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { y in
+            shiftGuard.note(y)
+        }
     }
 
     @ViewBuilder private var trustBody: some View {
@@ -2903,7 +5042,7 @@ private struct PromptCard: View {
             .foregroundStyle(.secondary)
             .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
         if prompt.canAnswerTrust {
-            Button(action: onTrust) {
+            Button(action: guarded(onTrust)) {
                 Label(NSLocalizedString("Trust this folder & continue", comment: "prompt"),
                       systemImage: "checkmark.shield.fill")
             }
@@ -2924,16 +5063,139 @@ private struct PromptCard: View {
     /// rows whose labels wrap: a row of AppKit `.bordered` buttons with long
     /// labels (/model) overflowed a narrow room cell, and each truncation
     /// re-invalidated the lazy transcript's layout — a main-thread livelock.
+    @ViewBuilder private var checklistBody: some View {
+        let start = prompt.checklist?.checked ?? []
+        if !prompt.detail.isEmpty {
+            Text(prompt.detail)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(6).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        ForEach(Array(prompt.options.enumerated()), id: \.offset) { i, option in
+            let on = ticks.indices.contains(i) ? ticks[i] : (start.indices.contains(i) && start[i])
+            Button(action: guarded {
+                if ticks.count != start.count { ticks = start }
+                if ticks.indices.contains(i) { ticks[i].toggle() }
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: on ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 14))
+                        .foregroundStyle(on ? Color.orange : Color.secondary)
+                    Text(option.label).font(.system(size: 12, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(on ? Color.orange.opacity(0.10) : Color.primary.opacity(0.04)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        HStack(spacing: 10) {
+            Button(action: guarded {
+                onChecklist(ticks.count == start.count ? ticks : start)
+            }) {
+                Text(prompt.checklist?.submitLabel ?? NSLocalizedString("Confirm", comment: "prompt checklist"))
+            }
+            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            Button(NSLocalizedString("Dismiss", comment: "prompt picker (Esc)"), action: guarded { onChecklist(nil) })
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.top, 2)
+        .onChange(of: prompt.checklist?.checked ?? []) { _, now in ticks = now }
+        .onAppear { if ticks.count != start.count { ticks = start } }
+    }
+
+    /// A banner the agent shows (Grok's data-retention choice): what it
+    /// says, and where it's answered.
+    @ViewBuilder private var noticeBody: some View {
+        if !prompt.detail.isEmpty {
+            Text(prompt.detail)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let onPrivacy {
+            // Opt out first and emphasised: it keeps the coding data private.
+            HStack(spacing: 8) {
+                Button(action: guarded { onPrivacy(false) }) {
+                    Text(NSLocalizedString("Opt out", comment: "Grok data-retention banner: don't let xAI keep coding data"))
+                }
+                .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+                Button(action: guarded { onPrivacy(true) }) {
+                    Text(NSLocalizedString("Opt in", comment: "Grok data-retention banner: let xAI keep coding data"))
+                }
+                .controlSize(.small).buttonStyle(.bordered)
+            }
+            Text(NSLocalizedString("Grok's own setting; you can change it later in Grok's /settings.",
+                                   comment: "Grok data-retention banner hint"))
+                .font(.system(size: 11)).foregroundStyle(.tertiary)
+        } else {
+            Text(NSLocalizedString("Open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+                .font(.system(size: 11)).foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder private var partialPickerBody: some View {
+        if !prompt.detail.isEmpty {
+            Text(prompt.detail)
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(10).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        Text(NSLocalizedString("This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal.",
+                               comment: "prompt hint: a dialog cut off by a small terminal"))
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if let onOpenTerminal {
+            Button(action: guarded(onOpenTerminal)) {
+                Label(NSLocalizedString("Open the terminal", comment: "prompt: answer a cut-off dialog"),
+                      systemImage: "terminal.fill")
+            }
+            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+        } else {
+            Text(NSLocalizedString("Open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+                .font(.system(size: 11)).foregroundStyle(.tertiary)
+        }
+    }
+
     @ViewBuilder private var pickerBody: some View {
-        ForEach(prompt.options) { option in
-            let highlighted = option.index == (prompt.selectedOption ?? prompt.options.first?.index)
-            Button { onPick(option.index) } label: {
+        if prompt.partial { partialPickerBody } else { fullPickerBody }
+    }
+
+    @ViewBuilder private var fullPickerBody: some View {
+        if !prompt.detail.isEmpty {
+            // What's being asked about: the command, the blocked action.
+            Text(prompt.detail)
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(8).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // One-off answers first, blanket approvals last; the default marked
+        // only when it isn't a blanket approval (see `cardHighlight`).
+        ForEach(prompt.cardOptions) { option in
+            let highlighted = option.index == prompt.cardHighlight
+            Button(action: guarded { onPick(option.index) }) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text("\(option.index)").font(.system(size: 11, weight: .bold, design: .monospaced))
                         .foregroundStyle(.orange).frame(width: 14)
-                    Text(option.label).font(.system(size: 12, weight: highlighted ? .semibold : .medium))
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(option.label).font(.system(size: 12, weight: highlighted ? .semibold : .medium))
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let detail = option.detail, !detail.isEmpty {
+                            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 9).padding(.vertical, 6)
@@ -2946,7 +5208,7 @@ private struct PromptCard: View {
             }
             .buttonStyle(.plain)
         }
-        Button(NSLocalizedString("Dismiss", comment: "prompt picker (Esc)")) { onPick(nil) }
+        Button(NSLocalizedString("Dismiss", comment: "prompt picker (Esc)"), action: guarded { onPick(nil) })
             .buttonStyle(.plain)
             .font(.system(size: 11.5))
             .foregroundStyle(.secondary)
@@ -2975,6 +5237,8 @@ private struct PromptCard: View {
                 Label(NSLocalizedString("Machine settings…", comment: "login"), systemImage: "gearshape")
             }
             .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+        } else if hostSignInAvailable, let machineName {
+            machineLoginBody(machineName)
         } else if hostSignInAvailable {
             // The host signs in: a throwaway machine does the OAuth, the
             // credential is stored on this Mac, the agent gets a stand-in key.
@@ -3006,7 +5270,7 @@ private struct PromptCard: View {
             Text(NSLocalizedString("How would you like to sign in?", comment: "login"))
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             ForEach(prompt.loginMethods) { m in
-                Button { onMethod(m.index) } label: {
+                Button(action: guarded { onMethod(m.index) }) {
                     HStack(spacing: 7) {
                         Text("\(m.index)").font(.system(size: 11, weight: .bold, design: .monospaced))
                             .foregroundStyle(.orange).frame(width: 14)
@@ -3024,15 +5288,29 @@ private struct PromptCard: View {
                 }
                 .buttonStyle(.plain)
             }
-        } else if prompt.authURL != nil {
-            // Stage 2 — approve in the browser, paste the code back.
-            Text(NSLocalizedString("Open the sign-in page, approve access, then paste the code back here.",
-                                   comment: "login")).font(.system(size: 11)).foregroundStyle(.secondary)
-            Button(action: onOpenURL) {
-                Label(NSLocalizedString("Open sign-in page", comment: "login"),
-                      systemImage: "arrow.up.right.square.fill")
+        } else if prompt.authURL != nil || prompt.deviceCode != nil {
+            // Stage 2 — approve in the browser: paste the code back (OAuth
+            // code flow), or check the page shows the agent's code (device flow).
+            Text(prompt.awaitingCode
+                 ? NSLocalizedString("Open the sign-in page, approve access, then paste the code back here.", comment: "login")
+                 : prompt.deviceCode == nil
+                 ? NSLocalizedString("Open the sign-in page and approve access.", comment: "login")
+                 : prompt.authURL == nil
+                 ? NSLocalizedString("Approve the sign-in in your browser; it should show this code:", comment: "login")
+                 : NSLocalizedString("Open the sign-in page and check that it shows this code:", comment: "login"))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let code = prompt.deviceCode, !prompt.awaitingCode {
+                Text(code)
+                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                    .textSelection(.enabled)
             }
-            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            if prompt.authURL != nil {
+                Button(action: onOpenURL) {
+                    Label(NSLocalizedString("Open sign-in page", comment: "login"),
+                          systemImage: "arrow.up.right.square.fill")
+                }
+                .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            }
             if prompt.awaitingCode {
                 HStack(spacing: 6) {
                     TextField(NSLocalizedString("Paste code", comment: "login"), text: $code)
@@ -3050,6 +5328,105 @@ private struct PromptCard: View {
             Text(NSLocalizedString("Starting sign-in…", comment: "login"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
+    }
+
+    /// A sign-in on an attached machine: the agent's own login runs there;
+    /// its credential stays there, outside any sandbox — said up front.
+    @ViewBuilder private func machineLoginBody(_ machine: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.system(size: 12)).foregroundStyle(.yellow)
+            Text(String(format: NSLocalizedString(
+                "Not sandboxed. This signs %@ in on %@ itself, as if you ran its login in a terminal there. Your %@ credentials are stored on that Mac in the agent's own files: the agent — and anything else running as you on that Mac — can read and use them. Bromure never sees them, and can't swap or revoke them for you.",
+                comment: "machine sign-in disclaimer"), agentName.isEmpty ? providerName : agentName, machine, providerName))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.yellow.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.yellow.opacity(0.35)))
+        if let device {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Text("1").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.orange)
+                    Button { NSWorkspace.shared.open(device.url) } label: {
+                        Label(NSLocalizedString("Open sign-in page", comment: "login"),
+                              systemImage: "arrow.up.right.square.fill")
+                    }
+                    .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+                    Text(device.url.host ?? "")
+                        .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.tertiary)
+                }
+                if device.paste {
+                    HStack(spacing: 8) {
+                        Text("2").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.orange)
+                        Text(NSLocalizedString("Approve access, then paste the code the page shows:", comment: "login"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 6) {
+                        TextField(NSLocalizedString("Paste code", comment: "login"), text: $code)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(maxWidth: 280)
+                            .onSubmit { submitSignInCode() }
+                        Button(NSLocalizedString("Submit", comment: "login")) { submitSignInCode() }
+                            .controlSize(.small)
+                            .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding(.leading, 18)
+                } else if let c = device.code {
+                    HStack(spacing: 8) {
+                        Text("2").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.orange)
+                        Text(NSLocalizedString("Enter this code:", comment: "login"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text(c)
+                            .font(.system(size: 17, weight: .semibold, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.06)))
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(c, forType: .string)
+                        } label: { Image(systemName: "doc.on.doc") }
+                            .buttonStyle(.borderless).help(NSLocalizedString("Copy the code", comment: "login"))
+                    }
+                }
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text(signInStatus ?? "").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    if let onCancelSignIn {
+                        Button(NSLocalizedString("Cancel", comment: "login"), action: onCancelSignIn)
+                            .buttonStyle(.link).font(.system(size: 11))
+                    }
+                }
+            }
+            .padding(.top, 2)
+        } else if let signInStatus {
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text(signInStatus).font(.system(size: 11.5)).foregroundStyle(.secondary)
+            }
+            .padding(.top, 2)
+        } else {
+            Button(action: onHostSignIn) {
+                Label(String(format: NSLocalizedString("Sign in to %@ on %@…", comment: "login"), providerName, machine),
+                      systemImage: "person.badge.key.fill")
+            }
+            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            if let signInError {
+                Text(signInError)
+                    .font(.system(size: 11)).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func submitSignInCode() {
+        let c = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !c.isEmpty else { return }
+        onSubmitSignInCode?(c)
+        code = ""
     }
 
     private func submit() {
@@ -3080,6 +5457,7 @@ struct DelegationPanel: View {
     /// nil = read-only (a fat client's mirror).
     let answer: ((UUID, UUID, String) -> Void)?
     @AppStorage("sessions.delegationsExpanded") private var expanded = true
+    @AppStorage("sessions.requestsExpanded") private var requestsExpanded = false
     @State private var drafts: [UUID: String] = [:]
 
     private var remoteHosts: [UUID: String] {
@@ -3094,7 +5472,11 @@ struct DelegationPanel: View {
         } else {
             VStack(spacing: 0) {
                 Divider().opacity(0.5)
-                ForEach(asChild) { delegateStrip($0) }
+                if asChild.count == 1 {
+                    delegateStrip(asChild[0])
+                } else if !asChild.isEmpty {
+                    requestList(asChild)
+                }
                 if !mine.isEmpty { delegatorList(mine) }
             }
             .background(Color.platformTextBackground)
@@ -3144,6 +5526,48 @@ struct DelegationPanel: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .help(d.brief)
+    }
+
+    /// Several open requests fold under one line, like the delegations:
+    /// stacked strips pushed the agent's own text out of view.
+    private func requestList(_ list: [Delegation]) -> some View {
+        let requests = list.filter(\.isRequest).count
+        return VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { requestsExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: requestsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Image(systemName: "bubble.left.and.text.bubble.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(requests == list.count
+                         ? NSLocalizedString("Requests", comment: "delegation panel")
+                         : NSLocalizedString("Working for others", comment: "delegation panel"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("\(list.count)")
+                        .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            if requestsExpanded {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(list) { delegateStrip($0) }
+                    }
+                }
+                .frame(maxHeight: 160)
+            }
+        }
     }
 
     // MARK: Delegator: my delegates
@@ -3366,6 +5790,9 @@ private struct MessageChrome<Content: View>: View {
     /// What Copy takes (the whole reply when this row is its first piece).
     var copyText: String? = nil
     var onEdit: (() -> Void)? = nil
+    /// The reply this row is part of (any piece of a long one): adds Copy
+    /// Reply / Copy as Markdown on a right-click.
+    var wholeReply: String? = nil
     @ViewBuilder let content: Content
     @State private var hovering = false
     @State private var copied = false
@@ -3397,7 +5824,9 @@ private struct MessageChrome<Content: View>: View {
                         } label: {
                             Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         }
-                        .help(NSLocalizedString("Copy", comment: "message tools"))
+                        .help(wholeReply != nil
+                              ? NSLocalizedString("Copy the whole reply as Markdown", comment: "message tools")
+                              : NSLocalizedString("Copy", comment: "message tools"))
                         if let onEdit {
                             Button(action: onEdit) { Image(systemName: "pencil") }
                                 .help(NSLocalizedString("Edit and send again", comment: "message tools"))
@@ -3416,5 +5845,145 @@ private struct MessageChrome<Content: View>: View {
                 }
             }
             .onHover { inside in withAnimation(.easeOut(duration: 0.12)) { hovering = inside } }
+            .replyCopyMenu(wholeReply)
+    }
+}
+
+
+/// A paused or ended session's held messages (`QueuedMessage.sessionID`),
+/// wherever its chat keyed them, above its rest composer: Edit takes one
+/// back into the draft, Drop removes it. Delivered once the session is
+/// back (its chat adopts them).
+struct SessionQueueStrip: View {
+    let sessionID: UUID
+    let agent: String
+    let accent: Color
+    let onEdit: (String) -> Void
+    @ObservedObject var store: ChatQueueStore = .shared
+
+    var body: some View {
+        let mine = store.messages(session: sessionID).map(\.message)
+        if !mine.isEmpty {
+            QueuedMessagesStrip(queued: mine, agent: agent, accent: accent,
+                                onEdit: { id in
+                                    guard let q = mine.first(where: { $0.id == id }) else { return }
+                                    store.remove(id)
+                                    onEdit(q.text)
+                                },
+                                onDelete: { store.remove($0) },
+                                alwaysEditable: true)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+}
+
+/// Messages waiting for the agent, above the composer: what the agent will
+/// read next (or, held by Bromure, once it's done), each one editable.
+struct QueuedMessagesStrip: View {
+    let queued: [QueuedMessage]
+    let agent: String
+    let accent: Color
+    let onEdit: (UUID) -> Void
+    let onDelete: (UUID) -> Void
+    /// Paused: nothing is in an agent's queue any more — every row can be
+    /// taken back or dropped.
+    var alwaysEditable = false
+    /// A card for the dialog a message waits on is on show. When none is
+    /// (the menu came up off stage, its card went with a stage switch), the
+    /// row offers its own way out — never a wait on a card that isn't there.
+    var dialogCardShown = true
+    var onAnswerInTerminal: (() -> Void)? = nil
+    var onDismissDialog: (() -> Void)? = nil
+
+    private var waitingText: String {
+        if dialogCardShown {
+            return agent.isEmpty
+                ? NSLocalizedString("Waiting — the agent is asking you something; answer the card first",
+                                    comment: "queued message held while the agent shows a dialog")
+                : String(format: NSLocalizedString("Waiting — %@ is asking you something; answer the card first",
+                                                   comment: "queued message held while the agent shows a dialog"), agent)
+        }
+        return agent.isEmpty
+            ? NSLocalizedString("Waiting — a menu is open in the agent's terminal; answer it there or dismiss it",
+                                comment: "queued message held behind a menu no card shows")
+            : String(format: NSLocalizedString("Waiting — a menu is open in %@'s terminal; answer it there or dismiss it",
+                                               comment: "queued message held behind a menu no card shows"), agent)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(queued) { q in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: q.failure != nil ? "exclamationmark.triangle"
+                          : q.waitingOnDialog ? "hand.raised"
+                          : q.isDelivered ? "checkmark.circle"
+                          : q.held ? "clock" : "text.line.last.and.arrowtriangle.forward")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(q.failure != nil ? Color.red : accent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(q.text)
+                            .font(.system(size: 12))
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                        if let failure = q.failure {
+                            Text(failure)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.red)
+                        } else if q.waitingOnDialog {
+                            Text(waitingText)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.orange)
+                            if !dialogCardShown, onAnswerInTerminal != nil || onDismissDialog != nil {
+                                HStack(spacing: 10) {
+                                    if let onAnswerInTerminal {
+                                        Button(NSLocalizedString("Open terminal", comment: "queued message: answer the agent's menu in its terminal"),
+                                               action: onAnswerInTerminal)
+                                    }
+                                    if let onDismissDialog {
+                                        Button(NSLocalizedString("Dismiss (Esc)", comment: "queued message: close the agent's menu with Esc"),
+                                               action: onDismissDialog)
+                                    }
+                                }
+                                .buttonStyle(.link)
+                                .font(.system(size: 11))
+                            }
+                        } else if q.isDelivered {
+                            Text(agent.isEmpty
+                                 ? NSLocalizedString("Delivered — queued by the agent", comment: "queued message typed in, not yet a turn in the transcript")
+                                 : String(format: NSLocalizedString("Delivered — queued by %@", comment: "queued message typed in, not yet a turn in the transcript"), agent))
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                        } else {
+                        Text(q.held
+                             ? (agent.isEmpty
+                                ? NSLocalizedString("Queued — sent when the agent is done", comment: "queued message")
+                                : String(format: NSLocalizedString("Queued — sent when %@ is done", comment: "queued message"), agent))
+                             : (agent.isEmpty
+                                ? NSLocalizedString("Queued — the agent reads it next", comment: "queued message")
+                                : String(format: NSLocalizedString("Queued — %@ reads it next", comment: "queued message"), agent)))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    if q.editable || q.failure != nil || alwaysEditable, !q.sending {
+                        Button(NSLocalizedString("Edit", comment: "queued message")) { onEdit(q.id) }
+                            .buttonStyle(.link)
+                            .font(.system(size: 11))
+                    }
+                    if q.held || q.failure != nil || alwaysEditable, !q.sending {
+                        Button { onDelete(q.id) } label: {
+                            Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help(NSLocalizedString("Don't send it", comment: "queued message"))
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(accent.opacity(0.06))
     }
 }

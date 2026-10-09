@@ -378,7 +378,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "結束 Bromure Agentic Coding？";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d 個執行中的 VM (%@) 將根據每個工作區的關閉動作而關閉。";
+"The workspace %@ is running. It will be closed according to its close action." = "工作區 %@ 正在執行，將根據其關閉動作關閉。";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d 個工作區正在執行（%2$@），每個都將根據其關閉動作關閉。";
+"The infrastructure machine %@ is running and will be suspended." = "基礎設施機器 %@ 正在執行，將被暫停。";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d 台基礎設施機器正在執行（%2$@），將被暫停。";
 "Quit" = "結束";
 
 /* Guardrails: new prompt-on-write mode */
@@ -468,7 +471,6 @@
 "Allow this request" = "允許此請求";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure 在本機分析代理的 AI 流量以偵測被注入的指令——任何資料都不會離開 Mac。每個偵測器使用本機模型，首次啟用時從 bromure.io 下載。";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "對代理讀取的檔案內容、網頁和工具輸出進行評分（Prompt Guard），捕捉藏在惡意儲存庫中的「忽略先前指令 / 竊取機密」。首次啟用時下載約 272 MB。";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "對 Claude Code、Codex 和 Grok 作為權威載入的 CLAUDE.md、AGENTS.md、GROK.md 及其他指令 / 設定檔進行評分。首次啟用時下載約 571 MB。";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "「記錄但繼續」會將偵測記錄到安全紀錄視窗。「詢問我該怎麼做」會暫停請求並顯示被標記的文字。「封鎖」會直接讓請求失敗。";
 "Possible %@ in “%@”" = "「%@」中可能存在%@";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure 標記了代理即將傳送給模型的內容（來自 %@）。請在下方檢視——放行還是封鎖此請求？";
@@ -1231,34 +1233,24 @@
 "Backlog" = "待辦";
 "No tasks yet — write one." = "還沒有任務——寫一個吧。";
 "Plan" = "規劃";
-"No phases yet — click Plan on a backlog card." = "還沒有階段——在待辦卡片上點擊「規劃」。";
-"Start %d selected" = "開始所選的%d項";
-"One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are." = "一次性啟動每個所選階段。依賴未完成的階段會排隊，完成後自動開始。";
 "Move to Testing" = "移到「測試」";
 "Close Without Merging" = "不合併直接關閉";
-"Stop Agent & Delete Worktree" = "停止代理程式並刪除工作樹";
-"Remove Card Only" = "僅移除卡片";
 "Testing/Review" = "測試/審查";
 "Nothing to review" = "沒有待審查的內容";
 "Merge into %@…" = "合併到 %@…";
 "parent" = "父分支";
 "Back to In Progress" = "退回「進行中」";
-"Delete Worktree & Branch" = "刪除工作樹和分支";
 "Nothing shipped yet" = "還沒有完成的內容";
 "Remove from board" = "從看板移除";
 "Remove “%@”?" = "移除「%@」？";
-"Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace." = "停止會刪除代理程式工作階段及其在工作樹中未提交/未合併的工作。「僅移除卡片」會將它們保留在工作區中。";
 "This can't be undone." = "此操作無法復原。";
 "queued" = "已排隊";
 "Starts automatically when its dependencies are Done." = "依賴完成後自動開始。";
 "Phases that must be Done before this one starts." = "此階段開始前必須完成的階段。";
 "Untitled task" = "未命名任務";
 "planning — click to watch" = "規劃中——點擊查看";
-"A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them." = "一個可見的規劃工作階段正在進行——點擊卡片開啟；階段登記後會出現在「規劃」欄。";
 "Plan reviewed by the agent" = "計劃已由代理程式審查";
 "part of “%@”" = "屬於「%@」";
-"A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column." = "規劃代理程式會閱讀任務簡述和程式碼儲存庫，然後在「規劃」欄登記有序的階段卡片（含依賴關係）。";
-"One shot" = "一步到位";
 "Straight to In Progress: the agent does the whole task autonomously and hands you the diff in Testing/Review." = "直接進入「進行中」：代理程式自主完成整個任務，並在測試/審查中交付差異。";
 "starting…" = "正在啟動…";
 "session gone" = "工作階段已遺失";
@@ -1281,9 +1273,7 @@
 "Write" = "編輯";
 "Preview" = "預覽";
 "Starting the task launches the agent in a fresh worktree of the repository with this brief as its prompt. It works on its own branch and commits its changes; you review the diff in Testing, then merge." = "開始任務後，代理程式會以此簡述為提示詞，在儲存庫的全新工作樹中啟動。它在自己的分支上工作並提交變更；你在測試中審查差異，然後合併。";
-"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column." = "先儲存，然後開啟一個可見的規劃工作階段：代理程式探索儲存庫（可以向它提問——它能看到你），並把帶依賴關係的有序階段卡片登記到「規劃」欄。";
 "Planning — %@" = "規劃 — %@";
-"Your brief" = "你的任務簡述";
 "The agent explores the repository and may ask you questions here, then files the plan's phases onto the board." = "代理程式會探索儲存庫，可能在此向你提問，然後把計劃的各階段登記到看板上。";
 "1 question answered — %@" = "已回答1個問題——%@";
 "%d questions answered — %@" = "已回答%d個問題——%@";
@@ -1347,7 +1337,7 @@
 "The transcript file has no readable entries." = "轉錄檔案沒有可讀條目。";
 "No transcript" = "無轉錄";
 "This run's transcript couldn't be read." = "無法讀取此次執行的轉錄。";
-"⏎ send   ⌥⏎ newline" = "⏎ 傳送   ⌥⏎ 換行";
+"⏎ send   ⇧⏎ newline" = "⏎ 傳送   ⇧⏎ 換行";
 "Send (⏎)" = "傳送 (⏎)";
 "The agent asked" = "代理程式曾提問";
 "The agent is asking %d questions — answer them all, then Submit" = "代理程式提出了%d個問題——全部回答後點擊提交";
@@ -1369,11 +1359,8 @@
 "Couldn't reach the workspace — is it running?" = "無法連接工作區——它在執行嗎？";
 "Plan: %@" = "規劃：%@";
 "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”." = "「%@」在工作區中不存在——請選擇現有資料夾，或編輯任務並啟用「建立資料夾和 git 儲存庫」。";
-"The planning session ended before filing phases — click Plan to retry." = "規劃工作階段在登記階段前就結束了——點擊「規劃」重試。";
-"The planning session timed out without filing phases — click Plan to retry." = "規劃工作階段逾時且未登記任何階段——點擊「規劃」重試。";
 "The planning session never started — is the workspace running? Click Plan to retry." = "規劃工作階段從未啟動——工作區在執行嗎？點擊「規劃」重試。";
 "Claude exited before filing phases — click Plan to retry." = "Claude 在登記階段前就退出了——點擊「規劃」重試。";
-"The planning session was interrupted — click Plan to retry." = "規劃工作階段被中斷——點擊「規劃」重試。";
 "Merge → %@" = "合併 → %@";
 "PR: %@" = "拉取請求：%@";
 
@@ -1384,7 +1371,6 @@
 "Types every drafted comment into the coding agent running in the active tab." = "把每則草稿評論輸入到作用中標籤頁執行的編碼代理程式。";
 
 /* Plan column — batch selection bar */
-"Delete %d selected phase(s)?" = "刪除所選的%d個階段？";
 "Remove every selected phase from the board" = "從看板移除所有所選階段";
 
 /* Coding board — session restart */
@@ -1682,7 +1668,6 @@
 "The workspace did not start in time" = "工作區未能及時啟動";
 "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again." = "代理程式一直沒有出現。工作區可能執行著舊版的 VM 內代理程式 — 請重新啟動它（虛擬機器 › ⋯ › 重新啟動）後再試。";
 "Under the Hood" = "深入內部";
-"New task" = "新增任務";
 "Describe what you want done (⌘N)" = "描述你想完成的事 (⌘N)";
 "Search tasks" = "搜尋任務";
 "Virtual Machines" = "虛擬機器";
@@ -1777,9 +1762,6 @@
 "The task's checkout is gone, so there is nothing to resume into." = "任務的取出已不存在，無處可恢復。";
 "Reopen the agent on this task's branch to keep working — the task goes back to In Progress. If the branch was cleaned up, you'll be offered a fresh start instead." = "在此任務的分支上重新打開代理程式繼續工作 — 任務回到「進行中」。如果分支已被清理，會改為提供重新開始。";
 "Needs a fresh start" = "需要重新開始";
-"The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch." = "%@ 的取出已不存在，且無法在 %@ 中重新建立。重新開始會在新分支上再跑一次任務。";
-"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch." = "任務的分支 %@ 在 %@ 中已不存在 — 其取出已被移除（合併後清理，或被刪除）。重新開始會在新分支上再跑一次任務。";
-"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@." = "儲存庫檔案夾「%@」已從工作區消失，無處可恢復。重新開始會從頭再跑一次任務%@。";
 ", cloning the repository first" = "，並先複製儲存庫";
 "Waking the workspace…" = "正在喚醒工作區…";
 "Starting the workspace…" = "正在啟動工作區…";
@@ -1795,7 +1777,7 @@
 "The machine it runs on — running" = "它執行所在的機器 — 執行中";
 "The machine it runs on — asleep, wakes up when you start" = "它執行所在的機器 — 睡眠中，啟動時喚醒";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "它的工作位置：一個新檔案夾、你已有的檔案夾，或要取出的儲存庫";
-"⏎ start   ⌥⏎ newline" = "⏎ 開始   ⌥⏎ 換行";
+"⏎ start   ⇧⏎ newline" = "⏎ 開始   ⇧⏎ 換行";
 "Start the session (⏎)" = "開始工作階段 (⏎)";
 "Working in this folder — click to start in a new folder instead" = "正在此檔案夾中工作 — 按一下改為在新檔案夾中開始";
 "Work in this folder again" = "再次在此檔案夾中工作";
@@ -1814,7 +1796,7 @@
 "Up one folder" = "上一層檔案夾";
 "No folders in here yet." = "這裡還沒有檔案夾。";
 "The machine's folders can't be read right now." = "現在無法讀取機器的檔案夾。";
-"Message %@…  (or drop files)" = "傳訊息給 %@…  （或拖入檔案）";
+"Message %@… (or drop files)" = "傳訊息給 %@…（或拖入檔案）";
 "Ready · %@" = "就緒 · %@";
 "Ended · %@ ago" = "已結束 · %@前";
 "End “%@”?" = "要結束「%@」嗎？";
@@ -2020,7 +2002,7 @@
 "Streaming to bromure.io" = "正在串流傳送到 bromure.io";
 "Signed in to bromure.io" = "已登入 bromure.io";
 "Log out" = "登出";
-"Message the agent…  (or drop files)" = "傳訊息給代理程式…  （或拖入檔案）";
+"Message the agent… (or drop files)" = "傳訊息給代理程式…（或拖入檔案）";
 "Drop to attach" = "放開以附加";
 "Loading transcript…" = "正在載入逐字稿…";
 "Say what you need — the agent is listening." = "說說你需要什麼 — 代理程式在聽。";
@@ -2103,6 +2085,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "已允許 — 略過憑證驗證 (X-bromure-insecure)；未注入憑證";
 "To-dos" = "待辦事項";
 "⎋ stop   ⏎ send" = "⎋ 停止   ⏎ 傳送";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ 停止   ⏎ 傳送   ⇧⏎ 換行";
 "Stop the agent (Esc)" = "停止代理程式 (Esc)";
 "Completed" = "已完成";
 "Reopened" = "已重新開啟";
@@ -2803,7 +2786,7 @@
 "Viewed" = "已檢視";
 "Viewed — click to unmark" = "已檢視——點按取消";
 "What the changes are compared against" = "變更的比較對象";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ 加入評論   ⌥⏎ 換行   ⇧⌘⏎ 傳送給代理程式";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ 加入評論   ⇧⏎ 換行   ⇧⌘⏎ 傳送給代理程式";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@（目前）";
@@ -2837,7 +2820,7 @@
 "The current commit" = "目前的提交";
 "This machine has no branches made by Bromure." = "此機器上沒有 Bromure 建立的分支。";
 "last commit %@" = "最近提交 %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ 加入評論   ⌥⏎ 換行   ⇧⌘⏎ 退回";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ 加入評論   ⇧⏎ 換行   ⇧⌘⏎ 退回";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "只回覆你的 Slack 帳號——頻道和其他所有人都會被忽略。";
@@ -3130,3 +3113,1033 @@
 "%@ stopped as it started: %@" = "%1$@ 啟動時停止：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ 曾由已封存的工作階段「%2$@」使用，最後一次在 %3$@。要在此工作階段中重新使用嗎？";
 "Delegation" = "委派";
+
+/* Added for hotfixes-v5 */
+"Requests" = "請求";
+"Working for others" = "為他人工作";
+"The model the agent last answered with" = "代理程式最近一次回覆所用的模型";
+"Time the agent spent working: %d turns, the longest %@" = "代理程式工作時間：%d 輪，最長 %@";
+"Erasing and restoring storage is done on the server Mac." = "儲存空間的清除與還原需在伺服器 Mac 上進行。";
+"Home folder size" = "主檔案夾大小";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "從 %d GB（目前大小——主檔案夾無法縮小）到 1024 GB。較大的主檔案夾會在工作區下次啟動時生效。磁碟映像只佔用其檔案實際使用的空間。";
+"Queued — sent when the agent is done" = "佇列中 — 代理程式完成後傳送";
+"Queued — sent when %@ is done" = "佇列中 — %@ 完成後傳送";
+"Queued — the agent reads it next" = "佇列中 — 代理程式接下來會讀取";
+"Queued — %@ reads it next" = "佇列中 — %@ 接下來會讀取";
+"Don't send it" = "不要傳送";
+"Chart" = "圖表";
+"Video" = "影片";
+"Open in its own window" = "在獨立視窗中打開";
+"Play video" = "播放影片";
+"Not an image or a video this app can show." = "不是此 App 可以顯示的影像或影片。";
+"This window can't read files from that machine." = "此視窗無法讀取那台機器上的檔案。";
+"Couldn't read %@." = "無法讀取 %@。";
+"That image couldn't be decoded." = "無法解碼該影像。";
+"Couldn't prepare the video." = "無法準備影片。";
+"The chart couldn't be drawn: %@" = "無法繪製圖表：%@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "在獨立視窗中打開（在聊天中按住 ⌥ 捲動可縮放圖表）";
+"No timed turns yet: the timeline fills in as the agent works." = "還沒有計時的輪次：代理程式工作時時間軸會逐步填滿。";
+"Hover a bar for what the agent was doing · click a turn to zoom in" = "將指標停在條上查看代理程式在做什麼 · 點按某一輪放大";
+"All turns" = "所有輪次";
+"(no message)" = "（無訊息）";
+"of work across %d turns" = "共 %d 輪的工作";
+"in this turn" = "本輪";
+"tool calls" = "次工具呼叫";
+"files edited" = "個編輯過的檔案";
+"longest solo run" = "最長獨立工作";
+"Worked %@ on its own" = "獨立工作了 %@";
+"%d tool calls without a single prompt — “%@”" = "無需任何提示完成 %d 次工具呼叫 —「%@」";
+"See it" = "查看";
+"“%@” — %@, %d tool calls · click to zoom in" = "「%@」— %@，%d 次工具呼叫 · 點按放大";
+"Thinking & writing — %@" = "思考與寫作 — %@";
+"No timed turns in this room yet." = "此房間還沒有計時的輪次。";
+"of combined work by %d agents" = "%d 個代理程式的合計工作";
+"at once, at peak" = "同時進行（峰值）";
+"worked the most" = "工作最多";
+"Hover a bar for who was doing what, and for how long" = "將指標停在條上查看誰在做什麼、持續多久";
+"Thinking & writing" = "思考與寫作";
+"Edits" = "編輯";
+"Reading & search" = "閱讀與搜尋";
+"Web" = "網頁";
+"Sub-agents" = "子代理程式";
+"MCP tools" = "MCP 工具";
+"Other tools" = "其他工具";
+"%@ — timeline" = "%@ — 時間軸";
+"Room timeline: who worked when, and on what" = "房間時間軸：誰在何時做了什麼";
+"Time the agent spent working: %d turns, the longest %@ — click for where it went" = "代理程式工作時間：%d 輪，最長 %@ — 點按查看時間花在哪裡";
+
+/* Installer: Local Network access (Sequoia) */
+"Bromure Needs Local Network Access" = "Bromure 需要存取區域網路";
+"The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "安裝程式無法連線到此 Mac 上的 Bromure。在 macOS Sequoia 上，請在「系統設定 › 隱私權與安全性 › 區域網路」中允許 Bromure Agentic Coding。\n\n安裝將繼續，直接下載。如果開關已經開啟，請將其關閉再重新開啟，或重新啟動 Mac——在此之前，Sequoia 的虛擬機器網路可能會一直卡住。";
+"Open Local Network Settings" = "打開區域網路設定";
+
+/* Models: your environment (auto mode) */
+"Applies to every workspace from its next launch." = "從每個工作區下次啟動時生效。";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "在此處開啟終端機，位於此工作階段的檔案夾";
+"Drag to resize" = "拖移以調整大小";
+"Hide — the shell keeps running (⌃`)" = "隱藏——shell 繼續執行 (⌃`)";
+"Close the terminal (ends the shell)" = "關閉終端機（結束 shell）";
+"The terminal isn't available right now." = "終端機暫時無法使用。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "正在同步最新內容…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "本輪開始後沒有任何變更。";
+
+/* Repository watches + Automations hub */
+"%1$@ · ×%2$d" = "%1$@ · ×%2$d";
+"%1$d new finding(s) in %2$@" = "%2$@ 中有 %1$d 個新發現項目";
+"%d dismissed" = "%d 個已略過";
+"%d duplicate" = "%d 個重複";
+"%d finding(s)" = "%d 個發現項目";
+"%d fixed" = "%d 個已修正";
+"%d need attention" = "%d 個需要注意";
+"%d new" = "%d 個新";
+"%d scanning continuously" = "%d 個持續掃描中";
+"A fix is a coding task on its own branch — it waits in review for you before anything merges. At most three automatic fixes run at once per repository." = "修正是在獨立分支上進行的程式設計任務——在合併任何內容之前都會等待你審查。每個儲存庫最多同時執行三個自動修正。";
+"A repository watch manages this automation — edit the watch in the Automations hub's Repositories tab. Changes made here are replaced the next time the watch is saved." = "此自動化由儲存庫監看管理——請在自動化中心的「儲存庫」標籤頁中編輯該監看。在此處所做的變更將在下次儲存監看時被取代。";
+"A watch scans a GitHub repository with an agent in one of your workspaces: the whole codebase on a schedule, and every new commit and pull request as they land. Findings are deduplicated across scans." = "監看會使用你某個工作區中的代理程式掃描 GitHub 儲存庫：依排程掃描整個程式碼庫，並在每個新提交和提取要求送達時進行掃描。發現項目會在多次掃描之間去除重複。";
+"Agent working on the fix" = "代理程式正在修正";
+"All" = "全部";
+"All %d" = "全部 (%d)";
+"All repositories" = "所有儲存庫";
+"Any severity" = "任何嚴重性";
+"Bug" = "錯誤";
+"Bugs" = "錯誤";
+"Checkout in the workspace" = "工作區中的簽出位置";
+"Closed" = "已關閉";
+"Commit" = "提交";
+"Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "提交和提取要求掃描會將第三方文字交給代理程式處理，因此需要 PromptGuard 模型。儲存監看時會下載該模型；在其就緒之前，這些掃描會被封鎖。";
+"Commits" = "提交";
+"Couldn't clone %1$@ into %2$@ — %3$@" = "無法將 %1$@ 複製到 %2$@——%3$@";
+"Critical" = "嚴重";
+"Critical finding in %@" = "%@ 中有嚴重發現項目";
+"Delete Finding" = "刪除發現項目";
+"Dependency" = "相依性";
+"Dismiss this finding?" = "要略過此發現項目嗎？";
+"Dismissed" = "已略過";
+"Dismiss…" = "略過…";
+"Duplicate of" = "重複於";
+"Edit Workspace…" = "編輯工作區…";
+"Every new commit" = "每個新提交";
+"Every new pull request" = "每個新提取要求";
+"Evidence" = "證據";
+"Finding" = "發現項目";
+"Findings" = "發現項目";
+"Findings appear here as the repository watches scan. Watch a repository from the Repositories tab." = "儲存庫監看掃描時，發現項目會顯示在這裡。請在「儲存庫」標籤頁中監看儲存庫。";
+"Findings pipeline" = "發現項目流程";
+"First seen" = "首次發現";
+"Fix" = "修正";
+"Fix closed without merging" = "修正已關閉，未合併";
+"Fix merged" = "修正已合併";
+"Fix not started" = "修正未開始";
+"Fix: %@" = "修正：%@";
+"Fixed" = "已修正";
+"Fixed in the last 30 days" = "過去 30 天內修正";
+"Fixes" = "修正";
+"Flagged by the prompt-injection screen" = "遭提示注入篩檢標記";
+"Flagged by the prompt-injection screen: %@" = "遭提示注入篩檢標記：%@";
+"For critical findings" = "針對嚴重發現項目";
+"For high and critical" = "針對高和嚴重";
+"For medium and above" = "針對中及以上";
+"Full repository scan" = "完整儲存庫掃描";
+"Full scan" = "完整掃描";
+"High" = "高";
+"In progress" = "進行中";
+"In review" = "審查中";
+"Info" = "資訊";
+"Instructions for the scanning agent" = "給掃描代理程式的說明";
+"Its scans stop and its automations are removed. Its findings are deleted too; fix tasks already started stay on the task board." = "其掃描將停止，自動化將被移除。其發現項目也會被刪除；已開始的修正任務仍保留在任務看板上。";
+"Last seen" = "最後發現";
+"Later scans that see it again won't reopen it." = "之後再次發現它的掃描不會重新開啟它。";
+"Location" = "位置";
+"Look for" = "尋找";
+"Low" = "低";
+"Mark as %@" = "標示為%@";
+"Medium" = "中";
+"Needs attention" = "需要注意";
+"Never" = "永不";
+"New" = "新";
+"No findings yet" = "尚無發現項目";
+"No scans yet — they appear here as the watches run." = "尚無掃描——監看執行後會顯示在這裡。";
+"No watched repositories" = "沒有監看的儲存庫";
+"Nothing needs you right now." = "目前沒有需要你處理的事項。";
+"Open findings" = "未解決的發現項目";
+"Other" = "其他";
+"Pick a repository (owner/name)." = "選擇一個儲存庫（owner/name）。";
+"Pipeline" = "流程";
+"Planning" = "規劃中";
+"Pull requests" = "提取要求";
+"Quality" = "品質";
+"Ready for review" = "待審查";
+"Reappeared after being marked fixed" = "標示為已修正後再次出現";
+"Reason (optional)" = "原因（選填）";
+"Recent scans" = "最近的掃描";
+"Recommendation" = "建議";
+"Reported by" = "回報者";
+"Resolved by a scan: %@" = "已由掃描解決：%@";
+"Run a full scan of %@ now" = "立即對 %@ 執行完整掃描";
+"Scan Now" = "立即掃描";
+"Scans" = "掃描";
+"Search findings" = "搜尋發現項目";
+"Security" = "安全性";
+"Security and bugs" = "安全性與錯誤";
+"Security vulnerabilities" = "安全性漏洞";
+"Seen" = "發現";
+"Severity" = "嚴重性";
+"Start Fix Anyway" = "仍要開始修正";
+"Start fixes automatically" = "自動開始修正";
+"Stop Watching" = "停止監看";
+"Stop Watching…" = "停止監看…";
+"Stop watching %@?" = "要停止監看 %@ 嗎？";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and a fix agent would read it too. Check it before starting a fix." = "提示注入篩檢標記了它（%@）。它來自讀取儲存庫內容的代理程式，修正代理程式也會讀取它。開始修正前請先檢查。";
+"These credentials ask before each use, which stalls an unattended scan until you answer: %@" = "這些憑證在每次使用前都會詢問，這會使無人看管的掃描停滯，直到你回應：%@";
+"This finding's text was flagged" = "此發現項目的文字已被標記";
+"This workspace has no github.com token — scans poll GitHub with it." = "此工作區沒有 github.com 權杖——掃描需要用它輪詢 GitHub。";
+"Watch" = "監看";
+"Watch a GitHub Repository" = "監看 GitHub 儲存庫";
+"Watch a GitHub Repository…" = "監看 GitHub 儲存庫…";
+"Watch and Scan Now" = "監看並立即掃描";
+"Watch on %@" = "監看 %@";
+"Watched repositories" = "監看的儲存庫";
+"What's wrong" = "問題描述";
+"Where the repository is (or will be cloned) inside the workspace." = "儲存庫在工作區中的位置（或將被複製到的位置）。";
+"default branch" = "預設分支";
+"last %@" = "上次 %@";
+"reported %d times" = "已回報 %d 次";
+"watching" = "監看中";
+"watching · checked %@" = "監看中 · %@檢查";
+"…and %d more" = "…以及另外 %d 個";
+"Clear Filters" = "清除篩選條件";
+"Findings by severity and status" = "依嚴重性和狀態分類的發現項目";
+"No matching findings" = "沒有相符的發現項目";
+"Nothing matches these filters." = "沒有符合這些篩選條件的項目。";
+"Repositories this workspace's token can reach" = "此工作區的權杖可存取的儲存庫";
+"Start a Fix" = "開始修正";
+"Watch a Repository…" = "監看儲存庫…";
+"Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "修正已開始——代理程式正在其獨立分支上處理。準備就緒後會移至「審查中」。";
+"Full scan of %@ requested — it shows under Recent scans once the agent starts." = "已要求對 %@ 進行完整掃描——代理程式開始後會顯示在「最近的掃描」下。";
+"Now watching %@." = "現在正在監看 %@。";
+"%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ 在 %3$@ 中，於 %2$@ 的新分支上處理你的提示詞";
+"%d run(s) need your attention" = "%d 個執行需要你注意";
+"(a disposable copy)" = "（一次性副本）";
+"A schedule, or something happening on GitHub or Linear." = "依排程，或在 GitHub 或 Linear 上發生某件事時。";
+"An agent picks up that item with your prompt — screened for prompt injection first" = "代理程式會依你的提示詞處理該項目——事先會進行提示注入篩檢";
+"An agent reviews the whole repository weekly, and every new commit and pull request" = "代理程式每週審查整個儲存庫，以及每個新提交和提取要求";
+"An agent starts in one of your workspaces with your prompt, on a fresh branch" = "代理程式在你的某個工作區中以你的提示詞在新分支上啟動";
+"Another one finishes" = "另一個自動化完成";
+"At set times" = "在設定的時間";
+"At the time you pick — every weekday at 9:00, hourly, weekly…" = "在你選擇的時間——每個工作日 9:00、每小時、每週…";
+"Backlog, dismiss, mark fixed…" = "待辦、略過、標示為已修正…";
+"Change the status" = "變更狀態";
+"Dismiss (Not an Issue)" = "略過（不是問題）";
+"Each item runs once, on its own branch, listed on the Runs tab" = "每個項目執行一次，在獨立分支上，並列在「執行」標籤頁中";
+"Each run starts this agent with your prompt, on a fresh branch." = "每次執行都會以你的提示詞在新分支上啟動此代理程式。";
+"Every %1$@ at %2$@" = "每%1$@ %2$@";
+"Every %d hours" = "每 %d 小時";
+"Every %d minutes" = "每 %d 分鐘";
+"Every automation runs an agent unattended in one of your workspaces, under its credentials and guardrails." = "每個自動化都會在你的某個工作區中無人看管地執行代理程式，並使用該工作區的憑證和防護措施。";
+"Every day at %@" = "每天 %@";
+"Every hour" = "每小時";
+"Every weekday at %@" = "每個工作日 %@";
+"Findings are collected and deduplicated across scans, by severity" = "發現項目會跨掃描收集並去除重複，依嚴重性排列";
+"Full scan %1$@ %2$02d:00" = "完整掃描 %1$@ %2$02d:00";
+"GitHub & Linear events" = "GitHub 與 Linear 事件";
+"Hasn't run yet" = "尚未執行";
+"Insert:" = "插入：";
+"Issue" = "問題";
+"Last run %@" = "上次執行 %@";
+"Mark as Fixed" = "標示為已修正";
+"Mark as New" = "標示為新";
+"Marked fixed by hand" = "已手動標示為已修正";
+"Move to Backlog" = "移至待辦";
+"Name this automation" = "為此自動化命名";
+"Needs a token" = "需要權杖";
+"New issue" = "新問題";
+"Next %@" = "下次 %@";
+"No event automations — e.g. review every new pull request" = "沒有事件自動化——例如審查每個新提取要求";
+"No open findings" = "沒有未解決的發現項目";
+"No scheduled automations — e.g. a weekday-morning triage of open issues" = "沒有排程的自動化——例如每個工作日早上分類未解決的問題";
+"Nothing runs on its own yet" = "還沒有任何項目會自動執行";
+"One click starts a fix on its own branch — you review before anything merges" = "一鍵在獨立分支上開始修正——合併前由你審查";
+"Open Runs" = "打開執行";
+"Open Task" = "打開任務";
+"Opened on GitHub" = "在 GitHub 上建立";
+"Pick what should start an agent. Every automation runs unattended in one of your workspaces, under its credentials and guardrails." = "選擇啟動代理程式的條件。每個自動化都會在你的某個工作區中無人看管地執行，並使用該工作區的憑證和防護措施。";
+"Pull request" = "提取要求";
+"Pushed to a branch" = "推送到分支";
+"React when something happens on GitHub or Linear." = "在 GitHub 或 Linear 上發生某件事時做出回應。";
+"Reopen" = "重新開啟";
+"Retry the Fix" = "重試修正";
+"Run an agent on a prompt, on a schedule." = "依排程以提示詞執行代理程式。";
+"Run now" = "立即執行";
+"Running now" = "正在執行";
+"Runs" = "執行";
+"Scan Now only" = "僅「立即掃描」";
+"Scan now" = "立即掃描";
+"Scanning" = "正在掃描";
+"Scans run as automations in the workspace you choose, with its GitHub token. Nothing is changed in the repository until you start a fix and merge it." = "掃描會以自動化的形式在你選擇的工作區中執行，並使用其 GitHub 權杖。在你開始修正並合併之前，儲存庫不會有任何變更。";
+"Set Up" = "設定";
+"Show Details" = "顯示詳細資訊";
+"Show Findings" = "顯示發現項目";
+"Show Runs" = "顯示執行";
+"Step %d" = "第 %d 步";
+"The fix couldn't start: %@" = "無法開始修正：%@";
+"The session closes; its transcript and branch stay for you to review" = "工作階段關閉；其記錄和分支會保留供你審查";
+"The session stays open for you to check" = "工作階段保持開啟，供你檢查";
+"The workspace's credentials and guardrails apply to every run." = "工作區的憑證和防護措施適用於每次執行。";
+"Then" = "然後";
+"Watching · checked %@" = "監看中 · %@檢查";
+"What" = "內容";
+"What happens" = "運作方式";
+"What should run on its own?" = "要自動執行什麼？";
+"What the agent does" = "代理程式要做什麼";
+"When" = "時間";
+"When a Linear issue is assigned to you" = "當 Linear 問題指派給你時";
+"When a commit lands on %1$@ of %2$@" = "當提交進入 %2$@ 的 %1$@ 時";
+"When a pull request is opened on %@" = "當 %@ 上有提取要求被建立時";
+"When a pull request, issue or commit lands on GitHub, a Linear issue appears, or another automation finishes" = "當 GitHub 上有提取要求、問題或提交，Linear 上出現問題，或另一個自動化完成時";
+"When an issue on %@ is assigned to you" = "當 %@ 上的問題指派給你時";
+"When an unassigned Linear issue is created" = "當建立未指派的 Linear 問題時";
+"When an unassigned issue is opened on %@" = "當 %@ 上有未指派的問題被建立時";
+"When it runs" = "執行時間";
+"When “%@” finishes" = "當「%@」完成時";
+"Where it runs" = "執行位置";
+"You find its result on the Runs tab: transcript and branch" = "你可以在「執行」標籤頁中找到結果：記錄和分支";
+"a repository" = "某個儲存庫";
+"against %@" = "（目標分支 %@）";
+"another automation" = "另一個自動化";
+"every commit" = "每個提交";
+"every pull request" = "每個提取要求";
+"the default branch" = "預設分支";
+"the home folder" = "主資料夾";
+"touching %@" = "（涉及 %@）";
+"“%@” is starting — follow it on the Runs tab." = "「%@」正在啟動——可在「執行」標籤頁中追蹤。";
+"%d comment(s)" = "%d 則留言";
+"Agents at work" = "工作中的代理程式";
+"An agent fixes it on a branch of its own — or the Switchboard proposes which of your running sessions should. You review the change before anything merges." = "代理程式會在獨立分支上修正它——或由總機建議你正在執行的哪個工作階段來修正。在合併任何內容之前，你會先審查變更。";
+"Ask a Room's Switchboard" = "詢問某個房間的總機";
+"Ask the Switchboard Instead…" = "改為詢問總機…";
+"Ask the Switchboard Who Should Fix It" = "詢問總機該由誰修正";
+"Asked the Switchboard — it will propose a session and wait for your OK." = "已詢問總機——它會建議一個工作階段並等待你確認。";
+"Briefs waiting to start" = "等待開始的任務簡介";
+"Merged or closed" = "已合併或已關閉";
+"No phases yet — click Plan on a backlog card to have an agent split it into ordered phases." = "還沒有階段——在待辦卡片上按一下「規劃」，讓代理程式將其拆分為有序的階段。";
+"Phases, in order" = "階段（依順序）";
+"Sent to the Switchboard to find who fixes it" = "已傳送給總機以決定由誰修正";
+"Sent to the “%@” room's Switchboard to find who fixes it" = "已傳送給「%@」房間的總機以決定由誰修正";
+"Session gone" = "工作階段已消失";
+"Start a Fix Session" = "開始修正工作階段";
+"Waiting for your review" = "等待你審查";
+"Code Review" = "程式碼審查";
+"Code review" = "程式碼審查";
+"Continuous code review for your GitHub repositories" = "為你的 GitHub 儲存庫提供持續的程式碼審查";
+"Keep a GitHub repository continuously reviewed for vulnerabilities and bugs." = "讓 GitHub 儲存庫持續接受漏洞和錯誤審查。";
+"No repository is watched — set up a continuous code review" = "沒有監看任何儲存庫——設定持續程式碼審查";
+"%@ says:" = "%@ 說：";
+"Answer %@" = "回答 %@";
+"Answer…" = "回答…";
+"Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back." = "已交付，但在分支 %@ 上找不到工作樹——無法顯示差異。請閱讀摘要，或將其退回。";
+"Handing over" = "正在移交";
+"Question" = "提問";
+"Show the session working on it" = "顯示正在處理它的工作階段";
+"That session no longer exists." = "該工作階段已不存在。";
+"The room has no Switchboard to take the task." = "該房間沒有可接手任務的總機。";
+"Your answer" = "你的回答";
+"#%1$d in %2$@'s queue" = "%2$@ 佇列中的第 %1$d 個";
+"@nickname or #room" = "@暱稱 或 #房間";
+"A new agent" = "新代理程式";
+"A new agent (in its own worktree)" = "新代理程式（在自己的工作樹中）";
+"A new agent each (%d at a time)" = "每個任務一個新代理程式（每次 %d 個）";
+"A room" = "房間";
+"A session" = "工作階段";
+"A session or room pushes its branch and opens a pull request before the card moves to Testing/Review." = "工作階段或房間會推送其分支並建立提取要求，然後卡片才會移至「測試/審查」。";
+"Added “%@”" = "已新增「%@」";
+"Assign" = "指派";
+"Assign…" = "指派…";
+"Auto-pickup: off" = "自動接手：關閉";
+"Details (optional)" = "詳細資訊（選填）";
+"In its own fresh worktree — queued with the other new-agent tasks" = "在自己的新工作樹中——與其他新代理程式任務一起排隊";
+"New agent" = "新代理程式";
+"New backlog items go to" = "新待辦項目交給";
+"New items → %@" = "新項目 → %@";
+"Next for %@" = "%@ 的下一個";
+"No session or room matches." = "沒有相符的工作階段或房間。";
+"No sessions yet — start one, give it a @nickname, and it can take tasks from the board." = "還沒有工作階段——啟動一個並為它設定 @暱稱，它就能從看板領取任務。";
+"Nobody — I start them" = "無人——由我啟動";
+"Open a pull request when done" = "完成後建立提取要求";
+"Pull request #%@" = "提取要求 #%@";
+"Quick Task…" = "快速任務…";
+"Sessions and rooms open a pull request when done" = "工作階段和房間完成後建立提取要求";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Testing/Review. To give it to a session or a room, use Assign." = "直接進入「進行中」：由新代理程式在新的工作樹中完成整個任務，並在「測試/審查」中交給你差異。要交給工作階段或房間，請使用「指派」。";
+"The room's Switchboard picks a member" = "房間的總機會挑選一位成員";
+"This session (%@)" = "此工作階段（%@）";
+"Unassign" = "取消指派";
+"Who picks it up" = "由誰接手";
+"Who picks this task up" = "由誰接手此任務";
+"Who picks this up?" = "由誰接手？";
+"Who picks up new backlog items on their own and takes them to Testing/Review. Each task can still be assigned by hand." = "自動接手新待辦項目並推進到「測試/審查」的對象。每個任務仍可手動指派。";
+"busy — it takes this after its current work" = "忙碌——會在目前工作之後接手";
+"New task — or ⇧⌥Space from any app for a quick one" = "新增任務——或在任何 App 中按 ⇧⌥空白鍵快速建立";
+"%@ picks it up on its own and takes it to Testing/Review." = "%@ 會自動接手，並推進到「測試/審查」。";
+"A new agent picks it up from the queue and takes it to Testing/Review." = "新代理程式會從佇列中接手，並推進到「測試/審查」。";
+"Add Task" = "新增任務";
+"Describe the task — what's wrong, where, what done looks like. Markdown welcome." = "描述任務——哪裡出了問題、在什麼位置、完成後是什麼樣子。支援 Markdown。";
+"Description" = "描述";
+"What needs doing?  @agent to assign" = "需要做什麼？  @agent 以指派";
+"busy — takes it after its current work" = "忙碌——會在目前工作之後接手";
+"in its own worktree" = "在自己的工作樹中";
+"the room's Switchboard picks a member" = "房間的總機會挑選一位成員";
+"↩ add · ⌘↩ add another · ⇥⇥ full editor" = "↩ 新增 · ⌘↩ 繼續新增 · ⇥⇥ 完整編輯器";
+"%@ works in its own workspace and folder, with its own agent" = "%@ 在自己的工作區和資料夾中，用自己的代理程式工作";
+"%@'s Switchboard picks a member" = "%@ 的總機會挑選一位成員";
+"@switchboard" = "@switchboard";
+"The Switchboard — it picks a session" = "總機——由它挑選工作階段";
+"The app's Switchboard picks the session best placed for it" = "App 的總機會挑選最合適的工作階段";
+"There's no workspace to run the Switchboard in." = "沒有可執行總機的工作區。";
+"picks the session best placed for it" = "挑選最合適的工作階段";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "描述你的環境";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "代理程式的安全檢查需要知道的資訊：你的組織、你的伺服器及其用途、你信任的儲存庫和網域、哪些內容可以安全變更。每行一項。Claude 的自動模式據此區分日常工作與有風險的操作。";
+"Variables" = "變數";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "信任此檔案夾？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · 已下載";
+"%@ · sent by the agent" = "%@ · 由代理程式傳送";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "無法讀取機器上的檔案——檔案是否仍在，機器是否正在執行？";
+"Couldn't write the file here." = "無法在此處寫入檔案。";
+"Downloaded" = "已下載";
+"Save As…" = "儲存為…";
+"Save or Share" = "儲存或分享";
+"Saved to %@" = "已儲存到 %@";
+"Sent by the agent" = "由代理程式傳送";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "加入指令";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "當工作階段以這些指令啟動時，會加入代理程式的系統提示詞。描述代理程式應扮演的角色以及工作方式——「你是一名……」。";
+"Careful reviewer" = "細心的審閱者";
+"Delete these instructions" = "刪除這些指令";
+"Edit instructions…" = "編輯指令…";
+"Instructions" = "指令";
+"Instructions added to the agent's system prompt (“You are a…”)" = "加入代理程式系統提示詞的指令（「你是一名……」）";
+"Instructions without a name or text are not kept." = "沒有名稱或文字的指令不會被保留。";
+"New instructions" = "新指令";
+"No instructions" = "無指令";
+"No instructions yet. Add some with +." = "還沒有指令。用 + 加入。";
+"Teacher" = "老師";
+"The agent as it comes" = "原樣的代理程式";
+"Untitled" = "未命名";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "你是一名一絲不苟的資深工程師，在變更發布前進行審閱。先尋找錯誤、邊界情況和安全問題，解釋你的推理，並優先選擇小而經過充分測試的變更，而非大規模重寫。";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "你是一位耐心的老師。邊做邊用淺白的語言解釋你在做什麼以及為什麼，並指出使用者能從每一步學到什麼。";
+
+/* Local model context window */
+"%@ context" = "%@ 上下文";
+"Context?" = "上下文？";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "伺服器未公布此模型的上下文長度——代理程式會假定為 128K。按一下以輸入。";
+"The context window agents are told this model has. Click to change it." = "告知代理程式的此模型上下文視窗。按一下以更改。";
+"Context window" = "上下文視窗";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "%@ 能處理的 token 數。所有使用它的代理程式都會得知，以便在適當時機壓縮。";
+"e.g. 1M, 256K or 131072" = "例如 1M、256K 或 131072";
+"Enter a number of tokens, like 1M or 200K." = "請輸入 token 數，例如 1M 或 200K。";
+"Use the server's value" = "使用伺服器的值";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "打開登入頁面並核准存取。";
+"Approve the sign-in in your browser; it should show this code:" = "在瀏覽器中核准登入；頁面上應顯示此代碼：";
+"Open the sign-in page and check that it shows this code:" = "打開登入頁面，確認頁面上顯示的是此代碼：";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "無法讀取你的自訂腳本（%@）——將在不執行它的情況下建立映像檔。";
+"Run my customize script after Bromure's setup" = "在 Bromure 設定完成後執行我的自訂腳本";
+"No script chosen" = "未選擇腳本";
+"Last Log" = "上次記錄";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "在安裝代理程式之後，以 root 身分在基礎映像檔中執行；每次重建或更新映像檔時都會執行，因此之後建立或重設的每個工作區都會包含它安裝的內容。使用 bash -x 追蹤，輸出儲存到 ~/Library/Logs/BromureAC/base-image-customize.log。若失敗，將保留目前的映像檔。";
+"Choose the shell script to run inside the base image" = "選擇要在基礎映像檔中執行的 shell 腳本";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "下載預先建立的映像檔";
+"The latest published image, then the recommended packages. A few minutes." = "取得最新發布的映像檔，然後安裝建議的套件。需要幾分鐘。";
+"Recommended" = "建議";
+"Rebuild locally" = "在本機重建";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "在這台 Mac 上用完整安裝程式從頭建立。大約 10 分鐘。";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "你的工作區不會被更動——每個工作區下次啟動時都會提示重設到新映像檔。";
+"Download & Update" = "下載並更新";
+"Rebuild" = "重建";
+"Update the base image" = "更新基礎映像檔";
+"New workspaces start from this image: the system, the coding agents and their tools." = "新的工作區都從這個映像檔開始：系統、程式設計代理程式及其工具。";
+"Customize the image" = "自訂映像檔";
+"Choose Script…" = "選擇腳本…";
+"Change…" = "更改…";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "在安裝代理程式之後，每次重建或更新時以 root 身分在映像檔中執行，因此新建或重設的工作區都會包含它安裝的內容。使用 bash -x 追蹤並寫入 ~/Library/Logs/BromureAC/base-image-customize.log。若失敗，將保留目前的映像檔。";
+"Your customize script failed — the current image is kept. See %@" = "你的自訂腳本執行失敗——已保留目前的映像檔。請查看 %@";
+"%@ says" = "%@ 說";
+"The agent" = "代理程式";
+"Ask %@ to Merge into %@" = "請 %@ 合併到 %@";
+"Ask %@ to Merge" = "請 %@ 合併";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "請完成任務的代理程式在其工作的地方合併它的分支；它回報後卡片即標記為完成。按住可選擇壓縮合併、提取要求或其他分支。";
+"%@ merges %@ into…" = "%@ 將 %@ 合併到…";
+"%@ — where it started" = "%@ — 開始工作的地方";
+"Loading branches…" = "正在載入分支…";
+"Squash into one commit" = "壓縮成一個提交";
+"Ask %@ to Merge into…" = "請 %@ 合併到…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "選擇分支：完成工作的代理程式會在其工作的地方合併，它回報後卡片即標記為完成。";
+"Mark as Done" = "標示為完成";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "將任務原樣移到「完成」——不合併任何內容，工作樹及其分支保留。";
+"Confirm" = "確認";
+"Created %@" = "建立於 %@";
+"Modified %@" = "修改於 %@";
+"Updated %@" = "更新於 %@";
+"GitHub rejected this workspace's token" = "GitHub 拒絕了此工作區的權杖";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "github.com 權杖已過期、已撤銷或輸入錯誤（HTTP 401）。請在 %@ › 憑證 中更新，或選擇其他工作區。";
+"Fix the workspace's GitHub token to watch a repository." = "請先修正工作區的 GitHub 權杖，才能監看儲存庫。";
+"Assigned to %@ — click to change" = "已指派給 %@ — 按一下以變更";
+"Click to fold the error" = "按一下以收合錯誤";
+"Click to read the whole error" = "按一下以閱讀完整錯誤";
+"Deleted workspace" = "已刪除的工作區";
+"Open Coding Tasks (⇧⌘T)" = "開啟編碼任務 (⇧⌘T)";
+"No open tasks" = "沒有未完成的任務";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "每次自動化觸發時，它的執行都會顯示在這裡——已排程、進行中、然後完成。先建立一個自動化開始吧。";
+"Open Automations" = "開啟自動化";
+"Open Automations (⇧⌘A)" = "開啟自動化 (⇧⌘A)";
+"View" = "顯示方式";
+"Help" = "輔助說明";
+"Close Window" = "關閉視窗";
+"Toggle Sidebar" = "顯示/隱藏側邊欄";
+"Toggle Files Pane" = "顯示/隱藏檔案面板";
+"Toggle Browser Pane" = "顯示/隱藏瀏覽器面板";
+"Enter Full Screen" = "進入全螢幕";
+"Zoom" = "縮放";
+"%@ Manual" = "%@ 手冊";
+"Add a note about this workspace" = "為此工作區新增備註";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "評估每個代理程式作為權威載入的指令 / 設定檔案：CLAUDE.md（Claude Code）、AGENTS.md（Codex、Kimi 和 omp）與 GROK.md（Grok），以及其巢狀與全域版本。首次啟用時下載約 571 MB。";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "外連連線規則需在執行此工作區的 Mac 上編輯。";
+"Click a protection that's off to turn it on in that workspace's settings." = "按一下已關閉的保護，即可在該工作區的設定中將其開啟。";
+"Turn on…" = "開啟…";
+"%1$@ is on for %2$@. Click to change it." = "%2$@ 的%1$@已開啟。按一下可更改。";
+"%1$@ is off for %2$@. Click to turn it on." = "%2$@ 的%1$@已關閉。按一下可開啟。";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "未掃描 — %@";
+"blocked, not sent — %@" = "已攔截，未傳送 — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@（%2$d 次，顯示最近一次）";
+
+"Security…" = "安全性…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "下載目前版本";
+"Update" = "更新";
+"an unknown version" = "未知版本";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "已過時：共享映像為 %1$@；此版本的 Agentic Coding 使用 %2$@。請打開 Bromure 讓它更新瀏覽器映像，或僅為 Agentic Coding 下載目前版本（在 Bromure 跟上之前，將取代共享映像使用）。";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "已過時：此映像為 %1$@；目前版本為 %2$@。更新即可下載。";
+"The Linux machine behind this session — available while it runs" = "此工作階段背後的 Linux 機器 — 僅在執行時可用";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "顯示了 1 個媒體";
+"%d media items shown" = "顯示了 %d 個媒體";
+"1 chart shown" = "顯示了 1 個圖表";
+"%d charts shown" = "顯示了 %d 個圖表";
+"1 file sent" = "傳送了 1 個檔案";
+"%d files sent" = "傳送了 %d 個檔案";
+"1 tool result" = "1 個工具結果";
+"%d tool results" = "%d 個工具結果";
+"Available when the workspace is running" = "工作區執行時可用";
+"Video available when the workspace is running" = "工作區執行時可檢視影片";
+"Image available when the workspace is running" = "工作區執行時可檢視圖片";
+
+/* Fat client: link states (reconnecting / key rejected / host key changed) */
+"“%@” didn't accept this Mac's key" = "「%@」未接受此 Mac 的金鑰";
+"“%@” presented a different host key" = "「%@」提供了不同的主機金鑰";
+"Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection." = "它的身分與此 Mac 信任的不再一致。如果遠端 Mac 重新安裝過，請透過「連接到遠端 Bromure…」重新連接以檢視新金鑰；否則可能有人在攔截連線。";
+"Reconnecting to %@…" = "正在重新連線到 %@…";
+"The connection dropped. What you see is from just before; it picks up again on its own." = "連線已中斷。您看到的是中斷前的內容；連線會自動恢復。";
+
+/* Coding Tasks: landing an approved task (2026-10) */
+"Ready to land" = "準備合入";
+"Landing — merging into %@…" = "合入中 — 正在合併到 %@…";
+"Landing — %1$@ is opening a pull request into %2$@…" = "合入中 — %1$@ 正在建立到 %2$@ 的拉取要求…";
+"Landing — %1$@ is merging into %2$@…" = "合入中 — %1$@ 正在合併到 %2$@…";
+"Needs you — %@" = "需要你處理 — %@";
+"marked by you" = "由你標記";
+"reported by %@, not verified" = "由 %@ 回報，未驗證";
+"the agent" = "代理程式";
+"PR #%@ opened" = "已建立 PR #%@";
+"Marked done by you" = "已由你標記為完成";
+"All its phases are done" = "所有階段皆已完成";
+"The agent couldn't land it." = "代理程式無法合入。";
+"Couldn't read the branch's repository or where it started — is the workspace running?" = "無法讀取分支所在的儲存庫或其起點 — 工作區正在執行嗎？";
+"The branch %@ doesn't exist in the repository any more — merge into another branch." = "分支 %@ 已不在儲存庫中 — 請合併到其他分支。";
+"The task's branch %@ is gone from the repository." = "任務的分支 %@ 已從儲存庫中消失。";
+"The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry." = "%@ 的取出有此任務涉及檔案的未提交變更 — 請在那裡提交或 stash，然後重試。";
+"The repository has no remote to open a pull request on — merge it instead." = "儲存庫沒有可建立拉取要求的遠端 — 請改為合併。";
+"Couldn't reach the session that did the task." = "無法連線完成該任務的工作階段。";
+"Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel." = "合入停滯 — 代理程式在 20 分鐘後仍未完成。開啟其工作階段查看進度，然後重試或取消。";
+"%@ stopped before it landed — open its session to see why, then retry." = "%@ 在合入前停止了 — 開啟其工作階段查看原因，然後重試。";
+"The app quit while landing this — retry." = "合入過程中 App 已結束 — 請重試。";
+"Mark done without merging?" = "不合併就標記為完成？";
+"Mark Done" = "標記為完成";
+"The agent is stopped. Nothing is merged; the branch %@ and its checkout are kept in the workspace." = "代理程式將被停止。不會合併任何內容；分支 %@ 及其取出保留在工作區中。";
+"Nothing is merged. The branch %@ and its checkout are kept in the workspace." = "不會合併任何內容。分支 %@ 及其取出保留在工作區中。";
+"Discard this branch?" = "捨棄此分支？";
+"The branch %@ and its checkout are deleted and the agent's session is put away. The task goes to Done as closed without merging; its transcript is kept." = "分支 %@ 及其取出將被刪除，代理程式的工作階段會被封存。任務以「未合併關閉」移到「完成」；其對話記錄會保留。";
+"Merge into %@?" = "合併到 %@？";
+"Bromure merges it directly when it can; otherwise %1$@, the agent that wrote it, rebases onto %2$@, fixes conflicts, runs the tests and merges. Afterwards the branch is removed and the session archived." = "能直接合併時由 Bromure 直接合併；否則由撰寫它的代理程式 %1$@ 重定基底到 %2$@、解決衝突、執行測試並合併。之後分支會被刪除，工作階段會被封存。";
+"Sessions and rooms open a pull request at delivery (skips review)" = "工作階段與房間在交付時建立拉取要求（略過審查）";
+"Who new tasks are queued for when you create them — they pick them up on their own and take them to Review. Each task can still be assigned by hand." = "新建任務時排入誰的佇列 — 他們會自行領取並推進到「審查」。每個任務仍可手動指派。";
+"Tasks waiting to start" = "等待開始的任務";
+"Move to Review" = "移到審查";
+"Stop & Return to Backlog" = "停止並退回待辦";
+"Nothing done yet" = "尚無完成的任務";
+"Merged, opened as pull requests, or closed" = "已合併、已建立拉取要求或已關閉";
+"Open Pull Request" = "建立拉取要求";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Review. To give it to a session or a room, use Assign." = "直接進入「進行中」：新代理程式在新的 worktree 中完成整個任務，並在「審查」中交給你差異。要交給工作階段或房間，請使用「指派」。";
+"Open a pull request at delivery (skips review)" = "交付時建立拉取要求（略過審查）";
+"No code changes — read the report" = "沒有程式碼變更 — 閱讀報告";
+"Assigned to %@" = "已指派給 %@";
+"Workspace: %@" = "工作區：%@";
+"Agent: %@" = "代理程式：%@";
+"Folder: %@" = "檔案夾：%@";
+"Folder" = "檔案夾";
+"Clone this repository first (optional)" = "先複製此儲存庫（選用）";
+"Make the folder and an empty git repository when they don't exist yet — tasks run on their own branch." = "檔案夾與空的 git 儲存庫不存在時建立它們 — 任務在自己的分支上執行。";
+"When approved" = "核准後";
+"Workspace default (%@)" = "工作區預設（%@）";
+"What happens when you approve the task in Review: merged into the branch it came from, or opened as a pull request." = "在「審查」中核准任務時的動作：合併到它來源的分支，或建立拉取要求。";
+"A new agent picks it up from the queue and takes it to Review." = "新代理程式從佇列中領取並推進到「審查」。";
+"%@ picks it up on its own and takes it to Review." = "%@ 會自行領取並推進到「審查」。";
+"Send Back" = "退回";
+"Send Back (%d)" = "退回（%d）";
+"This task isn't in Review any more." = "此任務已不在「審查」中。";
+"%1$@ worked on %2$@ in %3$@" = "%1$@ 在 %3$@ 中處理了 %2$@";
+"%1$@ worked in %2$@" = "%1$@ 在 %2$@ 中工作過";
+"%1$@ (+%2$d −%3$d) vs %4$@" = "%1$@（+%2$d −%3$d），相對於 %4$@";
+"%d uncommitted" = "%d 項未提交";
+"%1$@ moved %2$d commits since" = "%1$@ 此後前進了 %2$d 個提交";
+"%@ checkout clean" = "%@ 取出乾淨";
+"%@ checkout has uncommitted changes" = "%@ 取出有未提交的變更";
+"%@ not checked out" = "%@ 未被取出";
+"remote: %@" = "遠端：%@";
+"none" = "無";
+"can't reach the machine for the details" = "無法連線機器以取得詳細資料";
+"%@'s final report" = "%@ 的最終報告";
+"No code changes to merge" = "沒有需要合併的程式碼變更";
+"Reading the agent's report…" = "正在讀取代理程式的報告…";
+"Cancel Landing" = "取消合入";
+"The task produced no code: it goes to Done as it is." = "此任務沒有產生程式碼：它將照原樣移到「完成」。";
+"View Pull Request #%@" = "檢視拉取要求 #%@";
+"Mark Merged" = "標記為已合併";
+"The pull request was merged on the forge: the task goes to Done as merged." = "拉取要求已在程式碼平台上合併：任務以已合併移到「完成」。";
+"More" = "更多";
+"Merge into Another Branch…" = "合併到其他分支…";
+"Keep Branch — Mark Done" = "保留分支 — 標記為完成";
+"Open a pull request for the branch; hold for the other ways to land it." = "為此分支建立拉取要求；按住可查看其他合入方式。";
+"Merge the branch; hold for the other ways to land it." = "合併此分支；按住可查看其他合入方式。";
+"Mark done without merging — the branch is kept." = "不合併就標記為完成 — 分支會保留。";
+"Open a pull request into %@?" = "建立到 %@ 的拉取要求？";
+"Squash & merge into %@?" = "壓縮並合併到 %@？";
+"%1$@ is ahead of %2$@ with nothing in the way: Bromure merges it directly." = "%1$@ 領先 %2$@ 且沒有阻礙：Bromure 直接合併。";
+"Into" = "合併到";
+"Afterwards the session is archived; the branch stays for the pull request." = "之後工作階段會被封存；分支保留給拉取要求。";
+"Afterwards the session is archived; the branch and its checkout are kept." = "之後工作階段會被封存；分支及其取出會保留。";
+"Afterwards the branch is removed and the session archived." = "之後分支會被刪除，工作階段會被封存。";
+"Keep branch" = "保留分支";
+"%1$@ says it's done, but Bromure doesn't see it in %2$@: %3$@" = "%1$@ 說已完成，但 Bromure 在 %2$@ 中沒有看到：%3$@";
+"The planning session ended." = "規劃工作階段已結束。";
+"The planning session has ended" = "規劃工作階段已結束";
+"Merge into the branch" = "合併到分支";
+"Open a pull request" = "建立拉取要求";
+"When a task is approved" = "任務獲核准時";
+"What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise." = "程式碼任務「審查」主按鈕的動作：合併到它來源的分支，或建立拉取要求。每個工作區與每個任務都可以另行選擇。";
+"App default (%@)" = "App 預設（%@）";
+"What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise." = "此工作區中程式碼任務「審查」主按鈕的動作。每個任務仍可另行選擇。";
+
+/* Coding Tasks vocabulary + start/live-state (2026-10) */
+"Start %d Selected" = "開始所選的%d項";
+"Off: the session or room hands its branch back for your review, and lands it once you approve. On: it pushes and opens a pull request before the task moves to Review." = "關閉：工作階段或房間把分支交回給你審查，經你核准後合入。開啟：在任務移到「審查」之前推送並建立拉取要求。";
+"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phases with dependencies into the Plan column." = "先儲存，然後開啟一個可見的規劃工作階段：代理程式探索儲存庫（可以向它提問——它能看到你），並把帶依賴關係的有序階段登記到「規劃」欄。";
+"%1$@, the agent that wrote it, will rebase onto %2$@, run the tests, push %3$@ to %4$@ and open a pull request. You'll see its progress on the task and in its session." = "撰寫它的代理程式 %1$@ 將重定基底到 %2$@、執行測試、把 %3$@ 推送到 %4$@ 並建立拉取要求。你可以在任務與其工作階段中看到進度。";
+"%1$@, the agent that wrote it, will rebase onto %2$@, fix conflicts, run the tests and merge. You'll see its progress on the task and in its session." = "撰寫它的代理程式 %1$@ 將重定基底到 %2$@、解決衝突、執行測試並合併。你可以在任務與其工作階段中看到進度。";
+"The planning session timed out without filing phases — click Plan First to retry." = "規劃工作階段逾時且未登記任何階段——點擊「先規劃」重試。";
+"The planning session ended before filing phases — click Plan First to retry." = "規劃工作階段在登記階段前就結束了——點擊「先規劃」重試。";
+"The planning session didn't start — %@ may not be set up in this workspace. Open a session there to check, then click Plan First to retry." = "規劃工作階段沒有啟動 — 此工作區可能未設定 %@。請在那裡開啟一個工作階段檢查，然後按「先規劃」重試。";
+"%@ exited before filing phases — click Plan First to retry." = "%@ 在提交階段之前就結束了 — 按「先規劃」重試。";
+"The planning session was interrupted — click Plan First to retry." = "規劃工作階段被中斷——點擊「先規劃」重試。";
+"The checkout for %@ is gone and couldn't be re-created in %@. Start Over runs the task again on a new branch." = "%@ 的取出已不存在，且無法在 %@ 中重新建立。重新開始會在新分支上再跑一次任務。";
+"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start Over runs the task again on a new branch." = "任務的分支 %@ 在 %@ 中已不存在 — 其取出已被移除（合併後清理，或被刪除）。重新開始會在新分支上再跑一次任務。";
+"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start Over runs the task again from scratch%@." = "儲存庫檔案夾「%@」已從工作區消失，無處可恢復。重新開始會從頭再跑一次任務%@。";
+"Plan First" = "先規劃";
+"Remove Task" = "移除任務";
+"Remove Task Only" = "僅移除任務";
+"Stop & Discard Branch" = "停止並捨棄分支";
+"Discarding ends the agent's session and deletes its branch and worktree, with any uncommitted or unmerged work. “Remove Task Only” leaves them in the workspace." = "捨棄會結束代理程式的工作階段，並刪除其分支與工作樹，包括任何未提交或未合併的工作。「僅移除任務」會將它們保留在工作區中。";
+"Unassigned — I'll start it" = "未指派——我自己啟動";
+"New tasks: Unassigned" = "新任務：未指派";
+"New tasks: assigned to %@" = "新任務：指派給 %@";
+"Assign new tasks to" = "將新任務指派給";
+"No phases yet — click Plan First on a Backlog task." = "還沒有階段——在待辦任務上點按「先規劃」。";
+"Starts every selected phase. Phases whose dependencies aren't Done queue and start automatically when they are." = "啟動每個所選階段。相依項目未完成的階段會排隊，完成後自動開始。";
+"A visible planning session is running — click the task to open it; phases appear in the Plan column as it files them." = "一個可見的規劃工作階段正在進行——點按任務即可開啟；階段登記後會出現在「規劃」欄。";
+"A planner agent reads the task and the repository, then files ordered phases (with dependencies) in the Plan column." = "規劃代理程式會閱讀任務和儲存庫，然後在「規劃」欄登記有序的階段（含相依關係）。";
+"Start it from the board, or Plan First to split it into phases." = "從看板啟動，或選擇「先規劃」將其拆分為多個階段。";
+"Remove %d selected phase(s)?" = "移除所選的%d個階段？";
+"Your task" = "你的任務";
+"Start Over" = "重新開始";
+"Runs the task again from scratch on a new branch." = "在新分支上從頭重新執行任務。";
+"The agent is waiting at its prompt without having handed the task over — open its session to see where it is." = "代理程式在提示字元處等待，尚未交回任務——開啟其工作階段查看進度。";
+"Checking the workspace and the folder — the task moves to In Progress once its agent can start." = "正在檢查工作區和檔案夾——代理程式可以啟動後，任務會移到「進行中」。";
+"Connecting…" = "正在連線…";
+"Waiting for the host's first update." = "正在等待主機的首次更新。";
+
+/* Task landing / review QA fixes */
+"Planning in the terminal — open it to watch and answer." = "正在終端機中規劃 — 打開終端機即可查看並回答。";
+"The %@ checkout has uncommitted changes — if they touch the same files, the merge stops until you commit or stash them there." = "%@ 的簽出有未提交的變更 — 如果涉及相同檔案，合併會停止，直到你在那裡提交或暫存（stash）它們。";
+"Your review comments didn't reach the agent — they're still pending. Restart Session sends them." = "你的審閱留言沒有送達代理 — 它們仍待傳送。「重新啟動工作階段」會傳送它們。";
+"%1$@ is ahead of %2$@: Bromure merges it directly." = "%1$@ 領先於 %2$@：Bromure 直接合併。";
+"%1$@ adds nothing %2$@ doesn't already have: the task goes to Done." = "%1$@ 沒有 %2$@ 尚未包含的內容：任務轉為已完成。";
+"The %1$@ checkout has uncommitted changes — if they touch the same files, %2$@ can't merge until you commit or stash them there." = "%1$@ 的簽出有未提交的變更 — 如果涉及相同檔案，在你提交或暫存（stash）它們之前，%2$@ 無法合併。";
+"%@ didn't start in the task's session — open it to see why, then Restart Session." = "%@ 未在任務的工作階段中啟動 — 打開它查看原因，然後「重新啟動工作階段」。";
+"%1$@, the agent that wrote it, will %2$@. You'll see its progress on the task and in its session." = "編寫它的代理 %1$@ 將：%2$@。你可以在任務及其工作階段中看到進度。";
+"%@ moved 1 commit since" = "%@ 此後新增了 1 個提交";
+"Checking the branch…" = "正在檢查分支…";
+"Comment on the whole change instead" = "改為留言整個變更";
+"commit what's left uncommitted" = "提交剩餘未提交的內容";
+"Landed or closed" = "已合入或已關閉";
+"Merge the branch." = "合併該分支。";
+"merge" = "合併";
+"No code changes" = "無程式碼變更";
+"Open a pull request for the branch." = "為該分支打開拉取請求。";
+"Other ways to land it" = "其他合入方式";
+"Read Report" = "閱讀報告";
+"rebase onto %@ and fix conflicts" = "變基到 %@ 並解決衝突";
+"run the tests" = "執行測試";
+"squash it into one commit" = "壓縮為一個提交";
+
+/* Task delivery, landing hand-over, undelivered review comments */
+"%@ kept a menu open in the task's session, so the message wasn't typed — open the session, answer it, then try again." = "%@ 在任務工作階段中開著一個選單，因此訊息未輸入 — 請開啟工作階段、作出回應，然後再試一次。";
+"Couldn't check on the agent in the task's session — is the workspace running?" = "無法檢查任務工作階段中的代理 — 工作區是否正在執行？";
+"Handing over to %@…" = "正在交給 %@…";
+"The landing brief didn't reach %@." = "合併說明未送達 %@。";
+"%d review comment(s) that never reached the agent will be discarded." = "%d 則從未送達代理的審查評論將被捨棄。";
+"%d comment(s) didn't reach the agent before it handed the task back. Send them back again?" = "代理交回任務前，有 %d 則評論未送達。要再次退回嗎？";
+"Send Back Again" = "再次退回";
+"not delivered" = "未送達";
+"The agent handed the task back before this comment reached it." = "此評論送達前，代理已交回任務。";
+"Report" = "報告";
+
+/* Task board QA fixes (launch watch, plurals, card menus) */
+"1 comment" = "1 則留言";
+"%d comments" = "%d 則留言";
+"1 comment drafted" = "1 則留言草稿";
+"%d comments drafted" = "%d 則留言草稿";
+"1 review comment that never reached the agent will be discarded." = "1 則從未送達代理程式的審查留言將被捨棄。";
+"%d review comments that never reached the agent will be discarded." = "%d 則從未送達代理程式的審查留言將被捨棄。";
+"1 comment didn't reach the agent before it handed the task back. Send it back again?" = "代理程式交回任務前，有 1 則留言沒有送達。要再次送回嗎？";
+"%d comments didn't reach the agent before it handed the task back. Send them back again?" = "代理程式交回任務前，有 %d 則留言沒有送達。要再次送回嗎？";
+"Deselect" = "取消選取";
+"Select" = "選取";
+"Retry Landing" = "重試合入";
+"Read Transcript" = "閱讀轉錄";
+"Phase %d" = "階段 %d";
+"Selected" = "已選取";
+"In backlog" = "在待辦中";
+"Land it again with the same choices" = "用相同的選項再次合入";
+"There's unsent text in %@'s input box in the task's session, so the message wasn't typed — open the session, send or clear it, then try again." = "任務工作階段中 %@ 的輸入框裡有未送出的文字，因此沒有輸入訊息 — 請開啟工作階段，送出或清除它，然後再試一次。";
+"%@ exited right after it started (status %d) — open the session to see why, then Restart Session." = "%@ 啟動後立即結束（狀態 %d）— 請開啟工作階段查看原因，然後按「重新啟動工作階段」。";
+"%@ quit right after it started — open the session to see why, then Restart Session." = "%@ 啟動後立即結束 — 請開啟工作階段查看原因，然後按「重新啟動工作階段」。";
+"Close without landing" = "關閉且不合入";
+"%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ 已不在任務的工作階段中執行（只剩下一個 shell），因此沒有輸入任何內容 — 重新啟動工作階段以恢復它。";
+"The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "任務的工作階段分頁已不存在或已屬於其他內容，因此沒有向其輸入任何內容 — 重新啟動工作階段以恢復 %@。";
+"The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "訊息未輸入：工作階段的分頁已不再顯示其代理。請恢復工作階段後再試一次。";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "未傳送 — 工作階段的分頁已不存在，或已屬於其他內容。";
+"Not sent — the agent isn't running in the session's tab any more." = "未傳送 — 代理程式已不在工作階段的分頁中執行。";
+"No such task." = "沒有這個任務。";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "此任務處於「檢視」階段：其代理程式已完成。請改為將其退回「進行中」，或捨棄其分支。";
+"The task is done: there's no agent to stop." = "此任務已完成：沒有可停止的代理程式。";
+"The task isn't running: there's no agent to stop." = "此任務未在執行：沒有可停止的代理程式。";
+"Waiting — the agent is asking you something; answer the card first" = "等待中 — 智慧代理正在向你提問；請先回答卡片";
+"Waiting — %@ is asking you something; answer the card first" = "等待中 — %@ 正在向你提問；請先回答卡片";
+"Not sent — the agent is asking you something. Answer it first, then send again." = "未傳送 — 智慧代理正在向你提問。請先回答，然後再次傳送。";
+"Not sent — typing it into the session failed. Edit it or send it again." = "未傳送 — 向工作階段輸入失敗。請編輯或再次傳送。";
+"Restart Session relaunches %@ on this task's worktree." = "「重新啟動工作階段」會在此任務的工作樹上重新啟動 %@。";
+"Task brief" = "任務說明";
+"Show less" = "收合";
+"Show more" = "顯示更多";
+"Copy Reply" = "拷貝回覆";
+"Copy as Markdown" = "拷貝為 Markdown";
+"Copy the whole reply as Markdown" = "將整則回覆拷貝為 Markdown";
+"Showing first %@ of %@ characters" = "顯示前 %@ 個字元，共 %@ 個";
+"Copy full output" = "拷貝完整輸出";
+"Copy this file's diff" = "拷貝此檔案的差異";
+"Copy Diff" = "拷貝差異";
+"Copy the whole diff shown here as a patch" = "將此處顯示的全部差異拷貝為修補檔";
+"Copy Pane History" = "拷貝窗格歷史記錄";
+"Copied 1 line" = "已拷貝 1 行";
+"Copied %@ lines" = "已拷貝 %@ 行";
+"Couldn't read the terminal's history" = "無法讀取終端機歷史記錄";
+"Copy message" = "拷貝訊息";
+"%@ characters" = "%@ 個字元";
+"Showing the start of %@ characters" = "正在顯示 %@ 個字元的開頭";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "已送達 — 在代理程式的佇列中";
+"Delivered — queued by %@" = "已送達 — 在 %@ 的佇列中";
+"1 delegation call" = "1 次委派呼叫";
+"%d delegation calls" = "%d 次委派呼叫";
+"downloaded — install scripts could not be checked" = "已下載 — 無法檢查安裝指令碼";
+"Bromure — approval needed" = "Bromure — 需要核准";
+"No answer within %d s counts as Don't allow." = "%d 秒內未回應即視為不允許。";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "代理程式想要執行：\n\n%@\n\n核准僅適用於這一個請求——其他任何寫入都會再次詢問。";
+"Allow this request for 15 minutes" = "允許此請求 15 分鐘";
+"Allow this request for the rest of the session" = "在本次工作階段剩餘時間內允許此請求";
+"Provider unreachable" = "無法連線服務商";
+"Usage limit reached" = "已達使用上限";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi 核准";
+"Never ask" = "永不詢問";
+"Ask before sensitive actions" = "敏感操作前詢問";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "永不詢問：Kimi Code 會不停頓地執行每個指令、每次編輯和每個工具，並自行決定自己的問題和計畫——工作區的虛擬機器和 Bromure 的防護措施就是安全邊界。敏感操作前詢問（Kimi 的「Ask When Needed」模式）：一般指令和編輯仍然無需詢問即可執行；Kimi 只會在接觸敏感檔案（如 .env 或 SSH 金鑰）、執行危險指令（如 rm -rf）或退出 Plan 模式之前停下，以及在有問題要問你時停下。從下次啟動或繼續時生效。";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "已被 Bromure 封鎖 — 提示注入";
+"Blocked by Bromure — rogue instructions" = "已被 Bromure 封鎖 — 惡意指令";
+"Blocked by Bromure — credential leak" = "已被 Bromure 封鎖 — 憑證外洩";
+"Blocked by Bromure — supply chain" = "已被 Bromure 封鎖 — 供應鏈";
+"Blocked by Bromure — client certificate" = "已被 Bromure 封鎖 — 用戶端憑證";
+"Blocked by Bromure" = "已被 Bromure 封鎖";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "請求沒有到達提供者。詳情請見安全性時間軸；問題解決後請重新傳送。";
+"Credential approval" = "憑證核准";
+"allowed for 1 hour" = "已允許 1 小時";
+"allowed for 5 minutes" = "已允許 5 分鐘";
+"allowed for the rest of the session" = "已允許至本次工作階段結束";
+"denied — no answer in time; the next request asks again" = "已拒絕 — 未及時回應；下次請求時會再次詢問";
+"denied — you said no a moment ago" = "已拒絕 — 你剛才拒絕過";
+"denied by you" = "你已拒絕";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "登入儲存區無法讀取 — Bromure 不會覆寫它。在能夠再次讀取之前，其中儲存的登入無法使用。";
+"Last refreshed %@" = "上次重新整理 %@";
+"Not refreshed since sign-in" = "登入後尚未重新整理";
+"access token expires %@" = "存取權杖到期時間 %@";
+"access token renews on next use" = "存取權杖將在下次使用時續期";
+"(exit code %d)" = "（結束代碼 %d）";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "未送達 — 代理沒有接收。請編輯或再次傳送。";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "預設關閉：在下方勾選某個工作區（或開啟「每個工作區」）之前，這裡的代理無法存取其他工作區。";
+"Closes the editor without saving changes" = "關閉編輯器，不儲存變更";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok 詢問是否允許 xAI 保留你的程式設計資料";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "正在問你問題";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "沒有任何內容送達提供者。Bromure 會從此對話之後的請求中移除被封鎖的工具輸出，因此你可以傳送下一則訊息。如果代理仍然失敗，請將對話倒回該步驟之前，或開始新的工作階段。";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "%1$d 秒內未回應即視為「%2$@」。";
+"The workspace %@ will be shut down." = "工作區 %@ 將被關機。";
+"The workspaces %@ will be shut down." = "工作區 %@ 將被關機。";
+"The workspace %@ will be suspended and resume where it left off." = "工作區 %@ 將被暫停，下次從中斷處繼續。";
+"The workspaces %@ will be suspended and resume where they left off." = "工作區 %@ 將被暫停，下次從中斷處繼續。";
+
+/* QA round 4 */
+"“%@”" = "「%@」";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "此對話框在代理程式的終端機中顯示不下，因此無法在此顯示其選項。請在終端機中回答。";
+"Open the terminal" = "開啟終端機";
+"Opt out" = "選擇退出";
+"Opt in" = "選擇加入";
+"Grok's own setting; you can change it later in Grok's /settings." = "這是 Grok 自己的設定；之後可在 Grok 的 /settings 中變更。";
+
+"Listing its tools" = "列出其工具";
+"Looking up %@" = "正在查看 %@";
+"Reading earlier output" = "正在讀取先前的輸出";
+"Reading earlier output #%@" = "正在讀取先前的輸出 #%@";
+"tool lookup" = "工具查詢";
+"earlier output" = "先前的輸出";
+"Instructions for the agent" = "給代理的指示";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "未送達 — 訊息已在代理的輸入框中，但 Return 未被接受。請在終端機中按 Return，或清空輸入框後重新傳送。";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "有 1 則審查評論尚未送達代理 — 現在合併將不包含它。";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "有 %d 則審查評論尚未送達代理 — 現在合併將不包含它們。";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "等待中 — 代理程式的終端機裡有一個選單開著；請在那裡回答或關閉它";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "等待中 — %@ 的終端機裡有一個選單開著；請在那裡回答或關閉它";
+"Open terminal" = "打開終端機";
+"Dismiss (Esc)" = "關閉 (Esc)";
+"Conversation compacted" = "對話已壓縮";
+"The agent's work is its report above — there is no diff to read." = "代理程式的工作就是上面的報告 — 沒有可查看的差異。";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "登入機器未能就緒，因此無法開始 %@ 登入。";
+"The %@ sign-in command didn't start in the sign-in machine." = "%@ 登入指令未在登入機器中啟動。";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "登入機器一直處於忙碌狀態（%1$@），因此無法開始 %2$@ 登入。";
+"Couldn't start the %@ sign-in" = "無法開始 %@ 登入";
+"Retry types the sign-in command into the sign-in machine again." = "「重試」會在登入機器中再次輸入登入指令。";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "%@ 訂閱未登入";
+"using API key" = "正在使用 API 金鑰";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "變更在儲存後立即套用到執行中的工作區，無需重新啟動。取消勾選某條規則即可關閉它而不刪除，也可以透過它的時鐘選單限時開啟。";
+"Time limit" = "時限";
+"On — untick to switch this rule off without deleting it" = "已開啟 — 取消勾選可關閉此規則而不刪除";
+"Off — this rule is ignored until you tick it" = "已關閉 — 勾選前此規則將被忽略";
+"On for 15 minutes" = "開啟 15 分鐘";
+"On for 1 hour" = "開啟 1 小時";
+"On until the workspace stops" = "開啟直到工作區停止";
+"Make permanent" = "設為永久";
+"until stop" = "直到停止";
+"expired" = "已過期";
+"On until this workspace stops, then switched off automatically" = "開啟直到此工作區停止，之後自動關閉";
+"Switches off automatically at %@" = "將於 %@ 自動關閉";
+"Turn this rule on for a limited time" = "限時開啟此規則";
+"%@ — default policy" = "%@ — 預設政策";
+"Allow…" = "允許…";
+"Rule…" = "規則…";
+"Block…" = "封鎖…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "請在執行此工作區的 Mac 上，於其設定中變更此工作區的防火牆規則。";
+"Allow %@" = "允許 %@";
+"Allow all of %@" = "允許整個 %@";
+"Block %@" = "封鎖 %@";
+"Block all of %@" = "封鎖整個 %@";
+"Switch off rule “%@”" = "關閉規則「%@」";
+"Remove rule “%@”" = "移除規則「%@」";
+"The rule that allowed this is no longer in the workspace's rules." = "允許此連線的規則已不在工作區的規則中。";
+"Always" = "永遠";
+"For 15 minutes" = "15 分鐘";
+"For 1 hour" = "1 小時";
+"Until the workspace stops" = "直到工作區停止";
+"Add a rule allowing this destination — applies to the running workspace at once" = "新增一條允許此目標的規則 — 立即套用到執行中的工作區";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "關閉允許此連線的規則，或封鎖該目標 — 立即生效";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "自上次審查以來的新提交";
+"The full repository (baseline)" = "整個儲存庫（基準）";
+"New commits" = "新提交";
+"Baseline review at %@" = "在 %@ 的基準審查";
+"Review of new commits %1$@…%2$@" = "新提交 %1$@…%2$@ 的審查";
+"Review of the last %1$d commits up to %2$@" = "截至 %2$@ 的最近 %1$d 個提交的審查";
+"No new commits since the last review (%@)" = "自上次審查以來沒有新提交（%@）";
+"%@ (not set up here)" = "%@（此處未設定）";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ 未在此工作區中設定——無人值守的審查會停在它的登入步驟。請在首次掃描前於工作區設定中加入它（或在該工作區的工作階段中登入）。";
+"Scheduled review" = "排程審查";
+"Start with a full-repository baseline" = "先對整個儲存庫進行基準審查";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "提交和提取要求掃描從監看建立之後送達的內容開始。對現有程式碼請使用「立即執行基準審查」。";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "每次審查只涵蓋自上一次以來送達 %@ 的提交——快速又省錢。沒有新內容就不執行。";
+"Reviewed through %1$@ (%2$@)." = "已審查至 %1$@（%2$@）。";
+"The first review covers the whole repository; later ones only what's new." = "首次審查涵蓋整個儲存庫；之後只審查新內容。";
+"Nothing reviewed yet: the first review covers the last %d commits." = "尚未審查任何內容：首次審查涵蓋最近 %d 個提交。";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "每次審查都會走過整個程式碼庫，先看風險最高的部分。很徹底，但大型儲存庫耗時更久，消耗的 token 也更多。";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "已要求審查 %@ 的新提交——代理程式開始後會顯示在「最近的掃描」下（若自上次審查以來沒有新內容，則不執行）。";
+"Now watching %@ — the first review is starting." = "現在正在監看 %@——首次審查正在開始。";
+"Run Baseline Now" = "立即執行基準審查";
+"Review the commits that landed since the last review" = "審查自上次審查以來送達的提交";
+"Review the whole repository" = "審查整個儲存庫";
+"Review the new commits on %@ now" = "立即審查 %@ 的新提交";
+"New commits %1$@ %2$02d:00" = "新提交 %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "允許";
+"deny" = "拒絕";
+"“%@” no longer allows it" = "「%@」不再允許它";
+"connection closed — %@" = "連線已關閉 — %@";
+"Blocked now" = "現已封鎖";
+"Allowed now" = "現已允許";
+"Blocked now by “%@”" = "現已由「%@」封鎖";
+"Allowed now by “%@”" = "現已由「%@」允許";
+"Blocked now by the default policy" = "現已由預設原則封鎖";
+"Allowed now by the default policy" = "現已由預設原則允許";
+"“%@” exists and is off" = "「%@」已存在且已關閉";
+"“%@” is on until the workspace stops" = "「%@」在工作區停止前保持開啟";
+"“%1$@” is on until %2$@" = "「%1$@」開啟至 %2$@";
+"“%@” is already on, with no time limit" = "「%@」已開啟，無時間限制";
+"The workspace's rules have changed since this connection" = "自此連線以來，工作區的規則已變更";
+"Log allowed connections" = "記錄允許的連線";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "在安全時間軸中也列出防火牆放行的連線——每個目的地一列，重複項目合併顯示——讓你可以從那裡封鎖主機。關閉：只列出被封鎖的連線。在你做出選擇之前，工作區有規則時此項會開啟。";
+"Enable rule %@" = "啟用規則 %@";
+"Time limit set" = "已設定時間限制";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "規則在編輯器之外被變更（安全時間軸中的操作或時間限制）。該變更已合併到你未儲存的編輯中。";
+"The rules changed outside the editor while you have unsaved edits." = "你有未儲存的編輯時，規則在編輯器之外被變更。";
+"Reload" = "重新載入";
+"Keep my edits" = "保留我的編輯";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "連線已關閉（代理） — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "連線已關閉（直連） — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "也顯示為：%@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "上移規則";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "下移規則";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "刪除規則";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "在安全時間軸中也列出允許的連線";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "正在載入對話…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "正在載入更早的對話…（%@ / %@）";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "無法載入此對話——機器未及時回應。";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "在其機器上找不到此工作階段的對話。";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "請某個工作階段修正";
+"Ask a Session Instead…" = "改為詢問某個工作階段…";
+"Ask a Session or the Switchboard…" = "詢問某個工作階段或總機…";
+"Show the findings for %@" = "顯示 %@ 的發現項目";
+"Sent to %@ to fix" = "已傳送給 %@ 修正";
+"Sent to %@ — it works on the fix in its own session." = "已傳送給 %@ — 它會在自己的工作階段中進行修正。";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "儲存庫沒有可推送的遠端——請合併但不推送。";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "已合併到 %@，但無法連接工作區進行推送——它在執行嗎？";
+"Merge & Push" = "合併並推送";
+"Push %1$@ to %2$@" = "將 %1$@ 推送到 %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ 包含它即完成。如果 %1$@ 已有新提交，%3$@ 會拉取、解決衝突並推送。";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "無法傳送給 %1$@：%2$@";
+"that session is gone" = "該工作階段已不存在";
+"the server didn't answer" = "伺服器沒有回應";
+"the server runs an older Bromure — update it to hand findings to a session" = "伺服器執行的是舊版 Bromure——請更新後再將發現項目交給工作階段";
+"the server refused it" = "伺服器拒絕了";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "無法交給 %1$@：%2$@";
+"a menu or dialog stayed open in that session" = "該工作階段中有選單或對話框一直開著";
+"something else was typed in that session's input box" = "該工作階段的輸入框中已有其他內容";
+"Couldn't hand it to the Switchboard: %@" = "無法交給總機：%@";
+"the Switchboard session is gone" = "總機工作階段已不存在";
+"the message couldn't be typed into the Switchboard" = "無法將訊息輸入到總機";
+"the Switchboard's agent never started" = "總機的代理程式始終未啟動";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "其文字被提示注入檢查標記 (%@) — 交給代理程式前請先確認";
+"Hand It Over Anyway" = "仍然交給它";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "提示注入檢查標記了它 (%@)。它來自讀取儲存庫內容的代理程式，你交給的代理程式也會讀取它。交出前請先檢查。";
+"Couldn't start the fix: %@" = "無法開始修正：%@";
+"Couldn't ask the Switchboard: %@" = "無法詢問總機：%@";
+"that finding is gone" = "該發現項目已不存在";
+"couldn't start the fix" = "無法開始修正";
+"no Switchboard could be started" = "無法啟動總機";

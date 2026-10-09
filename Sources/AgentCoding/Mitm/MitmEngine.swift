@@ -110,19 +110,33 @@ public final class MitmEngine {
     nonisolated(unsafe) private var guardrailsConfigs: [UUID: GuardrailsConfig] = [:]
 
     public nonisolated func setGuardrailsConfig(_ config: GuardrailsConfig, for profileID: UUID) {
-        guardrailsLock.lock(); defer { guardrailsLock.unlock() }
+        guardrailsLock.lock()
+        let prior = guardrailsConfigs[profileID]?.egressPolicy
         guardrailsConfigs[profileID] = config
         UnmanagedCredentialGuard.shared.setEnabled(config.strictCredentials, for: profileID)
+        guardrailsLock.unlock()
+        // The firewall is live: a connection the new rules deny is cut now,
+        // not left running until it ends on its own (the proxy route never
+        // crosses the switch, which re-checks the transparent route per
+        // frame). Every call re-checks — also the expiry pass, which arrives
+        // here once a timed rule lapses. The registry also arms its own
+        // timer at the policy's soonest expiry, so a timed rule's end cuts
+        // its connections at that instant whether or not the host's sweep
+        // saves (and re-pushes) the switched-off rule.
+        if prior != config.egressPolicy { EgressReportDeduper.shared.reset(profileID: profileID) }
+        EgressConnectionRegistry.shared.applyPolicy(profileID: profileID, policy: config.egressPolicy)
     }
     public nonisolated func guardrailsConfig(for profileID: UUID) -> GuardrailsConfig? {
         guardrailsLock.lock(); defer { guardrailsLock.unlock() }
         return guardrailsConfigs[profileID]
     }
     public nonisolated func clearGuardrailsConfig(for profileID: UUID) {
-        guardrailsLock.lock(); defer { guardrailsLock.unlock() }
+        guardrailsLock.lock()
         guardrailsConfigs.removeValue(forKey: profileID)
         UnmanagedCredentialGuard.shared.setEnabled(false, for: profileID)
         UnmanagedCredentialGuard.shared.reset(profileID: profileID)
+        guardrailsLock.unlock()
+        EgressConnectionRegistry.shared.forget(profileID: profileID)
     }
 
     // Same shape for supply-chain policy. Looked up per-request
@@ -483,7 +497,8 @@ public final class MitmEngine {
     @available(macOS, deprecated: 10.15)
     public nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int,
                                                   srcPort: Int = 0) {
-        Task.detached(priority: .userInitiated) { [weak self] in
+        // Off the cooperative pool: the connection blocks on its sockets.
+        MitmTasks.spawn { [weak self] in
             guard let self else { close(appFD); return }
 
             // Strict sandbox: ask the guest's root attestor which executable
@@ -526,11 +541,17 @@ public final class MitmEngine {
                                           hostnames: os ? (peeked.map { [$0] } ?? []) : [host], proto: .tcp,
                                           port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                     case .deny:
+                        if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
+                                                                   port: destPort, denied: true) {
                         SupplyChainLog.shared.record(
                             "[firewall] ✗ deny tcp \(host):\(destPort) (\(profileID.uuidString.prefix(8)))")
                         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                             eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                                        "host": .string(host), "port": .int(destPort), "layer": .string("l4")])
+                                        "host": .string(host), "port": .int(destPort), "layer": .string("l4"),
+                                        "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
+                                                                      port: UInt16(truncatingIfNeeded: destPort))?.text),
+                                        "by_policy": .bool(true)])
+                        }
                         close(appFD); return
                     case .mitm:   shouldSplice = false
                     case .splice: shouldSplice = true
@@ -578,11 +599,18 @@ public final class MitmEngine {
                                       port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                 case .deny:
                     let label = sniHost ?? destIP
+                    if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: label,
+                                                               port: destPort, denied: true) {
                     SupplyChainLog.shared.record(
                         "[firewall] ✗ deny tcp \(label):\(destPort) (\(profileID.uuidString.prefix(8)))")
                     BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                         eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                                    "host": .string(label), "port": .int(destPort), "layer": .string("sni")])
+                                    "host": .string(label), "port": .int(destPort), "layer": .string("sni"),
+                                    "rule": .of(policy.firstMatch(ip: nil, hostnames: sniHost.map { [$0] } ?? [],
+                                                                  proto: .tcp,
+                                                                  port: UInt16(truncatingIfNeeded: destPort))?.text),
+                                    "by_policy": .bool(true)])
+                    }
                     close(appFD); return
                 case .mitm:   shouldSplice = false              // `web` rule / inspected endpoint overrides passthrough
                 case .splice: shouldSplice = true               // OpenShell `tls: skip`
@@ -889,9 +917,11 @@ private final class HTTPListenerDelegate: NSObject, VZVirtioSocketListenerDelega
             guardrailsProvider: guardrailsCopy,
             supplyChainProvider: supplyChainCopy
         )
-        Task.detached(priority: .userInitiated) {
-            await conn.run()
-        }
+        // The guest end's vsock port — how agentd's bridge for this socket is
+        // found when a firewall cut must reset it.
+        conn.guestVsockPort = connection.sourcePort
+        // Off the cooperative pool: the connection blocks on its sockets.
+        MitmTasks.spawn { await conn.run() }
         return true
     }
 }

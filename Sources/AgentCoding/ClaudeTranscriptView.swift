@@ -22,10 +22,193 @@ struct TranscriptItem: Identifiable, Equatable {
         /// parser, which merges the plan's items with the latest todo-tool
         /// result (its authoritative per-item status).
         case todo(title: String, rows: [TodoRowModel])
+        /// A turn the provider refused (bad sign-in, quota, overload),
+        /// as the agent itself recorded it.
+        case agentError(AgentAPIError)
     }
     let id: Int
     var kind: Kind
     var timestamp: Date?
+}
+
+/// An API failure read from the agent's own transcript, typed by what the
+/// agent wrote down — an error enum, an HTTP status — never by its wording,
+/// which is English today, changes between versions, and on some agents
+/// is the provider's message passed through in any language.
+struct AgentAPIError: Equatable {
+    /// `blocked`: Bromure's own proxy refused the request (its 451) — not
+    /// the provider, which was never reached.
+    enum Kind: String, Equatable { case auth, quota, rateLimit, overloaded, other, blocked }
+    let kind: Kind
+    let status: Int?
+    /// What the agent showed for it, for the card's detail line.
+    let message: String
+
+    init(kind: Kind, status: Int?, message: String) {
+        self.kind = Self.isBromureBlock(status: status, message: message) ? .blocked : kind
+        self.status = status
+        self.message = message
+    }
+
+    /// Which of Bromure's engines blocked it, when `kind == .blocked`.
+    var blockedBy: BromureBlock? { kind == .blocked ? (BromureBlock.of(message) ?? .unknown) : nil }
+
+    var headline: String {
+        switch kind {
+        case .auth: NSLocalizedString("The agent couldn't authenticate", comment: "failure")
+        case .quota, .rateLimit: NSLocalizedString("The agent hit a usage limit", comment: "failure")
+        case .overloaded, .other: NSLocalizedString("The agent stopped with an error", comment: "failure")
+        case .blocked: (blockedBy ?? .unknown).headline
+        }
+    }
+
+    /// Bromure's proxy answers a request it blocks with a 451 and a body
+    /// naming itself ("Bromure blocked this request: possible prompt
+    /// injection…"): the agent then reports an API error that is NOT the
+    /// provider's — it read as "Provider unreachable" (S3-4).
+    static func isBromureBlock(status: Int?, message: String) -> Bool {
+        status == 451 || BromureBlock.of(message) != nil
+            || (Self.status(in: message) == 451)
+    }
+
+    /// When the agent's own enum says nothing more specific: the HTTP status.
+    /// 403 stays `.other` — a refused permission on some providers, an empty
+    /// balance on others.
+    static func kind(forStatus status: Int?) -> Kind {
+        switch status {
+        case 401: .auth
+        case 402: .quota
+        case 429: .rateLimit
+        case 503, 529: .overloaded
+        default: .other
+        }
+    }
+
+    /// The first HTTP-looking status in an agent's error message — "API
+    /// Error: 401 …", "unexpected status 401 Unauthorized", "(status 429 Too
+    /// Many Requests)", "Unauthorized (401) from …". Numbers only, so it
+    /// reads the same whatever language the rest is in.
+    static func status(in message: String) -> Int? {
+        let pattern = #"(?<![\d.])(40[0-9]|42[0-9]|451|5[0-9]{2})(?![\d.])"#
+        guard let r = message.range(of: pattern, options: .regularExpression) else { return nil }
+        return Int(message[r])
+    }
+
+    /// Claude Code: `error` on an `isApiErrorMessage` line (also the
+    /// StopFailure hook's enum).
+    static func claude(error: String?, status: Int?, message: String) -> AgentAPIError {
+        let kind: Kind
+        switch error ?? "" {
+        case "authentication_failed", "oauth_org_not_allowed", "account_on_hold",
+             "verification_required", "cloud_credential_error": kind = .auth
+        case "billing_error": kind = .quota
+        case "rate_limit": kind = .rateLimit
+        case "overloaded", "server_error": kind = .overloaded
+        default: kind = Self.kind(forStatus: status ?? Self.status(in: message))
+        }
+        return AgentAPIError(kind: kind, status: status ?? Self.status(in: message), message: message)
+    }
+
+    /// Codex: `codex_error_info` (rollout, snake_case) / `codexErrorInfo`
+    /// (app-server, camelCase). An API-key 401 comes through as "other".
+    static func codex(info: String?, message: String) -> AgentAPIError {
+        let status = Self.status(in: message)
+        let kind: Kind
+        switch (info ?? "").replacingOccurrences(of: "_", with: "").lowercased() {
+        case "unauthorized": kind = .auth
+        case "usagelimitexceeded", "sessionbudgetexceeded": kind = .quota
+        case "ratelimitexceeded": kind = .rateLimit
+        case "serveroverloaded": kind = .overloaded
+        default: kind = Self.kind(forStatus: status)
+        }
+        return AgentAPIError(kind: kind, status: status, message: message)
+    }
+
+    /// Kimi Code: `turn.ended` error `code` + class `name` + `statusCode`.
+    static func kimi(code: String?, name: String?, status: Int?, message: String) -> AgentAPIError {
+        let code = code ?? ""
+        let kind: Kind
+        if code == "provider.auth_error" || code.hasPrefix("auth.") {
+            kind = .auth
+        } else if name == "APIProviderQuotaExhaustedError" {
+            kind = .quota
+        } else if code == "provider.rate_limit" || name == "APIProviderRateLimitError" {
+            kind = .rateLimit
+        } else {
+            kind = Self.kind(forStatus: status ?? Self.status(in: message))
+        }
+        return AgentAPIError(kind: kind, status: status ?? Self.status(in: message), message: message)
+    }
+
+    /// Grok: `retry_state.error_type` (auth / rate_limited / api).
+    static func grok(errorType: String?, rateLimited: Bool, message: String) -> AgentAPIError {
+        let status = Self.status(in: message)
+        let kind: Kind
+        switch errorType ?? "" {
+        case "auth": kind = .auth
+        case "rate_limited": kind = .rateLimit
+        default: kind = rateLimited ? .rateLimit : Self.kind(forStatus: status)
+        }
+        return AgentAPIError(kind: kind, status: status, message: message)
+    }
+
+    /// Oh My Pi: the `errorId` classifier bitfield (pi-ai error/flags.ts)
+    /// and `errorStatus`.
+    static func omp(errorID: Int?, status: Int?, message: String) -> AgentAPIError {
+        let id = errorID ?? 0
+        let kind: Kind
+        if id & 0x1000000 != 0 || id & 0x40000000 != 0 { kind = .auth }        // AuthFailed, OAuthExpiry
+        else if id & 0x80000 != 0 { kind = .quota }                              // UsageLimit
+        else { kind = Self.kind(forStatus: status ?? Self.status(in: message)) }
+        return AgentAPIError(kind: kind, status: status ?? Self.status(in: message), message: message)
+    }
+}
+
+/// Which Bromure engine blocked a request, from the body it answered with.
+enum BromureBlock: String, Equatable {
+    case promptInjection, rulesInjection, credentialLeak, supplyChain, clientCertificate, unknown
+
+    static func of(_ message: String) -> BromureBlock? {
+        let m = message.lowercased()
+        if m.contains("bromure blocked this request") || m.contains("bromure blocked: possible") {
+            return m.contains("rogue instructions") ? .rulesInjection : .promptInjection
+        }
+        if m.contains("bromure: outbound request blocked") { return .credentialLeak }
+        if m.contains("bromure supply-chain security blocked") { return .supplyChain }
+        if m.contains("bromure: client-certificate use denied") { return .clientCertificate }
+        return nil
+    }
+
+    /// The card's headline.
+    var headline: String {
+        switch self {
+        case .promptInjection:
+            NSLocalizedString("Blocked by Bromure — prompt injection", comment: "failure: Bromure's proxy blocked the request")
+        case .rulesInjection:
+            NSLocalizedString("Blocked by Bromure — rogue instructions", comment: "failure: Bromure's proxy blocked the request")
+        case .credentialLeak:
+            NSLocalizedString("Blocked by Bromure — credential leak", comment: "failure: Bromure's proxy blocked the request")
+        case .supplyChain:
+            NSLocalizedString("Blocked by Bromure — supply chain", comment: "failure: Bromure's proxy blocked the request")
+        case .clientCertificate:
+            NSLocalizedString("Blocked by Bromure — client certificate", comment: "failure: Bromure's proxy blocked the request")
+        case .unknown:
+            NSLocalizedString("Blocked by Bromure", comment: "failure: Bromure's proxy blocked the request")
+        }
+    }
+
+    /// What the user can do next, when there's more to say than "send
+    /// again": a blocked tool output stays in the agent's conversation and is
+    /// resent every turn — Bromure now takes it out of later requests.
+    var recoveryHint: String? {
+        switch self {
+        case .promptInjection:
+            NSLocalizedString(
+                "Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session.",
+                comment: "failure hint: a prompt-injection block, and how to go on")
+        default: nil
+        }
+    }
 }
 
 extension TranscriptItem.Kind {
@@ -39,6 +222,7 @@ extension TranscriptItem.Kind {
         case .toolResult: 5
         case .question: 6
         case .todo: 7
+        case .agentError: 8
         }
     }
 }
@@ -147,6 +331,25 @@ enum ClaudeTranscriptParser {
                 items.append(TranscriptItem(id: items.count, kind: kind, timestamp: stamp))
             }
 
+            // `/compact`'s summary is written as a user message ("This
+            // session is being continued from a previous conversation…"):
+            // not something the user said — one folded row, the summary
+            // behind its disclosure.
+            if type == "user", obj["isCompactSummary"] as? Bool == true {
+                add(compactSummaryItem(resultText(message["content"])))
+                continue
+            }
+
+            // A refused API call ("Please run /login · API Error: 401 …"),
+            // written as a synthetic assistant turn but tagged with its enum
+            // and status — the tags are the signal, the text only the detail.
+            if type == "assistant", obj["isApiErrorMessage"] as? Bool == true {
+                let text = resultText(message["content"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                add(.agentError(.claude(error: obj["error"] as? String,
+                                        status: obj["apiErrorStatus"] as? Int, message: text)))
+                continue
+            }
+
             // content is either a bare string or an array of typed blocks.
             if let s = message["content"] as? String {
                 let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -157,7 +360,7 @@ enum ClaudeTranscriptParser {
                     continue
                 }
                 if !trimmed.isEmpty {
-                    add(type == "user" ? .userText(trimmed) : .assistantText(trimmed))
+                    add(type == "user" ? .userText(unwrapPasted(trimmed)) : .assistantText(trimmed))
                 }
                 continue
             }
@@ -172,7 +375,7 @@ enum ClaudeTranscriptParser {
                         if isClearCommand(s) { items.removeAll() }
                         continue
                     }
-                    add(type == "user" ? .userText(s) : .assistantText(s))
+                    add(type == "user" ? .userText(unwrapPasted(s)) : .assistantText(s))
                 case "thinking":
                     let s = (block["thinking"] as? String ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -250,6 +453,46 @@ enum ClaudeTranscriptParser {
         localTags.contains { text.hasPrefix($0) }
     }
 
+    /// Claude Code (2.1.28x) records a paste as
+    /// `<pasted_content id="…">the text</pasted_content>` inside the user's
+    /// turn. The user wrote the text, not the wrapper: the bubble shows
+    /// (and counts) the text alone. Only well-formed pairs are unwrapped.
+    /// The closing tag may repeat the id (`</pasted_content id="11de">`,
+    /// seen live) or be bare; both close the paste.
+    static func unwrapPasted(_ text: String) -> String {
+        guard text.contains("<pasted_content") else { return text }
+        /// The end of a tag that starts at `start` (after its name): the
+        /// `>` on the same line, with no other tag opening before it.
+        func tagEnd(_ s: Substring, from start: Substring.Index) -> Substring.Index? {
+            guard let end = s[start...].firstIndex(of: ">"),
+                  s[start..<end].allSatisfy({ $0 != "<" && $0 != "\n" }) else { return nil }
+            // Right after the name: either the end or an attribute.
+            if let first = s[start..<end].first, first != " " { return nil }
+            return end
+        }
+        var out = ""
+        var rest = Substring(text)
+        while let open = rest.range(of: "<pasted_content") {
+            guard let openEnd = tagEnd(rest, from: open.upperBound) else { break }
+            let bodyStart = rest.index(after: openEnd)
+            var search = bodyStart
+            var closeRange: Range<Substring.Index>?
+            while let c = rest[search...].range(of: "</pasted_content") {
+                if let cEnd = tagEnd(rest, from: c.upperBound) {
+                    closeRange = c.lowerBound..<rest.index(after: cEnd)
+                    break
+                }
+                search = c.upperBound
+            }
+            guard let close = closeRange else { break }
+            out += rest[..<open.lowerBound]
+            out += rest[bodyStart..<close.lowerBound]
+            rest = rest[close.upperBound...]
+        }
+        out += rest
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// The `/clear` record — the point where the conversation on screen
     /// starts over.
     static func isClearCommand(_ text: String) -> Bool {
@@ -271,6 +514,13 @@ enum ClaudeTranscriptParser {
     }
 
     /// tool_result content: bare string, or an array of text blocks.
+    /// The folded row a compaction summary becomes.
+    static func compactSummaryItem(_ summary: String) -> TranscriptItem.Kind {
+        .toolUse(name: "Compact",
+                 summary: NSLocalizedString("Conversation compacted", comment: "transcript: /compact summary row"),
+                 detail: summary.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     fileprivate static func resultText(_ content: Any?) -> String {
         if let s = content as? String { return s }
         guard let blocks = content as? [[String: Any]] else { return "" }
@@ -283,6 +533,102 @@ enum ClaudeTranscriptParser {
                 withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
               let s = String(data: data, encoding: .utf8) else { return "" }
         return s
+    }
+}
+
+// MARK: - Shared-folder paths
+
+/// A shared Mac folder is mounted in the guest at `/mnt/bromure-share-N` and
+/// linked as `~/<name>`. Agents that resolve symlinks (Grok) name the mount
+/// in every path they log; the chat shows the folder the user knows.
+enum GuestSharePaths {
+    /// Workspace → its share roots and how they read ("/mnt/bromure-share-1"
+    /// → "~/gk-demo"), set by the app that knows the workspaces (macOS).
+    @MainActor static var resolver: ((UUID) -> [String: String])?
+
+    @MainActor static func names(profileID: UUID) -> [String: String] {
+        resolver?(profileID) ?? [:]
+    }
+
+    /// `/mnt/bromure-share-<i+1>` → `~/<name>` for each share name in order.
+    static func names(mountNames: [String]) -> [String: String] {
+        var out: [String: String] = [:]
+        for (i, n) in mountNames.enumerated() where !n.isEmpty { out["/mnt/bromure-share-\(i + 1)"] = "~/" + n }
+        return out
+    }
+
+    /// `text` with each share root (a whole path component — "-1" never
+    /// matches "-10") read as its folder.
+    static func display(_ text: String, names: [String: String]) -> String {
+        // A tool call's detail is JSON that Foundation wrote with its
+        // slashes escaped ("\/mnt\/bromure-share-1"): the card's header
+        // reads its path from there, so that form is rewritten too.
+        let escaped = text.contains(#"\/mnt\/bromure-share-"#)
+        guard !names.isEmpty, text.contains("/mnt/bromure-share-") || escaped else { return text }
+        var out = text
+        // Longest first, so "-12" is replaced before "-1" could be tried.
+        for (root, shown) in names.sorted(by: { $0.key.count > $1.key.count }) {
+            // Never something that would break the JSON a detail holds.
+            guard !shown.contains("\""), !shown.contains("\\") else { continue }
+            let pattern = NSRegularExpression.escapedPattern(for: root) + "(?![0-9A-Za-z_-])"
+            out = out.replacingOccurrences(of: pattern, with: NSRegularExpression.escapedTemplate(for: shown),
+                                           options: .regularExpression)
+            if escaped {
+                let eRoot = root.replacingOccurrences(of: "/", with: #"\/"#)
+                let eShown = shown.replacingOccurrences(of: "/", with: #"\/"#)
+                out = out.replacingOccurrences(
+                    of: NSRegularExpression.escapedPattern(for: eRoot) + "(?![0-9A-Za-z_-])",
+                    with: NSRegularExpression.escapedTemplate(for: eShown), options: .regularExpression)
+            }
+        }
+        return out
+    }
+
+    /// The guest's home ("/home/ubuntu") as "~" — a whole leading path
+    /// component only ("/home/ubuntu2", "/x/home/ubuntu" stay).
+    static let guestHome = "/home/ubuntu"
+    static func homeDisplay(_ text: String) -> String {
+        var out = text
+        if out.contains(guestHome) {
+            out = out.replacingOccurrences(
+                of: #"(?<![0-9A-Za-z_.~/\-])/home/ubuntu(?![0-9A-Za-z_.-])"#, with: "~", options: .regularExpression)
+        }
+        // A detail's JSON, slashes escaped ("\/home\/ubuntu\/x").
+        if out.contains(#"\/home\/ubuntu"#) {
+            out = out.replacingOccurrences(
+                of: #"(?<![0-9A-Za-z_.~/-])\\/home\\/ubuntu(?![0-9A-Za-z_.-])"#, with: "~", options: .regularExpression)
+        }
+        return out
+    }
+
+    /// A tool whose summary is a command line.
+    static func isShellTool(_ name: String) -> Bool {
+        ["bash", "shell", "exec_command", "local_shell", "run_terminal_command", "terminal"].contains(name.lowercased())
+    }
+
+    /// The items with their share paths read as folders (tool calls,
+    /// results, the agent's prose — never what the user typed).
+    static func rewrite(_ items: [TranscriptItem], names: [String: String]) -> [TranscriptItem] {
+        func d(_ s: String) -> String { names.isEmpty ? s : display(s, names: names) }
+        return items.map { item in
+            var item = item
+            switch item.kind {
+            case .toolUse(let name, let summary, let detail):
+                // The card's header reads the guest home as "~" ("Read
+                // ~/inj.txt", not "/home/ubuntu/inj.txt"); a command line
+                // stays as it runs (it's copied from there), and so does
+                // the call's detail.
+                let shell = isShellTool(name)
+                item.kind = .toolUse(name: name, summary: shell ? d(summary) : homeDisplay(d(summary)),
+                                     detail: shell ? d(detail) : homeDisplay(d(detail)))
+            case .toolResult(let tool, let content, let isError):
+                item.kind = .toolResult(tool: tool, content: d(content), isError: isError)
+            case .assistantText(let t): item.kind = .assistantText(d(t))
+            case .thinking(let t): item.kind = .thinking(d(t))
+            default: break
+            }
+            return item
+        }
     }
 }
 
@@ -414,6 +760,11 @@ enum OmpTranscriptParser {
         var todoInit: [TodoRowModel] = []
         var todoResult: String?
         var todoAnchor: Int?
+        // omp's own `ask` calls by id: where the call's card sits and what it
+        // asked. Once its result is in, the card turns into the answered
+        // question (the answer stays in the chat); while it's open, the
+        // dialog on screen is the way to answer it.
+        var askAnchors: [String: (at: Int, questions: [TranscriptQuestion])] = [:]
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
@@ -437,8 +788,10 @@ enum OmpTranscriptParser {
             // level. (Older omp inlined a `tool_result` block in a user
             // message — still handled in the block loop below.)
             if role == "toolResult" {
-                let tool = message["toolName"] as? String
-                    ?? (message["toolCallId"] as? String).flatMap { toolNames[$0] }
+                // The call's name as the chat knows it first: an `xd://` device
+                // write was renamed to the tool it ran (its result says "write").
+                let tool = (message["toolCallId"] as? String).flatMap { toolNames[$0] }
+                    ?? message["toolName"] as? String
                     ?? "tool"
                 let content = ClaudeTranscriptParser.resultText(message["content"])
                 // The todo result is the authoritative per-item status — fold it
@@ -448,15 +801,39 @@ enum OmpTranscriptParser {
                     todoResult = content
                     continue
                 }
+                if tool == "ask", let callID = message["toolCallId"] as? String,
+                   let anchor = askAnchors.removeValue(forKey: callID) {
+                    let answered = Self.answeredAsk(anchor.questions, result: content,
+                                                    isError: message["isError"] as? Bool ?? false)
+                    if let first = answered.first {
+                        items[anchor.at].kind = .question(first)
+                        answered.dropFirst().forEach { add(.question($0)) }
+                        continue
+                    }
+                }
                 add(.toolResult(tool: tool, content: content,
                                 isError: message["isError"] as? Bool ?? false))
                 continue
             }
             guard role == "user" || role == "assistant" else { continue }
 
+            // A turn the provider refused: omp records the HTTP status and
+            // its classifier bits next to the (provider-worded) message.
+            if role == "assistant", message["stopReason"] as? String == "error" {
+                let text = (message["errorMessage"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let status = message["errorStatus"] as? Int
+                let errorID = message["errorId"] as? Int
+                // A user's Esc is an "error" stop too — not a failure.
+                if errorID.map({ $0 & (0x4000000 | 0x8000000) != 0 }) != true,
+                   status != nil || errorID != nil || !text.isEmpty {
+                    add(.agentError(.omp(errorID: errorID, status: status, message: text)))
+                }
+            }
+
             // content: a bare string or an array of blocks.
             if let s = message["content"] as? String {
-                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                let t = (isUser ? Self.unwrapAttachments(s) : s).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !t.isEmpty { add(isUser ? .userText(t) : .assistantText(t)) }
                 continue
             }
@@ -464,7 +841,8 @@ enum OmpTranscriptParser {
             for block in blocks {
                 switch block["type"] as? String {
                 case "text":
-                    let s = (block["text"] as? String ?? "")
+                    let raw = block["text"] as? String ?? ""
+                    let s = (isUser ? Self.unwrapAttachments(raw) : raw)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if !s.isEmpty { add(isUser ? .userText(s) : .assistantText(s)) }
                 case "thinking":
@@ -474,9 +852,18 @@ enum OmpTranscriptParser {
                 // Current omp: `toolCall` (args in `arguments`, plus a human
                 // `intent`). Older omp / Anthropic: `tool_use` (`input`).
                 case "toolCall", "tool_use":
-                    let name = block["name"] as? String ?? "tool"
+                    var name = block["name"] as? String ?? "tool"
+                    var input = Self.toolInput(block)
+                    // omp drives MCP / mounted tools through read/write on
+                    // `xd://<tool>` and pages spilled output via
+                    // `artifact://N`: the tool it really ran, not a file edit.
+                    var virtualSummary: String?
+                    if let v = Self.virtualCall(name: name, input: input) {
+                        name = v.name
+                        input = v.input
+                        virtualSummary = v.summary
+                    }
                     if let id = block["id"] as? String { toolNames[id] = name }
-                    let input = Self.toolInput(block)
                     // omp's todo list → one consolidated, live-ticking .todo item
                     // (its per-item status is folded in from the result above).
                     if name == "todo" {
@@ -494,12 +881,16 @@ enum OmpTranscriptParser {
                     if !questions.isEmpty {
                         questions.forEach { add(.question($0)) }
                     } else {
+                        if name == "ask", let id = block["id"] as? String {
+                            let asked = Self.askQuestions(input)
+                            if !asked.isEmpty { askAnchors[id] = (items.count, asked) }
+                        }
                         // Prefer omp's own one-line `intent` ("Writing foo.html")
                         // as the summary; fall back to the derived one.
                         let intent = (block["intent"] as? String)?
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         let summary = (intent?.isEmpty == false) ? intent!
-                            : ClaudeTranscriptParser.toolSummary(name: name, input: input)
+                            : virtualSummary ?? ClaudeTranscriptParser.toolSummary(name: name, input: input)
                         add(.toolUse(name: name, summary: summary,
                                      detail: ClaudeTranscriptParser.prettyJSON(input)))
                     }
@@ -521,6 +912,115 @@ enum OmpTranscriptParser {
                                   rows: TodoParse.merge(initRows: todoInit, resultText: todoResult))
         }
         return items
+    }
+
+    /// omp's `ask` arguments: `questions: [{id, question, options: [{label,
+    /// description?}], multi?}]`.
+    static func askQuestions(_ input: [String: Any]) -> [TranscriptQuestion] {
+        guard let qs = input["questions"] as? [[String: Any]] else { return [] }
+        return qs.compactMap { q in
+            guard let text = q["question"] as? String, !text.isEmpty else { return nil }
+            let opts = (q["options"] as? [[String: Any]] ?? []).compactMap { o -> TranscriptQuestion.Option? in
+                guard let label = o["label"] as? String, !label.isEmpty else { return nil }
+                return .init(label: label, description: o["description"] as? String ?? "")
+            }
+            return TranscriptQuestion(question: text, header: q["id"] as? String ?? "",
+                                      multiSelect: q["multi"] as? Bool ?? false, options: opts)
+        }
+    }
+
+    /// The questions with what the user answered, from omp's result text:
+    /// "User selected: Green", "User provided custom input: teal", or for
+    /// several questions "User answers:\n<id>: Green". An error result (Esc:
+    /// "cancelled") is a declined question.
+    static func answeredAsk(_ questions: [TranscriptQuestion], result: String,
+                            isError: Bool) -> [TranscriptQuestion] {
+        var out = questions
+        let lines = result.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        func value(after prefix: String) -> String? {
+            lines.first { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces) }
+        }
+        let cancelled = isError || result.contains("User cancelled the selection")
+            || result.contains("User did not select any options")
+        for i in out.indices {
+            if cancelled { out[i].declined = true; continue }
+            var answer: String?
+            if questions.count == 1 {
+                answer = value(after: "User selected:") ?? value(after: "User provided custom input:")
+            }
+            if answer == nil, !out[i].header.isEmpty {
+                answer = value(after: out[i].header + ":").map {
+                    var a = $0
+                    if a.hasPrefix("["), a.hasSuffix("]") { a = String(a.dropFirst().dropLast()) }
+                    if a.hasPrefix("\""), a.hasSuffix("\""), a.count >= 2 { a = String(a.dropFirst().dropLast()) }
+                    return a
+                }
+            }
+            if answer == "(cancelled)" { out[i].declined = true; continue }
+            out[i].answer = answer ?? ""
+        }
+        return out
+    }
+
+    /// A paste omp wrapped for the model (`<attachment>\n…\n</attachment>`,
+    /// its large-paste marker): the words the user pasted, unwrapped — the
+    /// chat folds a long one like any long message.
+    static func unwrapAttachments(_ text: String) -> String {
+        guard text.contains("<attachment>") else { return text }
+        return text.replacingOccurrences(
+            of: #"<attachment>\r?\n?([\s\S]*?)\r?\n?</attachment>"#, with: "$1", options: .regularExpression)
+    }
+
+    /// A read/write that isn't a file: omp's `xd://<tool>` devices (a write
+    /// RUNS the tool with `content` as its JSON arguments, a read fetches
+    /// its docs) and `artifact://N` (an earlier command's spilled output).
+    struct VirtualCall {
+        let name: String
+        let summary: String?
+        let input: [String: Any]
+    }
+
+    /// Tool name for a docs lookup of an `xd://` device.
+    static let toolLookupName = "tool_lookup"
+    /// Tool name for a read of spilled output (`artifact://N`).
+    static let readOutputName = "read_output"
+
+    static func virtualCall(name: String, input: [String: Any]) -> VirtualCall? {
+        let n = name.lowercased()
+        guard n == "read" || n == "write",
+              let path = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return nil }
+        let lower = path.lowercased()
+        if lower.hasPrefix("xd://") {
+            let tool = path.dropFirst(5)
+                .split(whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" || $0 == ":" })
+                .first.map(String.init) ?? ""
+            if n == "write" {
+                guard !tool.isEmpty else { return nil }
+                var args: [String: Any] = [:]
+                if let d = input["content"] as? [String: Any] {
+                    args = d
+                } else if let c = input["content"] as? String,
+                          let d = try? JSONSerialization.jsonObject(with: Data(c.utf8)) as? [String: Any] {
+                    args = d
+                }
+                return VirtualCall(name: tool, summary: nil, input: args)
+            }
+            let label = tool.isEmpty
+                ? NSLocalizedString("Listing its tools", comment: "omp step: read of xd:// (the agent lists the tools it can call)")
+                : String(format: NSLocalizedString("Looking up %@", comment: "omp step: read of a tool's docs (xd://tool); %@ = tool"),
+                         ActivitySummary.humanTool(tool))
+            return VirtualCall(name: toolLookupName, summary: label, input: tool.isEmpty ? [:] : ["tool": tool])
+        }
+        if n == "read", lower.hasPrefix("artifact://") {
+            let rest = String(path.dropFirst("artifact://".count))
+            let id = String(rest.prefix { $0.isNumber })
+            let label = id.isEmpty
+                ? NSLocalizedString("Reading earlier output", comment: "omp step: read of a spilled command output (artifact://)")
+                : String(format: NSLocalizedString("Reading earlier output #%@", comment: "omp step: read of spilled command output N (artifact://N)"), id)
+            return VirtualCall(name: readOutputName, summary: label, input: ["artifact": rest])
+        }
+        return nil
     }
 
     /// A tool call's arguments as a dict: `input` (Anthropic/older omp) or
@@ -550,13 +1050,30 @@ enum OmpTranscriptParser {
 /// only as a fallback for files that carry no response_item conversation
 /// (newer "paginated" history mode). Unknown types are skipped, not fatal.
 enum CodexTranscriptParser {
+    /// What the reader carries from line to line: tool names by call id,
+    /// and the calls a Codex code-mode script made (`exec` custom tool,
+    /// Codex ≥ 0.157) — its output arrives later as one list for the whole
+    /// script, or, for a script still running when its call returned,
+    /// through `wait` calls naming its cell.
+    struct State {
+        var toolNames: [String: String] = [:]
+        var scripts: [String: [CodexCodeMode.Call]] = [:]
+        /// call id → the cell a `wait` call polls.
+        var waits: [String: String] = [:]
+        /// cell id → the calls of a script still running.
+        var runningCells: [String: [CodexCodeMode.Call]] = [:]
+        /// Code-mode scripts that only looked at the tool list: neither the
+        /// script nor its output is something the user asked to see.
+        var hidden: Set<String> = []
+    }
+
     static func parse(_ data: Data) -> [TranscriptItem] {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         var primary: [TranscriptItem.Kind] = []
         var fallback: [TranscriptItem.Kind] = []
         var stamps: [Date?] = []
         var fallbackStamps: [Date?] = []
-        var toolNames: [String: String] = [:]
+        var state = State()
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
@@ -570,12 +1087,20 @@ enum CodexTranscriptParser {
             switch obj["type"] as? String ?? "" {
             case "response_item":
                 guard let payload = obj["payload"] as? [String: Any] else { continue }
-                for kind in responseItemKinds(payload, toolNames: &toolNames) {
+                for kind in responseItemKinds(payload, state: &state) {
                     primary.append(kind)
                     stamps.append(stamp)
                 }
             case "event_msg":
                 guard let payload = obj["payload"] as? [String: Any] else { continue }
+                // A failed turn: the error rides on its task_complete, typed
+                // by codex_error_info. Not mirrored by any response_item, so
+                // it belongs in both lists.
+                if let error = Self.turnError(payload) {
+                    primary.append(error); stamps.append(stamp)
+                    fallback.append(error); fallbackStamps.append(stamp)
+                    continue
+                }
                 for kind in eventKinds(payload) {
                     fallback.append(kind)
                     fallbackStamps.append(stamp)
@@ -585,7 +1110,7 @@ enum CodexTranscriptParser {
                  "web_search_call":
                 // Early-2025 rollouts: bare ResponseItems, no envelope.
                 guard obj["payload"] == nil else { continue }
-                for kind in responseItemKinds(obj, toolNames: &toolNames) {
+                for kind in responseItemKinds(obj, state: &state) {
                     primary.append(kind)
                     stamps.append(stamp)
                 }
@@ -605,25 +1130,41 @@ enum CodexTranscriptParser {
         }
     }
 
+    /// The model Codex ran the conversation's latest turn on — its
+    /// `turn_context` records (a mid-session `/model` changes it), nil when
+    /// the rollout has none.
+    static func latestModel(_ data: Data) -> String? {
+        let text = String(decoding: data, as: UTF8.self)
+        var model: String?
+        for line in text.split(whereSeparator: \.isNewline) where line.contains("\"turn_context\"") {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  obj["type"] as? String == "turn_context",
+                  let p = obj["payload"] as? [String: Any] else { continue }
+            if let m = p["model"] as? String, !m.isEmpty { model = m }
+        }
+        return model
+    }
+
     private static func responseItemKinds(
         _ payload: [String: Any],
-        toolNames: inout [String: String]) -> [TranscriptItem.Kind] {
+        state: inout State) -> [TranscriptItem.Kind] {
         switch payload["type"] as? String ?? "" {
         case "message":
             let role = payload["role"] as? String ?? ""
             guard role == "user" || role == "assistant" else { return [] }
+            // Codex injects instructions (AGENTS.md) and an environment dump
+            // as synthetic user turns — plumbing, not conversation. Dropped
+            // per part: one message may carry both, or sit beside typed text.
             let text = (payload["content"] as? [[String: Any]] ?? [])
                 .compactMap { block -> String? in
                     guard ["input_text", "output_text", "text"]
                         .contains(block["type"] as? String ?? "") else { return nil }
-                    return block["text"] as? String
+                    guard let t = block["text"] as? String else { return nil }
+                    return role == "user" && Self.isInjectedContext(t) ? nil : t
                 }
                 .joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            // Codex injects instructions and an environment dump as
-            // synthetic user turns — plumbing, not conversation.
-            guard !text.isEmpty, !text.hasPrefix("<user_instructions>"),
-                  !text.hasPrefix("<environment_context>") else { return [] }
+            guard !text.isEmpty else { return [] }
             return [role == "user" ? .userText(text) : .assistantText(text)]
         case "reasoning":
             // Readable thinking is the summary; raw CoT is usually only an
@@ -638,30 +1179,66 @@ enum CodexTranscriptParser {
             return text.isEmpty ? [] : [.thinking(text)]
         case "function_call":
             let name = payload["name"] as? String ?? "tool"
-            if let id = payload["call_id"] as? String { toolNames[id] = name }
+            let callID = payload["call_id"] as? String
             let argsString = payload["arguments"] as? String ?? ""
             let args = (try? JSONSerialization.jsonObject(
                 with: Data(argsString.utf8))) as? [String: Any]
+            // Code mode's `wait`: polls a script that was still running when
+            // its call returned. Plumbing — its output is the script's.
+            if name == "wait", let callID, let cell = Self.cellID(args?["cell_id"]),
+               state.runningCells[cell] != nil {
+                state.waits[callID] = cell
+                return []
+            }
+            if let callID { state.toolNames[callID] = name }
             let summary = args.flatMap { shellSummary($0["command"]) }
                 ?? args.map { ClaudeTranscriptParser.toolSummary(name: name, input: $0) }
                 ?? String(argsString.prefix(200))
             let detail = args.map { ClaudeTranscriptParser.prettyJSON($0) } ?? argsString
             return [.toolUse(name: name, summary: summary, detail: detail)]
         case "local_shell_call":
-            if let id = payload["call_id"] as? String { toolNames[id] = "shell" }
+            if let id = payload["call_id"] as? String { state.toolNames[id] = "shell" }
             let action = payload["action"] as? [String: Any] ?? [:]
             return [.toolUse(name: "shell",
                              summary: shellSummary(action["command"]) ?? "",
                              detail: ClaudeTranscriptParser.prettyJSON(action))]
         case "custom_tool_call":
             let name = payload["name"] as? String ?? "tool"
-            if let id = payload["call_id"] as? String { toolNames[id] = name }
+            let callID = payload["call_id"] as? String
             let input = payload["input"] as? String ?? ""
+            // Code mode (Codex ≥ 0.157): one `exec` call runs a script that
+            // calls the real tools (`tools.exec_command({cmd})`,
+            // `tools.apply_patch("…")`, MCP tools) — each its own card.
+            if name == "exec" {
+                let calls = CodexCodeMode.calls(in: input)
+                if !calls.isEmpty {
+                    if let callID { state.scripts[callID] = calls }
+                    return calls.flatMap(\.kinds)
+                }
+                // A script that only reads the tool list.
+                if input.contains("ALL_TOOLS"), let callID {
+                    state.hidden.insert(callID)
+                    return []
+                }
+            }
+            if let callID { state.toolNames[callID] = name }
+            // The freeform apply_patch: its input IS the patch.
+            if name == "apply_patch" {
+                return CodexCodeMode.Call(name: name, args: input).kinds
+            }
             return [.toolUse(name: name, summary: String(input.prefix(200)),
                              detail: input)]
         case "function_call_output", "custom_tool_call_output":
-            let tool = (payload["call_id"] as? String)
-                .flatMap { toolNames[$0] } ?? "tool"
+            let callID = payload["call_id"] as? String
+            if let callID, state.hidden.contains(callID) { return [] }
+            if let callID, let cell = state.waits[callID] {
+                return scriptResults(payload["output"], calls: state.runningCells[cell] ?? [],
+                                     cell: cell, state: &state)
+            }
+            if let callID, let calls = state.scripts[callID] {
+                return scriptResults(payload["output"], calls: calls, cell: nil, state: &state)
+            }
+            let tool = callID.flatMap { state.toolNames[$0] } ?? "tool"
             let (content, isError) = outputText(payload["output"])
             return [.toolResult(tool: tool, content: content, isError: isError)]
         case "web_search_call":
@@ -672,6 +1249,85 @@ enum CodexTranscriptParser {
         default:
             return []
         }
+    }
+
+    /// A user-message part Codex wrote, not the user: the AGENTS.md block
+    /// (`# AGENTS.md instructions for …`, older `<user_instructions>`), the
+    /// `<environment_context>` dump, and similar tagged plumbing.
+    static func isInjectedContext(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("# AGENTS.md instructions for ")
+            || t.hasPrefix("<user_instructions>")
+            || t.hasPrefix("<environment_context>")
+            || t.hasPrefix("<INSTRUCTIONS>")
+    }
+
+    private static func cellID(_ v: Any?) -> String? {
+        if let s = v as? String, !s.isEmpty { return s }
+        if let n = v as? Int { return String(n) }
+        return nil
+    }
+
+    /// A code-mode script's output → one result per tool call it made. The
+    /// output is a list: a header ("Script completed" / "Script running
+    /// with cell ID N"), then what the script printed, one item per
+    /// `text(…)` — in practice each call's own result, in call order. Each
+    /// call takes the next result of its shape (a command's carries
+    /// exit_code, an MCP tool's a content list); prints of anything else
+    /// (the tool list) are left over and dropped.
+    private static func scriptResults(_ output: Any?, calls: [CodexCodeMode.Call], cell: String?,
+                                      state: inout State) -> [TranscriptItem.Kind] {
+        var texts: [String] = []
+        if let blocks = output as? [[String: Any]] {
+            texts = blocks.compactMap { $0["text"] as? String }
+        } else if let s = output as? String {
+            texts = [s]
+        }
+        let header = texts.first ?? ""
+        let printed = Array(texts.dropFirst())
+        if header.hasPrefix("Script running") {
+            // Still running: its results come through `wait`.
+            if let id = CodexCodeMode.runningCell(header) {
+                state.runningCells[id] = calls
+            }
+            return []
+        }
+        if let cell { state.runningCells[cell] = nil }
+        var out: [TranscriptItem.Kind] = []
+        var used = Set<Int>()
+        let results = printed.map(CodexCodeMode.Result.init)
+        for call in calls {
+            guard let i = results.indices.first(where: { !used.contains($0) && results[$0].fits(call) })
+                ?? results.indices.first(where: { !used.contains($0) && results[$0].fits(call, strict: false) })
+            else { continue }
+            used.insert(i)
+            if let r = results[i].kind(for: call) { out.append(r) }
+        }
+        // The script itself failed (a thrown error, a syntax error): say so
+        // on the call it was making.
+        if !header.hasPrefix("Script completed"), !header.isEmpty {
+            let body = texts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(.toolResult(tool: calls.last?.displayName ?? "exec", content: body, isError: true))
+        }
+        return out
+    }
+
+    /// `task_complete` (or a bare `error` event) carrying the turn's failure.
+    private static func turnError(_ payload: [String: Any]) -> TranscriptItem.Kind? {
+        let type = payload["type"] as? String ?? ""
+        let error: [String: Any]?
+        switch type {
+        case "task_complete", "turn_complete": error = payload["error"] as? [String: Any]
+        case "error": error = payload
+        default: return nil
+        }
+        guard let error else { return nil }
+        let message = (error["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let info = error["codex_error_info"] ?? error["codexErrorInfo"]
+        // The plain variants are strings; the http ones are a one-key object.
+        let infoName = (info as? String) ?? (info as? [String: Any])?.keys.first
+        guard !message.isEmpty || infoName != nil else { return nil }
+        return .agentError(.codex(info: infoName, message: message))
     }
 
     /// The legacy-mode UI mirror of the same conversation (fallback only).
@@ -731,6 +1387,431 @@ enum CodexTranscriptParser {
     }
 }
 
+// MARK: - Codex code mode
+
+/// Codex ≥ 0.157 "code mode": the model calls ONE tool, `exec`, with a
+/// JavaScript snippet that calls the real tools —
+/// `text(await tools.exec_command({cmd:"ls"}))`,
+/// `tools.apply_patch("*** Begin Patch…")`, `tools.mcp__server__tool({…})`.
+/// The calls are recovered from the source (their arguments are literals in
+/// practice); anything that isn't a literal is kept as raw text.
+enum CodexCodeMode {
+    struct Call {
+        var name: String
+        /// The first argument, decoded (`[String: Any]`, `String`, …); nil
+        /// when it wasn't a literal.
+        var args: Any?
+        var raw: String = ""
+
+        /// The name the transcript shows: a command is a shell call.
+        var displayName: String {
+            switch name {
+            case "exec_command", "shell", "shell_command", "local_shell": return "shell"
+            default: return name
+            }
+        }
+
+        /// The command a shell call runs.
+        var command: String? {
+            if let s = args as? String, displayName == "shell" { return s }
+            guard let d = args as? [String: Any] else { return nil }
+            for k in ["cmd", "command"] {
+                if let s = d[k] as? String { return s }
+                if let a = d[k] as? [Any] {
+                    let argv = a.compactMap { $0 as? String }
+                    if argv.count >= 3, ["bash", "sh", "zsh"].contains(argv[0]),
+                       ["-lc", "-c"].contains(argv[1]) { return argv[2...].joined(separator: " ") }
+                    return argv.joined(separator: " ")
+                }
+            }
+            return nil
+        }
+
+        var patch: String? {
+            if let s = args as? String { return s }
+            let d = args as? [String: Any]
+            return d?["input"] as? String ?? d?["patch"] as? String
+        }
+
+        /// The call's cards: one, except a patch touching several files —
+        /// one diff card per file, each with only its own hunks.
+        var kinds: [TranscriptItem.Kind] {
+            guard name == "apply_patch", let patch else { return [kind] }
+            let sections = CodexCodeMode.patchSections(patch)
+            guard sections.count > 1 else { return [kind] }
+            return sections.map { Call(name: name, args: $0).kind }
+        }
+
+        var kind: TranscriptItem.Kind {
+            func clip(_ s: String) -> String { s.count > 200 ? String(s.prefix(200)) + "…" : s }
+            if displayName == "shell", let cmd = command {
+                var input: [String: Any] = (args as? [String: Any]) ?? [:]
+                input["cmd"] = nil
+                input["command"] = cmd
+                return .toolUse(name: "shell", summary: clip(cmd),
+                                detail: ClaudeTranscriptParser.prettyJSON(input))
+            }
+            if name == "apply_patch", let patch {
+                let files = CodexCodeMode.patchFiles(patch)
+                var input: [String: Any] = ["patch": patch]
+                if let f = files.first { input["path"] = f }
+                return .toolUse(name: "apply_patch", summary: clip(files.joined(separator: ", ")),
+                                detail: ClaudeTranscriptParser.prettyJSON(input))
+            }
+            if let d = args as? [String: Any] {
+                return .toolUse(name: name, summary: ClaudeTranscriptParser.toolSummary(name: name, input: d),
+                                detail: ClaudeTranscriptParser.prettyJSON(d))
+            }
+            if let s = args as? String {
+                return .toolUse(name: name, summary: clip(s), detail: s)
+            }
+            return .toolUse(name: name, summary: clip(raw), detail: raw)
+        }
+    }
+
+    /// The files a Codex patch touches ("*** Update File: path").
+    static func patchFiles(_ patch: String) -> [String] {
+        var files: [String] = []
+        for line in patch.split(separator: "\n") {
+            for p in ["*** Update File: ", "*** Add File: ", "*** Delete File: ", "*** Move to: "]
+            where line.hasPrefix(p) {
+                let f = line.dropFirst(p.count).trimmingCharacters(in: .whitespaces)
+                if !f.isEmpty, !files.contains(f) { files.append(f) }
+            }
+        }
+        return files
+    }
+
+    /// A multi-file Codex patch split per file: each `*** Update File:` /
+    /// `*** Add File:` / `*** Delete File:` section (with its `*** Move to:`
+    /// and hunks) re-wrapped as a patch of its own. A single-file patch comes
+    /// back as one section.
+    static func patchSections(_ patch: String) -> [String] {
+        let heads = ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+        var sections: [[Substring]] = []
+        for line in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+            let l = line.hasSuffix("\r") ? line.dropLast() : line
+            if l.hasPrefix("*** Begin Patch") || l.hasPrefix("*** End Patch") { continue }
+            if heads.contains(where: { l.hasPrefix($0) }) {
+                sections.append([l])
+            } else if !sections.isEmpty {
+                sections[sections.count - 1].append(l)
+            }
+        }
+        guard !sections.isEmpty else { return [patch] }
+        return sections.map { body in
+            var lines = body
+            while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+            return (["*** Begin Patch"] + lines.map(String.init) + ["*** End Patch"]).joined(separator: "\n")
+        }
+    }
+
+    /// "Script running with cell ID 10…" → "10".
+    static func runningCell(_ header: String) -> String? {
+        guard let r = header.range(of: "cell ID ") else { return nil }
+        let id = header[r.upperBound...].prefix(while: { !$0.isWhitespace })
+        return id.isEmpty ? nil : String(id)
+    }
+
+    /// One printed result of a script.
+    struct Result {
+        enum Shape { case command, mcp, empty, list, other }
+        let text: String
+        let value: Any?
+        let rejected: Bool
+        let shape: Shape
+
+        init(_ text: String) {
+            self.text = text
+            var v = (try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed]))
+            var rejected = false
+            // Promise.allSettled's {status, value | reason}.
+            if let d = v as? [String: Any], let st = d["status"] as? String,
+               st == "fulfilled" || st == "rejected", d.count <= 2 {
+                rejected = st == "rejected"
+                v = d["value"] ?? d["reason"]
+            }
+            self.value = v
+            self.rejected = rejected
+            if let d = v as? [String: Any] {
+                if d["exit_code"] != nil || d["chunk_id"] != nil
+                    || (d["session_id"] != nil && d["output"] != nil) { shape = .command }
+                else if d["content"] is [Any] { shape = .mcp }
+                else if d.isEmpty { shape = .empty }
+                else { shape = .other }
+            } else if v is [Any] {
+                shape = .list
+            } else {
+                shape = .other
+            }
+        }
+
+        /// `strict`: an MCP call only takes an MCP-shaped result (a second,
+        /// lenient pass lets it take any printed value).
+        func fits(_ call: Call, strict: Bool = true) -> Bool {
+            if rejected { return true }
+            switch call.displayName {
+            case "shell", "write_stdin": return shape == .command
+            default:
+                if call.name.hasPrefix("mcp__") { return shape == .mcp || (!strict && shape == .other) }
+                return shape == .empty || shape == .other
+            }
+        }
+
+        /// The call's result row; nil for an empty success (a patch applied
+        /// says nothing).
+        func kind(for call: Call) -> TranscriptItem.Kind? {
+            let tool = call.displayName
+            if rejected {
+                let msg = (value as? [String: Any])?["message"] as? String
+                    ?? (value as? String) ?? text
+                return .toolResult(tool: tool, content: msg, isError: true)
+            }
+            switch shape {
+            case .command:
+                let d = value as? [String: Any] ?? [:]
+                var out = d["output"] as? String ?? ""
+                let exit = (d["exit_code"] as? NSNumber)?.intValue
+                if let exit, exit != 0 {
+                    out += (out.isEmpty || out.hasSuffix("\n") ? "" : "\n")
+                        + String(format: NSLocalizedString("(exit code %d)", comment: "transcript: a command's nonzero exit status"), exit)
+                }
+                return .toolResult(tool: tool, content: out.trimmingCharacters(in: .newlines),
+                                   isError: (exit ?? 0) != 0)
+            case .mcp:
+                let d = value as? [String: Any] ?? [:]
+                let content = ClaudeTranscriptParser.resultText(d["content"])
+                return .toolResult(tool: tool, content: content, isError: d["isError"] as? Bool ?? false)
+            case .empty:
+                return nil
+            case .list, .other:
+                let s = (value as? String) ?? text
+                if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+                return .toolResult(tool: tool, content: s, isError: false)
+            }
+        }
+    }
+
+    // MARK: Source scanning
+
+    /// The `tools.<name>(…)` calls in a script, in source order. String
+    /// literals and comments are skipped, so a command that merely mentions
+    /// `tools.` isn't one.
+    static func calls(in script: String) -> [Call] {
+        let s = Array(script.unicodeScalars)
+        var out: [Call] = []
+        var i = 0
+        func isIdent(_ c: Unicode.Scalar) -> Bool {
+            CharacterSet.alphanumerics.contains(c) || c == "_" || c == "$"
+        }
+        let word = Array("tools.".unicodeScalars)
+        while i < s.count {
+            let c = s[i]
+            if c == "\"" || c == "'" || c == "`" { skipString(s, &i); continue }
+            if c == "/", i + 1 < s.count, s[i + 1] == "/" {
+                while i < s.count, s[i] != "\n" { i += 1 }
+                continue
+            }
+            if c == "/", i + 1 < s.count, s[i + 1] == "*" {
+                i += 2
+                while i + 1 < s.count, !(s[i] == "*" && s[i + 1] == "/") { i += 1 }
+                i += 2
+                continue
+            }
+            if c == "t", i + word.count < s.count, Array(s[i..<(i + word.count)]) == word,
+               i == 0 || (!isIdent(s[i - 1]) && s[i - 1] != ".") {
+                var j = i + word.count
+                let nameStart = j
+                while j < s.count, isIdent(s[j]) { j += 1 }
+                let name = String(String.UnicodeScalarView(s[nameStart..<j]))
+                var k = j
+                skipSpace(s, &k)
+                guard !name.isEmpty, k < s.count, s[k] == "(" else { i = j; continue }
+                k += 1
+                let argStart = k
+                skipSpace(s, &k)
+                var call = Call(name: name, args: nil)
+                if k < s.count, s[k] == ")" {
+                    call.args = [String: Any]()
+                    i = k + 1
+                } else {
+                    var m = k
+                    if let v = literal(s, &m) {
+                        var n = m
+                        skipSpace(s, &n)
+                        if n < s.count, s[n] == ")" || s[n] == "," {
+                            call.args = v
+                        }
+                    }
+                    // Raw text up to the matching parenthesis.
+                    var depth = 1, e = argStart
+                    while e < s.count, depth > 0 {
+                        let ch = s[e]
+                        if ch == "\"" || ch == "'" || ch == "`" { skipString(s, &e); continue }
+                        if ch == "(" || ch == "{" || ch == "[" { depth += 1 }
+                        if ch == ")" || ch == "}" || ch == "]" { depth -= 1 }
+                        e += 1
+                    }
+                    let end = max(argStart, min(s.count, e - 1))
+                    call.raw = String(String.UnicodeScalarView(s[argStart..<end]))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    i = call.args != nil ? m : argStart
+                }
+                out.append(call)
+                continue
+            }
+            i += 1
+        }
+        return out
+    }
+
+    private static func skipSpace(_ s: [Unicode.Scalar], _ i: inout Int) {
+        while i < s.count, CharacterSet.whitespacesAndNewlines.contains(s[i]) { i += 1 }
+    }
+
+    /// Past a string literal starting at `i` (its quote).
+    private static func skipString(_ s: [Unicode.Scalar], _ i: inout Int) {
+        let q = s[i]
+        i += 1
+        while i < s.count {
+            if s[i] == "\\" { i += 2; continue }
+            if s[i] == q { i += 1; return }
+            i += 1
+        }
+    }
+
+    /// A JavaScript literal at `i` — object, array, string, number,
+    /// true/false/null/undefined — as Foundation values (undefined/null →
+    /// NSNull). nil (and `i` unspecified) when it isn't one.
+    static func literal(_ s: [Unicode.Scalar], _ i: inout Int) -> Any? {
+        skipSpace(s, &i)
+        guard i < s.count else { return nil }
+        let c = s[i]
+        switch c {
+        case "{":
+            i += 1
+            var d: [String: Any] = [:]
+            while true {
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "}" { i += 1; return d }
+                let key: String
+                if s[i] == "\"" || s[i] == "'" {
+                    guard let k = string(s, &i) else { return nil }
+                    key = k
+                } else {
+                    let st = i
+                    while i < s.count, CharacterSet.alphanumerics.contains(s[i]) || s[i] == "_" || s[i] == "$" { i += 1 }
+                    guard i > st else { return nil }
+                    key = String(String.UnicodeScalarView(s[st..<i]))
+                }
+                skipSpace(s, &i)
+                guard i < s.count, s[i] == ":" else { return nil }
+                i += 1
+                guard let v = literal(s, &i) else { return nil }
+                d[key] = v
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "," { i += 1; continue }
+                if s[i] == "}" { i += 1; return d }
+                return nil
+            }
+        case "[":
+            i += 1
+            var a: [Any] = []
+            while true {
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "]" { i += 1; return a }
+                guard let v = literal(s, &i) else { return nil }
+                a.append(v)
+                skipSpace(s, &i)
+                guard i < s.count else { return nil }
+                if s[i] == "," { i += 1; continue }
+                if s[i] == "]" { i += 1; return a }
+                return nil
+            }
+        case "\"", "'", "`":
+            return string(s, &i)
+        default:
+            let st = i
+            while i < s.count, CharacterSet.alphanumerics.contains(s[i]) || "+-.".unicodeScalars.contains(s[i]) { i += 1 }
+            let w = String(String.UnicodeScalarView(s[st..<i]))
+            switch w {
+            case "true": return true
+            case "false": return false
+            case "null", "undefined": return NSNull()
+            default:
+                if let n = Int(w) { return n }
+                if let d = Double(w) { return d }
+                return nil
+            }
+        }
+    }
+
+    /// A quoted string literal, escapes decoded. A template literal with a
+    /// `${…}` substitution isn't a literal (nil).
+    private static func string(_ s: [Unicode.Scalar], _ i: inout Int) -> String? {
+        let q = s[i]
+        i += 1
+        var out = String.UnicodeScalarView()
+        func hex(_ n: Int) -> Unicode.Scalar? {
+            guard i + n <= s.count,
+                  let v = UInt32(String(String.UnicodeScalarView(s[i..<(i + n)])), radix: 16) else { return nil }
+            i += n
+            return Unicode.Scalar(v)
+        }
+        while i < s.count {
+            let c = s[i]
+            if c == q { i += 1; return String(out) }
+            if q == "`", c == "$", i + 1 < s.count, s[i + 1] == "{" { return nil }
+            if c == "\\", i + 1 < s.count {
+                let e = s[i + 1]
+                i += 2
+                switch e {
+                case "n": out.append("\n")
+                case "t": out.append("\t")
+                case "r": out.append("\r")
+                case "b": out.append("\u{08}")
+                case "f": out.append("\u{0C}")
+                case "v": out.append("\u{0B}")
+                case "0": out.append("\u{00}")
+                case "\n": break                      // line continuation
+                case "x": guard let h = hex(2) else { return nil }; out.append(h)
+                case "u":
+                    if i < s.count, s[i] == "{" {
+                        i += 1
+                        let st = i
+                        while i < s.count, s[i] != "}" { i += 1 }
+                        guard i < s.count, let v = UInt32(String(String.UnicodeScalarView(s[st..<i])), radix: 16),
+                              let u = Unicode.Scalar(v) else { return nil }
+                        i += 1
+                        out.append(u)
+                    } else {
+                        guard i + 4 <= s.count,
+                              let v = UInt32(String(String.UnicodeScalarView(s[i..<(i + 4)])), radix: 16) else { return nil }
+                        i += 4
+                        // A surrogate pair: \uD83D\uDE00.
+                        if (0xD800...0xDBFF).contains(v), i + 6 <= s.count, s[i] == "\\", s[i + 1] == "u",
+                           let lo = UInt32(String(String.UnicodeScalarView(s[(i + 2)..<(i + 6)])), radix: 16),
+                           (0xDC00...0xDFFF).contains(lo) {
+                            i += 6
+                            if let u = Unicode.Scalar(0x10000 + ((v - 0xD800) << 10) + (lo - 0xDC00)) { out.append(u) }
+                        } else if let u = Unicode.Scalar(v) {
+                            out.append(u)
+                        }
+                    }
+                default: out.append(e)
+                }
+                continue
+            }
+            out.append(c)
+            i += 1
+        }
+        return nil
+    }
+}
+
 // MARK: - Grok parser
 
 /// Tolerant reader for Grok CLI session files
@@ -743,6 +1824,10 @@ enum GrokTranscriptParser {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         var items: [TranscriptItem] = []
         var toolNames: [String: String] = [:]
+        // The previous record's sessionUpdate kind, and the promptIndex of
+        // the last user chunk (see the user_message_chunk case).
+        var recordKind = ""
+        var lastUserPromptIndex: Int?
 
         for line in text.split(whereSeparator: \.isNewline) {
             guard let obj = try? JSONSerialization.jsonObject(
@@ -757,12 +1842,25 @@ enum GrokTranscriptParser {
                 items.append(TranscriptItem(id: items.count, kind: kind,
                                             timestamp: stamp))
             }
+            let prevRecordKind = recordKind
+            recordKind = kind
 
             switch kind {
             case "user_message_chunk", "agent_message_chunk", "agent_thought_chunk":
                 guard let chunk = chunkText(update["content"]), !chunk.isEmpty
                 else { continue }
-                if let last = items.last,
+                // A user message continues only in the very next record: a
+                // prompt that was cancelled before the agent said anything
+                // is followed by the next prompt with nothing but a
+                // hook_execution between them (even the same promptIndex,
+                // after a cancel-and-send) — two messages, never one
+                // "…in the chat.Create a file…" bubble.
+                let promptIndex = (update["_meta"] as? [String: Any])?["promptIndex"] as? Int
+                let newPrompt = kind == "user_message_chunk"
+                    && (prevRecordKind != "user_message_chunk"
+                        || (promptIndex != nil && lastUserPromptIndex != nil && promptIndex != lastUserPromptIndex))
+                if kind == "user_message_chunk" { lastUserPromptIndex = promptIndex }
+                if !newPrompt, let last = items.last,
                    let merged = mergedKind(last.kind, chunkKind: kind, text: chunk) {
                     items[items.count - 1].kind = merged
                 } else if kind == "user_message_chunk" {
@@ -773,10 +1871,13 @@ enum GrokTranscriptParser {
                     add(.thinking(chunk))
                 }
             case "tool_call":
-                let name = update["title"] as? String
+                let raw = update["title"] as? String
                     ?? update["kind"] as? String ?? "tool"
+                let meta = (update["_meta"] as? [String: Any])?["x.ai/tool"] as? [String: Any]
+                let name = displayName(raw, kind: meta?["kind"] as? String,
+                                       builtIn: meta?["namespace"] as? String == "grok_build")
                 if let id = update["toolCallId"] as? String { toolNames[id] = name }
-                let input = update["rawInput"] as? [String: Any]
+                let input = (update["rawInput"] as? [String: Any]).map(canonicalInput)
                 add(.toolUse(
                     name: name,
                     summary: input.map {
@@ -811,11 +1912,78 @@ enum GrokTranscriptParser {
                 }
                 add(.toolResult(tool: tool, content: content,
                                 isError: status == "failed"))
+            case "retry_state":
+                // The turn's request gave up — "failed" (not retryable, e.g.
+                // auth) or "exhausted" (retries spent). Typed by error_type;
+                // "retrying" is still in flight and says nothing yet.
+                let state = update["type"] as? String ?? ""
+                guard state == "failed" || state == "exhausted" else { continue }
+                var text = (update["message"] as? String ?? update["reason"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // A request Bromure's proxy blocked: Grok's message is the
+                // status line ("API error (status 451 …): Request failed …").
+                // Bromure's own words, wherever else the record carries them,
+                // say which engine and what next — the card Codex gets.
+                if BromureBlock.of(text) == nil,
+                   let bromure = Self.strings(in: update).first(where: { BromureBlock.of($0) != nil }) {
+                    text = bromure.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                add(.agentError(.grok(errorType: update["error_type"] as? String,
+                                      rateLimited: update["is_rate_limited"] as? Bool ?? false,
+                                      message: text)))
             default:
-                continue    // plan, turn_completed, hook_execution, retry_state, …
+                continue    // plan, turn_completed, hook_execution, …
             }
         }
         return trimmedTextItems(items)
+    }
+
+    /// Every string in a JSON value, depth-first.
+    static func strings(in value: Any, depth: Int = 0) -> [String] {
+        guard depth < 8 else { return [] }
+        if let s = value as? String { return [s] }
+        if let a = value as? [Any] { return a.flatMap { strings(in: $0, depth: depth + 1) } }
+        if let d = value as? [String: Any] {
+            return d.keys.sorted().flatMap { strings(in: d[$0]!, depth: depth + 1) }
+        }
+        return []
+    }
+
+    /// Grok's built-in tools by the names the cards know (Claude's): a
+    /// shell card for `run_terminal_command`, a diff for `search_replace`…
+    /// Anything else (an MCP tool) keeps its own name.
+    static func displayName(_ name: String, kind: String? = nil, builtIn: Bool = false) -> String {
+        switch name {
+        case "run_terminal_command", "run_command", "terminal": return "Bash"
+        case "search_replace", "edit_file", "str_replace", "multi_edit": return "Edit"
+        case "write_file", "create_file", "write": return "Write"
+        case "read_file", "view_file", "read": return "Read"
+        case "list_dir", "list_directory", "ls": return "LS"
+        case "grep", "grep_search", "search_files": return "Grep"
+        case "glob", "find_files", "file_search": return "Glob"
+        case "web_fetch", "fetch_url": return "WebFetch"
+        case "web_search": return "WebSearch"
+        case "todo_write", "update_todos", "todo": return "TodoWrite"
+        default: break
+        }
+        guard builtIn else { return name }
+        switch kind {
+        case "execute": return "Bash"
+        case "fetch": return "WebFetch"
+        default: return name
+        }
+    }
+
+    /// Grok's input keys under the names the cards read (`target_file` →
+    /// `file_path`, `target_directory` → `path`).
+    static func canonicalInput(_ input: [String: Any]) -> [String: Any] {
+        var out = input
+        for (from, to) in [("target_file", "file_path"), ("target_directory", "path"),
+                           ("directory", "path"), ("relative_workspace_path", "path")]
+        where out[to] == nil {
+            if let v = out.removeValue(forKey: from) { out[to] = v }
+        }
+        return out
     }
 
     /// ACP message chunks wrap text as {"type":"text","text":…}.
@@ -877,6 +2045,38 @@ enum GrokTranscriptParser {
 /// `context.append_loop_event` content parts and tool calls. Everything
 /// else (llm.request, usage.record, permission.*, …) is plumbing.
 enum KimiTranscriptParser {
+    /// Whether the journal's tail shows a turn under way: a turn started
+    /// (`turn.prompt` / `agent.turn.started`) with no `turn.ended` after it,
+    /// and the journal written within `freshFor` of `now` (a crashed agent
+    /// leaves its turn open forever). Kimi's status hooks drive the
+    /// working cue; this is the transcript's own word for it, so the chat
+    /// shows the agent at work even when a hook doesn't fire.
+    /// `notBefore`: when the agent process now running started — a turn
+    /// begun before it (the process was killed or restarted since) is
+    /// interrupted, not in progress.
+    static func turnInProgress(_ data: Data, now: Date = Date(), freshFor: TimeInterval = 180,
+                               notBefore: Date? = nil) -> Bool {
+        let tail = data.suffix(256_000)
+        let text = String(decoding: tail, as: UTF8.self)
+        var lastTime: Double?
+        for line in text.split(whereSeparator: \.isNewline).reversed() {
+            guard line.contains("\"type\""),
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            else { continue }
+            if lastTime == nil, let t = obj["time"] as? Double { lastTime = t }
+            switch obj["type"] as? String ?? "" {
+            case "turn.ended", "agent.turn.ended", "prompt.completed": return false
+            case "turn.prompt", "agent.turn.started":
+                guard let t = lastTime else { return false }
+                if let notBefore, let began = obj["time"] as? Double,
+                   Date(timeIntervalSince1970: began / 1000) < notBefore.addingTimeInterval(-2) { return false }
+                return now.timeIntervalSince(Date(timeIntervalSince1970: t / 1000)) < freshFor
+            default: continue
+            }
+        }
+        return false
+    }
+
     static func parse(_ data: Data) -> [TranscriptItem] {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         var items: [TranscriptItem] = []
@@ -992,6 +2192,17 @@ enum KimiTranscriptParser {
                 default:
                     continue    // step.begin / step.end / …
                 }
+            case "turn.ended":
+                // A failed turn carries Kimi's own error code and the HTTP
+                // status; the message after it is the provider's, any language.
+                lastPartStep = nil
+                guard obj["reason"] as? String == "failed",
+                      let error = obj["error"] as? [String: Any] else { continue }
+                let details = error["details"] as? [String: Any]
+                add(.agentError(.kimi(code: error["code"] as? String, name: error["name"] as? String,
+                                      status: details?["statusCode"] as? Int,
+                                      message: (error["message"] as? String ?? "")
+                                          .trimmingCharacters(in: .whitespacesAndNewlines))))
             default:
                 // metadata, profile.bind, llm.*, usage.record, turn.*, … —
                 // plumbing. turn.prompt duplicates the user append_message.
@@ -1010,6 +2221,8 @@ enum KimiTranscriptParser {
 /// finished, and by the kanban board's Done cards.
 struct ClaudeTranscriptPane: View {
     let url: URL
+    /// The agent that wrote it ("codex", …), when known; nil = sniffed.
+    var agent: String? = nil
     @State private var items: [TranscriptItem]?
     @State private var failed = false
 
@@ -1038,11 +2251,12 @@ struct ClaudeTranscriptPane: View {
         }
         .task(id: url) {
             let target = url
+            let agent = agent
             let parsed = await Task.detached(priority: .userInitiated) { () -> [TranscriptItem]? in
                 guard let data = try? Data(contentsOf: target) else { return nil }
-                // Sniffed, not assumed: archived runs may have been driven
-                // by any of the supported agents.
-                return AgentTranscript.parse(data)
+                // Archived runs may have been driven by any of the supported
+                // agents: the recorded one when known, else sniffed.
+                return AgentTranscript.parse(data, agent: agent)
             }.value
             if let parsed { items = parsed } else { failed = true }
         }
@@ -1139,8 +2353,8 @@ struct ChatComposer: View {
             #endif
             HStack(spacing: 8) {
                 Text(hint ?? (working
-                     ? NSLocalizedString("⎋ stop   ⏎ send", comment: "composer hint")
-                     : NSLocalizedString("⏎ send   ⌥⏎ newline", comment: "composer hint")))
+                     ? NSLocalizedString("⎋ stop   ⏎ send   ⇧⏎ newline", comment: "composer hint")
+                     : NSLocalizedString("⏎ send   ⇧⏎ newline", comment: "composer hint")))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.quaternary)
                 Spacer(minLength: 0)
@@ -1601,6 +2815,86 @@ extension TranscriptItem {
     }
 }
 
+/// An agent's reply is laid out line by line in its terminal; Markdown
+/// folds lines separated by a single newline into one paragraph (a soft
+/// break), so a reply written as separate lines read as one run-on
+/// paragraph in the chat. This makes those single newlines hard breaks
+/// (a trailing backslash) — only between two plain paragraph lines: code
+/// (fenced or indented), lists and their continuation lines, tables,
+/// headings, setext underlines and HTML keep their Markdown meaning.
+enum MarkdownHardBreaks {
+    static func apply(_ text: String) -> String {
+        guard text.contains("\n") else { return text }
+        let lines = text.components(separatedBy: "\n")
+        var out = lines
+        var fence: String?          // the open fence's marker
+        var inList = false          // a list block, until a blank line
+        var inTable = false
+        for i in lines.indices {
+            let line = lines[i]
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if let f = fence {
+                if t.hasPrefix(f) { fence = nil }
+                continue
+            }
+            if t.hasPrefix("```") || t.hasPrefix("~~~") {
+                fence = String(t.prefix(3))
+                continue
+            }
+            if t.isEmpty { inList = false; inTable = false; continue }
+            if isListItem(t) { inList = true }
+            if isTableRow(t) { inTable = true }
+            guard !inList, !inTable, isParagraphLine(line, trimmed: t),
+                  i + 1 < lines.count else { continue }
+            let next = lines[i + 1]
+            let nt = next.trimmingCharacters(in: .whitespaces)
+            guard !nt.isEmpty, isParagraphLine(next, trimmed: nt), !isListItem(nt),
+                  !isTableRow(nt), !isSetextUnderline(nt),
+                  !nt.hasPrefix("```"), !nt.hasPrefix("~~~") else { continue }
+            if line.hasSuffix("\\") || line.hasSuffix("  ") { continue }
+            out[i] = line + "\\"
+        }
+        return out.joined(separator: "\n")
+    }
+
+    private static func isParagraphLine(_ line: String, trimmed t: String) -> Bool {
+        if line.hasPrefix("    ") || line.hasPrefix("\t") { return false }   // indented code
+        if t.hasPrefix("#") || t.hasPrefix("<") { return false }            // heading, HTML
+        if isThematicBreak(t) { return false }
+        return true
+    }
+
+    static func isListItem(_ t: String) -> Bool {
+        if let c = t.first, "-*+".contains(c) {
+            let rest = t.dropFirst()
+            return rest.isEmpty || rest.first == " " || rest.first == "\t"
+        }
+        let digits = t.prefix { $0.isASCII && $0.isNumber }
+        guard !digits.isEmpty, digits.count <= 9 else { return false }
+        let rest = t.dropFirst(digits.count)
+        guard let m = rest.first, m == "." || m == ")" else { return false }
+        let after = rest.dropFirst()
+        return after.isEmpty || after.first == " " || after.first == "\t"
+    }
+
+    /// A row with a leading pipe, or a delimiter row (`---|:--:`) — whose
+    /// header line above it has none.
+    private static func isTableRow(_ t: String) -> Bool {
+        if t.hasPrefix("|") { return true }
+        return t.contains("|") && t.contains("-") && t.allSatisfy { "|-: \t".contains($0) }
+    }
+
+    private static func isSetextUnderline(_ t: String) -> Bool {
+        !t.isEmpty && (t.allSatisfy { $0 == "=" } || t.allSatisfy { $0 == "-" })
+    }
+
+    private static func isThematicBreak(_ t: String) -> Bool {
+        let chars = t.filter { $0 != " " }
+        guard chars.count >= 3, let c = chars.first, "-*_".contains(c) else { return false }
+        return chars.allSatisfy { $0 == c }
+    }
+}
+
 /// Parsed markdown by text. A transcript row is rebuilt often (a poll, a
 /// mirror push, a resize, a layout switch) and `Markdown(String)` parses
 /// again each time; the parse is kept here instead, and new messages are
@@ -1619,7 +2913,7 @@ enum TranscriptMarkdownCache {
     static func content(_ text: String) -> MarkdownContent {
         let key = text as NSString
         if let hit = cache.object(forKey: key) { return hit.content }
-        let parsed = MarkdownContent(text)
+        let parsed = MarkdownContent(MarkdownHardBreaks.apply(text))
         cache.setObject(Box(parsed), forKey: key)
         return parsed
     }
@@ -1633,7 +2927,302 @@ enum TranscriptMarkdownCache {
         }
         guard !texts.isEmpty else { return }
         Task.detached(priority: .utility) {
-            for t in texts { _ = content(t) }
+            for t in texts {
+                for case .markdown(let m) in TranscriptTables.segments(t) { _ = content(m) }
+            }
+        }
+    }
+}
+
+// MARK: - Tables in assistant prose
+
+/// A GFM pipe table lifted out of a reply, drawn by `TranscriptTableView`
+/// instead of MarkdownUI. MarkdownUI draws a table's borders and row tints
+/// from cell bounds collected through anchor preferences and read back by
+/// GeometryReaders over the grid (`tableDecoration`); inside the chat's
+/// lazy, tail-following stack, while a reply with a table streamed in, that
+/// geometry → preference → redraw cycle kept the main thread in SwiftUI
+/// updates for minutes (S3-1). Here every tint and rule belongs to the
+/// cell or row it decorates: no geometry is read back, nothing is measured
+/// twice.
+struct TranscriptTable: Equatable {
+    enum Align: Equatable { case leading, center, trailing }
+    var alignments: [Align]
+    /// Row 0 is the header; every row has `alignments.count` cells.
+    var rows: [[String]]
+    /// `rows`, parsed as inline markdown (bold, code, links).
+    var cells: [[AttributedString]]
+
+    init(alignments: [Align], rows: [[String]]) {
+        self.alignments = alignments
+        self.rows = rows
+        self.cells = rows.map { $0.map(Self.inline) }
+    }
+
+    static func inline(_ s: String) -> AttributedString {
+        (try? AttributedString(markdown: s, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+}
+
+enum TranscriptProseSegment: Equatable {
+    case markdown(String)
+    case table(TranscriptTable)
+}
+
+enum TranscriptTables {
+    private final class Box {
+        let segments: [TranscriptProseSegment]
+        init(_ s: [TranscriptProseSegment]) { segments = s }
+    }
+    nonisolated(unsafe) private static let cache: NSCache<NSString, Box> = {
+        let c = NSCache<NSString, Box>()
+        c.countLimit = 2000
+        return c
+    }()
+
+    /// `text` cut into markdown runs and the top-level pipe tables between
+    /// them (not those inside a code fence, an indented block, a quote or a
+    /// list — those stay MarkdownUI's). Text without a table is one run.
+    static func segments(_ text: String) -> [TranscriptProseSegment] {
+        guard text.contains("|"), text.contains("-") else { return [.markdown(text)] }
+        let key = text as NSString
+        if let hit = cache.object(forKey: key) { return hit.segments }
+        let parsed = parse(text)
+        cache.setObject(Box(parsed), forKey: key)
+        return parsed
+    }
+
+    static func parse(_ text: String) -> [TranscriptProseSegment] {
+        let lines = text.components(separatedBy: "\n")
+        var out: [TranscriptProseSegment] = []
+        var buf: [String] = []
+        var fence: String?
+        func flush() {
+            let s = buf.joined(separator: "\n")
+            if !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(.markdown(s)) }
+            buf = []
+        }
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if let f = fence {
+                buf.append(line)
+                if t.hasPrefix(f) { fence = nil }
+                i += 1
+                continue
+            }
+            if t.hasPrefix("```") || t.hasPrefix("~~~") {
+                fence = String(t.prefix(3))
+                buf.append(line)
+                i += 1
+                continue
+            }
+            if i + 1 < lines.count, isTopLevel(line), t.contains("|"),
+               let aligns = delimiter(lines[i + 1].trimmingCharacters(in: .whitespaces)),
+               cells(t).count == aligns.count {
+                var rows = [cells(t)]
+                var j = i + 2
+                while j < lines.count {
+                    let r = lines[j].trimmingCharacters(in: .whitespaces)
+                    guard !r.isEmpty, r.contains("|"), isTopLevel(lines[j]),
+                          !r.hasPrefix("```"), !r.hasPrefix("~~~") else { break }
+                    var row = cells(r)
+                    if row.count < aligns.count { row += Array(repeating: "", count: aligns.count - row.count) }
+                    rows.append(Array(row.prefix(aligns.count)))
+                    j += 1
+                }
+                flush()
+                out.append(.table(TranscriptTable(alignments: aligns, rows: rows)))
+                i = j
+                continue
+            }
+            buf.append(line)
+            i += 1
+        }
+        flush()
+        return out.isEmpty ? [.markdown(text)] : out
+    }
+
+    /// Not indented code, a quote or a list item.
+    private static func isTopLevel(_ line: String) -> Bool {
+        if line.hasPrefix("    ") || line.hasPrefix("\t") { return false }
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return !t.hasPrefix(">") && !MarkdownHardBreaks.isListItem(t)
+    }
+
+    /// The column alignments of a delimiter row (`|---|:--:|--:|`), or nil.
+    static func delimiter(_ t: String) -> [TranscriptTable.Align]? {
+        guard t.contains("|") || t.contains(":"), t.contains("-") else { return nil }
+        let parts = cells(t)
+        guard !parts.isEmpty else { return nil }
+        var out: [TranscriptTable.Align] = []
+        for p in parts {
+            let c = p.trimmingCharacters(in: .whitespaces)
+            let core = c.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            guard !core.isEmpty, core.allSatisfy({ $0 == "-" }) else { return nil }
+            let left = c.hasPrefix(":"), right = c.hasSuffix(":")
+            out.append(left && right ? .center : right ? .trailing : .leading)
+        }
+        return out
+    }
+
+    /// The cells of one row: split at unescaped pipes (outer pipes
+    /// dropped, `\|` kept as a pipe), each trimmed.
+    static func cells(_ t: String) -> [String] {
+        var s = Substring(t.trimmingCharacters(in: .whitespaces))
+        if s.hasPrefix("|") { s = s.dropFirst() }
+        if s.hasSuffix("|"), !s.hasSuffix("\\|") { s = s.dropLast() }
+        var out: [String] = []
+        var cur = ""
+        var escaped = false
+        for ch in s {
+            if escaped {
+                if ch != "|" { cur.append("\\") }
+                cur.append(ch)
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "|" {
+                out.append(cur.trimmingCharacters(in: .whitespaces))
+                cur = ""
+            } else {
+                cur.append(ch)
+            }
+        }
+        if escaped { cur.append("\\") }
+        out.append(cur.trimmingCharacters(in: .whitespaces))
+        return out
+    }
+}
+
+/// A reply's table: a card, not a spreadsheet — rows parted by hairlines,
+/// the header set off by a tint, cells with room around the words, one
+/// rounded border around the whole. In a column narrower than `narrow`
+/// (a room cell) it keeps its natural width — each cell at most `cap`
+/// wide — and scrolls sideways rather than squeeze into a table many
+/// screens tall. The choice is `ViewThatFits`'s, from the width offered,
+/// and the cells are placed by `TranscriptTableLayout` from their own
+/// sizes: no measured state and no geometry read back, so nothing the
+/// table draws can change how it is laid out.
+struct TranscriptTableView: View {
+    static var narrow: CGFloat { 480 }
+    static var cap: CGFloat { 240 }
+    let table: TranscriptTable
+    let bodySize: CGFloat
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            grid(cap: nil)
+                .frame(minWidth: 0, idealWidth: Self.narrow, maxWidth: .infinity, alignment: .leading)
+            ScrollView(.horizontal, showsIndicators: false) {
+                grid(cap: Self.cap)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var columns: Int { max(1, table.alignments.count) }
+
+    private func grid(cap: CGFloat?) -> some View {
+        TranscriptTableLayout(columns: columns, cap: cap) {
+            ForEach(0..<(table.cells.count * columns), id: \.self) { i in
+                cell(i / columns, i % columns)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.14)))
+    }
+
+    private func cell(_ r: Int, _ c: Int) -> some View {
+        let align = c < table.alignments.count ? table.alignments[c] : .leading
+        let value = r < table.cells.count && c < table.cells[r].count ? table.cells[r][c] : AttributedString()
+        return Text(value)
+            .font(.system(size: bodySize * 0.95, weight: r == 0 ? .semibold : .regular))
+            .lineSpacing(bodySize * 0.2)
+            .multilineTextAlignment(align == .center ? .center : align == .trailing ? .trailing : .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: align == .center ? .top : align == .trailing ? .topTrailing : .topLeading)
+            .background(r == 0 ? Color.primary.opacity(0.06)
+                        : r % 2 == 0 ? Color.primary.opacity(0.025) : Color.clear)
+            .overlay(alignment: .top) {
+                if r > 0 { Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1) }
+            }
+    }
+}
+
+/// Table cells, row-major, `columns` to a row: each column as wide as its
+/// widest cell (at most `cap`), shrunk fairly when the row doesn't fit the
+/// width offered (the narrowest columns keep their width, the rest share
+/// what is left); each row as tall as its tallest cell at those widths.
+/// Every cell is proposed exactly its column × row box, so its tint and
+/// hairline fill it. A pure function of the cells' sizes.
+struct TranscriptTableLayout: Layout {
+    let columns: Int
+    let cap: CGFloat?
+
+    struct Cache { var ideal: [CGFloat] }
+
+    func makeCache(subviews: Subviews) -> Cache { Cache(ideal: idealWidths(subviews)) }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) { cache.ideal = idealWidths(subviews) }
+
+    private func idealWidths(_ subviews: Subviews) -> [CGFloat] {
+        var w = Array(repeating: CGFloat(0), count: max(1, columns))
+        for (i, s) in subviews.enumerated() {
+            var x = s.sizeThatFits(.unspecified).width
+            if let cap { x = min(x, cap) }
+            if x.isFinite { w[i % w.count] = max(w[i % w.count], x.rounded(.up)) }
+        }
+        return w
+    }
+
+    static func widths(available: CGFloat?, ideal: [CGFloat]) -> [CGFloat] {
+        guard let available, available.isFinite, ideal.reduce(0, +) > available else { return ideal }
+        var out = ideal
+        var remaining = max(0, available)
+        var left = ideal.count
+        for c in ideal.indices.sorted(by: { ideal[$0] < ideal[$1] }) {
+            let w = min(ideal[c], (remaining / CGFloat(left)).rounded(.down))
+            out[c] = w
+            remaining -= w
+            left -= 1
+        }
+        return out
+    }
+
+    private func heights(_ widths: [CGFloat], _ subviews: Subviews) -> [CGFloat] {
+        let cols = max(1, columns)
+        var h = Array(repeating: CGFloat(0), count: (subviews.count + cols - 1) / cols)
+        for (i, s) in subviews.enumerated() {
+            let y = s.sizeThatFits(ProposedViewSize(width: widths[i % cols], height: nil)).height
+            if y.isFinite { h[i / cols] = max(h[i / cols], y.rounded(.up)) }
+        }
+        return h
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let w = Self.widths(available: proposal.width, ideal: cache.ideal)
+        return CGSize(width: w.reduce(0, +), height: heights(w, subviews).reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let cols = max(1, columns)
+        let w = Self.widths(available: bounds.width, ideal: cache.ideal)
+        let h = heights(w, subviews)
+        var xs: [CGFloat] = [bounds.minX]
+        for x in w { xs.append(xs[xs.count - 1] + x) }
+        var y = bounds.minY
+        for (i, s) in subviews.enumerated() {
+            let r = i / cols, c = i % cols
+            if c == 0, r > 0 { y += h[r - 1] }
+            s.place(at: CGPoint(x: xs[c], y: y), anchor: .topLeading,
+                    proposal: ProposedViewSize(width: w[c], height: h[r]))
         }
     }
 }
@@ -1719,6 +3308,19 @@ struct TranscriptItemView: View {
             ToolCallCard(name: name, summary: summary, detail: detail)
         case .todo(let title, let rows):
             TodoListView(title: title, rows: rows)
+        case .agentError(let e):
+            // A Bromure block says what it is in its title: the agent's raw
+            // "API error (status 451 …)" stays behind the disclosure.
+            CollapsibleRow(icon: "exclamationmark.triangle.fill", title: e.headline,
+                           subtitle: e.kind == .blocked ? "" : firstLine(e.message), tint: .orange) {
+                if let hint = e.blockedBy?.recoveryHint {
+                    Text(hint)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !e.message.isEmpty { clippedBlock(e.message, limit: TranscriptCopy.errorLimit) }
+            }
         case .toolResult(let tool, let content, let isError):
             CollapsibleRow(
                 icon: isError ? "exclamationmark.octagon" : "arrow.turn.down.right",
@@ -1727,7 +3329,7 @@ struct TranscriptItemView: View {
                 subtitle: firstLine(content),
                 tint: isError ? .red : .secondary) {
                 if !content.isEmpty {
-                    codeBlock(String(content.prefix(20_000)))
+                    clippedBlock(content, limit: TranscriptCopy.outputLimit)
                 }
             }
         }
@@ -1746,11 +3348,59 @@ struct TranscriptItemView: View {
         let bodySize: CGFloat = 14     // a dense dev tool on the Mac
         let serif = false
         #endif
+        let segments = TranscriptTables.segments(text)
+        if segments.count == 1, case .markdown(let only) = segments[0] {
+            markdown(only, bodySize: bodySize, serif: serif)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            // Tables drawn by `TranscriptTableView` (see `TranscriptTable`).
+            VStack(alignment: .leading, spacing: bodySize * 0.85) {
+                ForEach(segments.indices, id: \.self) { k in
+                    switch segments[k] {
+                    case .markdown(let m): markdown(m, bodySize: bodySize, serif: serif)
+                    case .table(let t): TranscriptTableView(table: t, bodySize: bodySize)
+                    }
+                }
+            }
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func markdown(_ text: String, bodySize: CGFloat, serif: Bool) -> some View {
         Markdown(TranscriptMarkdownCache.content(text))
             .markdownTheme(.claudeReader(bodySize: bodySize, serif: serif))
             .markdownCodeSyntaxHighlighter(TranscriptCodeHighlighter(dark: colorScheme == .dark))
-            .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Output shown up to `limit` characters; past that, a visible note of
+    /// how much is shown and a button that copies all of it.
+    @ViewBuilder
+    private func clippedBlock(_ text: String, limit: Int) -> some View {
+        let clip = TranscriptCopy.clip(text, limit: limit)
+        if let total = clip.total {
+            VStack(alignment: .leading, spacing: 6) {
+                codeBlock(clip.shown + "\n…")
+                HStack(spacing: 10) {
+                    Label(TranscriptCopy.truncationMarker(shown: limit, total: total),
+                          systemImage: "scissors")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Button {
+                        platformCopyToPasteboard(text)
+                    } label: {
+                        Label(NSLocalizedString("Copy full output", comment: "truncated transcript output"),
+                              systemImage: "doc.on.doc")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        } else {
+            codeBlock(text)
+        }
     }
 
     private func codeBlock(_ text: String) -> some View {
@@ -1860,7 +3510,10 @@ struct ToolCallCard: View {
 
     var body: some View {
         let n = name.lowercased()
-        if isTodo(n) {
+        if let display = DisplayRequest.parse(name: name, detail: detail) {
+            // The display MCP: show it, not the call.
+            DisplayCard(request: display)
+        } else if isTodo(n) {
             TodoCard(input: input, intent: summary)
         } else if let (content, path) = writeParts(n) {
             FileWriteCard(tool: name, path: path, content: content)
@@ -1873,7 +3526,8 @@ struct ToolCallCard: View {
         } else if isFileTool(n), let p = firstString(["file_path", "path", "pattern", "query", "notebook_path"]) {
             FileCard(icon: fileIcon(n), tool: name, value: p)
         } else {
-            CollapsibleRow(icon: "wrench.and.screwdriver", title: name,
+            CollapsibleRow(icon: ActivitySummary.category(name) == .delegation ? "arrow.left.arrow.right" : "wrench.and.screwdriver",
+                           title: ActivitySummary.humanTool(name),
                            subtitle: summary, tint: .secondary) {
                 if !detail.isEmpty { RawJSONBlock(detail) }
             }
@@ -2777,7 +4431,7 @@ private struct FileCard: View {
     }
 }
 
-private struct RawJSONBlock: View {
+struct RawJSONBlock: View {
     let text: String
     init(_ t: String) { text = t }
     var body: some View {
@@ -3042,9 +4696,13 @@ private struct TranscriptCodeFence: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text(languageLabel)
-                    .font(.system(size: bodySize * 0.7, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                // An unlabeled fence (command output, a plain listing) says
+                // nothing rather than a generic "code".
+                if let languageLabel {
+                    Text(languageLabel)
+                        .font(.system(size: bodySize * 0.7, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 0)
                 #if os(macOS)
                 CopyButton(text: configuration.content, size: bodySize * 0.72)
@@ -3065,9 +4723,15 @@ private struct TranscriptCodeFence: View {
         .transcriptCard()
     }
 
-    private var languageLabel: String {
-        let lang = (configuration.language ?? "").trimmingCharacters(in: .whitespaces)
-        return lang.isEmpty ? "code" : lang.lowercased()
+    private var languageLabel: String? { CodeFenceLabel.text(configuration.language) }
+}
+
+enum CodeFenceLabel {
+    /// A code fence's header label: its language, lowercased; nil when the
+    /// fence has none (or a placeholder like "text"/"code").
+    static func text(_ language: String?) -> String? {
+        let lang = (language ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        return ["", "code", "text", "plain", "plaintext", "txt"].contains(lang) ? nil : lang
     }
 }
 

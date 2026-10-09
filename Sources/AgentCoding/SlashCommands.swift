@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Slash commands
@@ -10,7 +11,7 @@ import SwiftUI
 // custom ones from the workspace.
 
 struct SlashCommand: Identifiable, Hashable {
-    enum Source: String { case builtIn, custom, skill }
+    enum Source: String { case builtIn, custom, skill, bromure }
     let name: String            // without the leading "/"
     let description: String
     let source: Source
@@ -251,6 +252,32 @@ enum SlashCommandCatalog {
 
 /// The floating list above the composer. Rows are the matches for what's
 /// typed; one is highlighted (keyboard) and any can be clicked.
+/// A command of Bromure's own (/term) rather than the agent's: the brand
+/// mark and the name, in the accent colour.
+private struct BromureTag: View {
+    let label: String
+    private static let mark: NSImage? = acResourceBundle
+        .url(forResource: "bromure-mark", withExtension: "png", subdirectory: "ac")
+        .flatMap(NSImage.init(contentsOf:))
+    var body: some View {
+        HStack(spacing: 4) {
+            if let mark = Self.mark {
+                Image(nsImage: mark)
+                    .renderingMode(.template)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 8)
+            }
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(Color.accentColor)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+    }
+}
+
 struct SlashCommandPalette: View {
     let commands: [SlashCommand]
     let agentName: String
@@ -345,7 +372,9 @@ struct SlashCommandPalette: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
-            if let tag = c.tag {
+            if c.source == .bromure {
+                BromureTag(label: c.tag ?? "Bromure")
+            } else if let tag = c.tag {
                 Text(tag)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)

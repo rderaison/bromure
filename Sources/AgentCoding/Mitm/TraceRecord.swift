@@ -188,12 +188,24 @@ public struct TraceRecord: Codable, Identifiable, Sendable {
 /// engine kept the real bytes in memory.
 public struct SwapEntry: Codable, Sendable {
     public let header: String           // e.g. "Authorization", "x-api-key"
-    public let fakePreview: String      // first/last 4 chars
+    public let fakePreview: String      // kind + keyed fingerprint (SecretFingerprint), never token chars
     public let realPreview: String
     public init(header: String, fakePreview: String, realPreview: String) {
         self.header = header
         self.fakePreview = fakePreview
         self.realPreview = realPreview
+    }
+
+    enum CodingKeys: String, CodingKey { case header, fakePreview, realPreview }
+
+    /// Records written before fingerprints hold "sk-a…bQAA" previews of the
+    /// real secrets: never surface those characters (see
+    /// `TraceStore.redactLegacyPreviews`, which also rewrites the files).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        header = try c.decode(String.self, forKey: .header)
+        fakePreview = legacyPreviewRedacted(try c.decode(String.self, forKey: .fakePreview))
+        realPreview = legacyPreviewRedacted(try c.decode(String.self, forKey: .realPreview))
     }
 }
 
@@ -217,4 +229,25 @@ public struct LeakEntry: Codable, Sendable {
         self.valuePreview = valuePreview
         self.suspicion = suspicion
     }
+
+    enum CodingKeys: String, CodingKey { case header, valuePreview, suspicion }
+
+    /// Legacy "first 4 … last 4" previews are redacted on load (see `SwapEntry`).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        header = try c.decode(String.self, forKey: .header)
+        valuePreview = legacyPreviewRedacted(try c.decode(String.self, forKey: .valuePreview))
+        suspicion = try c.decode(Suspicion.self, forKey: .suspicion)
+    }
+}
+
+/// `SecretFingerprint.redactLegacy` where it exists (the Mac app, which
+/// holds the trace files). The iOS client only reads records the Mac
+/// already served redacted.
+private func legacyPreviewRedacted(_ s: String) -> String {
+    #if os(macOS)
+    SecretFingerprint.redactLegacy(s)
+    #else
+    s
+    #endif
 }

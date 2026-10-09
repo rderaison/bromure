@@ -41,6 +41,16 @@ final class PinnedTranscriptProvider: BeautifiedTranscriptProvider {
     func isWorking() -> Bool {
         pane?.model.tabs.first { $0.index == window }?.agentStatus == .working
     }
+
+    func isWorking(window: Int) -> Bool? { pane?.chatIsWorking(window: window) }
+
+    func transcriptPin(window: Int) -> TranscriptPin {
+        pane?.chatTranscriptPin(window: window) ?? TranscriptPin()
+    }
+
+    func paneTarget(window: Int) -> PaneTarget {
+        pane?.chatPaneTarget(window: window) ?? .index(window)
+    }
 }
 
 /// Where a room stage's data lives: this Mac (the app delegate) or a
@@ -91,6 +101,13 @@ final class LocalRoomBackend: RoomStageBackend {
         // The session's own agent names the chat ("Kimi is ready"), not the
         // workspace's default one — the tab's label may not say it yet.
         pane.agentHints[w] = s.tool.rawValue
+        // This cell's transcript is this session's — not whatever session
+        // last held the window index (its cached copy is what the resting
+        // cell reads back).
+        if let cache = delegate?.agentSessionEngine.transcripts {
+            let sid = s.id
+            pane.transcriptSinks[w] = { data in cache.save(sid, data) }
+        }
         return pane.makeBeautifiedModel(windowIndex: w, provider: PinnedTranscriptProvider(pane: pane, window: w))
     }
 
@@ -164,6 +181,14 @@ final class RoomStageController {
     /// Stopped members' last messages (the tail), for their resting cells.
     private(set) var resting: [UUID: [TranscriptItem]] = [:]
     @ObservationIgnored private var restingLoading: Set<UUID> = []
+    /// Members whose last read came back empty (a fat client's fetch failed:
+    /// tunnel reconnecting, the workspace still waking, a slow server), with
+    /// when to try again. Without a retry one failed read pinned the cell
+    /// to its opening message for as long as the room stayed on screen.
+    @ObservationIgnored private var restingRetry: [UUID: (attempts: Int, at: Date)] = [:]
+    /// Back-off between failed resting reads (attempt n waits n× this).
+    @ObservationIgnored var restingRetryDelay: TimeInterval = 3
+    static let restingMaxAttempts = 6
     @ObservationIgnored private var modelKeys: [UUID: String] = [:]
     @ObservationIgnored private var timer: Timer?
 
@@ -198,11 +223,21 @@ final class RoomStageController {
 
     var room: AgentRoom? { backend.roomStore.room(roomID) }
 
+    /// Refreshes the focused / zoomed member has been missing from the room.
+    @ObservationIgnored private var missingFocus = 0
+    @ObservationIgnored private var missingZoom = 0
+    private static let missingRefreshesToMove = 3
+
     var members: [AgentSession] {
         guard let room else { return [] }
         let all = RoomTally.members(room, in: backend.roomSessions).sorted { $0.createdAt < $1.createdAt }
         guard hideEnded else { return all }
-        return all.filter { SessionHome.bucket(for: $0, in: listModel) != .ended }
+        // The focused and zoomed members stay put even when they read ended —
+        // a flicker (a restart, a tab missing from one snapshot) must not
+        // pull the chat the user is typing in out of the grid.
+        return all.filter {
+            $0.id == focusedID || $0.id == zoomedID || SessionHome.bucket(for: $0, in: listModel) != .ended
+        }
     }
 
     /// Every member, ended ones included (the room-wide actions).
@@ -275,13 +310,25 @@ final class RoomStageController {
             models[id] = m
             modelKeys[id] = key
         }
-        if focusedID == nil || !members.contains(where: { $0.id == focusedID }) {
+        // Focus and zoom move only once their member has really left the
+        // room (deleted, archived, moved out) — for a few refreshes running,
+        // not one snapshot's absence.
+        let present = Set(allMembers.map(\.id))
+        if let f = focusedID, !present.contains(f) { missingFocus += 1 } else { missingFocus = 0 }
+        if focusedID == nil || missingFocus >= Self.missingRefreshesToMove {
+            missingFocus = 0
             focus(members.first?.id)
         }
-        if let z = zoomedID, !members.contains(where: { $0.id == z }) { zoomedID = nil }
+        if let z = zoomedID, !present.contains(z) { missingZoom += 1 } else { missingZoom = 0 }
+        if missingZoom >= Self.missingRefreshesToMove { missingZoom = 0; zoomedID = nil }
         page = min(page, max(0, pages.count - 1))
         // A member that went live will have more to show when it stops again.
         for id in models.keys where resting[id] != nil { resting[id] = nil }
+        // Failed resting reads, due again.
+        let now = Date()
+        for s in members where models[s.id] == nil && resting[s.id] == nil {
+            if let r = restingRetry[s.id], r.at <= now { loadResting(s) }
+        }
     }
 
     /// Read a stopped member's conversation once (cached copy first).
@@ -303,11 +350,33 @@ final class RoomStageController {
             let items = await Task.detached(priority: .userInitiated) {
                 data.map { AgentTranscript.parse($0, agent: agent) } ?? []
             }.value
+            restingLoading.remove(s.id)
+            guard data != nil else {
+                // Nothing came back: keep the opening-message placeholder
+                // (resting stays nil) and try again — `refresh` re-asks when due.
+                let attempts = (restingRetry[s.id]?.attempts ?? 0) + 1
+                if attempts < Self.restingMaxAttempts {
+                    restingRetry[s.id] = (attempts, Date().addingTimeInterval(restingRetryDelay * Double(attempts)))
+                } else {
+                    restingRetry[s.id] = nil
+                    resting[s.id] = []   // give up: the placeholder for good
+                }
+                return
+            }
+            restingRetry[s.id] = nil
             let tail = Array(items.suffix(40))
             resting[s.id] = tail
-            if data != nil { Self.restingCache[s.id] = (stamp, tail) }
-            restingLoading.remove(s.id)
+            Self.restingCache[s.id] = (stamp, tail)
         }
+    }
+
+    /// Debug read-back: what each resting member holds (-1 = not read yet).
+    var restingDebugState: [String: Int] {
+        var out: [String: Int] = [:]
+        for s in members where models[s.id] == nil {
+            out[s.id.uuidString] = resting[s.id]?.count ?? -1
+        }
+        return out
     }
 
     /// Stopped sessions' tails by session, with what they were read at.
@@ -542,6 +611,21 @@ struct RoomStageView: View {
             }
             Spacer()
             if controller.zoomedID == nil, !controller.members.isEmpty { layoutPicker }
+            // Where the room's time went: one lane per session.
+            Button {
+                let c = controller
+                TimelineWindows.open(title: String(format: NSLocalizedString("%@ — timeline", comment: "room timeline window"),
+                                                   c.room?.name ?? ""),
+                                     RoomTimelineWindow(controller: c))
+            } label: {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(6)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(NSLocalizedString("Room timeline: who worked when, and on what", comment: "room stage"))
             roomMenu
             Button(action: controller.onNewSession) {
                 // The label when it fits, else just the "+" — never wrapped.
@@ -816,6 +900,16 @@ struct RoomStageView: View {
                     // Delegations only where a cell has the room for them.
                     BeautifiedSessionView(model: m, parts: .transcript,
                                           delegations: zoomed || controller.layout.size == 1)
+                        // B53: a cell's transcript scrolls under its title
+                        // bar; the line cut at the edge read as broken text.
+                        // Fade the top few points instead of a hard cut.
+                        .overlay(alignment: .top) {
+                            LinearGradient(colors: [Color.platformWindowBackground,
+                                                    Color.platformWindowBackground.opacity(0)],
+                                           startPoint: .top, endPoint: .bottom)
+                                .frame(height: 16)
+                                .allowsHitTesting(false)
+                        }
                 } else {
                     restingCell(s)
                 }
@@ -948,44 +1042,58 @@ struct RoomStageView: View {
     }
 
     private func restingBar(_ s: AgentSession, _ bucket: SessionBucket) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: bucket == .ended ? "checkmark.circle.fill" : "pause.circle.fill")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-            Text(bucket.title)
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(1)
-                .fixedSize()
-            // The hint goes first when the cell is narrow — never the button
-            // (its label wrapped to "Resum/e").
-            ViewThatFits(in: .horizontal) {
-                Text(NSLocalizedString("a message picks it up", comment: "room cell"))
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                Color.clear.frame(width: 0, height: 0)
-            }
-            Spacer(minLength: 6)
-            Button {
-                controller.onResume(s.id)
-            } label: {
-                Label(NSLocalizedString("Resume", comment: "room cell"), systemImage: "play.fill")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Capsule().fill(accent.gradient))
-            }
-            .buttonStyle(.plain)
-            .layoutPriority(1)
+        // Whole-row alternatives, widest first: the hint goes before the
+        // button's label, the label before the button — a squeezed HStack
+        // still wrapped "Resum/e" with per-piece fixedSize/ViewThatFits.
+        ViewThatFits(in: .horizontal) {
+            restingRow(s, bucket, hint: true, label: true)
+            restingRow(s, bucket, hint: false, label: true)
+            restingRow(s, bucket, hint: false, label: false)
         }
         .padding(.leading, 12).padding(.trailing, 5).padding(.vertical, 5)
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
         .padding(12)
+    }
+
+    private func restingRow(_ s: AgentSession, _ bucket: SessionBucket,
+                            hint: Bool, label: Bool) -> some View {
+        HStack(spacing: 8) {
+            // Ended or asleep, both "Paused": a message picks either up.
+            Image(systemName: "pause.circle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            Text(bucket.title)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+            if hint {
+                Text(NSLocalizedString("a message picks it up", comment: "room cell"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 6)
+            Button {
+                controller.onResume(s.id)
+            } label: {
+                Group {
+                    if label {
+                        Label(NSLocalizedString("Resume", comment: "room cell"), systemImage: "play.fill")
+                    } else {
+                        Image(systemName: "play.fill")
+                    }
+                }
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(Capsule().fill(accent.gradient))
+            }
+            .buttonStyle(.plain)
+            .help(NSLocalizedString("Resume", comment: "room cell"))
+            .accessibilityLabel(NSLocalizedString("Resume", comment: "room cell"))
+        }
     }
 
     // MARK: Switchboard dock + the one composer
@@ -1177,7 +1285,7 @@ struct RoomStageView: View {
             Group {
                 if let m = controller.targetModel {
                     BeautifiedSessionView(model: m, parts: .composer, placeholder: String(
-                        format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
+                        format: NSLocalizedString("Message %@… (or drop files)", comment: "beautified composer"),
                         toSwitchboard ? NSLocalizedString("the Switchboard", comment: "room composer target") : name))
                         .id(ObjectIdentifier(m))   // a fresh composer per target
                 } else if let asleep = toSwitchboard ? controller.switchboard : focused {
@@ -1515,3 +1623,19 @@ private struct RoomTargetPicker: View {
     }
 }
 #endif
+
+
+/// The room timeline window: one lane per member, from the chats' live
+/// timelines (the Switchboard too).
+struct RoomTimelineWindow: View {
+    let controller: RoomStageController
+    var body: some View {
+        let store = SessionTimelineStore.shared
+        let sessions = controller.allMembers + [controller.switchboard].compactMap { $0 }
+        RoomTimelineView(lanes: sessions.map {
+            RoomTimelineView.Lane(id: $0.id, title: $0.title, tool: $0.tool,
+                                  timeline: store.timeline($0.id) ?? SessionTimeline(turns: []),
+                                  nickname: $0.nickname.flatMap { $0.isEmpty ? nil : $0 })
+        })
+    }
+}

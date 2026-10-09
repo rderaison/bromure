@@ -963,6 +963,10 @@ private struct TranscriptReaderView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         TranscriptRowsView(items: answeredItems)
+                            // A picture the agent shows (display MCP) is read off its machine.
+                            .environment(\.displayFileReader, DisplayFileReader.chunked { op in
+                                try? await controller.guestFileOp(profileID, op: op)
+                            })
                         // The question the agent is asking RIGHT NOW gets the
                         // interactive card — pick the options here and Submit
                         // sends the picker's key sequence into the session, the
@@ -1074,11 +1078,23 @@ private struct TranscriptReaderView: View {
         guard !text.isEmpty, !sending else { return }
         sending = true
         Task {
-            _ = try? await controller.guestExec(
-                profileID,
-                command: CodingTaskEngine.typeCommand(tabIndex: window, text: text),
-                timeout: 20)
-            await MainActor.run { draft = ""; sending = false }
+            // Guarded: nothing is typed unless the agent holds the tab (a
+            // bare shell would run it) — the draft stays then.
+            // Held too: a menu or approval dialog is up in the tab, and a
+            // digit or Return would answer it — the draft stays, as it does
+            // when typing didn't go through.
+            let out = await PaneTypeGuard.runType(target: .index(window), text: text) {
+                try? await controller.guestExec(profileID, command: $0, timeout: 20)
+            } ?? ""
+            let held = PaneTypeGuard.held(in: out)
+            let refused = !PaneTypeGuard.typed(in: out)
+            await MainActor.run {
+                if !refused { draft = "" }
+                uploadError = held ? NSLocalizedString(
+                    "Not sent — the agent is asking you something. Answer it first, then send again.",
+                    comment: "iOS composer: held while the agent shows a dialog") : nil
+                sending = false
+            }
             await refreshNow()   // reflect the sent message immediately
         }
     }

@@ -430,10 +430,10 @@ struct TraceInspectorView<Store: TraceInspectorStore>: View {
                             ForEach(Array(rec.swaps.enumerated()), id: \.offset) { (_, sw) in
                                 HStack(spacing: 6) {
                                     Text(sw.header).font(.caption.monospaced().bold())
-                                    Text(sw.fakePreview).font(.caption.monospaced())
+                                    Text(SecretFingerprint.redactLegacy(sw.fakePreview)).font(.caption.monospaced())
                                     Image(systemName: "arrow.right")
                                         .font(.caption2)
-                                    Text(sw.realPreview).font(.caption.monospaced())
+                                    Text(SecretFingerprint.redactLegacy(sw.realPreview)).font(.caption.monospaced())
                                         .foregroundStyle(.secondary)
                                 }
                             }

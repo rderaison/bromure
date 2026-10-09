@@ -28,9 +28,22 @@ struct RemoteAccessSettingsView: View {
     private static let noMitmBuiltins = ["google.com", "gstatic.com", "googleapis.com"]
 
     @State private var account = P2PEnrollmentCoordinator.shared
+    /// Doc/video renders: a stand-in signed-in account (never touches the
+    /// keychain or bromure.io).
+    var demoAccount: String? = nil
+    private var signedIn: Bool { demoAccount != nil || (!demoRender && account.signedIn) }
+    private var accountLabel: String? { demoAccount ?? account.accountLabel }
 
     var body: some View {
-        ScrollView {
+        // A demo render is drawn offscreen, where ScrollView content isn't.
+        if demoAccount != nil || demoRender { content } else { ScrollView { content } }
+    }
+
+    /// Offline renders (docs/video): lay out without the scroll view.
+    var demoRender = false
+
+    private var content: some View {
+        Group {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 Divider()
@@ -50,8 +63,8 @@ struct RemoteAccessSettingsView: View {
             }
             .padding(20)
         }
-        .frame(minWidth: 480, minHeight: 560)
-        .onAppear { refresh(); account.refresh(); loadNoMitmDomains() }
+        .frame(minWidth: 480, minHeight: 560, alignment: .top)
+        .onAppear { refresh(); if demoAccount == nil && !demoRender { account.refresh(); loadNoMitmDomains() } }
     }
 
     /// Reach this Mac from anywhere over bromure.io — peer-to-peer, no port
@@ -60,16 +73,16 @@ struct RemoteAccessSettingsView: View {
     private var bromureIOSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Reachable from anywhere (bromure.io)").font(.headline)
-            if account.signedIn {
+            if signedIn {
                 HStack(spacing: 8) {
                     Image(systemName: enabled ? "checkmark.seal.fill" : "seal")
                         .foregroundStyle(enabled ? .green : .secondary)
                     Text(enabled
-                         ? "Reachable to your \(account.accountLabel ?? "bromure.io") devices while remote access is on."
-                         : "Signed in to \(account.accountLabel ?? "bromure.io"). Turn on remote access above to make this Mac reachable.")
+                         ? "Reachable to your \(accountLabel ?? "bromure.io") devices while remote access is on."
+                         : "Signed in to \(accountLabel ?? "bromure.io"). Turn on remote access above to make this Mac reachable.")
                         .font(.callout).fixedSize(horizontal: false, vertical: true)
                     Spacer()
-                    if !account.isEnterprise {
+                    if !account.isEnterprise || demoAccount != nil {
                         Button("Sign Out") { account.signOut() }.buttonStyle(.link)
                     }
                 }
@@ -80,7 +93,7 @@ struct RemoteAccessSettingsView: View {
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Sign in with bromure.io") { account.signIn() }
-                    if account.busy { ProgressView().controlSize(.small) }
+                    if account.busy && !demoRender { ProgressView().controlSize(.small) }
                 }
             }
             if let e = account.error {

@@ -554,7 +554,7 @@ actor MLXEngine {
             // transcript each turn, the shared prefix is everything up to the new
             // turn, so prefill collapses from O(transcript) to O(new tokens).
             if session.cache.isEmpty {
-                session.cache = context.model.newCache(parameters: gp)
+                session.cache = try context.model.newCache(parameters: gp)
                 session.tokens = []
             }
             // A slot is only continuable when its cache demonstrably matches
@@ -565,7 +565,7 @@ actor MLXEngine {
             // Qwen3-Next answer every turn with the title subrequest's tag.
             if !session.cache.allSatisfy({ $0.isTrimmable }),
                (session.cache.map(\.offset).max() ?? 0) != session.tokens.count {
-                session.cache = context.model.newCache(parameters: gp)
+                session.cache = try context.model.newCache(parameters: gp)
                 session.tokens = []
             }
             var reuse = max(0, min(MLXEngine.commonPrefix(session.tokens, promptIds),
@@ -577,7 +577,7 @@ actor MLXEngine {
                 } else {
                     // Non-trimmable cache (e.g. RotatingKVCache from maxKVSize) —
                     // can't rewind, so start fresh and prefill the whole prompt.
-                    session.cache = context.model.newCache(parameters: gp)
+                    session.cache = try context.model.newCache(parameters: gp)
                     reuse = 0
                 }
             }

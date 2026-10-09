@@ -88,14 +88,17 @@ public final class PrecisionScrollBridge {
     /// area's centre, minus the native-chrome inset. Set by the session.
     public var defaultPoint: (() -> (x: Double, y: Double))?
 
-    public init(socketDevice: VZVirtioSocketDevice) {
+    private let targetScoped: Bool
+
+    public init(socketDevice: VZVirtioSocketDevice, targetScoped: Bool = false) {
         self.socketDevice = socketDevice
+        self.targetScoped = targetScoped
         let raw = UserDefaults.standard.string(forKey: "vm.precisionScrollTransport") ?? "direct"
-        self.transport = Transport(rawValue: raw) ?? .direct
+        self.transport = targetScoped ? .direct : (Transport(rawValue: raw) ?? .direct)
         // The uinput path connects regardless: it is the fallback while the
         // CDP agent is still starting (and the whole path when selected).
-        connect()
-        if transport != .uinput { probeCDP() }
+        if !targetScoped { connect() }
+        if !targetScoped && transport != .uinput { probeCDP() }
     }
 
     public func stop() {
@@ -109,7 +112,8 @@ public final class PrecisionScrollBridge {
 
     /// True when at least one transport can take the event right now.
     public var canSend: Bool {
-        directReady || (transport != .uinput && cdpReady) || isConnected
+        if targetScoped { return directReady }
+        return directReady || (transport != .uinput && cdpReady) || isConnected
     }
 
     private var directReady: Bool {
@@ -139,6 +143,7 @@ public final class PrecisionScrollBridge {
                            dx: -dx, dy: -dy, modifiers: mods)
             return
         }
+        if targetScoped { return }
         if transport != .uinput && cdpReady {
             sendCDP(dx: dx, dy: dy, x: x, y: y, shift: shift, ctrl: ctrl, alt: alt)
             return
@@ -201,7 +206,7 @@ public final class PrecisionScrollBridge {
                         _ = Darwin.write(conn.fileDescriptor, base, buf.count)
                     }
                 }
-                Darwin.close(conn.fileDescriptor)
+                conn.close()   // VZ owns the fd: closing it here closed it twice
                 ok = true
             }
             DispatchQueue.main.async { self?.cdpSendFinished(ok: ok) }
@@ -251,7 +256,7 @@ public final class PrecisionScrollBridge {
                 self.cdpProbeScheduled = false
                 switch result {
                 case .success(let conn):
-                    Darwin.close(conn.fileDescriptor)
+                    conn.close()   // VZ owns the fd: closing it here closed it twice
                     self.cdpReady = true
                     self.cdpConnectFailures = 0
                     sbLog("[ScrollBridge] CDP input agent ready")

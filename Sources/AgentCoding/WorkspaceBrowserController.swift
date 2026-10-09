@@ -45,8 +45,36 @@ final class WorkspaceBrowserController {
 
     private let model: BrowserPaneModel
     private var pool: VMPool?
-    private var warm: VMPool.WarmVM?
+    private var warm: VMPool.WarmVM? {
+        didSet {
+            // Fat-client mode: the SOCKS forwarder admits this VM by its
+            // lease (see FatClient.BrowserPeers) while it's ours.
+            guard remoteProxy != nil, oldValue?.macAddress != warm?.macAddress else { return }
+            if let old = oldValue?.macAddress { FatClient.BrowserPeers.remove(old) }
+            if let new = warm?.macAddress { FatClient.BrowserPeers.add(new) }
+        }
+    }
     private var vmView: VZVirtualMachineView?
+    /// True once the guest's tab-agent has connected (Chromium is up). Gates
+    /// `isReady` (agent tools) and the framebuffer reveal: before it, the VZ
+    /// scanout is the black boot console / bare X root.
+    private var guestConnected = false
+    /// When the framebuffer was mounted — `isReady` falls back to "ready"
+    /// after `guestConnectGrace` even if tab-agent never connects (an older
+    /// image), so the gate can only delay a tool call, never strand it.
+    private var attachedAt: Date?
+    private static let guestConnectGrace: TimeInterval = 30
+    /// Reveal the framebuffer anyway after this long (placeholder fallback).
+    private static let revealFallback: TimeInterval = 20
+    private var revealFallbackWork: DispatchWorkItem?
+    /// Pane-resize → explicit display reconfigure (B18), debounced.
+    private var frameObserver: NSObjectProtocol?
+    private var displaySyncWork: DispatchWorkItem?
+    /// The cropper the VZ view is mounted in (its bounds = the visible page
+    /// area) and the chrome inset baked into the scanout — the inputs to
+    /// BrowserDisplaySizing.layout.
+    private weak var cropper: NativeChromeCropper?
+    private var deviceInset = 0
     /// Native-tabs bridge (vsock 5810) — the shared machinery that streams the
     /// guest's tab list/favicons and drives navigate/activate/close/back/…
     private var tabBridge: TabBridge?
@@ -170,13 +198,21 @@ final class WorkspaceBrowserController {
             print("[browser] fat-client: using AC-owned browser image dir: \(acDir.path)")
             return acDir
         }
-        if Self.hasAllBootFiles(in: shared) {
-            print("[browser] using shared Bromure image dir: \(shared.path)")
+        // Shared first, unless AC's own copy is newer than a stale shared one
+        // (Bromure Web not updated yet) — same policy Settings › Browser shows.
+        let sharedVersion = BrowserImageInstaller.stampedVersion(in: shared)
+        let acVersion = BrowserImageInstaller.stampedVersion(in: acDir)
+        switch BrowserImageInstaller.resolve(
+            sharedComplete: Self.hasAllBootFiles(in: shared), sharedVersion: sharedVersion,
+            acComplete: Self.hasAllBootFiles(in: acDir), acVersion: acVersion) {
+        case .sharedWithBromureWeb:
+            print("[browser] using shared Bromure image dir: \(shared.path) (v\(sharedVersion.map(String.init) ?? "?"))")
             return shared
-        }
-        if Self.hasAllBootFiles(in: acDir) {
-            print("[browser] using AC-owned browser image dir: \(acDir.path)")
+        case .downloadedByAC:
+            print("[browser] using AC-owned browser image dir: \(acDir.path) (v\(acVersion.map(String.init) ?? "?"), shared v\(sharedVersion.map(String.init) ?? "–"))")
             return acDir
+        case nil:
+            break
         }
         let fm = FileManager.default
         let missing = Self.bootFiles.filter {
@@ -210,6 +246,15 @@ final class WorkspaceBrowserController {
         model.imageInstall = nil
         model.placeholderStatus = NSLocalizedString("Booting browser…", comment: "")
 
+        // Fat client: bring the switch up with the pin first, so the PAC
+        // below names the gateway the VM will really have.
+        if remoteProxy != nil {
+            VMNetSwitch.shared.configure(ascendingSubnet: false, bridgePeers: true,
+                                         pinnedOctet: FatClient.browserSwitchOctet)
+            if !VMNetSwitch.shared.startIfNeeded() {
+                FatClientLog.log("browser: the VM switch didn't start — the PAC falls back to \(FatClient.browserSwitchGateway)")
+            }
+        }
         let config = browserConfig()
         // isolatePeers: false → the browser VM shares the workspace VMs' subnet
         // (VMNetSwitch.shared, peer bridging on) so the agent and the browser
@@ -219,7 +264,8 @@ final class WorkspaceBrowserController {
         // the PAC's SOCKS host) is deterministic before boot.
         let pool = VMPool(config: config, storageDir: storageDir,
                           isolatePeers: false, requireImageVersion: false,
-                          pinnedOctet: remoteProxy != nil ? FatClient.browserSwitchOctet : nil)
+                          pinnedOctet: remoteProxy != nil ? FatClient.browserSwitchOctet : nil,
+                          experimentalGPU: false)
         self.pool = pool
 
         // Persistent profiles: an encrypted per-workspace disk holds Chromium's
@@ -254,6 +300,7 @@ final class WorkspaceBrowserController {
                 try await pool.warmUp()
             } catch {
                 print("[browser] warmUp failed: \(error)")
+                guard self?.pool === pool else { return }   // stopped meanwhile
                 self?.fail(String(
                     format: NSLocalizedString("The browser VM did not start: %@", comment: ""),
                     "\(error)"))
@@ -265,6 +312,14 @@ final class WorkspaceBrowserController {
                                         profileImageDir: profileImageDir,
                                         profileDiskKey: profileDiskKey)
             guard let self else {
+                if let warm { await Self.tearDown(warm) }
+                return
+            }
+            // stop() mid-boot (pane closed, mirror window closed, quit) drops
+            // `pool`. Attaching now would revive a VM on a stopped controller
+            // that nothing tears down any more — discard it instead.
+            guard self.pool === pool else {
+                print("[browser] stopped during boot — discarding the claimed VM")
                 if let warm { await Self.tearDown(warm) }
                 return
             }
@@ -297,15 +352,30 @@ final class WorkspaceBrowserController {
         // Fat-client mode: a PAC routes the remote workspace subnet through the
         // SOCKS forwarder (at the pinned gateway); DIRECT otherwise. Local mode
         // connects straight out (directConnection).
+        // The SOCKS host is the gateway of the switch the VM will really be
+        // on (started above). The pin to 192.168.127.x doesn't always hold —
+        // the switch is one per process and may already be up on another
+        // subnet, or the host may already use 192.168.127 — and a PAC naming
+        // an address nothing answers gives ERR_PROXY_CONNECTION_FAILED.
+        let proxyHost = VMNetSwitch.shared.subnet?.startAddressString ?? FatClient.browserSwitchGateway
+        if let rp = remoteProxy {
+            NSLog("[bromure-ac] browser PAC: %@ → SOCKS5 %@:%d (VM switch %@)", rp.subnetCIDR, proxyHost,
+                  rp.socksPort, VMNetSwitch.shared.subnet?.cidrString ?? "not up")
+        }
         let pacB64: String? = remoteProxy.flatMap { rp in
             FatClientPAC.script(routes: [.init(cidr: rp.subnetCIDR,
-                                               proxyHost: FatClient.browserSwitchGateway,
+                                               proxyHost: proxyHost,
                                                proxyPort: rp.socksPort)])
                 .flatMap { Data($0.utf8).base64EncodedString() }
         }
         return VMConfig(
             homePage: homePage,
-            // WebGL/WebGPU on (software GL via llvmpipe): the agent frequently
+            // No GPU acceleration (no host-GPU Metal renderer, Chromium runs
+            // --disable-gpu): WebGL below falls back to SwiftShader on the CPU.
+            enableGPU: false,
+            // AC presents Apple's VZ scanout, not the custom Metal surfaces.
+            enableMetalRenderer: false,
+            // WebGL/WebGPU on (software GL via SwiftShader): the agent frequently
             // needs to view a WebGL/canvas app it just built. Without this the
             // guest config-agent passes --disable-webgl --disable-3d-apis.
             enableWebGL: true,
@@ -388,10 +458,41 @@ final class WorkspaceBrowserController {
             forDisplayScale: VMConfig.resolvedDisplayScale())
         let cropper = NativeChromeCropper()
         cropper.clip(view, deviceInset: deviceInset)
+        self.cropper = cropper
+        self.deviceInset = deviceInset
         model.framebufferContainer.mount(cropper)
+        // Mounted (VZ needs the view in the window to size the scanout) but
+        // NOT revealed: until Chromium is up the scanout is the black boot
+        // console, so the themed placeholder stays on top (B16).
+        model.framebufferContainer.alphaValue = 0   // AppKit-side too: never show black
         model.hasFramebuffer = true
-        model.placeholderStatus = ""
+        model.framebufferRevealed = false
+        model.placeholderStatus = NSLocalizedString("Booting browser…", comment: "")
+        guestConnected = false
+        attachedAt = Date()
         state = .running
+        let fallback = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .running || self.state == .suspended else { return }
+            if !self.model.framebufferRevealed {
+                print("[browser] guest not connected after \(Int(Self.revealFallback))s — revealing framebuffer anyway")
+            }
+            self.revealFramebuffer()
+        }
+        revealFallbackWork = fallback
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealFallback, execute: fallback)
+        // Keep the guest display matched to the pane (B18): VZ's automatic
+        // reconfigure can lose a size during the burst of pane-width changes
+        // while the pane opens, leaving the guest wider than the pane (page
+        // clipped on the right). Re-assert the final size once it settles.
+        view.postsFrameChangedNotifications = true
+        frameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: view, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.applyOverscanMode()
+                self?.scheduleDisplaySync()
+            }
+        }
 
         // Native-tabs bridge: the guest's tab-agent (started by native-chrome
         // mode) connects on vsock 5810 and streams the tab list; our host
@@ -434,7 +535,16 @@ final class WorkspaceBrowserController {
     private func wireTabBridge(_ bridge: TabBridge) {
         tabBridge = bridge
         let bar = model.tabBar
-        bridge.onTabsChanged = { tabs in bar.setTabs(tabs) }
+        bridge.onTabsChanged = { [weak self] tabs in
+            bar.setTabs(tabs)
+            // First tab list = Chromium's window is mapped and painting.
+            if !tabs.isEmpty { self?.guestDidComeUp() }
+        }
+        bridge.onConnected = { [weak self] in
+            guard let self else { return }
+            self.guestConnected = true
+            print("[browser] guest tab-agent connected")
+        }
         bridge.onShortcut = { [weak self] key in
             switch key {
             case "t":
@@ -480,7 +590,90 @@ final class WorkspaceBrowserController {
     // navigate/tabs/history go through TabBridge; screenshot/eval/text through
     // BrowserCDP. `isReady` gates calls before the guest agents connect.
 
-    var isReady: Bool { state == .running && tabBridge != nil && vmAlive }
+    var isReady: Bool {
+        guard state == .running, tabBridge != nil, vmAlive else { return false }
+        // Don't hand the agent a browser whose Chromium (and CDP forwarder)
+        // isn't up yet — that produced "[Errno 111] Connection refused" on a
+        // screenshot right after the first navigate (B17).
+        return BrowserReadiness.isReady(guestConnected: guestConnected,
+                                        attachedAt: attachedAt, now: Date(),
+                                        grace: Self.guestConnectGrace)
+    }
+
+    /// Chromium reported its first tabs: reveal the framebuffer shortly
+    /// after (one paint), and resync the display size now that the guest's
+    /// resize-watcher is certainly running.
+    private func guestDidComeUp() {
+        guestConnected = true
+        guard !model.framebufferRevealed else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.revealFramebuffer()
+        }
+        scheduleDisplaySync()
+    }
+
+    private func revealFramebuffer() {
+        revealFallbackWork?.cancel(); revealFallbackWork = nil
+        guard model.hasFramebuffer, !model.framebufferRevealed else { return }
+        model.framebufferContainer.alphaValue = 1
+        model.framebufferRevealed = true
+        model.placeholderStatus = ""
+    }
+
+    // MARK: - Display size (B18)
+
+    private func scheduleDisplaySync() {
+        displaySyncWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.syncDisplaySize()
+            // Verify once more after the guest had time to apply it.
+            let again = DispatchWorkItem { [weak self] in self?.syncDisplaySize() }
+            self.displaySyncWork = again
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: again)
+        }
+        displaySyncWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: w)
+    }
+
+    /// The scanout layout for the pane as it is now (nil mid-collapse).
+    private func currentDisplayLayout() -> BrowserDisplaySizing.Layout? {
+        guard let view = vmView, let window = view.window else { return nil }
+        let area = cropper?.bounds.size ?? view.bounds.size
+        return BrowserDisplaySizing.layout(
+            cropperSize: area, backingScale: window.backingScaleFactor,
+            guestScale: VMConfig.resolvedDisplayScale(), deviceInset: deviceInset)
+    }
+
+    /// Narrower than Chromium's minimum window (B18): VZ must stop matching
+    /// the scanout to the view (we drive a larger one and VZ scales it into
+    /// the view), and the cropper's chrome clip shrinks by the same factor.
+    /// Wide enough: VZ's own automatic reconfigure takes over again.
+    private func applyOverscanMode() {
+        guard let view = vmView, let layout = currentDisplayLayout() else { return }
+        let overscanned = layout.isOverscanned
+        if view.automaticallyReconfiguresDisplay == overscanned {
+            view.automaticallyReconfiguresDisplay = !overscanned
+        }
+        cropper?.overscan = layout.overscan
+    }
+
+    /// Reconfigure the guest scanout to the pane's layout when VZ's current
+    /// display size disagrees (VZ main-queue API; we're on main).
+    private func syncDisplaySize() {
+        guard state == .running, let view = vmView, view.window != nil,
+              let vm = warm?.vm, vm.state == .running,
+              let display = vm.graphicsDevices.first?.displays.first else { return }
+        applyOverscanMode()
+        guard let target = currentDisplayLayout()?.framebuffer,
+              BrowserDisplaySizing.needsReconfigure(current: display.sizeInPixels, target: target)
+        else { return }
+        print("[browser] display \(Int(display.sizeInPixels.width))x\(Int(display.sizeInPixels.height)) "
+            + "→ \(Int(target.width))x\(Int(target.height)) (pane resize, overscan "
+            + "\(String(format: "%.2f", cropper?.overscan ?? 1)))")
+        do { try display.reconfigure(sizeInPixels: target) }
+        catch { print("[browser] display reconfigure failed: \(error)") }
+    }
 
     private var vmAlive: Bool {
         guard let s = warm?.vm.state else { return false }
@@ -722,7 +915,15 @@ final class WorkspaceBrowserController {
     func stop() {
         cancelIdleTimers()
         installWait = false
+        guestConnected = false
+        attachedAt = nil
+        revealFallbackWork?.cancel(); revealFallbackWork = nil
+        displaySyncWork?.cancel(); displaySyncWork = nil
+        if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+        frameObserver = nil
         model.hasFramebuffer = false
+        model.framebufferRevealed = false
+        model.framebufferContainer.alphaValue = 1
         model.placeholderStatus = ""
         model.imageInstall = nil
         model.installPrompt = false
@@ -746,13 +947,18 @@ final class WorkspaceBrowserController {
             self.warm = nil
             Task { await Self.tearDown(warm) }
         }
+        // The pool can still hold a VM: one mid-boot, or its unclaimed pool VM
+        // when claim() booted a dedicated one. Dropping the reference alone
+        // orphans it (a live VZ VM nobody stops) — shut the pool down.
+        if let pool { Task { await pool.shutdown() } }
         pool = nil
         state = .idle
     }
 
     /// True while this workspace still owns a booted browser VM. Quit consults
     /// it: a browser VM alone must still take the `.terminateLater` path.
-    var hasLiveVM: Bool { warm != nil }
+    /// Booting counts: the pool is mid-boot on a VZ VM that quit must shut down.
+    var hasLiveVM: Bool { warm != nil || (pool != nil && state == .booting) }
 
     /// `stop()`, but *awaiting* the VM teardown instead of detaching it.
     ///
@@ -763,9 +969,15 @@ final class WorkspaceBrowserController {
     /// `handle_unresponsive_connection`. Quit must await this instead.
     func stopAndWait() async {
         let live = warm
+        let ownPool = pool
         warm = nil          // so stop() doesn't also detach a teardown
+        pool = nil          // ditto for the pool shutdown, awaited below
         stop()
         if let live { await Self.tearDown(live) }
+        // A boot still in flight: shutdown() makes the pool retire the VM it's
+        // booting instead of handing it out (and the boot task above discards
+        // anything claimed after stop()).
+        if let ownPool { await ownPool.shutdown() }
     }
 
     /// No image anywhere: show the consent card in the pane placeholder
@@ -870,5 +1082,102 @@ final class WorkspaceBrowserController {
         try? warm.serialInput.fileHandleForReading.close()
         try? warm.serialInput.fileHandleForWriting.close()
         try? warm.ephemeralDisk.destroy()
+    }
+}
+
+// MARK: - Pure policies (unit-tested)
+
+/// When the browser counts as ready for agent tools.
+enum BrowserReadiness {
+    /// Ready once the guest tab-agent connected (Chromium up), or — so an image
+    /// whose tab-agent never connects can't strand the agent — once `grace`
+    /// has elapsed since the framebuffer was attached.
+    static func isReady(guestConnected: Bool, attachedAt: Date?, now: Date,
+                        grace: TimeInterval) -> Bool {
+        if guestConnected { return true }
+        guard let attachedAt else { return false }
+        return now.timeIntervalSince(attachedAt) >= grace
+    }
+}
+
+/// Guest scanout sizing for the browser pane.
+enum BrowserDisplaySizing {
+    /// Smallest scanout we ask for (a collapsing pane passes through tiny sizes).
+    static let minSize = CGSize(width: 320, height: 240)
+
+    /// The pixel size to configure for a view of `backing` device pixels:
+    /// rounded down to even dimensions, nil while the view is too small to be
+    /// a real layout (mid-collapse / not yet laid out).
+    static func target(forBacking backing: CGSize) -> CGSize? {
+        guard backing.width.isFinite, backing.height.isFinite,
+              backing.width >= minSize.width, backing.height >= minSize.height else { return nil }
+        let w = (Int(backing.width.rounded(.down)) / 2) * 2
+        let h = (Int(backing.height.rounded(.down)) / 2) * 2
+        return CGSize(width: w, height: h)
+    }
+
+    /// Reconfigure only for a real mismatch (> 2 px either way), so rounding
+    /// noise never triggers a guest mode switch.
+    static func needsReconfigure(current: CGSize, target: CGSize) -> Bool {
+        abs(current.width - target.width) > 2 || abs(current.height - target.height) > 2
+    }
+
+    // MARK: Chromium's minimum window width (B18)
+
+    /// Chromium refuses to make its window narrower than ~500 CSS px. A
+    /// scanout narrower than that leaves the maximized window overflowing
+    /// the screen (innerWidth 500 on a 392-wide screen) and the page's right
+    /// side is cut off.
+    static let chromiumMinCSSWidth: CGFloat = 500
+
+    /// The browser pane's floor in points. The guest runs Chromium at the
+    /// host's backing scale (VMConfig.resolvedDisplayScale), so one CSS px
+    /// is one point and a pane this wide fits Chromium's minimum window.
+    static let minPaneWidth: CGFloat = chromiumMinCSSWidth
+
+    /// How much larger than the view (in device pixels) the scanout must be
+    /// so Chromium's window fits: 1 when the view is wide enough; above 1
+    /// the guest gets a proportionally larger display that VZ scales down
+    /// into the view, so the whole page stays visible (slightly smaller)
+    /// instead of being clipped.
+    static func overscan(viewWidthPoints w: CGFloat, backingScale: CGFloat,
+                         guestScale: Int) -> CGFloat {
+        guard w.isFinite, w > 0, backingScale > 0 else { return 1 }
+        let neededPixels = chromiumMinCSSWidth * CGFloat(max(guestScale, 1))
+        return max(1, neededPixels / (w * backingScale))
+    }
+
+    /// The scanout for a cropper of `cropperSize` points (the visible page
+    /// area) whose VZ view also carries `deviceInset` framebuffer rows of
+    /// Chromium chrome above it: the visible area at `overscan` times the
+    /// backing resolution, plus the chrome rows (which are framebuffer rows,
+    /// so they are NOT scaled). Width and height scale by the same factor,
+    /// so the scanout has the VZ view's exact aspect ratio and VZ's
+    /// scale-to-fit neither letterboxes nor distorts.
+    struct Layout: Equatable {
+        /// Scanout size in guest device pixels.
+        var framebuffer: CGSize
+        /// Framebuffer pixels per view device pixel (≥ 1).
+        var overscan: CGFloat
+        /// True when the scanout differs from the view's own backing size:
+        /// VZ's automatic reconfigure must be OFF or it shrinks it back.
+        var isOverscanned: Bool { overscan > 1.0001 }
+    }
+
+    static func layout(cropperSize: CGSize, backingScale: CGFloat,
+                       guestScale: Int, deviceInset: Int) -> Layout? {
+        guard backingScale > 0 else { return nil }
+        let k = overscan(viewWidthPoints: cropperSize.width,
+                         backingScale: backingScale, guestScale: guestScale)
+        let raw = CGSize(width: cropperSize.width * backingScale * k,
+                         height: cropperSize.height * backingScale * k + CGFloat(deviceInset))
+        guard var fb = target(forBacking: raw) else { return nil }
+        if k > 1 {
+            // Round the width UP so Chromium's minimum always fits (499.5
+            // CSS px would still clip a pixel column).
+            let needed = chromiumMinCSSWidth * CGFloat(max(guestScale, 1))
+            fb.width = max(fb.width, (needed / 2).rounded(.up) * 2)
+        }
+        return Layout(framebuffer: fb, overscan: k)
     }
 }

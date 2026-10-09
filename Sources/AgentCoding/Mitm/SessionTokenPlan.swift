@@ -105,6 +105,10 @@ public struct SessionTokenPlan: Sendable {
     /// via the store's bogus-key registry and injects a live OAuth Bearer token
     /// pulled from the host store instead of doing a static fake→real swap.
     public var claudeSubscriptionBogusKey: String?
+    /// Claude on the host-kept subscription WITH its account features: the
+    /// stand-in `~/.claude/.credentials.json` (see `ClaudeStandIn`) to write
+    /// instead of exporting `claudeSubscriptionBogusKey`. Nil = API-key mode.
+    public var claudeOAuthStandIn: Data?
 
     public init(entries: [Entry] = [], claudeSubscriptionBogusKey: String? = nil) {
         self.entries = entries
@@ -480,6 +484,28 @@ public extension Profile {
             }
         }
 
+        // omp's other providers: each key swapped on its own host only.
+        for extra in ompExtraProviders where !extra.apiKey.isEmpty {
+            guard let host = extra.host, !host.isEmpty,
+                  !entries.contains(where: { e in
+                      if case .cloudAPIKey(let h) = e.purpose { return h == host && e.realValue == extra.apiKey }
+                      return false
+                  })
+            else { continue }
+            let prefix: String
+            switch extra.provider {
+            case .anthropic: prefix = "sk-ant-api03-brm-"
+            case .xai:       prefix = "xai-brm-"
+            default:         prefix = "sk-brm-"
+            }
+            entries.append(.init(
+                realValue: extra.apiKey,
+                fakeValue: SessionTokenPlan.deriveFake(prefix: prefix, real: extra.apiKey, salt: salt),
+                purpose: .cloudAPIKey(host: host),
+                consentCredentialID: nil,
+                consentDisplayName: "\(extra.provider.displayName) API key"))
+        }
+
         for entry in manualTokens where entry.isUsable {
             let real = entry.realValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if real.isEmpty { continue }
@@ -682,14 +708,28 @@ public extension Profile {
             }
             let credConsentID: String? = cred.requireApproval
                 ? ConsentCredentialID.gitHTTPS(cred.id) : nil
+            let fake = SessionTokenPlan.deriveFake(prefix: prefix,
+                                                   real: real, salt: salt,
+                                                   targetLength: target)
+            let user = cred.effectiveUsername
             entries.append(.init(
                 realValue: real,
-                fakeValue: SessionTokenPlan.deriveFake(prefix: prefix,
-                                                       real: real, salt: salt,
-                                                       targetLength: target),
-                purpose: .gitHTTPS(host: cred.host, username: cred.username),
+                fakeValue: fake,
+                purpose: .gitHTTPS(host: cred.host, username: user),
                 consentCredentialID: credConsentID,
-                consentDisplayName: "git token (\(cred.username)@\(cred.host))"))
+                consentDisplayName: "git token (\(user)@\(cred.host))"))
+            // git itself (the `store` helper's credential) authenticates
+            // with `Authorization: Basic base64("<user>:<token>")` — the
+            // fake never appears in clear, so the entry above never fired
+            // and every HTTPS clone/push sent the fake ("Invalid username
+            // or token"). Swap the whole Basic blob too. Appended after the
+            // raw entry so `fakeForGitHTTPS` keeps returning the raw fake.
+            entries.append(.init(
+                realValue: Data("\(user):\(real)".utf8).base64EncodedString(),
+                fakeValue: Data("\(user):\(fake)".utf8).base64EncodedString(),
+                purpose: .gitHTTPS(host: cred.host, username: user),
+                consentCredentialID: credConsentID,
+                consentDisplayName: "git token (\(user)@\(cred.host))"))
         }
 
         for db in httpDatabases where db.isUsable {

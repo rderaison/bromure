@@ -94,6 +94,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case mcp         = "MCP"
     case tracing     = "Tracing"
     case guardrails       = "Guardrails"
+    case firewall         = "Firewall"
     case supplyChain      = "Supply Chain"
     case promptInjection  = "Prompt Injection"
     case pii              = "PII Protection"
@@ -117,7 +118,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general, .appearance: return .workspace
         case .localModels, .fusion: return .models
         case .folders, .environment, .resources, .browser, .mcp: return .machine
-        case .credentials, .guardrails, .supplyChain, .promptInjection, .pii, .tracing: return .security
+        case .credentials, .guardrails, .firewall, .supplyChain, .promptInjection, .pii, .tracing: return .security
         case .automation: return .app
         }
     }
@@ -125,15 +126,16 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     /// What else the sidebar search finds it by.
     var keywords: String {
         switch self {
-        case .general:         return "name color close login notes defaults"
+        case .general:         return "name color close login notes defaults task approved merge pull request kimi approvals never ask auto yolo sensitive reach delegation nickname"
         case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
         case .fusion:          return "mount mac folders fusion"
         case .folders:         return "shared folder mount directory"
         case .credentials:     return "keys tokens secrets ssh aws github password vault 1password"
-        case .environment:     return "env variables dotenv shell"
+        case .environment:     return "env variables dotenv shell description auto mode safety servers staging production trusted"
         case .mcp:             return "tools servers mcp"
         case .tracing:         return "trace http log requests"
-        case .guardrails:      return "firewall egress network block allow kubernetes aws docker github destructive"
+        case .guardrails:      return "credentials approval write policy kubernetes aws docker github destructive exfiltration"
+        case .firewall:        return "firewall egress outbound network connections block allow deny host port web methods interception proxy"
         case .supplyChain:     return "npm pypi packages age socket osv install scripts depi"
         case .promptInjection: return "injection detector scan classifier"
         case .pii:             return "privacy personal data names email phone gdpr redact anonymize pseudonymize"
@@ -155,6 +157,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .mcp:         "network"
         case .tracing:     "doc.text.magnifyingglass"
         case .guardrails:       "exclamationmark.shield.fill"
+        case .firewall:         "flame.fill"
         case .supplyChain:      "shippingbox.fill"
         case .promptInjection:  "exclamationmark.triangle.fill"
         case .pii:              "person.crop.circle.badge.checkmark"
@@ -176,6 +179,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .mcp:         .blue
         case .tracing:     .red
         case .guardrails:       .orange
+        case .firewall:         .red
         case .supplyChain:      .yellow
         case .promptInjection:  .red
         case .pii:              .purple
@@ -223,6 +227,10 @@ struct ProfileStorageContext {
     /// of its per-boot checkpoints (ACAppDelegate.restoreHomeStorage — owns
     /// its own picker + confirmation).
     var onRestoreHome: (() -> Void)?
+    /// A fat client's view of a REMOTE workspace: sizes measured on the
+    /// server (the URLs above are only placeholders there), and the erase /
+    /// reset / restore actions left to the server Mac.
+    var remoteSizes: StorageSizes? = nil
 
     static func empty(baseImageURL: URL) -> ProfileStorageContext {
         ProfileStorageContext(
@@ -238,6 +246,61 @@ struct ProfileStorageContext {
             onUpgradeHome: nil,
             onRestoreHome: nil
         )
+    }
+}
+
+/// What each storage layer costs on the Mac that holds it.
+struct StorageSizes: Sendable {
+    var base: Int64 = 0
+    var disk: Int64 = 0
+    var home: Int64 = 0
+    var homeMTime: Date?
+    /// The ext4 home image's guest-visible size (0: no image).
+    var homeCapacity: Int64 = 0
+
+    /// Off the main thread: a virtiofs home is a directory walk.
+    nonisolated static func measure(base: URL, disk: URL?, home: URL?, homeImage: URL?) -> StorageSizes {
+        let b = (try? base.resourceValues(forKeys: [.fileAllocatedSizeKey]))
+            .flatMap { $0.fileAllocatedSize }
+            .map(Int64.init) ?? 0
+        let d = disk.map { allocatedBytes(at: $0) } ?? 0
+        // ext4 home: the image's allocated (sparse-aware) size — O(1),
+        // and it's the real cost on the Mac. virtiofs home: the walk.
+        let h = homeImage.map { allocatedBytes(at: $0) }
+            ?? home.map { directoryBytes(at: $0) } ?? 0
+        let mtime = (homeImage ?? home).flatMap { url -> Date? in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+            return attrs[.modificationDate] as? Date
+        }
+        let cap = homeImage.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path) }
+            .flatMap { ($0[.size] as? NSNumber)?.int64Value } ?? 0
+        return StorageSizes(base: b, disk: d, home: h, homeMTime: mtime, homeCapacity: cap)
+    }
+
+    nonisolated static func allocatedBytes(at url: URL) -> Int64 {
+        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
+        let v = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey])
+        if let n = v?.totalFileAllocatedSize { return Int64(n) }
+        if let n = v?.fileAllocatedSize { return Int64(n) }
+        return 0
+    }
+
+    nonisolated static func directoryBytes(at url: URL) -> Int64 {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return 0 }
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey]
+        guard let it = fm.enumerator(at: url, includingPropertiesForKeys: keys, options: [], errorHandler: nil) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let u as URL in it {
+            let v = try? u.resourceValues(forKeys: Set(keys))
+            if v?.isRegularFile == true {
+                if let n = v?.totalFileAllocatedSize { total &+= Int64(n) }
+                else if let n = v?.fileAllocatedSize { total &+= Int64(n) }
+            }
+        }
+        return total
     }
 }
 
@@ -392,7 +455,17 @@ enum ModelsPaneMode {
 }
 
 struct ProfileEditorView: View {
+    #if os(macOS)
+    /// Content sizes of the windows hosting the editor (Preferences, the
+    /// workspace editor): opened at `idealWindowSize`, resizable down to
+    /// `minWindowSize`.
+    static let minWindowSize = CGSize(width: 780, height: 600)
+    static let idealWindowSize = CGSize(width: 880, height: 840)
+    #endif
     @State private var draft: Profile
+    /// The saved home size, so picking the current size back leaves the
+    /// profile unchanged (no restart prompt for a no-op).
+    private var savedHomeImageGB: Int?
     /// `.remoteGlobal`: the remote's global model settings being edited.
     @State private var remoteGlobalDraft: ModelSettings = ModelSettings()
     /// Terminal bg/text as live `Color`s the ColorPicker binds to directly.
@@ -406,6 +479,10 @@ struct ProfileEditorView: View {
     /// The pane a freshly opened Preferences editor starts on (set just before
     /// a workspace editor opens Preferences), consumed on init.
     static var pendingPreferencesCategory: EditorCategory?
+    /// The pane a workspace editor opens on when it is opened FOR that pane
+    /// (the Security Overview's "turn on" cells): consumed on init when the
+    /// edited workspace matches.
+    static var pendingWorkspaceCategory: (id: UUID, category: EditorCategory)?
     /// The sidebar's search.
     @State private var categorySearch = ""
     #if os(iOS) || os(visionOS)
@@ -517,6 +594,11 @@ struct ProfileEditorView: View {
     let codexReauthRequiredAt: (() -> Date?)?
     let grokReauthRequiredAt: (() -> Date?)?
     let kimiReauthRequiredAt: (() -> Date?)?
+    #if os(macOS)
+    /// Per provider: last host refresh, access-token expiry, unreadable store
+    /// (Settings › Models). Set after init by the hosts that know it.
+    var subscriptionHealth: ((ModelProvider) -> SubscriptionLoginHealth?)? = nil
+    #endif
     /// Launch the "Register with Claude" flow (scope baked in by the caller).
     let onRegisterClaude: (() -> Void)?
     /// Forget the stored Claude credential for this scope.
@@ -613,11 +695,16 @@ struct ProfileEditorView: View {
             _remoteGlobalDraft = State(initialValue: initial)
         }
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
+        if let pending = Self.pendingWorkspaceCategory, profile?.id == pending.id {
+            Self.pendingWorkspaceCategory = nil
+            _selectedCategory = State(initialValue: pending.category)
+        }
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
         // values. We always render the editable fields (no inherit toggle).
         p.seedAppearance(from: terminalDefaults)
         _draft = State(initialValue: p)
+        savedHomeImageGB = p.homeImageGB
         _bgColor = State(initialValue: Color(hex: p.customBackgroundHex ?? terminalDefaults.backgroundHex))
         _fgColor = State(initialValue: Color(hex: p.customForegroundHex ?? terminalDefaults.foregroundHex))
         // Caller-supplied isNew lets the picker pre-seed a draft from
@@ -725,7 +812,12 @@ struct ProfileEditorView: View {
             #endif
         }
         #if os(macOS)
-        .frame(width: 720, height: 520)
+        // Flexible, with a minimum that fits the whole sidebar (Security group
+        // included) and the widest pane; the hosting window sizes to the ideal.
+        .frame(minWidth: Self.minWindowSize.width, idealWidth: Self.idealWindowSize.width,
+               maxWidth: .infinity,
+               minHeight: Self.minWindowSize.height, idealHeight: Self.idealWindowSize.height,
+               maxHeight: .infinity)
         #endif
         // Title bar follows the name live, and is seeded on appear so a
         // pre-filled draft doesn't sit under a stale title until first keypress.
@@ -769,6 +861,12 @@ struct ProfileEditorView: View {
                 .replacingOccurrences(of: " ", with: "")
             if let r = raw, r.hasPrefix("preferences:") {
                 raw = isLocalPreferences ? String(r.dropFirst("preferences:".count)) : nil
+            }
+            // "workspace:<uuid>:<category>" targets only that workspace's editor.
+            if let r = raw, r.hasPrefix("workspace:") {
+                let parts = r.split(separator: ":", maxSplits: 2).map(String.init)
+                raw = parts.count == 3 && parts[1] == draft.id.uuidString.lowercased() && !isNew
+                    ? parts[2] : nil
             }
             if let raw,
                let cat = EditorCategory.allCases.first(where: {
@@ -823,15 +921,52 @@ struct ProfileEditorView: View {
         onSave(draft, generateSSH)
     }
 
+    /// "Create" / "Save", localized. A bare `isNew ? "Create" : "Save"`
+    /// is a String (not a LocalizedStringKey), so it skipped localization.
+    private var saveTitle: String {
+        isNew ? NSLocalizedString("Create", comment: "workspace editor: create button")
+              : NSLocalizedString("Save", comment: "workspace editor: save button")
+    }
+
+    private var cancelTitle: String {
+        NSLocalizedString("Cancel", comment: "workspace editor: cancel button")
+    }
+
+    /// The editor's footer buttons. Each one's name IS its visible Text
+    /// label (`Text(verbatim:)` of the already-localized title), so VoiceOver
+    /// and UI scripting read "Save" / "Cancel" / "Create" from the same view
+    /// the user sees — no separate `.accessibilityLabel` override for a
+    /// button style or shortcut wrapper to lose (QA read them as a bare
+    /// "button"). The identifiers stay for scripts.
+    ///
+    /// On macOS that alone is not enough: out of process, a SwiftUI Button
+    /// exposes its name only as AXAttributedDescription — no AXTitle, no
+    /// AXDescription — so System Events read "missing value" / "button"
+    /// whatever label modifiers it had. An AppKit element stands in for
+    /// each (`appKitAccessibleButton`), carrying the plain description.
     private var bottomBar: some View {
-        HStack {
-            Button("Cancel", action: onCancel)
+        let cancelHint = NSLocalizedString("Closes the editor without saving changes", comment: "workspace editor: cancel button accessibility hint")
+        let saveID = isNew ? "profileEditor.create" : "profileEditor.save"
+        return HStack {
+            Button(action: onCancel) { Text(verbatim: cancelTitle) }
                 .keyboardShortcut(.cancelAction)
+                #if os(macOS)
+                .appKitAccessibleButton(cancelTitle, hint: cancelHint, identifier: "profileEditor.cancel",
+                                        action: onCancel)
+                #else
+                .accessibilityHint(Text(cancelHint))
+                .accessibilityIdentifier("profileEditor.cancel")
+                #endif
             Spacer()
-            Button(isNew ? "Create" : "Save") { commitSave() }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.defaultAction)
-            .disabled(!isValid)
+            Button(action: commitSave) { Text(verbatim: saveTitle) }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isValid)
+                #if os(macOS)
+                .appKitAccessibleButton(saveTitle, identifier: saveID, enabled: isValid, action: commitSave)
+                #else
+                .accessibilityIdentifier(saveID)
+                #endif
         }
         .padding(12)
     }
@@ -844,8 +979,10 @@ struct ProfileEditorView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                     TextField(NSLocalizedString("Search settings", comment: "preferences search"), text: $categorySearch)
                         .textFieldStyle(.plain)
+                        .accessibilityLabel(Text(NSLocalizedString("Search settings", comment: "preferences search")))
                         .font(.system(size: 12.5))
                 }
                 .padding(.horizontal, 8).padding(.vertical, 6)
@@ -901,6 +1038,10 @@ struct ProfileEditorView: View {
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // A pane wider than the space left must clip inside this column,
+            // never widen the whole editor (which then centred in the window
+            // and cut the sidebar and the value column off — B44).
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         }
     }
 
@@ -936,7 +1077,8 @@ struct ProfileEditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel)
+                    Button(action: onCancel) { Text(verbatim: cancelTitle) }
+                        .accessibilityIdentifier("profileEditor.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) { phoneSaveButton }
             }
@@ -958,8 +1100,9 @@ struct ProfileEditorView: View {
     }
 
     private var phoneSaveButton: some View {
-        Button(isNew ? "Create" : "Save") { commitSave() }
+        Button(action: commitSave) { Text(verbatim: saveTitle) }
             .disabled(!isValid)
+            .accessibilityIdentifier(isNew ? "profileEditor.create" : "profileEditor.save")
     }
     #endif
 
@@ -992,6 +1135,7 @@ struct ProfileEditorView: View {
         case .mcp:         mcpSection
         case .tracing:     tracingSection
         case .guardrails:       guardrailsSection
+        case .firewall:         firewallSection
         case .supplyChain:      supplyChainSection
         case .promptInjection:  promptInjectionSection
         case .pii:              piiSection
@@ -1118,7 +1262,8 @@ struct ProfileEditorView: View {
                 case .moonshot:  return onForgetKimi != nil
                 case .zai, .bedrock, .openrouter, .custom: return false
                 }
-            })
+            },
+            health: { provider in subscriptionHealth?(provider) })
     }
     #endif
 
@@ -1228,13 +1373,23 @@ struct ProfileEditorView: View {
 
             closeActionPicker
 
+            taskFinishPicker
+
+            kimiApprovalsPicker
+
             // One machine's own: not a default for new ones.
             if draft.id != ProfileStore.templateID {
                 Toggle(NSLocalizedString("Start this VM at login", comment: ""),
                        isOn: $draft.bootAtStartup)
 
+                // A grouped Form draws an empty TextField borderless and
+                // right-aligned — invisible until typed into. The prompt
+                // makes the field visible.
                 TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
-                          text: $draft.comments, axis: .vertical)
+                          text: $draft.comments,
+                          prompt: Text(NSLocalizedString("Add a note about this workspace",
+                                                         comment: "Profile notes field placeholder")),
+                          axis: .vertical)
                     .lineLimit(2...6)
             }
 
@@ -1259,6 +1414,12 @@ struct ProfileEditorView: View {
             LabeledContent(NSLocalizedString("When closing the window", comment: "")) {
                 closeActionPicker.labelsHidden()
             }
+            LabeledContent(NSLocalizedString("When a task is approved", comment: "task finish preference")) {
+                taskFinishPicker.labelsHidden()
+            }
+            LabeledContent(NSLocalizedString("Kimi approvals", comment: "Kimi approvals setting")) {
+                kimiApprovalsPicker.labelsHidden()
+            }
             if draft.id != ProfileStore.templateID {
                 Toggle(NSLocalizedString("Start this VM at login", comment: ""),
                        isOn: $draft.bootAtStartup)
@@ -1274,6 +1435,44 @@ struct ProfileEditorView: View {
             }
         }
         #endif
+    }
+
+    /// How an approved coding task leaves the board. In Preferences (the
+    /// template) it's the app-wide default; in a workspace, an override
+    /// ("App default" follows Preferences).
+    @ViewBuilder
+    private var taskFinishPicker: some View {
+        if draft.id == ProfileStore.templateID {
+            Picker(NSLocalizedString("When a task is approved", comment: "task finish preference"),
+                   selection: Binding(get: { draft.taskFinish ?? .merge },
+                                      set: { draft.taskFinish = $0 })) {
+                ForEach(TaskFinish.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .help(NSLocalizedString("What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise.", comment: "task finish preference"))
+        } else {
+            Picker(NSLocalizedString("When a task is approved", comment: "task finish preference"),
+                   selection: $draft.taskFinish) {
+                Text(String(format: NSLocalizedString("App default (%@)", comment: "task finish preference"),
+                            TaskFinish.appDefault.label))
+                    .tag(TaskFinish?.none)
+                ForEach(TaskFinish.allCases, id: \.self) { Text($0.label).tag(TaskFinish?.some($0)) }
+            }
+            .pickerStyle(.menu)
+            .help(NSLocalizedString("What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise.", comment: "task finish preference"))
+        }
+    }
+
+    /// How much Kimi Code asks before acting in this workspace. Never Ask
+    /// by default: the VM and the host-side guardrails are the boundary.
+    @ViewBuilder
+    private var kimiApprovalsPicker: some View {
+        Picker(NSLocalizedString("Kimi approvals", comment: "Kimi approvals setting"),
+               selection: $draft.kimiApprovals) {
+            ForEach(KimiApprovals.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.menu)
+        .help(NSLocalizedString("Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume.", comment: "Kimi approvals setting"))
     }
 
     @ViewBuilder
@@ -1378,8 +1577,9 @@ struct ProfileEditorView: View {
         }
     }
 
-    /// Which workspaces the agents here may reach: every one (the default),
-    /// or only the ones ticked. Directional — the other workspace's own
+    /// Which workspaces the agents here may reach: only the ones ticked —
+    /// none by default (a new workspace reaches nobody until the user ticks
+    /// some) — or every one. Directional — the other workspace's own
     /// setting says whether its agents can reach back.
     @ViewBuilder
     private var agentReachSection: some View {
@@ -1397,6 +1597,12 @@ struct ProfileEditorView: View {
             }
             .toggleStyle(.switch)
             if draft.agentReach != nil {
+                if draft.agentReach?.isEmpty == true, !siblingWorkspaces.isEmpty {
+                    Text("Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace).")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if siblingWorkspaces.isEmpty {
                     Text("No other workspace yet — agents here can only reach each other.")
                         .font(.caption)
@@ -3312,7 +3518,18 @@ struct ProfileEditorView: View {
                 case .idle, .failed:
                     switch installer.installedSource {
                     case .sharedWithBromureWeb:
-                        EmptyView()   // Bromure Web owns it — nothing to manage here
+                        // Bromure Web owns it. Only when it's stale do we
+                        // offer AC's own copy — which then wins over the
+                        // shared one (BrowserImageInstaller.resolve).
+                        if installer.installedIsOutdated {
+                            Button("Download Current Version") {
+                                Task { await BrowserImageInstaller.shared.install() }
+                            }
+                        }
+                    case .downloadedByAC where installer.installedIsOutdated:
+                        Button("Update") {
+                            Task { await BrowserImageInstaller.shared.install() }
+                        }
                     case .downloadedByAC:
                         Button("Re-download") { confirmBrowserRedownload = true }
                             .confirmationDialog(
@@ -3353,6 +3570,12 @@ struct ProfileEditorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if installer.installedIsOutdated, let note = browserImageOutdatedNote(installer) {
+                    Label(note, systemImage: "exclamationmark.arrow.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if case .failed(let message) = installer.phase {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -3360,6 +3583,20 @@ struct ProfileEditorView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    /// Why the image is flagged outdated, and what to do about it.
+    private func browserImageOutdatedNote(_ installer: BrowserImageInstaller) -> String? {
+        let have = installer.installedVersion.map { "v\($0)" } ?? String(localized: "an unknown version")
+        let want = "v\(BrowserImageInstaller.currentVersion)"
+        switch installer.installedSource {
+        case .sharedWithBromureWeb:
+            return String(localized: "Outdated: the shared image is \(have); this version of Agentic Coding uses \(want). Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up).")
+        case .downloadedByAC:
+            return String(localized: "Outdated: this image is \(have); the current version is \(want). Update to download it.")
+        case nil:
+            return nil
         }
     }
 
@@ -3478,7 +3715,59 @@ struct ProfileEditorView: View {
         }
     }
 
-    @ViewBuilder
+    /// The home image's size now, GiB — nil before it exists.
+    private var homeCapacityGB: Int? {
+        if let r = storageContext?.remoteSizes {
+            return r.homeCapacity > 0 ? Int(r.homeCapacity >> 30) : nil
+        }
+        guard let u = storageContext?.profileHomeImageURL,
+              let n = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.size] as? NSNumber
+        else { return nil }
+        return Int(n.int64Value >> 30)
+    }
+
+    private static var defaultHomeGB: Int {
+        #if os(macOS)
+        SessionDisk.resolvedHomeImageGB()
+        #else
+        64
+        #endif
+    }
+
+    /// Grow-only: a running VM can't see its disk grow, so a bigger size
+    /// lands at the workspace's next start (the host grows the image, the
+    /// guest grows the filesystem).
+    private var homeSizeSection: some View {
+        let current = homeCapacityGB ?? Self.defaultHomeGB
+        let chosen = draft.homeImageGB.map { max($0, current) } ?? current
+        // Any whole GB from the current size up to 1 TB; below the current
+        // size it clamps (the image only grows — shrinking would cut the
+        // filesystem short).
+        let size = Binding<Int>(
+            get: { chosen },
+            set: { v in
+                let gb = min(1024, max(current, v))
+                draft.homeImageGB = (gb == current && savedHomeImageGB == nil) ? nil : gb
+            })
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Home folder size")
+                .font(.headline)
+            HStack(spacing: 6) {
+                TextField("", value: size, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 72)
+                Text(verbatim: "GB")
+                Stepper("", value: size, in: current...1024, step: 8)
+                    .labelsHidden()
+            }
+            Text(String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var resourcesSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             // Storage stack: top of the pane because it's the "loud"
@@ -3500,6 +3789,11 @@ struct ProfileEditorView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            if draft.homeModel == .ext4 {
+                Divider()
+                homeSizeSection
             }
 
             Divider()
@@ -3589,7 +3883,28 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var environmentSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            #if os(macOS)
+            // Preferences only (this Mac's, or a remote's): the global
+            // description every workspace's agents get.
+            switch resolvedModelsPane {
+            case .globalStore:
+                GlobalAgentEnvironmentEditor()
+                Divider()
+            case .remoteGlobal:
+                AgentEnvironmentEditor(text: $remoteGlobalDraft.agentEnvironment)
+                Divider()
+            case .workspace:
+                EmptyView()
+            }
+            #endif
+            environmentVariables
+        }
+    }
+
+    private var environmentVariables: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Text("Variables").font(.headline)
             Text("Plain `KEY=VALUE` pairs exported into every shell in the VM via `proxy.env` (sourced from `.bashrc`). No proxy substitution — values land on the VM verbatim, so don't put secrets here. Good for log levels, feature flags, build toggles.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -3813,14 +4128,39 @@ struct ProfileEditorView: View {
                 }
 
                 Divider().padding(.vertical, 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Don't alert on credential exfiltration",
+                           isOn: $draft.disableExfiltrationAlerts)
+                    Text("By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 2)
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
+    /// The Firewall pane: the workspace's outbound-connection rules (pf-style
+    /// egress policy) and the interception switches that decide what the proxy
+    /// gets to see. Split out of Guardrails, which is about credentials.
+    @ViewBuilder
+    private var firewallSection: some View {
+        guardrailsScrollWrapper {
+            VStack(alignment: .leading, spacing: 12) {
                 // The pf-rules table editor needs the real EgressPolicy
                 // model (SandboxEngine, macOS-only). The fat client
                 // mirrors profiles but neither edits nor enforces egress
                 // rules, so the pane simply omits the table there.
                 #if os(macOS)
                 FirewallEditor(draft: $draft)
+                #else
+                Text(NSLocalizedString("Outbound connection rules are edited on the Mac that runs this workspace.", comment: "Firewall pane, remote client"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 #endif
 
+                Divider().padding(.vertical, 4)
                 VStack(alignment: .leading, spacing: 2) {
                     Picker("Agent watchdog", selection: $draft.watchdogMode) {
                         Text("Off").tag("off")
@@ -3861,15 +4201,7 @@ struct ProfileEditorView: View {
                     Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-
-                    Toggle("Don't alert on credential exfiltration",
-                           isOn: $draft.disableExfiltrationAlerts)
-                        .padding(.top, 8)
-                    Text("By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.top, 6)
             }
             .padding(.bottom, 8)
         }
@@ -4067,7 +4399,7 @@ struct ProfileEditorView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             GroupBox(label: Label(NSLocalizedString("Detectors", comment: ""),
-                                  systemImage: "magnifyingglass")) {
+                                  systemImage: "brain")) {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle(NSLocalizedString("Detect prompt injection in source code", comment: ""),
                            isOn: $draft.promptInjection.detectSourceInjection)
@@ -4101,7 +4433,7 @@ struct ProfileEditorView: View {
                             }
                             #endif
                         }
-                    Text(NSLocalizedString("Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.", comment: ""))
+                    Text(NSLocalizedString("Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable.", comment: "Prompt injection: rules-file detector"))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -5093,15 +5425,8 @@ private struct ManualTokenRow: View {
             // Hosts — restrict where the fake is swapped back to the real key.
             VStack(alignment: .leading, spacing: 3) {
                 credFieldLabel("API host(s) (optional)")
-                TextField("", text: Binding(
-                    get: { token.hostFilters.joined(separator: ", ") },
-                    set: { token.hostFilters = $0
-                        .split(whereSeparator: { $0 == "," || $0 == " " })
-                        .map { String($0) }
-                        .filter { !$0.isEmpty } }),
-                    prompt: Text("api.stripe.com, api.example.com"))
-                    .textFieldStyle(.roundedBorder)
-                    .labelsHidden()
+                HostListField(hosts: $token.hostFilters,
+                              prompt: "api.stripe.com, api.example.com")
                 credFieldHint("Hostnames only, comma-separated, no https:// or path. The real key is substituted only on requests to these hosts and their subdomains. Leave blank to allow any host.")
             }
 
@@ -5432,6 +5757,11 @@ private struct StorageStackView: View {
     @State private var homeMTime: Date?
     @State private var baseBytes: Int64?
 
+    /// A remote workspace (fat client): shown, not erased from here.
+    private var remote: Bool { context.remoteSizes != nil }
+    private static let remoteHelp = NSLocalizedString(
+        "Erasing and restoring storage is done on the server Mac.", comment: "storage, fat client")
+
     var body: some View {
         VStack(spacing: 0) {
             // Top — your home dir.
@@ -5449,10 +5779,10 @@ private struct StorageStackView: View {
                     : .init(
                         label: NSLocalizedString("Erase home…", comment: ""),
                         role: .destructive,
-                        enabled: !context.isRunning
+                        enabled: !remote && !context.isRunning
                             && (context.profileHomeURL != nil
                                 || context.profileHomeImageURL != nil),
-                        disabledHelp: context.isRunning
+                        disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
                         handler: context.onResetHome
@@ -5465,16 +5795,18 @@ private struct StorageStackView: View {
                         return .init(
                             label: NSLocalizedString("Upgrade storage…", comment: ""),
                             role: nil,
-                            enabled: !context.isRunning,
-                            disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
+                            enabled: !remote && !context.isRunning,
+                            disabledHelp: remote ? Self.remoteHelp
+                                : NSLocalizedString("Close the session window first.", comment: ""),
                             handler: { context.onUpgradeHome?() })
                     }
                     if context.onRestoreHome != nil {
                         return .init(
                             label: NSLocalizedString("Restore home…", comment: ""),
                             role: nil,
-                            enabled: !context.isRunning,
-                            disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
+                            enabled: !remote && !context.isRunning,
+                            disabledHelp: remote ? Self.remoteHelp
+                                : NSLocalizedString("Close the session window first.", comment: ""),
                             handler: { context.onRestoreHome?() })
                     }
                     return nil
@@ -5496,8 +5828,8 @@ private struct StorageStackView: View {
                     : .init(
                         label: NSLocalizedString("Reset to base…", comment: ""),
                         role: .destructive,
-                        enabled: !context.isRunning && context.profileDiskURL != nil,
-                        disabledHelp: context.isRunning
+                        enabled: !remote && !context.isRunning && context.profileDiskURL != nil,
+                        disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
                         handler: context.onResetDisk
@@ -5565,30 +5897,22 @@ private struct StorageStackView: View {
     private func refreshSizes() async {
         // Off-main computation, then push back. Keeps the editor
         // interactive even if the home walk takes a beat.
+        if let r = context.remoteSizes {
+            (baseBytes, diskBytes, homeBytes, homeMTime) = (r.base, r.disk, r.home, r.homeMTime)
+            return
+        }
         let baseURL = context.baseImageURL
         let diskURL = context.profileDiskURL
         let homeURL = context.profileHomeURL
         let homeImageURL = context.profileHomeImageURL
-        let (b, d, h, m) = await Task.detached(priority: .utility) {
-            let base = (try? baseURL.resourceValues(forKeys: [.fileAllocatedSizeKey]))
-                .flatMap { $0.fileAllocatedSize }
-                .map(Int64.init) ?? 0
-            let disk = diskURL.map { Self.allocatedBytes(at: $0) } ?? 0
-            // ext4 home: the image's allocated (sparse-aware) size — O(1),
-            // and it's the real cost on the Mac. virtiofs home: the walk.
-            let home = homeImageURL.map { Self.allocatedBytes(at: $0) }
-                ?? homeURL.map { Self.directoryBytes(at: $0) } ?? 0
-            let mURL = homeImageURL ?? homeURL
-            let mtime = mURL.flatMap { url -> Date? in
-                guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
-                return attrs[.modificationDate] as? Date
-            }
-            return (base, disk, home, mtime)
+        let m = await Task.detached(priority: .utility) {
+            StorageSizes.measure(base: baseURL, disk: diskURL, home: homeURL, homeImage: homeImageURL)
         }.value
+        let (b, d, h) = (m.base, m.disk, m.home)
+        homeMTime = m.homeMTime
         baseBytes = b
         diskBytes = d
         homeBytes = h
-        homeMTime = m
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -5597,36 +5921,6 @@ private struct StorageStackView: View {
         f.timeStyle = .none
         return f
     }()
-
-    // `nonisolated` because these are called from a `Task.detached`
-    // closure that runs off the main actor. The view itself is
-    // MainActor-isolated by virtue of conforming to View, which would
-    // otherwise infer these too.
-    nonisolated private static func allocatedBytes(at url: URL) -> Int64 {
-        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
-        let v = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey])
-        if let n = v?.totalFileAllocatedSize { return Int64(n) }
-        if let n = v?.fileAllocatedSize { return Int64(n) }
-        return 0
-    }
-
-    nonisolated private static func directoryBytes(at url: URL) -> Int64 {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return 0 }
-        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey]
-        guard let it = fm.enumerator(at: url, includingPropertiesForKeys: keys, options: [], errorHandler: nil) else {
-            return 0
-        }
-        var total: Int64 = 0
-        for case let u as URL in it {
-            let v = try? u.resourceValues(forKeys: Set(keys))
-            if v?.isRegularFile == true {
-                if let n = v?.totalFileAllocatedSize { total &+= Int64(n) }
-                else if let n = v?.fileAllocatedSize { total &+= Int64(n) }
-            }
-        }
-        return total
-    }
 
     /// "2 minutes ago", "yesterday", "last week" — short, human.
     private func relativeAge(of date: Date) -> String {
@@ -6656,3 +6950,45 @@ private struct AutomationDefaultsStore {
 }
 
 #endif
+
+#if os(macOS)
+extension ProfileEditorView {
+    /// Attach the per-provider sign-in health Settings › Models shows.
+    func withSubscriptionHealth(_ f: ((ModelProvider) -> SubscriptionLoginHealth?)?) -> ProfileEditorView {
+        var copy = self
+        copy.subscriptionHealth = f
+        return copy
+    }
+}
+#endif
+
+/// A comma/space-separated host list typed as free text. The text is the
+/// field's own state — parsed into `hosts` as you type, never re-formatted
+/// under the cursor (a computed join/split binding ate the "," and " " the
+/// moment they were typed, so a second host ran into the first: #39).
+struct HostListField: View {
+    @Binding var hosts: [String]
+    var prompt: String
+    @State private var text: String = ""
+
+    static func parse(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" })
+            .map { String($0) }
+            .filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        TextField("", text: $text, prompt: Text(prompt))
+            .textFieldStyle(.roundedBorder)
+            .labelsHidden()
+            .onAppear { text = hosts.joined(separator: ", ") }
+            .onChange(of: text) { _, new in
+                let parsed = Self.parse(new)
+                if parsed != hosts { hosts = parsed }
+            }
+            .onChange(of: hosts) { _, new in
+                // Changed elsewhere (not by typing here): show it.
+                if Self.parse(text) != new { text = new.joined(separator: ", ") }
+            }
+    }
+}

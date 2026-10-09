@@ -20,7 +20,12 @@ it automatically on first run via `tools/build-ghostty.sh`, which:
 First build takes a few minutes; afterwards it's a no-op keyed on the pinned
 commit. `swift build` / `swift test` also need `vendor/` present — run
 `./tools/build-ghostty.sh` once if you skip `build.sh`. CI should cache
-`vendor/` (or `~/.cache/bromure-ghostty`) keyed on `tools/ghostty.commit`.
+`~/.cache/bromure-ghostty` (the zig toolchain and source); if it caches
+`vendor/` too, key it on `tools/ghostty.commit` **and** the `BUILD_FLAGS` in
+`tools/build-ghostty.sh` — not on the commit alone — and still run the script
+(or `build.sh`, which always does): it compares the framework's stamp
+(`vendor/GhosttyKit.xcframework/.bromure-ghostty-commit`, commit + flags) and
+rebuilds a stale one, e.g. one built before `-Dsentry=false`.
 The script self-heals two Xcode 26 toolchain issues: SDKs whose tbds dropped
 the `arm64-macos` slice (zig #31658) and libtool dropping zig's misaligned
 archive members; see the comments in `tools/build-ghostty.sh`.

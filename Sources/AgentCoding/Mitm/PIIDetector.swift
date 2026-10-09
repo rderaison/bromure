@@ -68,6 +68,23 @@ actor PIIDetector {
     /// Forget a failed load so a freshly downloaded model is picked up.
     func reload() { loadTask = nil }
 
+    /// Last time the classifier was asked for (load or inference).
+    private var lastUsed = Date.distantPast
+
+    /// Release the ONNX session (+ span cache) when nothing has used it for
+    /// `idle` seconds — called by ClassifierLifecycle when no running
+    /// workspace has PII protection on. The next detect() reloads lazily.
+    /// In-flight scans keep their own reference, so this never races one.
+    @discardableResult
+    func unloadIfIdle(_ idle: TimeInterval) -> Bool {
+        guard loadTask != nil, Date().timeIntervalSince(lastUsed) >= idle else { return false }
+        loadTask = nil
+        cache.removeAll()
+        cacheOrder.removeAll()
+        FileHandle.standardError.write(Data("[pii] Rampart classifier released (idle)\n".utf8))
+        return true
+    }
+
     /// Every PII span in `text` (all labels; the caller applies policy),
     /// sorted and disjoint. `cached` reports whether this exact text was seen
     /// before (history the agent resent).
@@ -77,6 +94,49 @@ actor PIIDetector {
     /// the text a full pass.
     func detect(_ text: String, minScore: Double = PIIDetector.defaultMinScore,
                 useModel: Bool = true) async -> (spans: [PIISpan], cached: Bool) {
+        let d = await detectIncremental(text, minScore: minScore, useModel: useModel)
+        return (d.spans, d.cached)
+    }
+
+    struct Detection {
+        var spans: [PIISpan]
+        /// Every part of the text came from the cache (history re-sent).
+        var cached: Bool
+        /// UTF-16 units the model read for this call (0 when all cached or
+        /// `useModel` was off) — what a request's model budget is charged.
+        var modelUnits: Int
+    }
+
+    /// `detect`, but a long text is scanned in content-defined chunks
+    /// (`PIIText.contentChunks`), each cached on its own: a big string that
+    /// grew or changed in one place since the last turn only has its new
+    /// chunks read by the model. With `useModel` off, chunks seen before still
+    /// return their full (model) result; only unseen ones fall back to the
+    /// recognizers.
+    func detectIncremental(_ text: String, minScore: Double = PIIDetector.defaultMinScore,
+                           useModel: Bool = true) async -> Detection {
+        let chunks = PIIText.contentChunks(text)
+        guard chunks.count > 1 else {
+            let (spans, cached) = await detectWhole(text, minScore: minScore, useModel: useModel)
+            return Detection(spans: spans, cached: cached, modelUnits: cached || !useModel ? 0 : text.utf16.count)
+        }
+        let ns = text as NSString
+        var all: [PIISpan] = []
+        var cachedAll = true
+        var units = 0
+        for r in chunks {
+            let piece = ns.substring(with: NSRange(location: r.lowerBound, length: r.count))
+            let (spans, cached) = await detectWhole(piece, minScore: minScore, useModel: useModel)
+            if !cached {
+                cachedAll = false
+                if useModel { units += r.count }
+            }
+            all += spans.map { var s = $0; s.start += r.lowerBound; s.end += r.lowerBound; return s }
+        }
+        return Detection(spans: PIIText.merge(all), cached: cachedAll, modelUnits: units)
+    }
+
+    private func detectWhole(_ text: String, minScore: Double, useModel: Bool) async -> (spans: [PIISpan], cached: Bool) {
         var hasher = Hasher()
         hasher.combine(text)
         hasher.combine(minScore)
@@ -194,6 +254,7 @@ actor PIIDetector {
     // MARK: Loading
 
     private func loaded() async -> Loaded? {
+        lastUsed = Date()
         if let t = loadTask { return await t.value }
         let dir = modelDirectory
         let t = Task { () -> Loaded? in

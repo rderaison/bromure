@@ -20,11 +20,133 @@ struct DelegationRefusal: Error, CustomStringConvertible {
     var description: String { why }
 }
 
+/// A connected Bromure Agent Host (agents in tmux on a plain Mac, mirrored
+/// through a fat-client window): its sessions take part in delegation as
+/// fully as this Mac's own — the records live here, and what the engine
+/// would do in a guest (run a command, move a file, type a notice, resume,
+/// archive, start a delegate) goes to that Mac over its link.
+@MainActor
+protocol AgentHostLink: AnyObject {
+    /// The machine id its sessions carry as `profileID`.
+    var agentHostID: UUID? { get }
+    var hostName: String { get }
+    var hostSessions: AgentSessionStore { get }
+    /// Where the Linux guest's /home/ubuntu lives on this host (an attached
+    /// Mac's own home); nil when paths are the guest's as is.
+    var hostHome: String? { get }
+    func hostExec(_ command: String, timeout: Int) async throws -> String
+    func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any]
+    func hostTabStatus(window: Int) -> AgentStatus?
+    func hostSessionCommand(_ id: UUID, _ action: String, _ body: [String: Any])
+    /// Any other call to the host's control API (branches: git-state,
+    /// worktree, branch-*), with its reply.
+    func hostControl(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])?
+    func hostStartSession(tool: Profile.Tool, cwd: String, message: String) async -> UUID?
+}
+
+struct HostRefusal: Error { let message: String }
+
+extension AgentHostLink {
+    /// A branch session off `parent` on the host (its Worktrees.make).
+    func hostStartWorktree(from parent: UUID, name: String, tool: Profile.Tool, message: String?,
+                           initGit: Bool = false, base: String? = nil) async -> Result<UUID, HostRefusal> {
+        var body: [String: Any] = ["name": name, "tool": tool.rawValue, "initGit": initGit]
+        if let message, !message.isEmpty { body["message"] = message }
+        if let base, !base.isEmpty { body["base"] = base }
+        guard let r = await hostControl("POST", "/agent-sessions/\(parent.uuidString)/worktree", body) else {
+            return .failure(HostRefusal(message: "\(hostName) didn't answer"))
+        }
+        if let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) { return .success(id) }
+        return .failure(HostRefusal(message: r.json["error"] as? String ?? "status \(r.status)"))
+    }
+
+    /// The host's GitFolderState for a session's folder.
+    func hostGitState(_ session: UUID) async -> GitFolderState? {
+        guard let r = await hostControl("POST", "/agent-sessions/git-state", ["id": session.uuidString]),
+              r.status == 200 else { return nil }
+        return GitFolderState(json: r.json)
+    }
+}
+
+/// This Mac's sessions and the connected agent hosts', as one set — what
+/// the engine (and the MCP server, through `engine.sessions`) looks up.
+@MainActor
+struct DelegationSessions {
+    let local: AgentSessionStore
+    let hosts: [AgentHostLink]
+
+    var sessions: [AgentSession] { local.sessions + hosts.flatMap(\.hostSessions.sessions) }
+
+    func session(_ id: UUID) -> AgentSession? {
+        local.session(id) ?? hosts.lazy.compactMap { $0.hostSessions.session(id) }.first
+    }
+
+    func session(profileID: UUID, windowIndex: Int) -> AgentSession? {
+        if let h = host(for: profileID) { return h.hostSessions.session(profileID: profileID, windowIndex: windowIndex) }
+        return local.session(profileID: profileID, windowIndex: windowIndex)
+    }
+
+    func host(for profileID: UUID) -> AgentHostLink? {
+        hosts.first { $0.agentHostID == profileID }
+    }
+
+    /// A host's session is its host's record: the delegation links it
+    /// carries are sent there (the mirror catches up on the next poll).
+    func mutate(_ id: UUID, _ change: (inout AgentSession) -> Void) {
+        if local.session(id) != nil { local.mutate(id, change); return }
+        guard let h = hosts.first(where: { $0.hostSessions.session(id) != nil }),
+              var s = h.hostSessions.session(id) else { return }
+        change(&s)
+        var body: [String: Any] = [:]
+        if let p = s.parentSessionID { body["parentSessionID"] = p.uuidString }
+        if let d = s.delegationID { body["delegationID"] = d.uuidString }
+        h.hostSessionCommand(id, "delegation-link", body)
+    }
+
+    /// Nicknames are unique across this host and its machines: `raw` for
+    /// `id`, checked against every store.
+    func checkNickname(_ id: UUID, _ raw: String) -> AgentSessionStore.NicknameVerdict {
+        let here = local.checkNickname(id, raw)
+        if here != .ok { return here }
+        for h in hosts {
+            let there = h.hostSessions.checkNickname(id, raw)
+            if there != .ok { return there }
+        }
+        return .ok
+    }
+
+    /// Name a session wherever it lives (a machine's is named on the
+    /// machine). The refusal, else nil.
+    @discardableResult
+    func setNickname(_ id: UUID, _ raw: String?, reclaim: Bool = false) -> String? {
+        // Taken on a machine (a name there can't be reclaimed from here).
+        if let raw {
+            for h in hosts where h.hostSessions.session(id) == nil {
+                switch h.hostSessions.checkNickname(id, raw) {
+                case .ok: break
+                case .refused(let why), .reclaim(let why): return why
+                }
+            }
+        }
+        if local.session(id) != nil { return local.setNickname(id, raw, reclaim: reclaim) }
+        guard let h = hosts.first(where: { $0.hostSessions.session(id) != nil }) else {
+            return NSLocalizedString("Unknown session.", comment: "nickname")
+        }
+        if let raw, case .refused(let why) = local.checkNickname(id, raw) { return why }
+        h.hostSessionCommand(id, "nickname", ["nickname": raw ?? "", "reclaim": reclaim])
+        h.hostSessions.mutate(id) { $0.nickname = raw.flatMap(DelegationNotice.normalizeNickname) }
+        return nil
+    }
+}
+
 @MainActor
 final class DelegationEngine {
     let store: DelegationStore
-    let sessions: AgentSessionStore
+    let localSessions: AgentSessionStore
     let sessionEngine: AgentSessionEngine
+    /// The connected Bromure Agent Hosts (see AgentHostLink).
+    var agentHostLinks: @MainActor () -> [AgentHostLink] = { [] }
+    var sessions: DelegationSessions { DelegationSessions(local: localSessions, hosts: agentHostLinks()) }
     private weak var delegate: ACAppDelegate?
 
     /// Scans a text crossing between agents; a non-nil return is the snippet
@@ -56,18 +178,35 @@ final class DelegationEngine {
     /// machine: message id → local paths (the record's paths are the far
     /// host's).
     private var remoteLanded: [UUID: [String]] = [:]
+    /// Sessions a notice is being typed into right now.
+    private var typingNotice: Set<UUID> = []
     private var landing: Set<UUID> = []
+
+    /// The Coding Tasks board as a requester: it hands a task to a session
+    /// that already exists (or to a room's Switchboard) as a request. It
+    /// has no session; what comes back to it goes to `onBoardMessage`.
+    static let boardSessionID = UUID(uuidString: "B0A2D000-0000-4000-8000-00000000B0A2")!
+    static let boardLabel = "the Coding Tasks board"
+    /// A message for the board (an ask, a report, a delivery, a host note).
+    var onBoardMessage: (@MainActor (Delegation, DelegationMessage) -> Void)?
 
     /// A child may delegate in turn, this deep.
     static let maxDepth = 3
     /// Open delegations one session may have at once.
     static let maxOpenChildren = 8
     static let defaultWait: TimeInterval = 50
-    static let waitCap: TimeInterval = 600
+    /// A blocking call (wait, request, ask) returns by this, empty-handed
+    /// if nothing came, for the agent to call again: MCP clients give up
+    /// on a call at 60 s (Kimi, Codex) — a message a given-up call took
+    /// was marked read and never seen.
+    static let waitCap: TimeInterval = 50
     /// Files a message may carry between machines: this many, this big
-    /// all together.
+    /// all together. They stream through the host a chunk at a time, so the
+    /// cap is about disk and patience, not memory: a 2 GB video travels.
     static let transferMaxFiles = 20
-    static let transferCap: Int64 = 64 * 1024 * 1024
+    static let transferCap: Int64 = 4 * 1024 * 1024 * 1024
+    /// Copying, tarring or unpacking that much on a guest disk.
+    static let bulkTimeout = 1800
     static let transferChunk = 6 * 1024 * 1024
     /// Where the host lands files on the recipient's machine.
     static let inboxBase = "/home/ubuntu/.bromure/inbox"
@@ -90,7 +229,7 @@ final class DelegationEngine {
     init(store: DelegationStore, sessions: AgentSessionStore,
          sessionEngine: AgentSessionEngine, delegate: ACAppDelegate?) {
         self.store = store
-        self.sessions = sessions
+        self.localSessions = sessions
         self.sessionEngine = sessionEngine
         self.delegate = delegate
         ticker = Task { [weak self] in
@@ -113,8 +252,56 @@ final class DelegationEngine {
         return only.contains(to)
     }
 
+    /// What a reach refusal tells the agent to pass on: where the user
+    /// opens it. New workspaces reach no other one until the user does.
+    nonisolated static func howToReach(_ target: String, from mine: String) -> String {
+        "Ask the user to open “\(mine)” settings › General › Reach and tick “\(target)” "
+            + "(or turn on “Every workspace”), then try again."
+    }
+
     func workspaceName(_ id: UUID) -> String {
-        profiles().first { $0.id == id }?.name ?? ""
+        if let h = sessions.host(for: id) { return h.hostName }
+        return profiles().first { $0.id == id }?.name ?? ""
+    }
+
+    // MARK: Machines (a workspace's VM, or an agent host)
+
+    func guestExec(profileID: UUID, command: String, timeout: Int = 30) async throws -> String {
+        if let h = sessions.host(for: profileID) { return try await h.hostExec(command, timeout: timeout) }
+        guard let delegate else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        return try await delegate.guestExec(profileID: profileID, command: command, timeout: timeout)
+    }
+
+    func guestFileOp(profileID: UUID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
+        if let h = sessions.host(for: profileID) { return try await h.hostFileOp(op, timeout: timeout) }
+        guard let delegate else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        return try await delegate.guestFileOp(profileID: profileID, op: op, timeout: timeout)
+    }
+
+    /// An agent host is up while its link is (it has no VM to boot).
+    func ensureUp(_ profileID: UUID, quietly: Bool) async -> Bool {
+        if sessions.host(for: profileID) != nil { return true }
+        return await sessionEngine.ensureUp(profileID, quietly: quietly)
+    }
+
+    func resume(_ id: UUID, message: String?, quietly: Bool) {
+        let all = sessions
+        if let s = all.session(id), let h = all.host(for: s.profileID) {
+            var body: [String: Any] = [:]
+            if let message { body["message"] = message }
+            h.hostSessionCommand(id, "resume", body)
+            return
+        }
+        sessionEngine.resume(id, message: message, quietly: quietly)
+    }
+
+    func archive(_ id: UUID) {
+        let all = sessions
+        if let s = all.session(id), let h = all.host(for: s.profileID) {
+            h.hostSessionCommand(id, "archive", [:])
+            return
+        }
+        sessionEngine.archive(id)
     }
 
     /// The sessions `me` may talk to: not put away, in a workspace the
@@ -140,7 +327,8 @@ final class DelegationEngine {
         if let nick, let other = sessions.sessions.first(where: { $0.nickname?.lowercased() == nick && !$0.isDeleted }) {
             if other.id == me.id { throw DelegationRefusal("@\(other.nickname ?? nick) is you.") }
             if other.isArchived { throw DelegationRefusal("@\(other.nickname ?? nick) is archived — the user has to bring it back first.") }
-            throw DelegationRefusal("@\(other.nickname ?? nick) is in workspace “\(workspaceName(other.profileID))”, which this workspace's settings don't let you reach.")
+            throw DelegationRefusal("@\(other.nickname ?? nick) is in workspace “\(workspaceName(other.profileID))”, which isn't reachable from this workspace. "
+                + Self.howToReach(workspaceName(other.profileID), from: workspaceName(me.profileID)))
         }
         throw DelegationRefusal("No session named “\(raw)” — list_peers shows who you can reach.")
     }
@@ -157,7 +345,8 @@ final class DelegationEngine {
             }()
         guard let hit else { throw DelegationRefusal("No workspace named “\(key)” — list_peers names the ones you can reach.") }
         guard canReach(from: me.profileID, to: hit.id) else {
-            throw DelegationRefusal("Workspace “\(hit.name)” isn't reachable from this one — its settings say which workspaces agents here may reach.")
+            throw DelegationRefusal("Workspace “\(hit.name)” isn't reachable from this workspace. "
+                + Self.howToReach(hit.name, from: workspaceName(me.profileID)))
         }
         return hit
     }
@@ -186,8 +375,14 @@ final class DelegationEngine {
     func remotePeers(from me: AgentSession) -> [(RemoteDelegationLink, AgentSession)] {
         guard remotePeersAllowed(from: me) else { return [] }
         var out: [(RemoteDelegationLink, AgentSession)] = []
+        // A session this host already has (its own, an attached machine's —
+        // a host mirroring itself, or a remote that mirrors this one) is
+        // reached here, not twice through a tunnel; nor listed twice.
+        var seen = Set(sessions.sessions.map(\.id))
+        seen.insert(me.id)
         for link in remoteLinks() {
             for s in link.remoteSessions.sessions where !s.isArchived && !s.isDeleted && s.folderMissing != true {
+                guard seen.insert(s.id).inserted else { continue }
                 out.append((link, s))
             }
         }
@@ -210,7 +405,7 @@ final class DelegationEngine {
             }
             if let nick, !remotePeersAllowed(from: me),
                let far = remoteLinks().first(where: { l in l.remoteSessions.sessions.contains { $0.nickname?.lowercased() == nick && !$0.isDeleted } }) {
-                throw DelegationRefusal("@\(nick) is on “\(far.hostName)” — this workspace's settings keep its agents to the workspaces they name, so other hosts are out of reach.")
+                throw DelegationRefusal("@\(nick) is on “\(far.hostName)” — this workspace's settings keep its agents to the workspaces they name, so other hosts are out of reach. Tell the user: in the settings of workspace “\(workspaceName(me.profileID))”, General › Reach, turning on “Every workspace” lets its agents reach other hosts too.")
             }
             throw local
         }
@@ -270,6 +465,8 @@ final class DelegationEngine {
         // delegation on a technicality; an explicit worktree: true still
         // insists (and fails with the reason). Another workspace has no
         // folder of the parent's to branch: the child gets one of its own.
+        // A native machine makes its worktrees itself (Worktrees.swift).
+        let targetHost = sessions.host(for: targetProfileID)
         let useWorktree: Bool
         if elsewhere {
             useWorktree = false
@@ -281,7 +478,17 @@ final class DelegationEngine {
             useWorktree = false
         }
         let childID: UUID?
-        if useWorktree {
+        if let targetHost, useWorktree {
+            switch await targetHost.hostStartWorktree(from: parentID, name: title, tool: tool, message: opening) {
+            case .success(let id): childID = id
+            case .failure(let why): throw DelegationRefusal("“\(targetHost.hostName)” couldn't branch your folder: \(why.message)")
+            }
+        } else if let targetHost {
+            childID = await targetHost.hostStartSession(tool: tool, cwd: elsewhere ? "~" : parent.cwd, message: opening)
+            guard childID != nil else {
+                throw DelegationRefusal("“\(targetHost.hostName)” couldn't start the delegate.")
+            }
+        } else if useWorktree {
             childID = sessionEngine.startWorktree(from: parentID, name: title, tool: tool, message: opening)
         } else {
             childID = sessionEngine.start(.init(profileID: targetProfileID, tool: tool,
@@ -299,7 +506,13 @@ final class DelegationEngine {
         briefMessage.readAt = briefMessage.at      // the child opens with it
         d.messages = [briefMessage]
         store.upsert(d)
-        sessions.mutate(childID) { $0.parentSessionID = parentID; $0.delegationID = d.id }
+        if let targetHost {
+            // Not in the mirror yet: tell the host directly.
+            targetHost.hostSessionCommand(childID, "delegation-link", [
+                "parentSessionID": parentID.uuidString, "delegationID": d.id.uuidString])
+        } else {
+            sessions.mutate(childID) { $0.parentSessionID = parentID; $0.delegationID = d.id }
+        }
         audit(parent.profileID, auditData(title: title, kind: .brief, from: .parent, to: .child, text: brief))
         BACDebug.log("delegation", "“\(parent.title)” delegated “\(title)” (\(tool.rawValue)\(useWorktree ? ", worktree" : "")\(elsewhere ? ", in \(target?.name ?? "")" : ""))")
         return d
@@ -351,6 +564,36 @@ final class DelegationEngine {
         return d
     }
 
+    /// The board hands a coding task to `peerID` — an existing session or a
+    /// room's Switchboard. Same record and notice as an agent's request; the
+    /// replies come back through `onBoardMessage`. Scanned like any text
+    /// crossing to an agent.
+    func requestFromBoard(to peerID: UUID, title: String, text: String) async throws -> Delegation {
+        guard let peer = sessions.session(peerID), !peer.isDeleted else {
+            throw DelegationRefusal("That session no longer exists.")
+        }
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw DelegationRefusal("Nothing to ask.") }
+        if let snippet = await scan(text) {
+            audit(peer.profileID, auditData(title: title, kind: .brief, from: .user, to: .child,
+                                            text: text, blocked: snippet))
+            throw DelegationRefusal("The task was withheld: it reads like a prompt injection (“\(DelegationNotice.oneLine(snippet, max: 120))”). Reword the brief.")
+        }
+        var d = Delegation(profileID: peer.profileID, parentSessionID: Self.boardSessionID,
+                           childSessionID: peer.id,
+                           title: DelegationNotice.oneLine(title, max: 60), brief: text, kind: .request)
+        d.parentLabel = Self.boardLabel
+        d.childLabel = label(peer)
+        d.status = .working
+        let m = DelegationMessage(kind: .brief, from: .user, to: .child, text: text)
+        d.messages = [m]
+        store.upsert(d)
+        audit(peer.profileID, auditData(title: d.title, kind: .brief, from: .user, to: .child, text: text))
+        BACDebug.log("delegation", "the board asked \(label(peer)): \(d.title)")
+        notify(peer.id, d, m)
+        return d
+    }
+
     /// A request to a session on another host: the record is opened THERE
     /// (where the peer's tools run), files go up through the tunnel into
     /// the peer's inbox, then the host hands the brief to the peer. What
@@ -395,11 +638,11 @@ final class DelegationEngine {
     /// inbox on a remote host, chunk by chunk through the tunnel.
     private func uploadToRemote(_ link: RemoteDelegationLink, delegation id: UUID,
                                 from: AgentSession, path raw: String) async throws {
-        guard let delegate else { throw DelegationRefusal("Files can't travel without the machines.") }
+        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
         let src = Self.resolve(raw, cwd: from.cwd)
         let name = (src as NSString).lastPathComponent
         guard !name.isEmpty, name != ".", name != ".." else { throw DelegationRefusal("Can't send “\(raw)”.") }
-        let probe = ((try? await delegate.guestExec(
+        let probe = ((try? await self.guestExec(
             profileID: from.profileID,
             command: "if [ -d \(Self.q(src)) ]; then echo dir; elif [ -f \(Self.q(src)) ]; then stat -c %s \(Self.q(src)); else echo missing; fi",
             timeout: 15)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -408,23 +651,26 @@ final class DelegationEngine {
         var sendName = name
         var extract = false
         if probe == "dir" {
+            if let size = await folderBytes(from.profileID, src), size > Self.transferCap {
+                throw refuseFolder(raw, size)
+            }
             readPath = "/tmp/bromure-xfer-\(DelegationNotice.shortID(UUID())).tgz"
             sendName = name + ".tgz"
             extract = true
-            _ = try await delegate.guestExec(
+            _ = try await self.guestExec(
                 profileID: from.profileID,
                 command: "tar -C \(Self.q((src as NSString).deletingLastPathComponent)) -czf \(Self.q(readPath)) \(Self.q(name))",
-                timeout: 180)
+                timeout: Self.bulkTimeout)
         }
         defer {
             if extract {
-                Task { _ = try? await delegate.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(readPath))", timeout: 10) }
+                Task { _ = try? await self.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(readPath))", timeout: 10) }
             }
         }
         var offset: Int64 = 0
         var first = true
         while true {
-            let resp = try await delegate.guestFileOp(
+            let resp = try await self.guestFileOp(
                 profileID: from.profileID,
                 op: ["op": "read", "path": readPath, "offset": offset, "length": Self.remoteChunk], timeout: 60)
             guard let b64 = resp["data"] as? String, let data = Data(base64Encoded: b64) else {
@@ -484,29 +730,29 @@ final class DelegationEngine {
     /// the peer's inbox; `extract` unpacks a tarball once complete.
     func receiveRemoteFile(delegationID: UUID, name: String, data: Data, append: Bool, extract: Bool) async throws {
         guard let d = store.delegation(delegationID), d.parentRemote != nil,
-              let peer = sessions.session(d.childSessionID), let delegate else {
+              let peer = sessions.session(d.childSessionID), delegate != nil else {
             throw DelegationRefusal("Unknown request.")
         }
         let safe = (name as NSString).lastPathComponent
         guard !safe.isEmpty, safe != ".", safe != "..", !name.contains("/") else { throw DelegationRefusal("Bad file name.") }
-        guard await sessionEngine.ensureUp(peer.profileID, quietly: true) else {
+        guard await ensureUp(peer.profileID, quietly: true) else {
             throw DelegationRefusal("The peer's workspace didn't start in time.")
         }
         let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))"
         let target = dest + "/" + safe
         if !append {
-            _ = try await delegate.guestExec(profileID: peer.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
+            _ = try await self.guestExec(profileID: peer.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
         }
         let soFar = (pendingRemoteFiles[delegationID] ?? []).reduce(Int64(0)) { $0 + Int64($1.utf8.count) }
         _ = soFar
-        _ = try await delegate.guestFileOp(
+        _ = try await self.guestFileOp(
             profileID: peer.profileID,
             op: ["op": "write", "path": target, "data": data.base64EncodedString(), "append": append], timeout: 60)
         if extract, data.count < Self.remoteChunk {
             // The last chunk of a tarball: unpack it where it landed.
-            _ = try await delegate.guestExec(
+            _ = try await self.guestExec(
                 profileID: peer.profileID,
-                command: "tar -xzf \(Self.q(target)) -C \(Self.q(dest)) && rm -f \(Self.q(target))", timeout: 180)
+                command: "tar -xzf \(Self.q(target)) -C \(Self.q(dest)) && rm -f \(Self.q(target))", timeout: Self.bulkTimeout)
             let unpacked = dest + "/" + String(safe.dropLast(4))
             if !(pendingRemoteFiles[delegationID] ?? []).contains(unpacked) {
                 pendingRemoteFiles[delegationID, default: []].append(unpacked)
@@ -577,13 +823,13 @@ final class DelegationEngine {
     /// parent, read off the peer's machine — only paths a message names.
     func readRemoteFile(delegationID: UUID, path: String, offset: Int64, length: Int) async throws -> [String: Any] {
         guard let d = store.delegation(delegationID), d.parentRemote != nil,
-              let peer = sessions.session(d.childSessionID), let delegate else {
+              let peer = sessions.session(d.childSessionID), delegate != nil else {
             throw DelegationRefusal("Unknown request.")
         }
         guard d.messages.contains(where: { $0.to == .parent && ($0.files ?? []).contains(path) }) else {
             throw DelegationRefusal("Not a file of this request.")
         }
-        return try await delegate.guestFileOp(
+        return try await self.guestFileOp(
             profileID: peer.profileID,
             op: ["op": "read", "path": path, "offset": offset, "length": min(max(length, 1), Self.remoteChunk)],
             timeout: 60)
@@ -624,10 +870,10 @@ final class DelegationEngine {
     /// the parent's inbox for that request; the local paths (the far ones
     /// where a copy failed, so nothing is silently lost).
     private func landRemoteFiles(_ link: RemoteDelegationLink, _ d: Delegation, _ m: DelegationMessage) async -> [String] {
-        guard let delegate, let parent = sessions.session(d.parentSessionID), let files = m.files else { return m.files ?? [] }
+        guard delegate != nil, let parent = sessions.session(d.parentSessionID), let files = m.files else { return m.files ?? [] }
         let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))"
-        guard await sessionEngine.ensureUp(parent.profileID, quietly: true),
-              (try? await delegate.guestExec(profileID: parent.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)) != nil
+        guard await ensureUp(parent.profileID, quietly: true),
+              (try? await self.guestExec(profileID: parent.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)) != nil
         else { return files }
         var out: [String] = []
         for far in files {
@@ -639,7 +885,7 @@ final class DelegationEngine {
             while true {
                 guard let chunk = try? await link.remoteDownload(delegation: d.id, path: far, offset: offset, length: Self.remoteChunk) else { ok = false; break }
                 if first || !chunk.data.isEmpty {
-                    guard (try? await delegate.guestFileOp(
+                    guard (try? await self.guestFileOp(
                         profileID: parent.profileID,
                         op: ["op": "write", "path": target, "data": chunk.data.base64EncodedString(), "append": !first],
                         timeout: 60)) != nil else { ok = false; break }
@@ -687,9 +933,9 @@ final class DelegationEngine {
     /// Is the session's folder inside a git checkout? Unknowable without
     /// the machine (no delegate, in tests): then no.
     private func isGitRepository(_ s: AgentSession) async -> Bool {
-        guard let delegate else { return false }
+        guard delegate != nil || sessions.host(for: s.profileID) != nil else { return false }
         let path = ScheduledAutomationEngine.guestPath(s.cwd)
-        let out = (try? await delegate.guestExec(
+        let out = (try? await self.guestExec(
             profileID: s.profileID,
             command: "git -C \(Self.q(path)) rev-parse --is-inside-work-tree 2>/dev/null", timeout: 15)) ?? ""
         return out.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
@@ -757,6 +1003,15 @@ final class DelegationEngine {
              (.user, .answer), (.user, .steer), (.user, .cancel): to = .child
         case (.host, .note): to = .parent
         default: throw DelegationRefusal("A \(from.rawValue) can't send a \(kind.rawValue).")
+        }
+        // A session the user archived is done: nothing an agent sends may
+        // bring it back (a follow-up on an old thread used to resume it).
+        // A cancel is still recorded — it asks nothing of it.
+        if kind != .cancel, kind != .note,
+           let recipient = sessions.session(to == .parent ? d.parentSessionID : d.childSessionID),
+           recipient.isArchived || recipient.isDeleted {
+            let name = recipient.nickname.map { "@" + $0 } ?? "“\(recipient.title)”"
+            throw DelegationRefusal("\(name) is \(recipient.isDeleted ? "deleted" : "archived") — the user has to bring it back first.")
         }
         var m = DelegationMessage(kind: kind, from: from, to: to, text: text, answers: answering)
         if from != .host, let snippet = await scan(text) {
@@ -910,7 +1165,7 @@ final class DelegationEngine {
     private func retireChild(_ d: Delegation) {
         guard !d.isRequest,
               let child = sessions.session(d.childSessionID), !child.isDeleted, !child.isArchived else { return }
-        sessionEngine.archive(d.childSessionID)
+        archive(d.childSessionID)
     }
 
     // MARK: Inbox
@@ -940,7 +1195,9 @@ final class DelegationEngine {
     /// or any of its), at most `timeout`; what arrived, taken. Empty on a
     /// timeout.
     func wait(for sessionID: UUID, in delegationID: UUID? = nil,
-              timeout: TimeInterval) async -> [(Delegation, DelegationMessage)] {
+              timeout: TimeInterval,
+              stillWanted: @MainActor () -> Bool = { true }) async -> [(Delegation, DelegationMessage)] {
+        guard stillWanted() else { return [] }
         let now = inbox(for: sessionID, in: delegationID)
         if !now.isEmpty { return now }
         let t = min(max(timeout, 1), Self.waitCap)
@@ -961,9 +1218,25 @@ final class DelegationEngine {
             await waiter.wait()
             timer.cancel()
             waiters[sessionID]?.removeAll { $0 === waiter }
+            // Its client gave up on the call: take nothing for it.
+            guard stillWanted() else { return [] }
             let got = inbox(for: sessionID, in: delegationID)
             if !got.isEmpty || Date() >= deadline { return got }
         }
+    }
+
+    /// Messages a call took that never reached the agent (its client gave
+    /// up on the call, or the connection was gone): unread again, for the
+    /// next read_inbox or wait. Only this host's records — a remote host's
+    /// copy was already told.
+    /// Wake the session's blocked waits (one was abandoned: it ends now,
+    /// taking nothing).
+    func interruptWaits(for sessionID: UUID) { wake(sessionID) }
+
+    func untake(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        store.markUnread(ids)
+        BACDebug.log("delegation", "\(ids.count) message(s) back to unread: their call was abandoned")
     }
 
     private func wake(_ sessionID: UUID) {
@@ -979,15 +1252,15 @@ final class DelegationEngine {
     /// Returns the paths as the recipient sees them. On one machine it is a
     /// plain copy. The recipient's workspace is started if it's off.
     func transfer(_ paths: [String], from: AgentSession, toProfile: UUID, inbox: String) async throws -> [String] {
-        guard let delegate else { throw DelegationRefusal("Files can't travel without the machines.") }
+        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
         guard paths.count <= Self.transferMaxFiles else {
             throw DelegationRefusal("At most \(Self.transferMaxFiles) files per message — send a folder, or an archive.")
         }
-        guard await sessionEngine.ensureUp(toProfile, quietly: true) else {
+        guard await ensureUp(toProfile, quietly: true) else {
             throw DelegationRefusal("The recipient's workspace didn't start in time.")
         }
         let dest = "\(Self.inboxBase)/\(inbox)"
-        _ = try await delegate.guestExec(profileID: toProfile, command: "mkdir -p \(Self.q(dest))", timeout: 15)
+        _ = try await self.guestExec(profileID: toProfile, command: "mkdir -p \(Self.q(dest))", timeout: 15)
         var out: [String] = []
         var total: Int64 = 0
         for raw in paths {
@@ -995,7 +1268,7 @@ final class DelegationEngine {
             let name = (src as NSString).lastPathComponent
             guard !name.isEmpty, name != ".", name != ".." else { throw DelegationRefusal("Can't send “\(raw)”.") }
             let target = dest + "/" + name
-            let probe = ((try? await delegate.guestExec(
+            let probe = ((try? await self.guestExec(
                 profileID: from.profileID,
                 command: "if [ -d \(Self.q(src)) ]; then echo dir; elif [ -f \(Self.q(src)) ]; then stat -c %s \(Self.q(src)); else echo missing; fi",
                 timeout: 15)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1003,24 +1276,27 @@ final class DelegationEngine {
                 throw DelegationRefusal("No such file on your machine: \(raw)")
             }
             if from.profileID == toProfile {
-                _ = try await delegate.guestExec(profileID: toProfile,
-                                                 command: "cp -a \(Self.q(src)) \(Self.q(target))", timeout: 120)
+                _ = try await self.guestExec(profileID: toProfile,
+                                                 command: "cp -a \(Self.q(src)) \(Self.q(target))", timeout: Self.bulkTimeout)
                 out.append(target)
                 continue
             }
             if probe == "dir" {
+                if let size = await folderBytes(from.profileID, src), size > Self.transferCap - total {
+                    throw refuseFolder(raw, size)
+                }
                 let tgz = "/tmp/bromure-xfer-\(DelegationNotice.shortID(UUID())).tgz"
                 let parent = (src as NSString).deletingLastPathComponent
-                _ = try await delegate.guestExec(
+                _ = try await self.guestExec(
                     profileID: from.profileID,
-                    command: "tar -C \(Self.q(parent)) -czf \(Self.q(tgz)) \(Self.q(name))", timeout: 180)
+                    command: "tar -C \(Self.q(parent)) -czf \(Self.q(tgz)) \(Self.q(name))", timeout: Self.bulkTimeout)
                 total += try await copyFile(from: from.profileID, path: tgz, to: toProfile, path: target + ".tgz",
                                             budgetLeft: Self.transferCap - total)
-                _ = try? await delegate.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(tgz))", timeout: 10)
-                _ = try await delegate.guestExec(
+                _ = try? await self.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(tgz))", timeout: 10)
+                _ = try await self.guestExec(
                     profileID: toProfile,
                     command: "tar -xzf \(Self.q(target + ".tgz")) -C \(Self.q(dest)) && rm -f \(Self.q(target + ".tgz"))",
-                    timeout: 180)
+                    timeout: Self.bulkTimeout)
             } else {
                 total += try await copyFile(from: from.profileID, path: src, to: toProfile, path: target,
                                             budgetLeft: Self.transferCap - total)
@@ -1031,33 +1307,82 @@ final class DelegationEngine {
         return out
     }
 
-    /// One file, chunk by chunk through the host; the bytes moved.
+    /// One file, chunk by chunk through the host; the bytes moved. The next
+    /// chunk is read while this one is written, so a big file moves at
+    /// the slower of the two sides rather than their sum.
     private func copyFile(from srcProfile: UUID, path src: String, to dstProfile: UUID, path dst: String,
                           budgetLeft: Int64) async throws -> Int64 {
-        guard let delegate else { throw DelegationRefusal("Files can't travel without the machines.") }
-        var offset: Int64 = 0
-        var first = true
-        while true {
-            let resp = try await delegate.guestFileOp(
+        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
+        func read(_ offset: Int64) async throws -> (b64: String, count: Int, size: Int64, eof: Bool) {
+            let resp = try await self.guestFileOp(
                 profileID: srcProfile,
                 op: ["op": "read", "path": src, "offset": offset, "length": Self.transferChunk], timeout: 60)
-            guard let b64 = resp["data"] as? String, let data = Data(base64Encoded: b64) else {
+            // Counted from the encoding: decoding megabytes just to count
+            // them is main-actor time wasted, chunk after chunk.
+            guard let b64 = resp["data"] as? String, let count = Self.decodedCount(b64) else {
                 throw DelegationRefusal("Couldn't read \(src) on your machine.")
             }
             let size = (resp["size"] as? Int64) ?? Int64((resp["size"] as? Int) ?? 0)
-            guard size <= budgetLeft else {
-                throw DelegationRefusal("\(src) is \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) — up to \(ByteCountFormatter.string(fromByteCount: Self.transferCap, countStyle: .file)) travels per message.")
+            return (b64, count, size, (resp["eof"] as? Bool) == true || count == 0)
+        }
+        var chunk = try await read(0)
+        // Refuse before moving a byte: too big for the message, or for
+        // the recipient's disk.
+        guard chunk.size <= budgetLeft else {
+            throw DelegationRefusal("\(src) is \(ByteCountFormatter.string(fromByteCount: chunk.size, countStyle: .file)) — up to \(ByteCountFormatter.string(fromByteCount: Self.transferCap, countStyle: .file)) travels per message.")
+        }
+        let dir = (dst as NSString).deletingLastPathComponent
+        if let free = Int64(((try? await self.guestExec(
+                profileID: dstProfile,
+                command: "df -Pk \(Self.q(dir)) 2>/dev/null | awk 'NR==2{printf \"%.0f\\n\", $4*1024}'", timeout: 15)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)),
+           free < chunk.size + 64 * 1024 * 1024 {
+            throw DelegationRefusal("The recipient's machine has \(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free — not enough for \(ByteCountFormatter.string(fromByteCount: chunk.size, countStyle: .file)).")
+        }
+        var offset: Int64 = 0
+        var first = true
+        while true {
+            let at = offset + Int64(chunk.count)
+            let next: Task<(b64: String, count: Int, size: Int64, eof: Bool), Error>? =
+                chunk.eof ? nil : Task { try await read(at) }
+            if first || chunk.count > 0 {
+                do {
+                    _ = try await self.guestFileOp(
+                        profileID: dstProfile,
+                        op: ["op": "write", "path": dst, "data": chunk.b64, "append": !first], timeout: 60)
+                } catch {
+                    next?.cancel()
+                    throw error
+                }
             }
-            if first || !data.isEmpty {
-                _ = try await delegate.guestFileOp(
-                    profileID: dstProfile,
-                    op: ["op": "write", "path": dst, "data": b64, "append": !first], timeout: 60)
-            }
-            offset += Int64(data.count)
+            offset = at
             first = false
-            if (resp["eof"] as? Bool) == true || data.isEmpty { break }
+            guard let next else { break }
+            chunk = try await next.value
         }
         return offset
+    }
+
+    /// Bytes a padded base64 string decodes to; nil when it isn't one.
+    static func decodedCount(_ b64: String) -> Int? {
+        let n = b64.utf8.count
+        guard n % 4 == 0 else { return nil }
+        let pad = b64.utf8.suffix(2).filter { $0 == UInt8(ascii: "=") }.count
+        return n / 4 * 3 - pad
+    }
+
+    /// A folder's size in bytes on a machine, before tarring it (nil: unknown).
+    private func folderBytes(_ profile: UUID, _ path: String) async -> Int64? {
+        guard delegate != nil else { return nil }
+        // `du -sk` (KiB), not GNU's `-sb`: an attached Mac runs BSD du.
+        let out = (try? await self.guestExec(
+            profileID: profile,
+            command: "du -sk \(Self.q(path)) 2>/dev/null | awk '{printf \"%.0f\\n\", $1*1024}'", timeout: 120)) ?? ""
+        return Int64(out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func refuseFolder(_ raw: String, _ size: Int64) -> DelegationRefusal {
+        DelegationRefusal("\(raw) is \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) — up to \(ByteCountFormatter.string(fromByteCount: Self.transferCap, countStyle: .file)) travels per message.")
     }
 
     /// A path as the sender means it: absolute as is, "~" its home, else
@@ -1094,6 +1419,14 @@ final class DelegationEngine {
     /// as a one-line notice — now if the prompt can take it, on a later
     /// tick if not, through a resume if the agent has ended.
     private func notify(_ sessionID: UUID, _ d: Delegation, _ m: DelegationMessage) {
+        if sessionID == Self.boardSessionID {
+            // The board has no prompt: its engine takes the message, and it
+            // counts as read (nothing is owed to a session that isn't one).
+            store.markNoticed([m.id])
+            store.markRead([m.id])
+            onBoardMessage?(d, m)
+            return
+        }
         if let ws = waiters[sessionID], !ws.isEmpty {
             for w in ws { w.resume() }
             return
@@ -1120,7 +1453,10 @@ final class DelegationEngine {
             }
         }
         items.sort { $0.1.at < $1.1.at }
-        guard !items.isEmpty, let s = sessions.session(sessionID), let delegate, !s.isDeleted else { return }
+        // Archived: the user put it away — what it's owed waits on the record
+        // and is never typed in or resumed for.
+        guard !items.isEmpty, let s = sessions.session(sessionID), delegate != nil, !s.isDeleted, !s.isArchived
+        else { return }
         if s.isLaunching { return }
         let lines = items.map { d, m in
             m.to == .parent ? DelegationNotice.toParent(m, in: d) : DelegationNotice.toChild(m, in: d)
@@ -1144,7 +1480,7 @@ final class DelegationEngine {
             // that was asleep wakes to the request.
             markNoticed()
             BACDebug.log("delegation", "resuming “\(s.title)” with \(items.count) notice(s)")
-            sessionEngine.resume(sessionID, message: line, quietly: true)
+            resume(sessionID, message: line, quietly: true)
             return
         }
         // Typed only into a tab the liveness probe has seen this agent in:
@@ -1159,13 +1495,32 @@ final class DelegationEngine {
         let canType = status == nil || status == .done
             || (status == .working && waited > Self.holdWhileWorking)
             || (status == .needsInput && waited > Self.holdWhileNeedsInput)
-        guard canType else { return }
-        markNoticed()
+        guard canType, !typingNotice.contains(sessionID) else { return }
+        typingNotice.insert(sessionID)
         Task {
             let t0 = Date()
-            _ = try? await delegate.guestExec(
+            // Guarded: an Enter into a menu or dialog open in the tab would
+            // answer it. Held, the notice stays owed and a later tick retries.
+            let out = (try? await self.guestExec(
                 profileID: s.profileID,
-                command: CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
+                command: CodingTaskEngine.guardedTypeCommand(
+                    target: AgentSessionEngine.paneTarget(s) ?? .index(w), text: line), timeout: 20)) ?? ""
+            typingNotice.remove(sessionID)
+            if let r = PaneTypeGuard.refusal(in: out) {
+                // Not its agent's tab (any more): nothing typed, still owed.
+                BACDebug.log("delegation", "notice for “\(s.title)” NOT typed: \(r.rawValue)")
+                return
+            }
+            if out.contains(CodingTaskEngine.typeHeldMarker) {
+                BACDebug.log("delegation", "held notice for “\(s.title)”: a menu or dialog is open in its tab")
+                return
+            }
+            guard PaneTypeGuard.typed(in: out) else {
+                // Didn't go through (tmux refused it, no answer): still owed.
+                BACDebug.log("delegation", "notice for “\(s.title)” NOT typed: the typing command failed")
+                return
+            }
+            markNoticed()
             BACDebug.log("delegation", "typed notice into “\(s.title)” took=\(BACDebug.ms(t0))")
         }
     }
@@ -1187,7 +1542,9 @@ final class DelegationEngine {
     }
 
     private func tabStatus(_ s: AgentSession) -> AgentStatus? {
-        guard let w = s.windowIndex, let delegate else { return nil }
+        guard let w = s.windowIndex else { return nil }
+        if let h = sessions.host(for: s.profileID) { return h.hostTabStatus(window: w) }
+        guard let delegate else { return nil }
         return delegate.pane(for: s.profileID)?.model.tabs.first { $0.index == w }?.agentStatus
     }
 
@@ -1218,11 +1575,32 @@ final class DelegationEngine {
     /// ended without delivering stays open — its parent hears once, and a
     /// steer or an answer resumes the agent right where it was. A request's
     /// peer is nobody's to watch: it lives its own life.
+    /// Open delegations whose other session hasn't been found since when.
+    private var missingSince: [UUID: Date] = [:]
+    /// How long a session may be out of view (its Mac restarting, asleep,
+    /// reconnecting) before its delegations end.
+    static let missingGrace: TimeInterval = 300
+
     private func watchChildren() {
+        let now = Date()
         for d in store.delegations where d.status.isOpen {
-            guard let child = sessions.session(d.childSessionID), !child.isDeleted else {
+            if let child = sessions.session(d.childSessionID), child.isDeleted {
+                missingSince[d.id] = nil
                 fail(d, d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"); continue
             }
+            guard let child = sessions.session(d.childSessionID) else {
+                // Not found isn't deleted: an attached Mac restarting or
+                // reconnecting takes all its sessions out of view for a
+                // moment. Only a long absence ends the delegation.
+                let since = missingSince[d.id] ?? now
+                missingSince[d.id] = since
+                if now.timeIntervalSince(since) > Self.missingGrace {
+                    missingSince[d.id] = nil
+                    fail(d, d.isRequest ? "the peer's session is gone" : "the delegate's session is gone")
+                }
+                continue
+            }
+            missingSince[d.id] = nil
             if d.isRequest { continue }
             if d.status == .starting {
                 if child.windowIndex != nil, !child.isLaunching {

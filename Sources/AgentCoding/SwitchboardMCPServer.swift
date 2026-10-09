@@ -210,7 +210,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
         /// whether they took.
         func screenAfter(_ s: AgentSession) async -> [String: Any] {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            let fresh = engine.sessions.session(s.id) ?? s
+            let fresh = engine.record(s.id) ?? s
             return ["ok": true, "screen": await engine.screen(fresh, lines: 25) ?? "(no screen)"]
         }
 
@@ -231,7 +231,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
             case "list_sessions":
                 let all = (args["include_ended"] as? Bool) ?? false
                 let handles = engine.handles()
-                let list = engine.sessions.sessions
+                let list = engine.allSessions
                     .filter { !$0.isSwitchboard && !$0.isDeleted && engine.inScope($0, of: me) }
                     .filter { s in
                         all || (!s.isArchived && ["needs_you", "working", "ready"].contains(state(s)))
@@ -257,13 +257,13 @@ final class SwitchboardMCPServer: MCPLineHandler {
                     }
                     out.append(o)
                 }
-                let hidden = all ? 0 : engine.sessions.sessions
+                let hidden = all ? 0 : engine.allSessions
                     .filter { !$0.isSwitchboard && !$0.isDeleted && engine.inScope($0, of: me) }.count - list.count
                 engine.markAllSeen(for: me)
                 var res: [String: Any] = ["sessions": out]
                 if let room = me.roomID {
                     res["room"] = engine.roomName(room) ?? ""
-                    let outside = engine.sessions.sessions.filter {
+                    let outside = engine.allSessions.filter {
                         !$0.isSwitchboard && !$0.isDeleted && !$0.isArchived && !engine.inScope($0, of: me)
                     }.count
                     if outside > 0 {
@@ -360,13 +360,13 @@ final class SwitchboardMCPServer: MCPLineHandler {
             case "resume_session":
                 guard let s = session() else { return unknown() }
                 engine.markTouched(s.id)
-                engine.sessionEngine.resume(s.id, message: args["message"] as? String, quietly: true)
+                engine.resume(s, message: args["message"] as? String)
                 return textResult("Resuming \(engine.label(s)).")
 
             case "archive_session":
                 guard let s = session() else { return unknown() }
                 if let why = await engine.verifyProvenance(args["on_behalf_of"] as? String, for: me) { return errorResult(why) }
-                engine.sessionEngine.archive(s.id)
+                engine.archive(s)
                 return textResult("Archived \(engine.label(s)).")
 
             default:

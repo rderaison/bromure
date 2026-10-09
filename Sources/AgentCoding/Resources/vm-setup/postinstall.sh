@@ -111,6 +111,25 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
 export DEBIAN_PRIORITY=critical
 . /tmp/bromure-build.env
 
+# Some Macs refuse a guest's connection to the Mac itself (a VPN or
+# security agent enforcing its tunnel, Local Network privacy) while the
+# NAT out to the internet works — every step then dies on EHOSTUNREACH
+# to the proxy. Check it answers; if it doesn't, go direct.
+if [ -n "$BROMURE_PROXY" ]; then
+    _hp="${BROMURE_PROXY##*://}"; _hp="${_hp%%/*}"
+    _ok=""
+    for _i in 1 2 3; do
+        if timeout 5 bash -c ": >/dev/tcp/${_hp%%:*}/${_hp##*:}" 2>/dev/null; then _ok=1; break; fi
+        sleep 2
+    done
+    if [ -z "$_ok" ]; then
+        printf '[ac-postinstall-chroot] host proxy %s unreachable from the guest — fetching directly\n' "$_hp"
+        ip -4 -o addr show 2>/dev/null | sed 's/^/[ac-postinstall-chroot]   /' || true
+        ip -4 route 2>/dev/null | sed 's/^/[ac-postinstall-chroot]   /' || true
+        BROMURE_PROXY=""
+    fi
+fi
+
 # Route every request through the host's proxy — same rationale as the
 # setup.sh bake: Apple's TLS handles VPN MITM setups that guest TLS
 # stacks (Node, curl, apt-https) sometimes don't.
@@ -143,15 +162,19 @@ run_step() {
     log "BEGIN step $name"
     local t0=$SECONDS
     local i
-    for i in 1 2 3; do
+    # The user's customize script runs once: it's theirs, it may not be
+    # safe to repeat, and a failure there is real, not a flaky mirror.
+    local tries=3
+    case "$file" in *-customize.sh) tries=1 ;; esac
+    for i in $(seq 1 "$tries"); do
         if bash -e "$file"; then
             log "END   step $name (took $((SECONDS - t0))s)"
             return 0
         fi
-        log "retry $i/3 failed: $name"
-        sleep 3
+        log "attempt $i/$tries failed: $name"
+        if [ "$i" -lt "$tries" ]; then sleep 3; fi
     done
-    printf 'SANDBOX_POSTINSTALL_FAILED: step failed after 3 attempts: %s\n' "$name"
+    printf 'SANDBOX_POSTINSTALL_FAILED: step failed after %s attempt(s): %s\n' "$tries" "$name"
     exit 1
 }
 

@@ -10,6 +10,7 @@ final class ProfileEditorController {
     private let state: AppState
     private unowned let delegate: GUIAppDelegate
 
+    private var pickerWindow: NSWindow?
     private var newProfileWindow: NSWindow?
     private var settingsPanel: NSWindow?
     private var settingsDelegateHelper: SettingsWindowDelegate?
@@ -17,6 +18,67 @@ final class ProfileEditorController {
     init(state: AppState, delegate: GUIAppDelegate) {
         self.state = state
         self.delegate = delegate
+    }
+
+    static func renderPickerPreview(to output: String) throws {
+        let state = AppState(previewStorage: FileManager.default.temporaryDirectory.appendingPathComponent("bromure-picker-preview-" + UUID().uuidString))
+        var saved = ProfileSettings(); saved.persistent = true
+        let work = state.profileManager.createProfile(name: "Work", color: .blue, settings: saved)
+        _ = state.profileManager.createProfile(name: "Personal", color: .purple, settings: saved)
+        _ = state.profileManager.createProfile(name: "Research", color: .teal, settings: ProfileSettings())
+        let hosting = NSHostingView(rootView: ProfilePickerView(state: state,
+            isUnavailable: { $0 == work.id }, onOpen: { _ in }, onEdit: { _ in }, onNew: {}, onDelete: { _ in }))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 560),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        hosting.layoutSubtreeIfNeeded(); hosting.displayIfNeeded()
+        guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { throw NSError(domain: "ProfilePickerPreview", code: 1) }
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw NSError(domain: "ProfilePickerPreview", code: 2) }
+        try png.write(to: URL(fileURLWithPath: output))
+        window.close()
+    }
+
+    func presentPicker() {
+        if let pickerWindow, pickerWindow.isVisible {
+            pickerWindow.makeKeyAndOrderFront(nil); return
+        }
+        let view = ProfilePickerView(state: state,
+            isUnavailable: { [weak self] id in self?.delegate.hasProfileResourcesInUse(id) ?? true },
+            onOpen: { [weak self] id in self?.delegate.openWindow(forProfileID: id) },
+            onEdit: { [weak self] id in self?.presentSettings(forProfileID: id) },
+            onNew: { [weak self] in self?.presentNewProfile() },
+            onDelete: { [weak self] ids in self?.confirmDeleteMany(ids) })
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 560),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = NSLocalizedString("Profiles", comment: "")
+        window.contentView = NSHostingView(rootView: view)
+        window.contentMinSize = NSSize(width: 560, height: 420)
+        window.isReleasedWhenClosed = false
+        window.center(); window.makeKeyAndOrderFront(nil)
+        pickerWindow = window
+    }
+
+    private func confirmDeleteMany(_ ids: Set<UUID>) {
+        let profiles = state.profileManager.allProfiles.filter { ids.contains($0.id) }
+        guard !profiles.isEmpty,
+              profiles.allSatisfy({ !state.profileManager.isManaged($0.id) && !delegate.hasProfileResourcesInUse($0.id) }) else { return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete %d profiles?", comment: ""), profiles.count)
+        alert.informativeText = NSLocalizedString("Their saved browsing data will be permanently deleted.", comment: "")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // Recheck ownership after the confirmation's nested run loop.
+        guard profiles.allSatisfy({ !state.profileManager.isManaged($0.id) && !delegate.hasProfileResourcesInUse($0.id) }) else { return }
+        for profile in profiles { state.profileManager.deleteProfile(id: profile.id) }
+        if let selected = state.selectedProfileID, ids.contains(selected) {
+            state.selectedProfileID = state.profileManager.allProfiles.first?.id
+        }
+        if let launch = state.launchProfileID, ids.contains(launch) { state.launchProfileID = nil }
+        state.profileVersion += 1
     }
 
     // MARK: - New profile
@@ -200,7 +262,7 @@ final class ProfileEditorController {
               !state.profileManager.isManaged(id) else { return }
 
         let alert = NSAlert()
-        if delegate.sessions.contains(where: { $0.profile?.id == id && !$0.isClosing }) {
+        if delegate.hasProfileResourcesInUse(id) {
             alert.messageText = String(format: NSLocalizedString("\u{201C}%@\u{201D} is open", comment: "Delete-profile refusal title"), profile.name)
             alert.informativeText = NSLocalizedString("Close its window before deleting the profile.", comment: "")
             alert.alertStyle = .informational
@@ -218,9 +280,13 @@ final class ProfileEditorController {
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        guard !state.profileManager.isManaged(id), !delegate.hasProfileResourcesInUse(id) else { return }
         state.profileManager.deleteProfile(id: id)
         if state.selectedProfileID == id {
             state.selectedProfileID = state.profileManager.allProfiles.first?.id
+        }
+        if state.launchProfileID == id {
+            state.launchProfileID = nil  // back to the last-used profile
         }
         state.profileVersion += 1
     }
@@ -228,15 +294,17 @@ final class ProfileEditorController {
 
 // MARK: - New profile form
 
-private struct NewProfileForm: View {
-    @State private var name = ""
+struct NewProfileForm: View {
+    @State private var name: String
     @State private var color: ProfileColor?
     let onCreate: (String, ProfileColor?) -> Void
     let onCancel: () -> Void
 
-    init(initialColor: ProfileColor?,
+    init(initialName: String = "",
+         initialColor: ProfileColor?,
          onCreate: @escaping (String, ProfileColor?) -> Void,
          onCancel: @escaping () -> Void) {
+        _name = State(initialValue: initialName)
         _color = State(initialValue: initialColor)
         self.onCreate = onCreate
         self.onCancel = onCancel

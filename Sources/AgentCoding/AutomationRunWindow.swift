@@ -75,7 +75,7 @@ final class AutomationRunWindowManager {
         models[run.id] = model
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 880, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 780),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false)
         win.title = String(
@@ -203,7 +203,10 @@ final class AutomationRunWindowManager {
             windows[runID]?.makeFirstResponder(view)
         case .transcript(let url):
             slot.layer?.backgroundColor = NSColor.acCanvas.cgColor
-            let host = NSHostingView(rootView: ClaudeTranscriptPane(url: url))
+            // The run's own agent when it was recorded (runs from before
+            // that are sniffed).
+            let host = NSHostingView(rootView: ClaudeTranscriptPane(
+                url: url, agent: model.run.tool?.rawValue))
             mount(host, in: slot)
         case .outcome:
             slot.layer?.backgroundColor = NSColor.acCanvas.cgColor

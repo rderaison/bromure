@@ -158,10 +158,28 @@ enum RemoteTransport {
         // connection the mirror poll rides — a shared connection let one wedge
         // freeze everything on "Connecting…".
         let lane = interactive ? "term" : ""
-        return ControlClient(socketPath: "ssh://\(host.connectLabel)") {
+        var c = ControlClient(socketPath: "ssh://\(host.connectLabel)") {
             SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: lane)
         }
+        c.linkStats = LinkStats.shared(for: rawHost.id)
+        return c
     }
+
+    /// Bulk lane: big / long control calls (transcripts, guest execs, file
+    /// ops) on their own pooled connection so they never queue ahead of the
+    /// mirror's `/state` poll — same policy as macOS (see FatClientRemote).
+    static func bulkClient(for rawHost: RemoteHost) -> ControlClient {
+        _ = bootstrap
+        ensureClientKey()
+        let host = resolved(rawHost)
+        var c = ControlClient(socketPath: "ssh://\(host.connectLabel)") {
+            SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: bulkLane)
+        }
+        c.linkStats = LinkStats.shared(for: rawHost.id)
+        return c
+    }
+
+    static let bulkLane = "bulk"
 
     static func client(hostID: UUID, interactive: Bool = false) -> ControlClient? {
         // Saved (by-address) hosts resolve from disk; peer hosts live only in

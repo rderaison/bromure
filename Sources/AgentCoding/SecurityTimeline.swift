@@ -66,6 +66,12 @@ public final class SecurityTimeline {
         /// (a network flow's full lineage, an agent's reasoning).
         public var eventType: String? = nil
         public var detail: [String: AnyJSON]? = nil
+        /// Repeats of a routine event (same credential swapped in for the same
+        /// host) share this key and fold into one row with a `count` (B40).
+        public var coalesceKey: String? = nil
+        /// A connection-level firewall verdict, structured — what the row's
+        /// quick actions (allow / block / switch the rule off) work from.
+        public var firewall: Firewall? = nil
     }
 
     /// Event types whose rows keep their raw data (`detail`).
@@ -78,6 +84,87 @@ public final class SecurityTimeline {
         guard let v, JSONSerialization.isValidJSONObject(v),
               let data = try? JSONSerialization.data(withJSONObject: v) else { return nil }
         return try? JSONDecoder().decode([String: AnyJSON].self, from: data)
+    }
+
+    /// The destination and deciding rule of a firewall connection verdict.
+    public struct Firewall: Sendable, Equatable {
+        /// The hostname (DNS-snooped name, SNI, CONNECT host); nil for a flow
+        /// to a bare IP.
+        public var host: String?
+        public var ip: String?
+        public var port: Int?
+        /// "tcp" / "udp" (or "ipv6" for the v6 drop).
+        public var proto: String?
+        /// The deciding rule's text (`EgressPolicy.Rule.text`); nil = the
+        /// default action decided.
+        public var rule: String?
+        public var denied: Bool
+        /// False for drops that aren't a ruleset decision (IPv6 / QUIC / IP
+        /// fragments) — nothing a rule change would alter.
+        public var byPolicy: Bool
+        /// The destination's other DNS names (CNAME targets, other names
+        /// seen for its address) — `host` is the one the guest asked for.
+        public var aliases: [String] = []
+
+        public init(host: String?, ip: String?, port: Int?, proto: String?, rule: String?,
+                    denied: Bool, byPolicy: Bool, aliases: [String] = []) {
+            self.host = host; self.ip = ip; self.port = port; self.proto = proto
+            self.rule = rule; self.denied = denied; self.byPolicy = byPolicy
+            self.aliases = aliases
+        }
+
+        var wire: [String: Any] {
+            var d: [String: Any] = ["denied": denied, "byPolicy": byPolicy]
+            if !aliases.isEmpty { d["aliases"] = aliases }
+            if let host { d["host"] = host }
+            if let ip { d["ip"] = ip }
+            if let port { d["port"] = port }
+            if let proto { d["proto"] = proto }
+            if let rule { d["rule"] = rule }
+            return d
+        }
+
+        init?(wire d: [String: Any]?) {
+            guard let d else { return nil }
+            self.init(host: d["host"] as? String, ip: d["ip"] as? String, port: d["port"] as? Int,
+                      proto: d["proto"] as? String, rule: d["rule"] as? String,
+                      denied: d["denied"] as? Bool ?? false, byPolicy: d["byPolicy"] as? Bool ?? false,
+                      aliases: d["aliases"] as? [String] ?? [])
+        }
+    }
+
+    /// A routine row folds into an earlier one with the same `coalesceKey`
+    /// seen within this long (sliding: each repeat restarts it).
+    nonisolated static let coalesceWindow: TimeInterval = 10 * 60
+
+    /// Fold `e` into `events` (oldest first): a repeat of a recent row with the
+    /// same `coalesceKey` (same profile) replaces it — moved to the end, time
+    /// bumped, count incremented — instead of adding a row.
+    nonisolated static func coalesce(_ e: Event, into events: inout [Event]) {
+        if let key = e.coalesceKey {
+            // Look back a bounded number of rows; routine repeats are recent.
+            let lowerBound = max(0, events.count - 500)
+            var i = events.count - 1
+            while i >= lowerBound {
+                let old = events[i]
+                if old.time < e.time.addingTimeInterval(-coalesceWindow) { break }
+                if old.coalesceKey == key, old.profileID == e.profileID, old.machine == e.machine {
+                    var merged = Event(time: e.time, engine: e.engine, condition: e.condition,
+                                       decision: e.decision, kind: e.kind, profileID: e.profileID,
+                                       workspace: e.workspace ?? old.workspace, machine: e.machine,
+                                       count: (old.count ?? 1) + (e.count ?? 1))
+                    merged.coalesceKey = key
+                    merged.firewall = e.firewall ?? old.firewall
+                    merged.eventType = e.eventType ?? old.eventType
+                    merged.detail = e.detail ?? old.detail
+                    events.remove(at: i)
+                    events.append(merged)
+                    return
+                }
+                i -= 1
+            }
+        }
+        events.append(e)
     }
 
     /// This Mac's events, oldest first (the most recent `cap` in memory; the
@@ -112,7 +199,7 @@ public final class SecurityTimeline {
         let clearedAt = UserDefaults.standard.double(forKey: Self.clearedAtKey)
         events = Self.load(from: directory, limit: Self.cap, after: clearedAt)
         let dir = directory
-        io.async { Self.prune(dir) }
+        io.async { Self.prune(dir); Self.redactLegacyPreviews(in: dir) }
     }
 
     /// The app's timeline: persisted in the support folder, except in a test
@@ -141,7 +228,9 @@ public final class SecurityTimeline {
     public func append(_ e: Event) {
         var e = e
         if e.workspace == nil { e.workspace = workspaceName(e.profileID) }
-        events.append(e)
+        // Routine repeats fold into one row; the disk log keeps every raw
+        // event (with its key) and `load` folds them the same way.
+        Self.coalesce(e, into: &events)
         if events.count > Self.cap { events.removeFirst(events.count - Self.cap) }
         persist(e)
     }
@@ -172,6 +261,8 @@ public final class SecurityTimeline {
         if let w = e.workspace { d["w"] = w }
         if let n = e.count { d["n"] = n }
         if let t = e.eventType, let x = e.detail.flatMap(foundation) { d["y"] = t; d["x"] = x }
+        if let ck = e.coalesceKey { d["ck"] = ck }
+        if let fw = e.firewall { d["fw"] = fw.wire }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -181,11 +272,48 @@ public final class SecurityTimeline {
         guard let d = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               let t = d["t"] as? Double, let engine = d["e"] as? String,
               let condition = d["c"] as? String, let decision = d["d"] as? String else { return nil }
-        return Event(time: Date(timeIntervalSince1970: t), engine: engine, condition: condition,
-                     decision: decision, kind: Decision(wire: d["k"] as? String ?? ""),
-                     profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
-                     workspace: d["w"] as? String, count: d["n"] as? Int,
-                     eventType: d["y"] as? String, detail: anyJSON(d["x"]))
+        // Rows written before fingerprints carry "sk-a…kUyU" previews of real
+        // secrets: never show (or re-export) those characters.
+        var e = Event(time: Date(timeIntervalSince1970: t), engine: engine,
+                      condition: SecretFingerprint.redactLegacy(condition),
+                      decision: SecretFingerprint.redactLegacy(decision),
+                      kind: Decision(wire: d["k"] as? String ?? ""),
+                      profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
+                      workspace: d["w"] as? String, count: d["n"] as? Int,
+                      eventType: d["y"] as? String, detail: anyJSON(d["x"]))
+        e.coalesceKey = (d["ck"] as? String).map(SecretFingerprint.redactLegacy)
+        e.firewall = Firewall(wire: d["fw"] as? [String: Any])
+        return e
+    }
+
+    /// Rewrite the daily logs so no legacy secret preview stays on disk.
+    /// Idempotent; only files that change are rewritten (atomically).
+    nonisolated static func redactLegacyPreviews(in directory: URL) {
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        where name.hasSuffix(".jsonl") {
+            let url = directory.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8), text.contains("…") else { continue }
+            var changed = false
+            var out = Data()
+            for raw in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+                let lineData = Data(raw)
+                if let d = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                    var m = d
+                    for k in ["c", "d", "ck"] {
+                        if let s = d[k] as? String {
+                            let r = SecretFingerprint.redactLegacy(s)
+                            if r != s { m[k] = r; changed = true }
+                        }
+                    }
+                    if let enc = try? JSONSerialization.data(withJSONObject: m) { out.append(enc) } else { out.append(lineData) }
+                } else {
+                    out.append(lineData)
+                }
+                out.append(0x0A)
+            }
+            if changed { try? out.write(to: url, options: .atomic) }
+        }
     }
 
     private func persist(_ e: Event) {
@@ -215,7 +343,10 @@ public final class SecurityTimeline {
             out = day + out
             if out.count >= limit { break }
         }
-        return Array(out.suffix(limit))
+        var folded: [Event] = []
+        folded.reserveCapacity(out.count)
+        for e in out { coalesce(e, into: &folded) }
+        return Array(folded.suffix(limit))
     }
 
     /// Drop daily logs past the retention window.
@@ -251,6 +382,8 @@ public final class SecurityTimeline {
             if let w = e.workspace { r["workspace"] = w }
             if let n = e.count { r["count"] = n }
             if let t = e.eventType, let x = e.detail.flatMap(Self.foundation) { r["type"] = t; r["detail"] = x }
+            if let ck = e.coalesceKey { r["ck"] = ck }
+            if let fw = e.firewall { r["fw"] = fw.wire }
             return r
         }
     }
@@ -265,11 +398,15 @@ public final class SecurityTimeline {
                   let decision = r["decision"] as? String else { return nil }
             let t = (r["t"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
             let pid = (r["profileID"] as? String).flatMap(UUID.init) ?? UUID()
-            return Event(time: t, engine: engine, condition: condition,
-                         decision: decision, kind: Decision(wire: r["kind"] as? String ?? ""),
-                         profileID: pid, workspace: r["workspace"] as? String, machine: host,
-                         count: r["count"] as? Int, eventType: r["type"] as? String,
-                         detail: Self.anyJSON(r["detail"]))
+            var e = Event(time: t, engine: engine, condition: SecretFingerprint.redactLegacy(condition),
+                          decision: SecretFingerprint.redactLegacy(decision),
+                          kind: Decision(wire: r["kind"] as? String ?? ""),
+                          profileID: pid, workspace: r["workspace"] as? String, machine: host,
+                          count: r["count"] as? Int, eventType: r["type"] as? String,
+                          detail: Self.anyJSON(r["detail"]))
+            e.coalesceKey = r["ck"] as? String
+            e.firewall = Firewall(wire: r["fw"] as? [String: Any])
+            return e
         }
     }
 
@@ -323,9 +460,23 @@ public final class SecurityTimeline {
             let fake = str(d, "fake_preview") ?? "fake"
             let real = str(d, "real_preview") ?? "real"
             let host = str(d, "host") ?? "?"
-            return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
-                       "\(fake) → \(host)",
-                       String(format: NSLocalizedString("swapped in %@", comment: "Security Timeline decision"), real), .info)
+            var e = row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                        "\(fake) → \(host)",
+                        String(format: NSLocalizedString("swapped in %@", comment: "Security Timeline decision"), real), .info)
+            // One row per credential + host, not one per API call (B40).
+            e.coalesceKey = "token_swap|\(fake)|\(real)|\(host)"
+            return e
+
+        case "credential.subscription_auth":
+            // A workspace set to its subscription that runs on the API key
+            // from Settings › Models instead: a neutral note, not a block.
+            let agent = str(d, "agent").flatMap { Profile.Tool(rawValue: $0)?.displayName } ?? str(d, "agent") ?? "?"
+            var e = row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                        String(format: NSLocalizedString("%@ subscription not signed in", comment: "Security Timeline condition: agent name"), agent),
+                        NSLocalizedString("using API key", comment: "Security Timeline decision: subscription workspace runs on the API key"),
+                        .info)
+            e.coalesceKey = "subscription_auth|\(agent)"
+            return e
 
         case "sandbox.status":
             let fs = str(d, "filesystem") ?? "off"
@@ -562,6 +713,11 @@ public final class SecurityTimeline {
             case "stripped":
                 decision = NSLocalizedString("install scripts stripped", comment: "Security Timeline decision")
                 kind = .info
+            case "unchecked":
+                // The strip couldn't read the tarball: it went through as-is.
+                decision = NSLocalizedString("downloaded — install scripts could not be checked",
+                                             comment: "Security Timeline decision: npm tarball passed through unread")
+                kind = .blocked
             default:
                 decision = reason.map { "\(outcome) — \($0)" } ?? outcome
                 kind = .blocked
@@ -569,19 +725,127 @@ public final class SecurityTimeline {
             return row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
 
         case "egress.firewall":
-            let host = str(d, "host") ?? str(d, "ip") ?? "?"
-            let port = int(d, "port").map { ":\($0)" } ?? ""
-            let proto = str(d, "proto").map { " \($0)" } ?? ""
+            // The destination as the guest asked for it. The switch names a
+            // flow by its DNS-snooped names (the queried name first); should
+            // that first name still be a CDN / load-balancer server
+            // (`dyna.wikimedia.org`) while another is the site
+            // (`www.wikipedia.org`), the site is the row's host and the
+            // server an alias — the same requested-name-first the blocked
+            // rows (SNI / CONNECT host) get.
+            var snooped: [String] = []
+            if case .array(let names)? = d["hostnames"] {
+                for case .string(let n) in names where !snooped.contains(n) { snooped.append(n) }
+            }
+            var primary = str(d, "host")
+            if let p = primary, FirewallRuleActions.isServerName(p),
+               let site = snooped.first(where: { !FirewallRuleActions.isServerName($0) }) {
+                primary = site
+            }
+            let host = primary ?? str(d, "ip") ?? "?"
             let action = (str(d, "action") ?? "allowed").lowercased()
-            // OpenShell request (L7) decisions name the request and the reason;
-            // an `audit` endpoint records the violation but forwards it.
+            // An OpenShell `audit` endpoint records the violation but
+            // forwards the request.
             let kind: Decision = action == "audit" ? .info : (action.contains("allow") ? .allowed : .blocked)
-            if str(d, "layer") == "l7", let method = str(d, "method") {
-                let cond = "\(method) \(host)\(port)\(str(d, "path") ?? "")"
-                let decision = str(d, "reason").map { "\(action) — \($0)" } ?? action
+            // The verdict word, localized (the event carries English
+            // "allow"/"deny", older ones "allowed"/"blocked").
+            let word = kind == .info
+                ? NSLocalizedString("audit", comment: "Security Timeline firewall decision word: an OpenShell audit endpoint let a request through that its rules would deny")
+                : kind == .allowed
+                ? NSLocalizedString("allow", comment: "Security Timeline firewall decision word: the connection was let through")
+                : NSLocalizedString("deny", comment: "Security Timeline firewall decision word: the connection was refused")
+            // A `web` rule's verb decision (or an OpenShell L7 request
+            // decision) carries the request: show it like a guardrails block
+            // ("POST httpbin.org/post").
+            if let method = str(d, "method"), !method.isEmpty {
+                let cond = "\(method) \(host)\(str(d, "path") ?? "")"
+                let decision = str(d, "reason").map { "\(word) — \($0)" } ?? word
                 return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), cond, decision, kind)
             }
-            return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), "\(host)\(port)\(proto)", action, kind)
+            let port = int(d, "port").map { ":\($0)" } ?? ""
+            let proto = str(d, "proto").map { " \($0)" } ?? ""
+            // A ruleset decision names what decided: the matching rule, or the
+            // default action. Older events carry neither key — left as they
+            // were. Transport drops (IPv6 / QUIC / fragments) say by_policy false.
+            var byPolicy = d["rule"] != nil
+            if case .bool(let v)? = d["by_policy"] { byPolicy = v }
+            let rule = str(d, "rule")
+            var decision = word
+            if byPolicy {
+                // OpenShell decisions name no pf rule; theirs is the reason
+                // (no matching policy, a destination that failed validation…).
+                decision = rule.map { "\(word) — \($0)" }
+                    ?? str(d, "reason").map { "\(word) — \($0)" }
+                    ?? String(format: NSLocalizedString("%@ — default policy",
+                                                        comment: "Security Timeline decision: firewall verdict from the unmatched-traffic default; %@ = the localized allow/deny word"),
+                              word)
+            }
+            // An open connection the firewall cut when its rules changed
+            // (a rule switched off, expired, or a new deny).
+            var closed = false
+            if case .bool(true)? = d["closed"] {
+                closed = true
+                let why = str(d, "previous_rule").map {
+                    String(format: NSLocalizedString("“%@” no longer allows it",
+                                                     comment: "Security Timeline: why an open connection was closed; %@ = the rule that had allowed it"), $0)
+                } ?? decision
+                // Which route the cut connection took: the guest's proxy
+                // (HTTPS_PROXY, via vsock) or direct (the transparent route).
+                switch str(d, "layer") {
+                case "proxy"?:
+                    decision = String(format: NSLocalizedString("connection closed (proxy) — %@",
+                                                                comment: "Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why"),
+                                      why)
+                case .some:
+                    decision = String(format: NSLocalizedString("connection closed (direct) — %@",
+                                                                comment: "Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why"),
+                                      why)
+                case nil:
+                    decision = String(format: NSLocalizedString("connection closed — %@",
+                                                                comment: "Security Timeline decision: an open connection cut by a firewall change; %@ = why"),
+                                      why)
+                }
+            }
+            var e = row(NSLocalizedString("Firewall", comment: "Security Timeline engine"),
+                        "\(host)\(port)\(proto)", decision, kind)
+            var aliases: [String] = snooped.filter { $0 != primary }
+            if let original = str(d, "host"), original != primary, !aliases.contains(original) {
+                aliases.insert(original, at: 0)
+            }
+            e.firewall = Firewall(host: primary, ip: str(d, "ip"), port: int(d, "port"),
+                                  proto: str(d, "proto"), rule: rule,
+                                  denied: kind == .blocked, byPolicy: byPolicy, aliases: aliases)
+            // Allowed connections are routine: repeats to one destination
+            // fold into one counted row (blocks and cuts stay one row each).
+            if kind == .allowed, !closed {
+                e.coalesceKey = "egress_allow|\(primary ?? str(d, "ip") ?? "")|\(int(d, "port") ?? 0)|\(str(d, "proto") ?? "")|\(rule ?? "")"
+            }
+            return e
+
+        case "credential.consent":
+            // The user's answer to a credential-approval prompt (or its
+            // absence): every grant, deny and timeout is a row.
+            let cred = SecretFingerprint.redactLegacy(str(d, "credential") ?? "credential")
+            let scope = SecretFingerprint.redactLegacy(str(d, "scope") ?? "")
+            let cond = scope.isEmpty ? cred : "\(cred) — \(scope)"
+            let engine = NSLocalizedString("Credential approval", comment: "Security Timeline engine")
+            switch str(d, "decision") ?? "" {
+            case "allow_1h":
+                return row(engine, cond, NSLocalizedString("allowed for 1 hour", comment: "Security Timeline decision"), .allowed)
+            case "allow_5m":
+                return row(engine, cond, NSLocalizedString("allowed for 5 minutes", comment: "Security Timeline decision"), .allowed)
+            case "allow_session":
+                return row(engine, cond, NSLocalizedString("allowed for the rest of the session", comment: "Security Timeline decision"), .allowed)
+            case "timeout":
+                return row(engine, cond, NSLocalizedString("denied — no answer in time; the next request asks again",
+                                                           comment: "Security Timeline decision: consent prompt timed out"), .blocked)
+            case "deny_remembered":
+                var e = row(engine, cond, NSLocalizedString("denied — you said no a moment ago",
+                                                            comment: "Security Timeline decision: a remembered Don't allow"), .blocked)
+                e.coalesceKey = "consent_deny|\(profileID.uuidString)|\(str(d, "credential_id") ?? cred)"
+                return e
+            default:
+                return row(engine, cond, NSLocalizedString("denied by you", comment: "Security Timeline decision"), .blocked)
+            }
 
         case "credential.ssh_sign":
             let label = str(d, "key_label").flatMap { $0.isEmpty ? nil : $0 } ?? "SSH key"
@@ -604,7 +868,14 @@ public final class SecurityTimeline {
             let path = str(d, "path") ?? ""
             let cond = "\(method) \(host)\(path)".trimmingCharacters(in: .whitespaces)
             let decision = str(d, "reason").map { "blocked — \($0)" } ?? "blocked"
-            return row(NSLocalizedString("Guardrails", comment: "Security Timeline engine"), cond, decision, .blocked)
+            // A firewall `web` rule's verb denial goes through the same 403
+            // path; the proxy tags it so it isn't credited to Guardrails.
+            let engine = (str(d, "engine") ?? str(d, "source") ?? "").lowercased()
+            let isFirewall = engine == "firewall" || engine == "egress"
+            return row(isFirewall
+                           ? NSLocalizedString("Firewall", comment: "Security Timeline engine")
+                           : NSLocalizedString("Guardrails", comment: "Security Timeline engine"),
+                       cond, decision, .blocked)
 
         case "tls.upstream_untrusted":
             let host = str(d, "host") ?? "?"
@@ -651,6 +922,44 @@ public final class SecurityTimeline {
                             : NSLocalizedString("swapped for stand-ins", comment: "Security Timeline decision"),
                         .info)
             e.count = n
+            return e
+
+        case "content_scan.skipped":
+            // An AI request that went out without the content scans (body too
+            // large, or compressed in a way the proxy can't decode). Credited to
+            // the engine(s) that would have scanned it; blue, not a block.
+            let host = str(d, "host") ?? "?"
+            let reason = str(d, "reason") ?? "unknown reason"
+            var ids: [String] = []
+            if case .array(let a)? = d["engines"] {
+                ids = a.compactMap { if case .string(let v) = $0 { return v.lowercased() } else { return nil } }
+            } else if let one = str(d, "engines") {
+                ids = one.lowercased().split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            }
+            let pi = NSLocalizedString("Prompt injection", comment: "Security Timeline engine")
+            let pii = NSLocalizedString("PII protection", comment: "Security Timeline engine")
+            let names = ids.compactMap { id -> String? in
+                switch id {
+                case "prompt_injection", "promptinjection", "prompt injection": return pi
+                case "pii", "pii_protection", "pii protection": return pii
+                default: return nil
+                }
+            }
+            let engine = names.first ?? pi
+            // Both engines missed it: one row, the other named in the condition.
+            let cond = names.count > 1 ? "\(host) (\(names.joined(separator: " + ")))" : host
+            // Fail closed: a body the proxy couldn't decode was refused, not sent.
+            let blocked = str(d, "action")?.lowercased() == "blocked"
+            var e = blocked
+                ? row(engine, cond,
+                      String(format: NSLocalizedString("blocked, not sent — %@", comment: "Security Timeline decision: request refused because the content scans couldn't read it; %@ = reason"), reason),
+                      .blocked)
+                : row(engine, cond,
+                      String(format: NSLocalizedString("not scanned — %@", comment: "Security Timeline decision: content scans skipped; %@ = reason"), reason),
+                      .info)
+            // Every occurrence is emitted; repeats fold into one row with a
+            // count so a per-request miss reads "×N", not a single quiet row.
+            e.coalesceKey = "content_scan|\(blocked ? "blocked" : "skipped")|\(host.lowercased())|\(reason)|\(ids.joined(separator: ","))"
             return e
 
         case "prompt_injection.detection":

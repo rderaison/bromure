@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import SandboxEngine
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -34,7 +35,12 @@ extension FatForward {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(lfd, $0, &len) }
             }
             if cfd < 0 { if errno == EINTR { continue }; break }   // lfd closed → stop
-            if let allow, !allow(peerIPv4(peer)) { Darwin.close(cfd); continue }
+            if let allow, !allow(peerIPv4(peer)) {
+                // Always in the log: a browser VM turned away here shows up in
+                // the page as ERR_PROXY_CONNECTION_FAILED with no other trace.
+                NSLog("[bromure-ac] socks: refused %@ (not a fat-client browser VM)", peerIPv4(peer))
+                Darwin.close(cfd); continue
+            }
             Thread.detachNewThread { handleSocks(cfd, host: host) }
         }
     }
@@ -149,6 +155,7 @@ final class RemoteSocksForwarder {
         Thread.detachNewThread {
             FatForward.acceptSocks(lfd: fd, host: host) { ip in
                 ip.hasPrefix("127.") || ip.hasPrefix(browserPrefix)
+                    || FatClient.BrowserPeers.admits(ip)
             }
         }
     }
@@ -285,5 +292,22 @@ struct FatClientSocks: ParsableCommand {
             throw ValidationError("unknown remote host: \(hostID)")
         }
         FatForward.serveSocks(host: host, localPort: localPort, bindAll: bindAll)
+    }
+}
+
+extension FatClient {
+    /// The fat-client browser VMs running now (by MAC): the SOCKS forwarder
+    /// admits each by its current lease, whatever subnet the switch is on —
+    /// and nothing else on it (a local workspace VM must not ride the fat
+    /// client into the remote's VMs).
+    enum BrowserPeers {
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var macs: Set<String> = []
+        static func add(_ mac: String) { lock.lock(); macs.insert(mac.lowercased()); lock.unlock() }
+        static func remove(_ mac: String) { lock.lock(); macs.remove(mac.lowercased()); lock.unlock() }
+        static func admits(_ ip: String) -> Bool {
+            lock.lock(); let current = macs; lock.unlock()
+            return current.contains { VMNetSwitch.shared.leasedIP(forMAC: $0) == ip }
+        }
     }
 }

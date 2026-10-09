@@ -1,0 +1,114 @@
+{
+  "scope": "Isolated local TLS endpoint; actual Squid/gateway/kernel NAT/production router; no external HTTPS claim",
+  "results": [
+    {
+      "version": "TLSv1_2",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    },
+    {
+      "version": "TLSv1_3",
+      "bytes": 1048576,
+      "sha256": "fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83"
+    }
+  ],
+  "serverVersions": [
+    "TLSv1.2",
+    "TLSv1.3",
+    "TLSv1.3",
+    "TLSv1.3",
+    "TLSv1.3",
+    "TLSv1.3",
+    "TLSv1.3",
+    "TLSv1.3",
+    "TLSv1.3",
+    "TLSv1.3"
+  ],
+  "logs": "/tmp/bromure-native-tls-a5g92f21",
+  "certificateVerification": true,
+  "rulesCleaned": true,
+  "finalCounters": {
+    "accepted": 10,
+    "active": 0,
+    "bytesRead": {
+      "router": 10534402,
+      "squid": 4550
+    },
+    "completed": 10,
+    "eofs": {
+      "router": 10,
+      "squid": 10
+    },
+    "failed": 0,
+    "failureErrnos": {},
+    "failuresByPhase": {
+      "connect": 0,
+      "originalDestination": 0,
+      "relay": 0
+    },
+    "failuresByType": {
+      "brokenPipe": 0,
+      "connection": 0,
+      "eof": 0,
+      "invalidDestination": 0,
+      "osError": 0,
+      "reset": 0,
+      "timeout": 0
+    },
+    "maxConnections": 256,
+    "monotonic": 167478.117678318,
+    "peakActive": 8,
+    "pid": 7,
+    "rejectedCapacity": 0,
+    "socksReplyCodes": {
+      "0": 10
+    },
+    "version": 1
+  },
+  "sourceSHA256": {
+    "tools/network/test-async-squid-tls.py": "2d4d92050f134c77b787d21807ae2887b87706b999248a13807961b53250f40b",
+    "tools/network/async-squid-launch.py": "b0253adb5525483b57d956dc0100025860599abfa12f40e926a0c2f49f76b13a",
+    "tools/network/async-squid-gateway.py": "3a4f718d108a688359b8790f7d40330d3e5828b91639c1216594968adefa4f02",
+    "Sources/SandboxEngine/Resources/vm-setup/scripts/routing-socks.py": "c848c454af9f2f0024e534b0e9144c37f9e50e4223d068c71e5dc19f150decda"
+  }
+}

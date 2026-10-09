@@ -99,7 +99,7 @@ struct ClaudeSubscriptionRefreshTests {
         try store.setShared(expired("sk-ant-ort01-B"))
         let late = ClaudeSubscriptionRecord(accessToken: "sk-ant-oat01-A2", refreshToken: "sk-ant-ort01-A2",
                                             expiresAt: Date().addingTimeInterval(3600), savedAt: Date())
-        #expect(!store.commitRefresh(late, slotKey: "shared", replacing: "sk-ant-ort01-A"))
+        #expect(try store.commitRefresh(late, slotKey: "shared", replacing: "sk-ant-ort01-A") == false)
         #expect(store.record(for: nil)?.refreshToken == "sk-ant-ort01-B")
         // A stale rejection of A mustn't flag B either.
         store.setReauthRequired(true, slotKey: "shared", ifRefreshTokenIs: "sk-ant-ort01-A")
@@ -118,7 +118,7 @@ struct ClaudeSubscriptionRefreshTests {
         // A refresh through the clone rotates the BASE's slot — one grant.
         let rotated = ClaudeSubscriptionRecord(accessToken: "sk-ant-oat01-r", refreshToken: "sk-ant-ort01-r",
                                                expiresAt: Date().addingTimeInterval(3600), savedAt: Date())
-        #expect(store.commitRefresh(rotated, slotKey: store.slot(for: clone)!.key, replacing: "sk-ant-ort01-base"))
+        #expect(try store.commitRefresh(rotated, slotKey: store.slot(for: clone)!.key, replacing: "sk-ant-ort01-base"))
         #expect(store.record(for: base)?.refreshToken == "sk-ant-ort01-r")
         try store.forget(for: clone)
         #expect(store.slot(for: clone)?.key == "shared")

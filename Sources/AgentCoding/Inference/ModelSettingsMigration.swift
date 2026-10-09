@@ -121,6 +121,130 @@ public extension Profile {
     }
 }
 
+public extension Profile {
+    /// A workspace that names its OWN local engine the pre-Models way —
+    /// routed local, its agent on `.local`, an engine URL and the model it
+    /// serves on the record (`localEngineURL` + `activeModelID`) — as the
+    /// per-workspace layer that makes that choice win over the global
+    /// Models settings. Without it the launch overlay staged the GLOBAL
+    /// default (another server, another model): QA-omp's GLM on :8888 ran
+    /// as deepseek on :8001, and every turn failed upstream.
+    ///
+    /// nil when the workspace has an override of its own (that is the
+    /// choice), names no engine, or asks for exactly what the global
+    /// settings already give its local agents.
+    func legacyLocalEngineOverride(global: ModelSettings) -> ModelOverride? {
+        guard case .own(let o)? = legacyLocalEngine(global: global) else { return nil }
+        return o
+    }
+
+    /// What the record's old local-engine fields amount to: nothing, the
+    /// global settings again (`.sameAsGlobal` — stale copies to clear, or a
+    /// later change of the global server would pin the workspace to the old
+    /// one), or a choice of its own.
+    enum LegacyLocalEngine: Equatable { case sameAsGlobal, own(ModelOverride) }
+
+    func legacyLocalEngine(global: ModelSettings) -> LegacyLocalEngine? {
+        guard modelOverride == nil, modelRouting == .local,
+              let url = localEngineURL?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty,
+              let model = activeModelID?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty
+        else { return nil }
+        let agents = allToolSpecs.filter { $0.authMode == .local }.map { ModelAgent.from($0.tool) }
+        guard !agents.isEmpty else { return nil }
+        func norm(_ s: String?) -> String {
+            var u = (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            while u.hasSuffix("/") { u.removeLast() }
+            if u.hasSuffix("/v1") { u.removeLast(3) }
+            return u
+        }
+        let same = agents.allSatisfy { agent in
+            guard let r = global.ref(for: agent, tier: .medium), r.modelID == model else { return false }
+            switch r.source {
+            case .localServer: return norm(global.localServer?.baseURL) == norm(url)
+            case .provider(.custom): return norm(global.credential(.custom)?.baseURL) == norm(url)
+            default: return false
+            }
+        }
+        guard !same else { return .sameAsGlobal }
+        var layer = ModelSettings()
+        let key = localEngineAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        layer.localServer = LocalServer(baseURL: url, apiKey: (key ?? "").isEmpty ? nil : key)
+        for agent in agents {
+            let tiers: [ModelTier] = agent.usesAllTiers ? ModelTier.allCases : [.medium]
+            var t: [ModelTier: ModelRef] = [:]
+            for tier in tiers { t[tier] = ModelRef(source: .localServer, modelID: model) }
+            layer.agentTiers[agent] = t
+        }
+        return .own(ModelOverride(inheritsGlobal: true, settings: layer))
+    }
+
+    /// The old fields moved: a choice of its own written onto the record
+    /// as its override; either way the old fields are cleared (so removing
+    /// the override later really means "use the global settings"). nil:
+    /// nothing to move.
+    func migratedLegacyLocalEngine(global: ModelSettings) -> Profile? {
+        guard let legacy = legacyLocalEngine(global: global) else { return nil }
+        var p = self
+        if case .own(let override) = legacy { p.modelOverride = override }
+        p.localEngineURL = nil
+        p.localEngineAPIKey = nil
+        return p
+    }
+
+    /// A workspace whose omp still carries the pre-5.0 custom server
+    /// (`ompProvider == .custom` + base URL + model on the agent itself):
+    /// nothing in the UI showed it any more, yet every launch staged it
+    /// (issue #36). Moved into the workspace's model override — the custom
+    /// provider, and omp's model when nothing else gives omp one — where
+    /// it can be seen, edited and removed, then cleared from the agent.
+    /// nil: nothing to move, or the override already names another custom
+    /// server (left alone).
+    func migratedLegacyOmpCustom(global: ModelSettings) -> Profile? {
+        let isPrimary = tool == .omp
+        guard let spec = allToolSpecs.first(where: { $0.tool == .omp }),
+              spec.effectiveOmpProvider == .custom,
+              let base = spec.ompBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines), !base.isEmpty
+        else { return nil }
+        func norm(_ s: String?) -> String {
+            var u = (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            while u.hasSuffix("/") { u.removeLast() }
+            if u.hasSuffix("/v1") { u.removeLast(3) }
+            return u
+        }
+        let inherits = modelOverride?.inheritsGlobal ?? true
+        var layer = modelOverride?.settings ?? ModelSettings()
+        let key = spec.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let own = layer.credential(.custom) {
+            guard norm(own.baseURL) == norm(base) else { return nil }
+        } else if !(inherits && norm(global.credential(.custom)?.baseURL) == norm(base)) {
+            // Not already the server everyone uses: this workspace's own.
+            layer.providers.append(ProviderCredential(provider: .custom,
+                                                      apiKey: (key ?? "").isEmpty ? nil : key,
+                                                      baseURL: base))
+        }
+        let model = spec.ompModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let ompHasModel = layer.ref(for: .omp, tier: .medium) != nil
+            || (inherits && global.ref(for: .omp, tier: .medium) != nil)
+        if !model.isEmpty, !ompHasModel {
+            layer.agentTiers[.omp] = [.medium: ModelRef(source: .provider(.custom), modelID: model)]
+        }
+        var p = self
+        p.modelOverride = ModelOverride(inheritsGlobal: inherits, settings: layer,
+                                        excludedProviders: modelOverride?.excludedProviders ?? [])
+        // The agent no longer carries it — nor the key, which now sits on the
+        // provider (left on the agent, it would pass for an Anthropic key).
+        if isPrimary {
+            p.ompProvider = nil; p.ompBaseURL = nil; p.ompModel = nil; p.apiKey = nil
+        } else if let i = p.additionalTools.firstIndex(where: { $0.tool == .omp }) {
+            p.additionalTools[i].ompProvider = nil
+            p.additionalTools[i].ompBaseURL = nil
+            p.additionalTools[i].ompModel = nil
+            p.additionalTools[i].apiKey = nil
+        }
+        return p
+    }
+}
+
 public extension ModelSettingsStore {
     /// True when nothing has been configured yet — the signal to migrate.
     var isEmpty: Bool {

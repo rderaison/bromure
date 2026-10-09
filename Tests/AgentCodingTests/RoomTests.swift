@@ -208,11 +208,46 @@ struct TranscriptActivityTests {
             item(4, .toolUse(name: "Read", summary: "b", detail: "")),
             item(5, .toolUse(name: "mcp__delegation__request", summary: "", detail: "")),
         ])
-        #expect(many.text == "1 command · 2 files read · 1 subagent")
+        #expect(many.text == "1 command · 2 files read · 1 delegation call")   // S1-5: not a subagent
         #expect(many.failures == 1)
         let one = ActivitySummary.line([item(1, .thinking("…")), item(2, .toolUse(name: "Bash", summary: "npm test", detail: ""))])
         #expect(one.text == "Thought · Bash npm test")
         #expect(ActivitySummary.current([item(1, .toolUse(name: "Bash", summary: "npm test", detail: ""))]) == "Running npm test…")
+    }
+
+    @Test("A run of display-MCP results alone still has a label (B69)")
+    func displayResultsOnly() {
+        // The show_media calls are cards outside the run; only their results fold.
+        let run = [
+            item(1, .toolResult(tool: "mcp__display__show_media", content: "Shown.", isError: false)),
+            item(2, .toolResult(tool: "mcp__display__show_media", content: "Shown.", isError: false)),
+        ]
+        let line = ActivitySummary.line(run)
+        #expect(line.text == "2 media items shown")
+        #expect(line.symbols == ["photo"])
+        let mixed = ActivitySummary.line([
+            item(1, .toolResult(tool: "mcp__display__show_chart", content: "", isError: false)),
+            item(2, .toolResult(tool: "Bash", content: "", isError: true)),
+        ])
+        #expect(mixed.text == "1 chart shown · 1 tool result")
+        #expect(mixed.failures == 1)
+        #expect(!ActivitySummary.line([item(1, .toolResult(tool: "display.send_file", content: "", isError: false))]).text.isEmpty)
+    }
+
+    @Test("MCP tool names don't repeat their server (B71)")
+    func humanToolDedup() {
+        #expect(ActivitySummary.humanTool("mcp__browser__browser_evaluate") == "browser evaluate")
+        #expect(ActivitySummary.humanTool("mcp__delegation__request") == "delegation request")
+        #expect(ActivitySummary.humanTool("mcp__display__show_media") == "display show media")
+        // Only a whole-word prefix is dropped.
+        #expect(ActivitySummary.humanTool("mcp__browser__browsers_list") == "browser browsers list")
+        #expect(ActivitySummary.humanTool("mcp__browser__browser") == "browser browser")
+        #expect(ActivitySummary.humanTool("Bash") == "Bash")
+        let one = ActivitySummary.line([item(1, .toolUse(name: "mcp__browser__browser_evaluate",
+                                                         summary: "JSON.stringify(x)", detail: ""))])
+        #expect(one.text == "browser evaluate JSON.stringify(x)")
+        let bare = ActivitySummary.line([item(1, .toolUse(name: "mcp__browser__browser_tabs", summary: "", detail: ""))])
+        #expect(bare.text == "browser tabs")
     }
 }
 
@@ -236,21 +271,38 @@ struct TurnChangesTests {
         let changes = rows.compactMap { r -> TurnChanges? in if case .changes(let c, _) = r { return c } else { return nil } }
         #expect(changes.count == 1)
         #expect(changes.first?.files == ["/a/x.swift", "/a/y.swift", "z.py"])
-        #expect(changes.first?.added == 3 + 3 + 2)
-        #expect(changes.first?.removed == 2 + 1)
+        // The edit's kept lines ("a", "b") are no change: +1, as the review counts it.
+        #expect(changes.first?.added == 1 + 3 + 2)
+        #expect(changes.first?.removed == 0 + 1)
         // It sits right before the next message.
         if case .changes = rows[rows.count - 2] {} else { Issue.record("changes not at the turn's end") }
     }
 
-    @Test("Token use: Claude's per-message usage summed, Codex's running total")
+    @Test("The chip counts an edit's net line diff, the review's numbers (QA: chip +12 −3, review +9 −0)")
+    func netLineDiff() {
+        let old = "def add(a, b):\n    return a + b\n\n"
+        let new = old + "def mul(a, b):\n    return a * b\n\n\ndef sub(a, b):\n    return a - b\n\n\ndef div(a, b):\n"
+        // Every line of each side: +12 −3. The diff: 9 lines added, none removed.
+        #expect(TurnChanges.lineDiff(old, new) == (9, 0))
+        #expect(TurnChanges.lineDiff("a\nb\nc", "a\nB\nc") == (1, 1))
+        #expect(TurnChanges.lineDiff("", "x\ny") == (2, 0))
+        #expect(TurnChanges.lineDiff("x\ny\n", "") == (0, 2))
+        let edit = #"{"file_path":"/a/calc.py","old_string":"def add(a, b):\n    return a + b\n\n","new_string":"def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"}"#
+        let c = TurnChanges.of([item(1, .toolUse(name: "Edit", summary: "", detail: edit)),
+                                item(2, .toolResult(tool: "Edit", content: "ok", isError: false))])
+        #expect(c?.added == 3 && c?.removed == 0)
+    }
+
+    @Test("Token use: the context of the latest model call, not a running sum")
     func tokens() {
         let claude = Data("""
-        {"message":{"usage":{"input_tokens":10,"cache_read_input_tokens":100,"output_tokens":5}}}
-        {"message":{"usage":{"input_tokens":20,"cache_creation_input_tokens":3,"output_tokens":7}}}
+        {"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":100,"output_tokens":5}}}
+        {"type":"assistant","message":{"usage":{"input_tokens":20,"cache_creation_input_tokens":3,"cache_read_input_tokens":110,"cache_creation":{"ephemeral_5m_input_tokens":3},"output_tokens":7}}}
+        {"type":"user","toolUseResult":{"usage":{"input_tokens":99999,"output_tokens":1}}}
         """.utf8)
         let t = TranscriptSearchIndex.tokens(in: claude)
-        #expect(t.input == 33 && t.cached == 100 && t.output == 12)
-        let codex = Data(#"{"total_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":9}} {"total_token_usage":{"input_tokens":80,"cached_input_tokens":30,"output_tokens":15}}"#.utf8)
+        #expect(t.input == 23 && t.cached == 110 && t.output == 7)
+        let codex = Data(#"{"info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":90},"last_token_usage":{"input_tokens":80,"cached_input_tokens":30,"output_tokens":15}}}"#.utf8)
         let c = TranscriptSearchIndex.tokens(in: codex)
         #expect(c.input == 50 && c.cached == 30 && c.output == 15)
         #expect(TranscriptSearchIndex.compact(1_234_567) == "1.2M")
@@ -294,5 +346,49 @@ struct ReplyChunkTests {
         let item = TranscriptItem(id: 42, kind: .assistantText(text), timestamp: nil)
         let rows = TranscriptRow.split(item)
         #expect(rows.first?.id == 42 && Set(rows.map(\.id)).count == rows.count)
+    }
+}
+
+@Suite("Transcript row ids (B23)")
+struct TranscriptRowIDTests {
+    private func item(_ id: Int, _ k: TranscriptItem.Kind) -> TranscriptItem { TranscriptItem(id: id, kind: k, timestamp: nil) }
+
+    @Test("Pieces of a long reply never take another row's id, even with positional item ids")
+    func chunkIDsDontCollide() {
+        let long = (0..<12).map { _ in String(repeating: "word ", count: 120) }.joined(separator: "\n\n")
+        // Positional ids, as a parser numbering by index would give: the old
+        // `id * 131 + k` piece ids landed on 132, 133… — real items' ids.
+        var items: [TranscriptItem] = [item(1, .assistantText(long))]
+        for i in 2..<300 { items.append(item(i, i % 2 == 0 ? .userText("q\(i)") : .assistantText("a\(i)"))) }
+        let rows = TranscriptRow.rows(items)
+        #expect(rows.count > items.count)
+        #expect(Set(rows.map(\.id)).count == rows.count)
+        #expect(rows.first?.id == 1)
+    }
+
+    @Test("Duplicate item ids are re-keyed, content kept; Int.max ids don't overflow")
+    func dedupe() {
+        let rows = TranscriptRow.rows([
+            item(7, .userText("a")),
+            item(7, .userText("b")),
+            item(Int.max, .toolUse(name: "Edit", summary: "x",
+                                   detail: #"{"file_path":"/a","old_string":"a","new_string":"b"}"#)),
+        ])
+        #expect(Set(rows.map(\.id)).count == rows.count)
+        let texts = rows.compactMap { r -> String? in
+            if case .item(let i) = r, case .userText(let t) = i.kind { return t } else { return nil }
+        }
+        #expect(texts == ["a", "b"])
+    }
+
+    @Test("Narrow columns cut replies smaller")
+    func chunkLimitByWidth() {
+        #expect(TranscriptRow.chunkLimit(forWidth: 180) < TranscriptRow.chunkLimit(forWidth: 700))
+        #expect(TranscriptRow.chunkLimit(forWidth: 0) == TranscriptRow.chunkChars)
+        #expect(TranscriptRow.chunkLimit(forWidth: 900) == TranscriptRow.chunkChars)
+        let text = (0..<8).map { _ in String(repeating: "word ", count: 60) }.joined(separator: "\n\n")
+        let narrow = TranscriptRow.split(item(3, .assistantText(text)), limit: TranscriptRow.chunkLimit(forWidth: 180))
+        let wide = TranscriptRow.split(item(3, .assistantText(text)))
+        #expect(narrow.count > wide.count)
     }
 }

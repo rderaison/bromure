@@ -139,6 +139,9 @@ for f in "$BASE_IMG" "$KERNEL" "$INITRD" "$BUILD_INFO" \
     [ -f "$f" ] || { echo "ERROR: $f missing after build"; exit 1; }
 done
 
+# Validate version and guest graphics metadata even with SKIP_VERIFY=1.
+python3 "$SCRIPT_DIR/scripts/check-browser-image-contract.py" "$IMAGE_DIR"
+
 # --- 2. Verify (boot + browsers) on disposable clones ---------------------
 # scripts/verify-browser-image.sh owns both gates so Jenkins can run them
 # as separate stages; here they run back to back unless the caller

@@ -82,6 +82,10 @@ private struct DockerVolumeJSON: Decodable {
 private final class SerialScanState: @unchecked Sendable {
     var buffer = Data()
     var reported = false
+    /// Line buffer for the console → per-VM log / app-log filter.
+    var logBuffer = Data()
+    /// Per-VM console transcript (~/Library/Logs/BromureAC/console/…).
+    var consoleFile: FileHandle?
 }
 
 /// Boots an Ubuntu base image for an interactive session.
@@ -333,7 +337,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
 
         let bootLoader = VZEFIBootLoader()
-        bootLoader.variableStore = VZEFIVariableStore(url: imageManager.efiVarsURL)
+        bootLoader.variableStore = VZEFIVariableStore(
+            url: try sessionDisk?.efiVariableStoreURL(base: imageManager.efiVarsURL)
+                ?? imageManager.efiVarsURL)
         config.bootLoader = bootLoader
 
         let platform = VZGenericPlatformConfiguration()
@@ -357,6 +363,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // home into it first).
         if let session = sessionDisk, session.homeAttachMode != .virtiofs {
             try session.ensureHomeImageExists()
+            // Logged either way (~/Library/Logs/BromureAC/bromure-ac.log): a size
+            // change that doesn't land has to say why.
+            let homeNote = session.hasSavedState
+                ? "saved state present — home image kept at its size until a cold boot"
+                : try session.growHomeImageIfNeeded()
+            AppLog.stamp("'\(session.profile.name)': \(homeNote)")
             let homeAttachment = try VZDiskImageStorageDeviceAttachment(
                 url: session.homeImageURL, readOnly: false)
             config.storageDevices.append(
@@ -445,10 +457,26 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         )
         config.serialPorts = [serial]
         let scan = SerialScanState()
+        // The raw console goes to a per-VM file, not the app log (B47: a guest
+        // "login:" prompt and boot chatter used to interleave with [mitm]
+        // lines). Only lines that signal trouble reach stderr / the app log,
+        // prefixed with the workspace so they can't be mistaken for host output.
+        let consoleName = sessionDisk?.profile.name ?? "vm"
+        scan.consoleFile = Self.openConsoleLog(name: consoleName,
+                                               id: sessionDisk?.profile.id.uuidString)
         serialOut.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            FileHandle.standardError.write(data)
+            scan.consoleFile?.write(data)
+            scan.logBuffer.append(data)
+            while let nl = scan.logBuffer.firstIndex(of: 0x0A) {
+                let line = String(decoding: scan.logBuffer[..<nl], as: UTF8.self)
+                scan.logBuffer.removeSubrange(...nl)
+                if let out = UbuntuSandboxVM.consoleLineForAppLog(line, name: consoleName) {
+                    FileHandle.standardError.write(Data((out + "\n").utf8))
+                }
+            }
+            if scan.logBuffer.count > 4096 { scan.logBuffer.removeAll() }
             guard !scan.reported else { return }
             scan.buffer.append(data)
             func report(_ match: String) {
@@ -554,6 +582,17 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 )
                 sharingDevices.append(fs)
             }
+
+            // Which optional fstab tags this boot attaches. The guest agent
+            // turns these markers into ConditionPathExists drop-ins on the
+            // fstab mount units, so slots the host doesn't attach (unused
+            // share-N, bromure-home on ext4 boots) are SKIPPED by systemd
+            // instead of logging a red "FAILED to mount" on every boot.
+            var attachedTags: [String] = homeShareURL == nil ? [] : ["bromure-home"]
+            attachedTags += session.sharedFolders.indices.map { "share-\($0 + 1)" }
+            // (A restore resumes a guest that already booted: leave the
+            // share's inodes alone.)
+            if !forRestore { Self.writeVirtiofsTagMarkers(attachedTags, in: metaDir) }
         }
         config.directorySharingDevices = sharingDevices
 
@@ -575,6 +614,15 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     public func start() async throws {
         guard let vm = vm else { throw UbuntuImageError.installerStoppedEarly }
         state = .starting
+        // A fresh boot: a tab status a hook dropped before the last shutdown
+        // (never consumed) names a window of the previous boot — read now it
+        // flashed "Working" on whatever tab took that index.
+        if let outbox = sessionDisk?.outboxDirectory,
+           let names = try? FileManager.default.contentsOfDirectory(atPath: outbox.path) {
+            for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
+                try? FileManager.default.removeItem(at: outbox.appendingPathComponent(n))
+            }
+        }
         try await vm.start()
         state = .running
         startOutboxPolling()
@@ -759,6 +807,63 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// emergency-shell breadcrumbs (which also catch non-fsck local-fs
     /// failures — the shell is equally unreachable either way). Returns the
     /// matched line, trimmed, or nil.
+    /// Directory (inside the meta share) holding one empty file per optional
+    /// virtiofs tag attached to this boot — read by the guest agent's
+    /// `task_mount_conditions` (B48).
+    nonisolated static let virtiofsTagMarkerDir = "virtiofs-tags"
+
+    nonisolated static func writeVirtiofsTagMarkers(_ tags: [String], in metaDir: URL) {
+        let fm = FileManager.default
+        let dir = metaDir.appendingPathComponent(virtiofsTagMarkerDir, isDirectory: true)
+        try? fm.removeItem(at: dir)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        for tag in tags {
+            fm.createFile(atPath: dir.appendingPathComponent(tag).path, contents: Data())
+        }
+    }
+
+    /// Opens (append) the per-VM console transcript under
+    /// ~/Library/Logs/BromureAC/console/, rotating it to `.1` past 2 MB.
+    nonisolated static func openConsoleLog(name: String, id: String?) -> FileHandle? {
+        let fm = FileManager.default
+        let dir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/BromureAC/console", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let safe = String(name.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-" })
+        let stem = id.map { "\(safe)-\($0.prefix(8))" } ?? safe
+        let url = dir.appendingPathComponent(stem + ".log")
+        if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? UInt64,
+           size > 2 << 20 {
+            let old = dir.appendingPathComponent(stem + ".log.1")
+            try? fm.removeItem(at: old)
+            try? fm.moveItem(at: url, to: old)
+        }
+        if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
+        guard let h = try? FileHandle(forWritingTo: url) else { return nil }
+        h.seekToEndOfFile()
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        h.write(Data("\n=== \(stamp) boot ===\n".utf8))
+        return h
+    }
+
+    /// The app-log form of one guest console line, or nil to keep it out of
+    /// the app log (it still lands in the per-VM console file). Only trouble
+    /// is forwarded — systemd FAILED units, kernel panics/oopses, OOM kills,
+    /// emergency mode, fsck failures — with ANSI colour stripped and a
+    /// `[guest <name>]` prefix.
+    nonisolated static func consoleLineForAppLog(_ raw: String, name: String) -> String? {
+        let line = raw
+            .replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "",
+                                  options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return nil }
+        let markers = ["FAILED", "Kernel panic", "Oops:", "BUG:", "Out of memory",
+                       "oom-kill", "emergency mode", "Emergency", "end Kernel panic"]
+        guard markers.contains(where: { line.contains($0) })
+                || fsBootFailureMatch(in: line) != nil else { return nil }
+        return "[guest \(name)] \(line)"
+    }
+
     nonisolated static func fsBootFailureMatch(in line: String) -> String? {
         let patterns = [
             "UNEXPECTED INCONSISTENCY",          // e2fsck: preen can't fix, wants -y

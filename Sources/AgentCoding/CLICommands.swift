@@ -253,6 +253,15 @@ struct VMAttachWindow: ParsableCommand {
     @Option(name: .long, help: "Peer attach: remote login user.")
     var remoteUser: String?
 
+    // A scratch terminal (the chat's /term): a tmux session of its own —
+    // never a tab of `bromure`, so no roster, sidebar or session sees it —
+    // created in `--cwd-b64` (base64: any path survives the shell words)
+    // and kept alive across detaches until it is killed or exited.
+    @Option(name: .long, help: "Scratch terminal: guest tmux session name.")
+    var scratch: String?
+    @Option(name: .long, help: "Scratch terminal: starting folder, base64.")
+    var cwdB64: String?
+
     func run() throws {
         // Wipe the host login banner ("Last login: … on ttysNNN") that ghostty's
         // login shell prints before it execs us. While the VM is still booting
@@ -298,6 +307,19 @@ struct VMAttachWindow: ParsableCommand {
         return RemoteTransport.client(hostID: hostID, interactive: true)
     }
 
+    /// The guest command behind a scratch terminal: attach to (or create)
+    /// its own tmux session in `cwd` — the home when the folder is gone.
+    /// The wheel scrolls its history (mouse on: its one client is ours);
+    /// status off, the chat draws the chrome.
+    static func scratchCommand(session: String, cwd: String) -> String {
+        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let name = String(session.filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(48))
+        let dir = cwd == "~" ? "$HOME" : (cwd.hasPrefix("~/") ? "$HOME/" + q(String(cwd.dropFirst(2))) : q(cwd))
+        return "d=\(dir); [ -d \"$d\" ] || d=\"$HOME\"; "
+            + "exec tmux new-session -A -s \(q(name)) -c \"$d\" \\; set-option status off \\; "
+            + "set-option mouse on \\; set-option -s set-clipboard on"
+    }
+
     private func attachLoop(client: ControlClient) throws {
 
         // Stay patient through VM boot instead of exiting: a fresh workspace
@@ -324,9 +346,17 @@ struct VMAttachWindow: ParsableCommand {
                     // surface the user is actively working in, so a background
                     // side (native window vs fat client) can't resize the
                     // shared tmux window out from under the active one.
-                    try InteractiveExec.run(client: client, vm: vmID,
-                                            view: view ?? UUID().uuidString, window: windowIndex,
-                                            guiConsent: true, sizePassive: true)
+                    if let scratch {
+                        let cwd = cwdB64.flatMap { Data(base64Encoded: $0) }
+                            .map { String(decoding: $0, as: UTF8.self) } ?? "~"
+                        try InteractiveExec.run(client: client, vm: vmID,
+                                                command: Self.scratchCommand(session: scratch, cwd: cwd),
+                                                guiConsent: true)
+                    } else {
+                        try InteractiveExec.run(client: client, vm: vmID,
+                                                view: view ?? UUID().uuidString, window: windowIndex,
+                                                guiConsent: true, sizePassive: true)
+                    }
                     // A real attach runs until the tmux client exits. If it
                     // returned almost immediately AND we're still early in
                     // boot, the session probably wasn't ready — retry rather
@@ -366,6 +396,8 @@ struct FatClientPost: ParsableCommand {
     var path: String
     @Option(name: .long, help: "Inline JSON request body.")
     var json: String?
+    @Option(name: .long, help: "Send it N times on one connection and print the timings (link measurements).")
+    var `repeat`: Int?
 
     func run() throws {
         guard let id = UUID(uuidString: hostID), let client = RemoteTransport.client(hostID: id) else {
@@ -374,6 +406,19 @@ struct FatClientPost: ParsableCommand {
         var body: [String: Any]?
         if let json, let data = json.data(using: .utf8) {
             body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        if let n = `repeat`, n > 0 {
+            for i in 1...n {
+                let t = Date()
+                let r = try client.request(method, path, body: body)
+                FileHandle.standardError.write(Data(String(format: "#%d HTTP %d %.0f ms\n", i, r.status,
+                                                           Date().timeIntervalSince(t) * 1000).utf8))
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: RequestLedger.shared.report(),
+                                                   options: [.prettyPrinted, .sortedKeys]) {
+                print(String(data: d, encoding: .utf8) ?? "")
+            }
+            return
         }
         let resp = try client.request(method, path, body: body)
         FileHandle.standardError.write(Data("HTTP \(resp.status)\n".utf8))
@@ -400,6 +445,8 @@ struct FatClientAuthProbe: ParsableCommand {
     func run() throws {
         var host = RemoteHost(name: address, address: address, port: port, user: user)
         host.pinnedHostKey = pinned
+        // This Mac's client key — what a server's authorized_keys needs.
+        print("client key: \(RemoteTransport.clientPublicKey() ?? "none")")
         var scannedLine: String?
         if let info = RemoteTransport.scanHostKey(address: address, port: port) {
             print("host-key fingerprint: \(info.fingerprint)")
@@ -819,8 +866,8 @@ struct WorkspacesCreate: ParsableCommand {
         }
         let resp = try client.request("POST", "/profiles", body: body)
         guard resp.status == 201, (resp.json["ok"] as? Bool) == true else {
-            throw ValidationError(resp.json["error"] as? String
-                ?? "Couldn't create the workspace (HTTP \(resp.status)).")
+            FileHandle.standardError.write(Data("Error: \(resp.json["error"] as? String ?? "Couldn't create the workspace (HTTP \(resp.status)).")\n".utf8))
+            throw ExitCode(1)
         }
         let sid = resp.json["shortId"] as? String ?? ""
         let nm = resp.json["name"] as? String ?? (body["name"] as? String ?? "?")
@@ -867,14 +914,16 @@ struct WorkspacesEdit: ParsableCommand {
         abstract: "Edit a workspace's full settings — opens its JSON in $EDITOR (kubectl-style).",
         discussion: """
         With no --from-json this fetches the workspace's entire configuration,
-        opens it in $EDITOR (or vi), and saves your changes back. Secrets are shown
-        blank: leave one blank to keep the stored value, or type a new value to
-        change it. Pass --from-json to apply a document non-interactively.
+        opens it in $EDITOR (or vi), and saves your changes back; deleting a key
+        clears that field. Secrets are shown blank: leave one blank to keep the
+        stored value, or type a new value to change it. Pass --from-json to apply a document non-interactively; it may
+        be partial (only the fields to change — the rest keep their values, and
+        an explicit null clears an optional field).
         """)
 
     @Argument(help: "Workspace id or name.")
     var workspace: String
-    @Option(name: .long, help: "Apply a full profile JSON document non-interactively: a file path, or - for stdin.")
+    @Option(name: .long, help: "Apply a (full or partial) profile JSON document non-interactively: a file path, or - for stdin.")
     var fromJson: String?
 
     func run() throws {
@@ -892,11 +941,16 @@ struct WorkspacesEdit: ParsableCommand {
             guard let edited = try editJSONInEditor(cur.json) else {
                 print("No changes."); return
             }
-            body = edited
+            // The editor held the WHOLE document: a key deleted there is a
+            // field cleared, not one left alone (--from-json stays partial).
+            body = ProfileDocument.editedDocument(fetched: cur.json, edited: edited)
         }
         let resp = try client.request("PUT", "/profiles/\(seg)", body: body)
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
-            throw ValidationError(resp.json["error"] as? String ?? "Couldn't save (HTTP \(resp.status)).")
+            // The server's message names the field; the usage text a
+            // ValidationError adds would bury it.
+            FileHandle.standardError.write(Data("Error: \(resp.json["error"] as? String ?? "Couldn't save (HTTP \(resp.status)).")\n".utf8))
+            throw ExitCode(1)
         }
         print("Saved workspace \(resp.json["name"] as? String ?? workspace).")
     }
@@ -1004,6 +1058,93 @@ func absoluteHostPath(_ raw: String) -> String {
         ? expanded
         : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(expanded)
     return (absolute as NSString).standardizingPath
+}
+
+/// Profile documents as `workspaces create/edit --from-json` (and the control
+/// API's POST/PUT /profiles) send them: possibly partial — only the fields to
+/// change. They are overlaid key by key on a base profile's own document
+/// (the template for a create, the stored workspace for an edit), so an
+/// omitted key keeps its value and an explicit `null` clears an optional one.
+enum ProfileDocument {
+    /// `doc` overlaid on `base`, decoded. On failure, a message naming the
+    /// offending field ("authMode: unknown value \"tokn\"").
+    static func merge(_ doc: [String: Any], over base: Profile) -> Result<Profile, ProfileDocumentError> {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let baseData = try? encoder.encode(base),
+              var merged = (try? JSONSerialization.jsonObject(with: baseData)) as? [String: Any] else {
+            return .failure(ProfileDocumentError(message: "Internal error encoding the workspace."))
+        }
+        for (k, v) in doc { merged[k] = v }
+        guard JSONSerialization.isValidJSONObject(merged),
+              let data = try? JSONSerialization.data(withJSONObject: merged) else {
+            return .failure(ProfileDocumentError(message: "Invalid profile document: not valid JSON."))
+        }
+        do {
+            return .success(try decoder.decode(Profile.self, from: data))
+        } catch {
+            return .failure(ProfileDocumentError(message: "Invalid profile document: " + describe(error)))
+        }
+    }
+
+    /// The document an editor session saves back. It started from the full
+    /// fetched document, so a top-level key the user deleted means "clear
+    /// it": sent as an explicit null (which `merge` treats as a clear —
+    /// absent would mean "unchanged", the partial-document rule). Keys only
+    /// the editor added go as typed. (Objects are replaced whole by `merge`,
+    /// so a key removed inside one is already gone.)
+    static func editedDocument(fetched: [String: Any], edited: [String: Any]) -> [String: Any] {
+        var out = edited
+        for key in fetched.keys where edited[key] == nil {
+            out[key] = NSNull()
+        }
+        return out
+    }
+
+    /// "folderPaths[2]: expected a string" — the path and the problem, from a
+    /// DecodingError (the generic localizedDescription says neither).
+    static func describe(_ error: Error) -> String {
+        func path(_ ctx: DecodingError.Context, _ last: CodingKey? = nil) -> String {
+            var keys = ctx.codingPath
+            if let last { keys.append(last) }
+            var out = ""
+            for k in keys {
+                if let i = k.intValue { out += "[\(i)]" } else { out += (out.isEmpty ? "" : ".") + k.stringValue }
+            }
+            return out.isEmpty ? "(document)" : out
+        }
+        guard let e = error as? DecodingError else { return error.localizedDescription }
+        switch e {
+        case .keyNotFound(let key, let ctx):
+            return "\(path(ctx, key)): required field is missing"
+        case .typeMismatch(let type, let ctx):
+            return "\(path(ctx)): expected \(typeName(type))"
+        case .valueNotFound(let type, let ctx):
+            return "\(path(ctx)): expected \(typeName(type)), found null"
+        case .dataCorrupted(let ctx):
+            let detail = ctx.debugDescription.isEmpty ? "invalid value" : ctx.debugDescription
+            return "\(path(ctx)): \(detail)"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
+
+    private static func typeName(_ t: Any.Type) -> String {
+        switch t {
+        case is String.Type: return "a string"
+        case is Bool.Type: return "true or false"
+        case is Int.Type, is Double.Type, is UInt64.Type, is Int64.Type: return "a number"
+        case is [Any].Type: return "an array"
+        case is [String: Any].Type: return "an object"
+        default: return "\(t)"
+        }
+    }
+}
+
+struct ProfileDocumentError: Error, Equatable {
+    let message: String
 }
 
 /// Load a JSON object from a file path, or from stdin when `spec == "-"`.

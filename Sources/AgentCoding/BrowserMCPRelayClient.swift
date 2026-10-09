@@ -28,12 +28,21 @@ final class BrowserMCPRelayClient {
     /// `runningState` so nonisolated access compiles under actor isolation.
     private let fdState = OSAllocatedUnfairLock<Int32>(initialState: -1)
 
+    /// `browser` resolves the workspace's existing controller (no side
+    /// effects — it's polled while a cold browser boots); `ensureBrowser`
+    /// boots it for a tool call, which is where the client applies the same
+    /// reveal rule as the local window (open the pane when the agent STARTS a
+    /// browser for the workspace on stage, boot hidden otherwise).
     init(host: RemoteHost, vm: String,
-         browser: @escaping () -> WorkspaceBrowserController?) {
+         browser: @escaping () -> WorkspaceBrowserController?,
+         ensureBrowser: (() -> Void)? = nil) {
         self.host = host
         self.vm = vm
         self.server = BrowserMCPServer(browser: browser,
-                                       ensureBrowser: { browser()?.ensureRunning() })
+                                       ensureBrowser: ensureBrowser ?? { browser()?.ensureRunning() },
+                                       // This browser lives on the client's vmnet:
+                                       // the server's workspace VM can't reach it.
+                                       cdpViaHost: true)
     }
 
     func start() {

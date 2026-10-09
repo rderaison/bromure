@@ -2,7 +2,25 @@
 # Cursor size and display scale are set after chrome-env is loaded (runtime, not build-time)
 export XCURSOR_THEME=Adwaita
 
-/usr/local/bin/resize-watcher.sh &
+# macOS owns display sleep. Keep the virtual desktop available even while a
+# pre-warmed VM waits for a profile or Chromium releases its video wake lock.
+# The DPMS extension is optional; lack of it must not prevent session startup.
+# BROMURE_IDLE_POLICY_BEGIN
+xset s off >/dev/null 2>&1 || true
+xset s noblank >/dev/null 2>&1 || true
+xset -dpms >/dev/null 2>&1 || true
+xset s reset >/dev/null 2>&1 || true
+# BROMURE_IDLE_POLICY_END
+
+_SHARED_WINDOWS=0
+_SHARED_MAXIMIZE=--start-maximized
+if grep -Eq '(^|[[:space:]])bromure\.shared_windows=' /proc/cmdline; then
+    /usr/local/bin/shared_windows.py prepare-wm || exit 1
+    _SHARED_WINDOWS=1
+    _SHARED_MAXIMIZE=
+else
+    /usr/local/bin/resize-watcher.sh &
+fi
 openbox &
 
 # XDG_RUNTIME_DIR is required by PipeWire and other session services.
@@ -42,6 +60,7 @@ CHROME_LANG=
 CHROME_UA=
 BROWSER_BIN=
 DISPLAY_SCALE=
+GRAPHICS_BACKEND=software
 MTU=
 KEY_REPEAT_DELAY_MS=
 KEY_REPEAT_RATE_HZ=
@@ -122,11 +141,17 @@ fi
 # file-agent.py and webcam-agent.py are started at boot via inittab
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl
 [ "$MICROPHONE" = "1" ] && pactl load-module module-alsa-source device=hw:0,1 source_name=virtio_mic source_properties=device.description=Microphone 2>/dev/null &
-[ "$AUTOMATION" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-agent.py &
+# Internal CDP is also needed for target-scoped shared-window scrolling.
+# This does not enable the external automation setting or LAN forwarding.
+if [ "$AUTOMATION" = "1" ] || [ "$_SHARED_WINDOWS" = "1" ]; then
+    /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-agent.py &
+fi
 # CDP LAN forwarder: lets the workspace VM drive CDP over VM↔VM TCP (host stays
 # out of the loop → no main-queue wedge). No-ops unless CDP_LAN_ACCESS=1.
 [ "$AUTOMATION" = "1" ] && [ "$CDP_LAN_ACCESS" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-lan-forwarder.py &
-[ "$NATIVE_CHROME" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/tab-agent.py &
+if [ "$NATIVE_CHROME" = "1" ] || [ "$_SHARED_WINDOWS" = "1" ]; then
+    /usr/local/bin/resilient-launch.sh /usr/local/bin/tab-agent.py &
+fi
 # Native tabs: swap in the Openbox config that grabs browser-chrome chords
 # (⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘]) and bounces them to the host via bromure-hostkey ->
 # tab-agent. Legacy full-Chromium mode keeps the keyless rc.xml so those
@@ -138,11 +163,9 @@ if [ "$NATIVE_CHROME" = "1" ] && [ -f "$HOME/.config/openbox/rc-nativetabs.xml" 
 fi
 [ "$DEBUG_SHELL" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/shell-agent.py &
 echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SWAP_CMD_CTRL" > /dev/hvc0
-# Mesa software GL (llvmpipe) — VZ's virtio-gpu has no 3D acceleration
-# for Linux guests, and llvmpipe beats Chromium's bundled SwiftShader by
-# ~2x on compositing. NO_LIBGL_SOFTWARE=1 (via vm.chromeEnvExtra) skips
-# this for experiments.
-[ "$NO_LIBGL_SOFTWARE" = "1" ] || export LIBGL_ALWAYS_SOFTWARE=1
+# Select the Mesa environment for the actual host device. Legacy hosts omit
+# GRAPHICS_BACKEND and continue using software GL; VirGL is explicit opt-in.
+. /usr/local/bin/graphics-env.sh
 
 
 # Boost Xorg and Chromium to high CPU priority (-10 nice).
@@ -167,7 +190,7 @@ LANG_FLAG=
 # and the host clips off the top rows. Chromium itself runs completely
 # unmodified — same launch flags, same maximize behaviour, same window
 # manager rules. tab-agent + the native titlebar handle the visible UI.
-CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --no-default-browser-check --disable-pings --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
+CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --no-default-browser-check --disable-pings $_SHARED_MAXIMIZE --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
 
 # VPN splash: when a VPN is configured to connect at startup, the tunnel
 # takes a few seconds to establish. Loading the user's URL in that window
@@ -244,6 +267,16 @@ for attempt in 1 2 3 4 5; do
     else
         $CHROME_CMD
     fi
+    # Explicit shared-owner quit must not be mistaken for a quick startup
+    # crash. Give the controller a bounded chance to send its process-exit
+    # evidence before the normal guest shutdown below.
+    if [ "$_SHARED_WINDOWS" = "1" ] && [ -f /tmp/bromure/shared-shutdown-requested ]; then
+        for shutdown_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            [ -f /tmp/bromure/shared-shutdown-replied ] && break
+            sleep 0.1
+        done
+        break
+    fi
     now_ts=$(date +%s)
     elapsed=$((now_ts - start_ts))
     # If Chrome ran for more than 10 seconds, treat it as a real session
@@ -273,4 +306,3 @@ done
 # dhclient -r under ifupdown — the udhcpc -R equivalent from Alpine days).
 doas ifdown eth0 2>/dev/null
 doas poweroff
-

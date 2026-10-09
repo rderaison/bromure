@@ -19,7 +19,7 @@
 This repo ships two sibling apps, both built on Apple's [Virtualization.framework](https://developer.apple.com/documentation/virtualization):
 
 - **Bromure** — every browser session runs in a throwaway Linux VM. Close the window, the VM is destroyed.
-- **Bromure Agentic Coding** — a sandboxed environment for AI coding agents (Claude Code, Codex). A host-side MITM proxy swaps fake credentials for real ones on the wire so secrets never enter the VM, then adds supply-chain scanning, prompt-injection detection, a multi-model panel, local/hybrid inference, and remote access — all enforced at that one boundary.
+- **Bromure Agentic Coding** — a sandboxed environment for AI coding agents (Claude Code, Codex, Grok, Kimi Code, Oh My Pi). A host-side MITM proxy swaps fake credentials for real ones on the wire so secrets never enter the VM, then adds supply-chain scanning, prompt-injection detection, PII protection, a multi-model panel, local inference, and remote access — all enforced at that one boundary.
 
 <details>
 <summary><strong>How Bromure Agentic Coding compares</strong></summary>
@@ -36,13 +36,18 @@ A more detailed feature matrix is available at [bromure.io/en/feature-matrix](ht
 | **Credential scope & approval**<br><sub>Per-use limits, read-only, expiry, consent</sub> | ❌ No per-use scoping | 🟡 Approval flow + egress filter | 🟡 Per-secret TTL; blocks shells | 🟡 Egress filter per endpoint | 🟡 Domain allow-list; in-VM code can still use it | 🟡 Domain + method/path egress rules | ✅ Per-destination consent + TTL |
 | **Supply-chain scanning**<br><sub>Catching malicious / vulnerable packages</sub> | ❌ No registry scanning | ❌ Signing only, no pkg scan | ❌ Out of scope | ❌ Out of scope | ❌ No package scanning | ❌ No package scanning | ✅ Age-gate, OSV, socket.dev, Depi |
 | **Prompt-injection detection**<br><sub>Scanning untrusted content & rules files</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ PromptGuard + ModernBERT |
+| **PII protection**<br><sub>Keeping personal data from the model provider</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Swapped on-device, restored in replies |
 | **Audit trail**<br><sub>Recording what the agent did</sub> | ❌ Container logs only | 🟡 Immutable local audit | ❌ | 🟡 Request logging | 🟡 Request logging | 🟡 Full HTTP bodies in SQLite | ✅ Full session trace, encrypted |
 | **Supply-chain inventory** <sub>(Enterprise)</sub><br><sub>A record of every package fetched</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Every dependency + verdict, searchable |
 | **Productivity** | | | | | | | |
+| **Agent teams**<br><sub>Many agents on one task, talking to each other</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Rooms, Switchboard, @-delegation |
 | **Token usage** <sub>(Enterprise)</sub><br><sub>Which files burn the most tokens</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Per file, repo, and model |
 | **Multi-model fusion**<br><sub>A panel of models, judged & synthesized</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Panel + judge, on the wire |
-| **Local & hybrid models**<br><sub>Inference on your own silicon or in the cloud, local fallback when cloud is down</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Local or hybrid, on the wire |
-| **Reach it from anywhere**<br><sub>Attach to the sandbox remotely</sub> | 🟡 VS Code remote | ❌ | ❌ | ❌ | 🟡 docker exec, local | ❌ | ✅ App, CLI, or SSH |
+| **Automations**<br><sub>Agent runs on a schedule or on GitHub / Linear events</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Schedule, GitHub, Linear, chained |
+| **Local models**<br><sub>Any provider, or inference on your own silicon</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ On-device MLX + any provider |
+| **Local Kubernetes**<br><sub>Clusters and registries next to the sandbox</sub> | 🟡 DIY via Docker-in-Docker | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ k3s clusters + private registry |
+| **Agentic browser**<br><sub>A browser the agent drives to test its work</sub> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Isolated Chromium, agent-driven |
+| **Reach it from anywhere**<br><sub>Attach to the sandbox remotely</sub> | 🟡 VS Code remote | ❌ | ❌ | ❌ | 🟡 docker exec, local | ❌ | ✅ Mac, iPhone, iPad, CLI or SSH |
 
 ✅ Full — built in, enforced &nbsp;·&nbsp; 🟡 Partial — limited or optional &nbsp;·&nbsp; ❌ None — not addressed
 

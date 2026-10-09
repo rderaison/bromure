@@ -302,6 +302,13 @@ final class DelegationStore {
         stamp(ids, now) { $0.readAt == nil ? { $0.readAt = now } : nil }
     }
 
+    /// Back to unread: the call that took them never got its answer to the
+    /// agent (cancelled by its client's timeout, or the connection was
+    /// gone) — the next read_inbox or wait returns them again.
+    func markUnread(_ ids: [UUID], now: Date = Date()) {
+        stamp(ids, now) { $0.readAt != nil ? { $0.readAt = nil } : nil }
+    }
+
     /// A notice is typed again for a message still unread this long after
     /// the last one — a notice the agent read past, or that landed in a
     /// dialog, was otherwise the end of the road for the message.
@@ -573,6 +580,28 @@ enum DelegationNotice {
         return rest
     }
 
+    /// How the instructions the host appends for the AGENT start (" — that
+    /// is the whole request: …", " — call read_inbox now …"): plumbing the
+    /// reader needn't wade through. Longest first.
+    static let instructionMarkers = [
+        " — that is the whole request", " — that is the whole question", " — that is the whole reply",
+        " — call read_inbox now", " — call read_inbox to take it", " — review it", " — stop working on it",
+    ]
+
+    /// A notice line as the reader wants it: what was asked or answered,
+    /// and the instructions for the agent (nil when there are none).
+    static func readable(_ line: String) -> (summary: String, instructions: String?) {
+        var cut: Range<String.Index>?
+        for m in instructionMarkers {
+            if let r = line.range(of: m, options: .backwards), cut == nil || r.lowerBound > cut!.lowerBound { cut = r }
+        }
+        guard let r = cut else { return (line, nil) }
+        let summary = String(line[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        let rest = String(line[r.lowerBound...].dropFirst(3)).trimmingCharacters(in: .whitespaces)   // " — "
+        guard !summary.isEmpty else { return (line, nil) }
+        return (summary, rest.isEmpty ? nil : rest)
+    }
+
     /// Typed by the host (a delegation or Switchboard notice), not by the user.
     static func isHostAside(_ userText: String) -> Bool {
         strip(userText) != nil || stripSwitchboard(userText) != nil
@@ -717,8 +746,8 @@ enum DelegationNotice {
 /// apart from the user's own turns. Several notices typed as one line
 /// (joined with `joiner`) read as one row with a line each.
 /// A line the host typed at the agent — a delegation or Switchboard
-/// notice. Drawn as a system line (glyph, small caps label, grey text, no
-/// card), so it never reads as something the user said.
+/// notice. Drawn as a quoted request: the user turn's card with a neutral
+/// spine and a small-caps label, so it never reads as something the user said.
 struct DelegationNoticeRow: View {
     let text: String
     /// A Switchboard notice rather than a delegation one.
@@ -731,8 +760,16 @@ struct DelegationNoticeRow: View {
             .filter { !$0.isEmpty }
     }
 
+    #if os(iOS) || os(visionOS)
+    private static let textSize: CGFloat = 16
+    #else
+    private static let textSize: CGFloat = 13
+    #endif
+
+    /// Read as a quoted request — the user turn's card, its spine neutral
+    /// (the host typed it, not the user) and a small label over the words.
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 7) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 4) {
                 Image(systemName: switchboard ? "point.3.connected.trianglepath.dotted" : "arrow.triangle.branch")
                     .font(.system(size: 9.5, weight: .semibold))
@@ -742,21 +779,61 @@ struct DelegationNoticeRow: View {
                     .textCase(.uppercase)
                     .tracking(0.5)
             }
-            .foregroundStyle(.tertiary)
-            .fixedSize()
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    Text(line)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(.secondary)
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                let parts = switchboard ? (summary: line, instructions: nil) : DelegationNotice.readable(line)
+                Text(parts.summary)
+                    .font(.system(size: Self.textSize))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let instructions = parts.instructions {
+                    NoticeInstructions(text: instructions)
                 }
             }
         }
-        .padding(.vertical, 2)
-        .padding(.leading, 4)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.10))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.5))
+                .frame(width: 3)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// The instructions Bromure typed for the agent under a notice, folded:
+/// the request reads first, the plumbing opens on a click.
+private struct NoticeInstructions: View {
+    let text: String
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { open.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                    Text(NSLocalizedString("Instructions for the agent", comment: "delegation notice: the host's instructions to the agent, folded"))
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                Text(text)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 #endif

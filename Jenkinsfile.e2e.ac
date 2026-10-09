@@ -488,6 +488,21 @@ pipeline {
                 }
             }
         }
+
+        stage('33. Sign-in capture + OAuth callback relay (stress)') {
+            // The in-session sign-in path with no browser and no provider
+            // (debug sign-in-sim / loopback-sim): the proxy's capture of a
+            // guest token exchange — whose hook was over-released on macOS
+            // 15 — and the 127.0.0.1 callback relay into the guest — whose
+            // closed-twice descriptor quit the app on "Authorize" — each 40
+            // times, then both at once; the app must still be up. Base image
+            // required; SKIP without. ACE2E_SIGNIN_ROUNDS overrides the count.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^33\\."'
+                }
+            }
+        }
     }
 
     post {

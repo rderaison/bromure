@@ -65,6 +65,36 @@ enum FatClient {
         return rest.isEmpty ? nil : rest
     }
 
+    /// SSH `exec` verb for the delegation-MCP relay on a Bromure Agent Host:
+    /// the channel waits (parked) until one of the host's agents opens its
+    /// `bromure-delegation` MCP stream, then carries it — first line
+    /// `bromure-hello w<window>`, then line-delimited JSON-RPC — to the fat
+    /// client, whose own DelegationEngine answers. One channel per stream;
+    /// the client parks a fresh one as soon as a channel is taken.
+    static let delegationMCPVerb = "bromure-fatclient/1 delegation-mcp"
+
+    /// SSH `exec` verbs a Bromure Agent Host attaches (and detaches) itself
+    /// with: `…machine-link <machineID> <base64 name>` parks the channel on
+    /// the server as one of the machine's links (MachineLinks.swift);
+    /// `…machine-detach <machineID>` forgets it. The only verbs a key with the
+    /// bromure.io `agent-host` capability may use (see RemoteGrant).
+    static let machineLinkVerbPrefix = "bromure-fatclient/1 machine-link "
+    static let machineDetachVerbPrefix = "bromure-fatclient/1 machine-detach "
+
+    static func parseMachineLink(_ command: String) -> (id: UUID, name: String)? {
+        guard command.hasPrefix(machineLinkVerbPrefix) else { return nil }
+        let parts = command.dropFirst(machineLinkVerbPrefix.count).split(separator: " ")
+        guard parts.count == 2, let id = UUID(uuidString: String(parts[0])),
+              let data = Data(base64Encoded: String(parts[1])),
+              let name = String(data: data, encoding: .utf8) else { return nil }
+        return (id, name)
+    }
+
+    static func parseMachineDetach(_ command: String) -> UUID? {
+        guard command.hasPrefix(machineDetachVerbPrefix) else { return nil }
+        return UUID(uuidString: command.dropFirst(machineDetachVerbPrefix.count).trimmingCharacters(in: .whitespaces))
+    }
+
     /// Protocol version advertised in `state` snapshots.
     static let protocolVersion = 1
 

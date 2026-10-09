@@ -1,0 +1,182 @@
+diff --git a/src/gallium/auxiliary/vl/vl_compositor.c b/src/gallium/auxiliary/vl/vl_compositor.c
+--- a/src/gallium/auxiliary/vl/vl_compositor.c
++++ b/src/gallium/auxiliary/vl/vl_compositor.c
+@@ -43,8 +43,9 @@
+          return false;
+ 
+    } else if (c->pipe_gfx_supported) {
+-      c->fs_video_buffer = create_frag_shader_video_buffer(c);
+-      if (!c->fs_video_buffer) {
++      c->fs_video_buffer = create_frag_shader_video_buffer(c, true);
++      c->fs_video_buffer_2d = create_frag_shader_video_buffer(c, false);
++      if (!c->fs_video_buffer || !c->fs_video_buffer_2d) {
+          debug_printf("Unable to create YCbCr-to-RGB fragment shader.\n");
+          return false;
+       }
+@@ -55,11 +56,13 @@
+          return false;
+       }
+ 
+-      c->fs_yuv.weave.y = create_frag_shader_deint_yuv(c, true, true);
+-      c->fs_yuv.weave.uv = create_frag_shader_deint_yuv(c, false, true);
+-      c->fs_yuv.bob.y = create_frag_shader_deint_yuv(c, true, false);
+-      c->fs_yuv.bob.uv = create_frag_shader_deint_yuv(c, false, false);
+-      if (!c->fs_yuv.weave.y || !c->fs_yuv.weave.uv ||
++      c->fs_yuv.weave.y = create_frag_shader_deint_yuv(c, true, true, true);
++      c->fs_yuv.weave.uv = create_frag_shader_deint_yuv(c, false, true, true);
++      c->fs_yuv.bob.y = create_frag_shader_deint_yuv(c, true, false, true);
++      c->fs_yuv.bob.uv = create_frag_shader_deint_yuv(c, false, false, true);
++      c->fs_yuv.progressive.y = create_frag_shader_deint_yuv(c, true, false, false);
++      c->fs_yuv.progressive.uv = create_frag_shader_deint_yuv(c, false, false, false);
++      if (!c->fs_yuv.progressive.y || !c->fs_yuv.progressive.uv || !c->fs_yuv.weave.y || !c->fs_yuv.weave.uv ||
+           !c->fs_yuv.bob.y || !c->fs_yuv.bob.uv) {
+          debug_printf("Unable to create YCbCr i-to-YCbCr p deint fragment shader.\n");
+          return false;
+@@ -115,6 +118,9 @@
+       vl_compositor_cs_cleanup_shaders(c);
+    } else if (c->pipe_gfx_supported) {
+       c->pipe->delete_fs_state(c->pipe, c->fs_video_buffer);
++      c->pipe->delete_fs_state(c->pipe, c->fs_video_buffer_2d);
++      c->pipe->delete_fs_state(c->pipe, c->fs_yuv.progressive.y);
++      c->pipe->delete_fs_state(c->pipe, c->fs_yuv.progressive.uv);
+       c->pipe->delete_fs_state(c->pipe, c->fs_weave_rgb);
+       c->pipe->delete_fs_state(c->pipe, c->fs_yuv.weave.y);
+       c->pipe->delete_fs_state(c->pipe, c->fs_yuv.weave.uv);
+@@ -379,6 +385,10 @@
+       break;
+ 
+    case VL_COMPOSITOR_NONE:
++      if (!buffer->interlaced && c->pipe_gfx_supported && !c->pipe_cs_composit_supported) {
++         s->layers[layer].fs = y ? c->fs_yuv.progressive.y : c->fs_yuv.progressive.uv;
++         break;
++      }
+       if (c->pipe_cs_composit_supported) {
+          if (plane == VL_COMPOSITOR_PLANE_Y)
+             s->layers[layer].cs = c->cs_yuv.progressive.y;
+@@ -633,7 +643,7 @@
+       if (c->pipe_cs_composit_supported)
+          s->layers[layer].cs = c->cs_video_buffer;
+       else if (c->pipe_gfx_supported)
+-         s->layers[layer].fs = c->fs_video_buffer;
++         s->layers[layer].fs = c->fs_video_buffer_2d;
+    }
+ }
+ 
+diff --git a/src/gallium/auxiliary/vl/vl_compositor.h b/src/gallium/auxiliary/vl/vl_compositor.h
+--- a/src/gallium/auxiliary/vl/vl_compositor.h
++++ b/src/gallium/auxiliary/vl/vl_compositor.h
+@@ -152,6 +152,7 @@
+ 
+    void *vs;
+    void *fs_video_buffer;
++   void *fs_video_buffer_2d;
+    void *fs_weave_rgb;
+    void *fs_rgba;
+    void *cs_video_buffer;
+@@ -172,6 +173,7 @@
+          void *y;
+          void *uv;
+       } bob;
++      struct { void *y; void *uv; } progressive;
+    } fs_yuv;
+ 
+    struct {
+diff --git a/src/gallium/auxiliary/vl/vl_compositor_gfx.c b/src/gallium/auxiliary/vl/vl_compositor_gfx.c
+--- a/src/gallium/auxiliary/vl/vl_compositor_gfx.c
++++ b/src/gallium/auxiliary/vl/vl_compositor_gfx.c
+@@ -238,7 +238,7 @@
+ }
+ 
+ static void
+-create_frag_shader_yuv(struct ureg_program *shader, struct ureg_dst texel)
++create_frag_shader_yuv(struct ureg_program *shader, struct ureg_dst texel, bool array)
+ {
+    struct ureg_src tc;
+    struct ureg_src sampler[3];
+@@ -247,7 +247,7 @@
+    tc = ureg_DECL_fs_input(shader, TGSI_SEMANTIC_GENERIC, VS_O_VTEX, TGSI_INTERPOLATE_LINEAR);
+    for (i = 0; i < 3; ++i) {
+       sampler[i] = ureg_DECL_sampler(shader, i);
+-      ureg_DECL_sampler_view(shader, i, TGSI_TEXTURE_2D_ARRAY,
++      ureg_DECL_sampler_view(shader, i, array ? TGSI_TEXTURE_2D_ARRAY : TGSI_TEXTURE_2D,
+                              TGSI_RETURN_TYPE_FLOAT,
+                              TGSI_RETURN_TYPE_FLOAT,
+                              TGSI_RETURN_TYPE_FLOAT,
+@@ -258,11 +258,11 @@
+     * texel.xyz = tex(tc, sampler[i])
+     */
+    for (i = 0; i < 3; ++i)
+-      ureg_TEX(shader, ureg_writemask(texel, TGSI_WRITEMASK_X << i), TGSI_TEXTURE_2D_ARRAY, tc, sampler[i]);
++      ureg_TEX(shader, ureg_writemask(texel, TGSI_WRITEMASK_X << i), array ? TGSI_TEXTURE_2D_ARRAY : TGSI_TEXTURE_2D, tc, sampler[i]);
+ }
+ 
+ void *
+-create_frag_shader_video_buffer(struct vl_compositor *c)
++create_frag_shader_video_buffer(struct vl_compositor *c, bool array)
+ {
+    struct ureg_program *shader;
+    struct ureg_dst texel;
+@@ -275,7 +275,7 @@
+    texel = ureg_DECL_temporary(shader);
+    fragment = ureg_DECL_output(shader, TGSI_SEMANTIC_COLOR, 0);
+ 
+-   create_frag_shader_yuv(shader, texel);
++   create_frag_shader_yuv(shader, texel, array);
+    create_frag_shader_csc(shader, texel, fragment);
+ 
+    ureg_release_temporary(shader, texel);
+@@ -308,7 +308,7 @@
+ }
+ 
+ void *
+-create_frag_shader_deint_yuv(struct vl_compositor *c, bool y, bool w)
++create_frag_shader_deint_yuv(struct vl_compositor *c, bool y, bool w, bool array)
+ {
+    struct ureg_program *shader;
+    struct ureg_dst texel, fragment;
+@@ -323,7 +323,7 @@
+    if (w)
+       create_frag_shader_weave(shader, texel);
+    else
+-      create_frag_shader_yuv(shader, texel);
++      create_frag_shader_yuv(shader, texel, array);
+ 
+    if (y)
+       ureg_MOV(shader, ureg_writemask(fragment, TGSI_WRITEMASK_X), ureg_src(texel));
+@@ -740,7 +740,14 @@
+    c->pipe->bind_vs_state(c->pipe, c->vs);
+    c->pipe->bind_vertex_elements_state(c->pipe, c->vertex_elems_state);
+    util_set_vertex_buffers(c->pipe, 1, false, &c->vertex_buf);
+-   pipe_set_constant_buffer(c->pipe, PIPE_SHADER_FRAGMENT, 0, s->shader_params);
++   /* These TGSI shaders declare legacy constants, not a uniform block.
++    * Supply immediate constants so virgl binds them to the declared uniforms. */
++   float values[16] = {0};
++   memcpy(values, &s->csc_matrix, sizeof(vl_csc_matrix));
++   values[12] = s->luma_min;
++   values[13] = s->luma_max;
++   struct pipe_constant_buffer cb = { .user_buffer = values, .buffer_size = sizeof(values) };
++   c->pipe->set_constant_buffer(c->pipe, PIPE_SHADER_FRAGMENT, 0, false, &cb);
+    c->pipe->bind_rasterizer_state(c->pipe, c->rast);
+ 
+    draw_layers(c, s, dirty_area);
+diff --git a/src/gallium/auxiliary/vl/vl_compositor_gfx.h b/src/gallium/auxiliary/vl/vl_compositor_gfx.h
+--- a/src/gallium/auxiliary/vl/vl_compositor_gfx.h
++++ b/src/gallium/auxiliary/vl/vl_compositor_gfx.h
+@@ -40,7 +40,7 @@
+  * create YCbCr-to-RGB fragment
+  */
+ void *
+-create_frag_shader_video_buffer(struct vl_compositor *c);
++create_frag_shader_video_buffer(struct vl_compositor *c, bool array);
+ 
+ /**
+  * create YCbCr-to-RGB weave fragment shader
+@@ -54,7 +54,7 @@
+ void *
+ create_frag_shader_deint_yuv(struct vl_compositor *c,
+                              bool                  y,
+-                             bool                  w);
++                             bool                  w, bool array);
+ 
+ /**
+  * create YUV/RGB-Palette-to-RGB fragment shader

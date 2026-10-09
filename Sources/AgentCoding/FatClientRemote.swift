@@ -69,6 +69,7 @@ enum RemoteTransport {
     /// once, lazily, before anything dials (`_ = bootstrap`), mirroring iOS.
     private static let bootstrap: Void = {
         SSHDialer.shared.knownHostsURL = knownHostsPath
+        RequestLedger.shared.reportURL = dir.appendingPathComponent("link-report.json")
         SSHDialer.shared.loadClientKey = { loadClientKeyCrypto() }
         reapLegacyKeyAgent()
     }()
@@ -343,10 +344,33 @@ enum RemoteTransport {
         // connection the mirror poll rides — sharing one let a wedged terminal
         // freeze the whole mirror on "Connecting…".
         let lane = interactive ? "term" : ""
-        return ControlClient(socketPath: "ssh://\(host.connectLabel)") {
+        var c = ControlClient(socketPath: "ssh://\(host.connectLabel)") {
             SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: lane)
         }
+        c.linkStats = LinkStats.shared(for: rawHost.id)
+        return c
     }
+
+    /// A control client on the BULK lane — its own pooled SSH connection
+    /// (own TCP flow) for the calls that move megabytes or run long: transcript
+    /// fetches (up to ~33 MB of base64), guest execs and file ops, trace
+    /// bodies, delegation file transfers. On the control connection they sat
+    /// ahead of the next `/state` poll (an SSH channel window is 16 MB), so on
+    /// a slow link one transcript read starved the poll past its timeout and
+    /// the mirror showed "Reconnecting…" with nothing wrong.
+    static func bulkClient(for rawHost: RemoteHost) -> ControlClient {
+        _ = bootstrap
+        ensureClientKey()
+        let host = resolved(rawHost)
+        var c = ControlClient(socketPath: "ssh://\(host.connectLabel)") {
+            SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: bulkLane)
+        }
+        c.linkStats = LinkStats.shared(for: rawHost.id)
+        return c
+    }
+
+    /// The pooled SSH connection bulk control calls ride (see `bulkClient`).
+    static let bulkLane = "bulk"
 
     /// Resolve a remote client by host id (used by the `__attach-window
     /// --remote <hostID>` subprocess).
@@ -363,8 +387,13 @@ enum RemoteTransport {
         ensureClientKey()
         let host = resolved(rawHost)
         guard host.sshDestination != nil else { return nil }
+        // Forwards (the browser pane's SOCKS, the VPN's flows) get their own
+        // pooled connection ("fwd" lane), like terminals: a burst of page
+        // loads, or one backed-up stream, must never stall the mirror poll and
+        // control requests riding the control connection — nor the reverse.
         return SSHDialer.shared.dial(host: host,
-                                     verb: "\(FatClient.forwardVerbPrefix)\(ip) \(port)")
+                                     verb: "\(FatClient.forwardVerbPrefix)\(ip) \(port)",
+                                     lane: Self.forwardLane)
     }
 
     /// Open a `forward-udp <ip>` channel: a multiplexed byte stream carrying
@@ -375,12 +404,26 @@ enum RemoteTransport {
         let host = resolved(rawHost)
         guard host.sshDestination != nil else { return nil }
         return SSHDialer.shared.dial(host: host,
-                                     verb: "\(FatClient.forwardUDPVerbPrefix)\(ip)")
+                                     verb: "\(FatClient.forwardUDPVerbPrefix)\(ip)",
+                                     lane: Self.forwardLane)
     }
+
+    /// The pooled SSH connection guest forwards ride (see `forwardDial`).
+    static let forwardLane = "fwd"
 
     /// Open a `browser-mcp <vm>` channel: a raw byte stream carrying the remote
     /// workspace agent's line-delimited JSON-RPC, which the fat client answers
     /// with its own `BrowserMCPServer`.
+    /// A parked `delegation-mcp` channel to a Bromure Agent Host (see
+    /// FatClient.delegationMCPVerb); nil when it can't be opened.
+    static func delegationMCPDial(host rawHost: RemoteHost) -> Int32? {
+        _ = bootstrap
+        ensureClientKey()
+        let host = resolved(rawHost)
+        guard host.sshDestination != nil else { return nil }
+        return SSHDialer.shared.dial(host: host, verb: FatClient.delegationMCPVerb)
+    }
+
     static func browserMCPDial(host rawHost: RemoteHost, vm: String) -> Int32? {
         _ = bootstrap
         ensureClientKey()

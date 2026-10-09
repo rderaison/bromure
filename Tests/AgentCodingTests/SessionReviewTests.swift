@@ -77,6 +77,74 @@ struct SessionReviewTests {
     }
 }
 
+@Suite("Session review — the turn's checkout")
+struct SessionReviewFocusTests {
+    private func sh(_ cmd: String, in dir: URL) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", cmd]
+        p.currentDirectoryURL = dir
+        p.environment = ["PATH": "/usr/bin:/bin:/opt/homebrew/bin", "HOME": dir.path,
+                         "GIT_CONFIG_NOSYSTEM": "1"]
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        try? p.run(); p.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    @Test("a turn's edit in a worktree is reviewed there, not in the session's folder")
+    func worktreeFocus() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("rv-\(UUID().uuidString.prefix(6))")
+        let repo = tmp.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        _ = sh("git init -q && git config user.email t@t && git config user.name t && "
+               + "printf 'a\\n' > main.txt && printf 'x\\n' > wt.txt && git add . && git commit -qm init && "
+               + "git worktree add -q ../wt && printf 'changed\\n' > main.txt && printf 'y\\n' > ../wt/wt.txt", in: repo)
+        let wtFile = tmp.appendingPathComponent("wt/wt.txt").path
+
+        // The session's folder alone: only its own change, not the turn's.
+        let plain = TaskReviewData.parse(sh(TaskReviewData.sessionCommand(dir: repo.path, base: .uncommitted), in: repo))
+        #expect(plain.files.map(\.path) == ["main.txt"])
+        // Aimed at the turn's file: its worktree's diff, where it matches.
+        let aimed = TaskReviewData.parse(sh(TaskReviewData.sessionCommand(dir: repo.path, base: .uncommitted,
+                                                                         focusFiles: [wtFile]), in: repo))
+        #expect(aimed.files.map(\.path) == ["wt.txt"])
+        #expect(aimed.files.contains { ReviewView.samePath(wtFile, $0.path) })
+        // A file in no repo at all: the session's folder, as before.
+        let stray = TaskReviewData.parse(sh(TaskReviewData.sessionCommand(dir: repo.path, base: .uncommitted,
+                                                                         focusFiles: ["/nonexistent/x.txt"]), in: repo))
+        #expect(stray.files.map(\.path) == ["main.txt"])
+    }
+
+    @Test("a turn the agent already committed still shows, under \"This turn\" — its memory note first doesn't mislead")
+    func committedTurn() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("rt-\(UUID().uuidString.prefix(6))")
+        let repo = tmp.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let turnStart = Date()
+        let before = Int(turnStart.timeIntervalSince1970) - 100, after = Int(turnStart.timeIntervalSince1970) + 100
+        _ = sh("git init -q && git config user.email t@t && git config user.name t && "
+               + "printf 'a\\n' > a.txt && printf 'o\\n' > other.txt && git add . && "
+               + "GIT_COMMITTER_DATE=@\(before) GIT_AUTHOR_DATE=@\(before) git commit -qm init && "
+               // The turn: edits a.txt and commits it; someone leaves other.txt dirty.
+               + "printf 'b\\n' > a.txt && git add a.txt && "
+               + "GIT_COMMITTER_DATE=@\(after) GIT_AUTHOR_DATE=@\(after) git commit -qm turn && "
+               + "printf 'dirty\\n' > other.txt", in: repo)
+        let files = [tmp.appendingPathComponent("notes/memory.md").path,   // outside any repo
+                     repo.appendingPathComponent("a.txt").path]
+        // Uncommitted: only the stranger's file — the old empty "no changes here".
+        let unc = TaskReviewData.parse(sh(TaskReviewData.sessionCommand(dir: "/", base: .uncommitted,
+                                                                        focusFiles: files), in: repo))
+        #expect(unc.files.map(\.path) == ["other.txt"])
+        // This turn: the turn's commit is there.
+        let turn = TaskReviewData.parse(sh(TaskReviewData.sessionCommand(dir: "/", base: .since(turnStart),
+                                                                         focusFiles: files), in: repo))
+        #expect(turn.files.map(\.path).contains("a.txt"))
+        #expect(turn.files.contains { ReviewView.samePath(files[1], $0.path) })
+    }
+}
+
 @Suite("Branches (pass 3)")
 @MainActor
 struct BranchesPass3Tests {

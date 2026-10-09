@@ -348,7 +348,10 @@ struct HomeStorageTests {
             atPath: files.appendingPathComponent(".git-credentials").path))
         let lines = try manifest(in: seedDir)
         #expect(lines.contains("d\t-\t.git-credentials"))
-        #expect(lines.contains(where: { $0.hasPrefix("p\t-\t.gitconfig\t") }))
+        // ~/.gitconfig is always staged now (a generic identity fills in when
+        // the workspace sets none), so it is never swept.
+        #expect(lines.contains("o\t644\t.gitconfig"))
+        #expect(!lines.contains(where: { $0.hasPrefix("p\t-\t.gitconfig\t") }))
     }
 
     @Test("Bedrock profile ships its env in the claude-settings spec")

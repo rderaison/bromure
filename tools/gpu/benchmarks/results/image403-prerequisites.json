@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "capabilities": {
+    "configVersion": 1,
+    "graphicsBackends": [
+      "software",
+      "virgl"
+    ],
+    "videoDecodeBackends": [
+      "software",
+      "virgl-videotoolbox-h264"
+    ],
+    "mesaVersion": "25.2.8",
+    "chromiumVaapiRgbABI": 1,
+    "diagnosticCommand": "/usr/local/bin/graphics-diagnostics.py"
+  },
+  "packages": {
+    "chromium": {
+      "version": "154.0.8037.57-1xtradeb1.2404.1",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libegl-mesa0": {
+      "version": "25.2.8-0ubuntu0.24.04.3",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libegl1": {
+      "version": "1.7.0-1build1",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libgbm1": {
+      "version": "25.2.8-0ubuntu0.24.04.3",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libgl1-mesa-dri": {
+      "version": "25.2.8-0ubuntu0.24.04.3",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libgles2": {
+      "version": "1.7.0-1build1",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libglx-mesa0": {
+      "version": "25.2.8-0ubuntu0.24.04.3",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libva-drm2": {
+      "version": "2.20.0-2ubuntu0.2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libva2": {
+      "version": "2.20.0-2ubuntu0.2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "mesa-libgallium": {
+      "version": "25.2.8-0ubuntu0.24.04.3",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "mesa-utils": {
+      "version": "9.0.0-2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "mesa-va-drivers": {
+      "version": "25.2.8-0ubuntu0.24.04.3",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "vainfo": {
+      "version": "2.12.0+ds1-1",
+      "architecture": "arm64",
+      "status": "installed"
+    }
+  },
+  "driDrivers": [
+    {
+      "path": "/usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so",
+      "exists": true,
+      "target": "/usr/lib/aarch64-linux-gnu/dri/libdril_dri.so",
+      "loadable": true,
+      "error": null
+    }
+  ],
+  "libraries": {
+    "libEGL.so.1": {
+      "loadable": true,
+      "error": null
+    },
+    "libEGL_mesa.so.0": {
+      "loadable": true,
+      "error": null
+    },
+    "libGLESv2.so.2": {
+      "loadable": true,
+      "error": null
+    },
+    "libGLX_mesa.so.0": {
+      "loadable": true,
+      "error": null
+    },
+    "libgbm.so.1": {
+      "loadable": true,
+      "error": null
+    },
+    "/usr/lib/aarch64-linux-gnu/libgallium-25.2.8-0ubuntu0.24.04.3.so": {
+      "loadable": true,
+      "error": null
+    }
+  },
+  "tools": {
+    "glxinfo": "/usr/bin/glxinfo",
+    "eglinfo": "/usr/bin/eglinfo",
+    "Xorg": "/usr/bin/Xorg"
+  },
+  "browser": {
+    "exitCode": 0,
+    "stdout": "Chromium 154.0.8037.57 built on Ubuntu 24.04.5 LTS\n",
+    "stderr": "",
+    "command": "chromium-browser"
+  },
+  "guestFiles": {
+    "/usr/local/bin/config-agent.py": true,
+    "/usr/local/bin/graphics-env.sh": true,
+    "/usr/local/bin/graphics-diagnostics.py": true
+  },
+  "hostGPUVerified": null,
+  "videoPrerequisites": {
+    "libraries": {
+      "/opt/bromure/mesa-virgl/lib/libEGL_mesa.so.0": {
+        "loadable": true,
+        "error": null
+      },
+      "/opt/bromure/mesa-virgl/lib/libGLX_mesa.so.0": {
+        "loadable": true,
+        "error": null
+      },
+      "/opt/bromure/mesa-virgl/lib/libgbm.so.1": {
+        "loadable": true,
+        "error": null
+      },
+      "/opt/bromure/mesa-virgl/lib/dri/virtio_gpu_dri.so": {
+        "loadable": true,
+        "error": null
+      },
+      "/opt/bromure/mesa-virgl/lib/dri/virtio_gpu_drv_video.so": {
+        "loadable": true,
+        "error": null
+      },
+      "/opt/bromure/chromium-vaapi/libva.so.2": {
+        "loadable": true,
+        "error": null
+      },
+      "/opt/bromure/chromium-vaapi/libbromure-va.so.2": {
+        "loadable": true,
+        "error": null
+      }
+    },
+    "build": [
+      "mesa=25.2.8",
+      "video=h264-8bit-progressive",
+      "chromium-vaapi-rgb-abi=1"
+    ],
+    "markerValid": true,
+    "vainfo": "/usr/bin/vainfo",
+    "hardwareDecodeVerified": null
+  },
+  "note": "Packaging check only; run graphics-diagnostics.py in X, verify Chromium and host Metal separately.",
+  "issues": [],
+  "readyForGuestProbe": true
+}

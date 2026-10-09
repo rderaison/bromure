@@ -378,7 +378,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Quitter Bromure Agentic Coding ?";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d VM en cours d’exécution (%@) seront fermées conformément à l’action de fermeture de chaque espace de travail.";
+"The workspace %@ is running. It will be closed according to its close action." = "L’espace de travail %@ est en cours d’exécution. Il sera fermé selon son action de fermeture.";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d espaces de travail sont en cours d’exécution (%2$@). Chacun sera fermé selon son action de fermeture.";
+"The infrastructure machine %@ is running and will be suspended." = "La machine d’infrastructure %@ est en cours d’exécution et sera suspendue.";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d machines d’infrastructure sont en cours d’exécution (%2$@) et seront suspendues.";
 "Quit" = "Quitter";
 
 /* Guardrails: new prompt-on-write mode */
@@ -468,7 +471,6 @@
 "Allow this request" = "Autoriser cette requête";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure analyse le trafic IA de l'agent sur l'appareil pour détecter les instructions injectées — rien ne quitte le Mac. Chaque détecteur utilise un modèle local, téléchargé depuis bromure.io lors de la première activation.";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "Évalue le contenu des fichiers, les pages web et la sortie des outils que l'agent lit (Prompt Guard). Détecte les « ignore les instructions précédentes / exfiltre les secrets » cachés dans un dépôt malveillant. Télécharge ~272 Mo à la première activation.";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Évalue CLAUDE.md, AGENTS.md, GROK.md et les autres fichiers d'instructions / réglages que Claude Code, Codex et Grok chargent comme référence. Télécharge ~571 Mo à la première activation.";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "« Journaliser et continuer » enregistre les détections dans la fenêtre Journal de sécurité. « Me demander quoi faire » met la requête en pause et affiche le texte signalé. « Bloquer » fait échouer la requête.";
 "Possible %@ in “%@”" = "Possible %@ dans « %@ »";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure a signalé du contenu que l'agent s'apprête à envoyer au modèle (depuis %@). Examinez-le ci-dessous — l'autoriser, ou bloquer cette requête ?";
@@ -1228,34 +1230,24 @@
 "Backlog" = "Backlog";
 "No tasks yet — write one." = "Pas encore de tâches — écrivez-en une.";
 "Plan" = "Planifier";
-"No phases yet — click Plan on a backlog card." = "Pas encore de phases — cliquez sur Planifier sur une carte du backlog.";
-"Start %d selected" = "Démarrer les %d sélectionnées";
-"One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are." = "Lance d’un coup chaque phase sélectionnée. Les phases dont les dépendances ne sont pas terminées sont mises en file et démarrent automatiquement dès qu’elles le sont.";
 "Move to Testing" = "Déplacer vers Tests";
 "Close Without Merging" = "Fermer sans fusionner";
-"Stop Agent & Delete Worktree" = "Arrêter l’agent et supprimer le worktree";
-"Remove Card Only" = "Retirer la carte uniquement";
 "Testing/Review" = "Tests/Revue";
 "Nothing to review" = "Rien à examiner";
 "Merge into %@…" = "Fusionner dans %@…";
 "parent" = "branche parente";
 "Back to In Progress" = "Retour vers En cours";
-"Delete Worktree & Branch" = "Supprimer le worktree et la branche";
 "Nothing shipped yet" = "Rien de livré pour l’instant";
 "Remove from board" = "Retirer du tableau";
 "Remove “%@”?" = "Retirer « %@ » ?";
-"Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace." = "Arrêter supprime la session de l’agent et son travail non commité/non fusionné dans le worktree. « Retirer la carte uniquement » les laisse dans l’espace de travail.";
 "This can't be undone." = "Cette action est irréversible.";
 "queued" = "en attente";
 "Starts automatically when its dependencies are Done." = "Démarre automatiquement dès que ses dépendances sont terminées.";
 "Phases that must be Done before this one starts." = "Phases qui doivent être terminées avant que celle-ci démarre.";
 "Untitled task" = "Tâche sans titre";
 "planning — click to watch" = "planification — cliquez pour suivre";
-"A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them." = "Une session de planification visible est en cours — cliquez sur la carte pour l’ouvrir ; les phases apparaissent dans la colonne Planifier au fur et à mesure.";
 "Plan reviewed by the agent" = "Plan examiné par l’agent";
 "part of “%@”" = "partie de « %@ »";
-"A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column." = "Un agent planificateur lit le brief et le dépôt, puis dépose des cartes de phase ordonnées (avec dépendances) dans la colonne Planifier.";
-"One shot" = "D’une traite";
 "Straight to In Progress: the agent does the whole task autonomously and hands you the diff in Testing/Review." = "Directement vers En cours : l’agent réalise toute la tâche en autonomie et vous remet le diff dans Tests/Revue.";
 "starting…" = "démarrage…";
 "session gone" = "session disparue";
@@ -1278,9 +1270,7 @@
 "Write" = "Rédiger";
 "Preview" = "Aperçu";
 "Starting the task launches the agent in a fresh worktree of the repository with this brief as its prompt. It works on its own branch and commits its changes; you review the diff in Testing, then merge." = "Le démarrage de la tâche lance l’agent dans un worktree neuf du dépôt avec ce brief comme prompt. Il travaille sur sa propre branche et commite ses changements ; vous examinez le diff dans Tests, puis fusionnez.";
-"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column." = "Enregistre, puis ouvre une session de planification visible : l’agent explore le dépôt (posez-lui des questions — il vous voit) et dépose des cartes de phase ordonnées avec dépendances dans la colonne Planifier.";
 "Planning — %@" = "Planification — %@";
-"Your brief" = "Votre brief";
 "The agent explores the repository and may ask you questions here, then files the plan's phases onto the board." = "L’agent explore le dépôt, peut vous poser des questions ici, puis dépose les phases du plan sur le tableau.";
 "1 question answered — %@" = "1 question répondue — %@";
 "%d questions answered — %@" = "%d questions répondues — %@";
@@ -1344,7 +1334,7 @@
 "The transcript file has no readable entries." = "Le fichier de transcription ne contient aucune entrée lisible.";
 "No transcript" = "Pas de transcription";
 "This run's transcript couldn't be read." = "Impossible de lire la transcription de cette exécution.";
-"⏎ send   ⌥⏎ newline" = "⏎ envoyer   ⌥⏎ nouvelle ligne";
+"⏎ send   ⇧⏎ newline" = "⏎ envoyer   ⇧⏎ nouvelle ligne";
 "Send (⏎)" = "Envoyer (⏎)";
 "The agent asked" = "L’agent a demandé";
 "The agent is asking %d questions — answer them all, then Submit" = "L’agent pose %d questions — répondez à toutes, puis Validez";
@@ -1366,11 +1356,8 @@
 "Couldn't reach the workspace — is it running?" = "Impossible de joindre l’espace de travail — est-il démarré ?";
 "Plan: %@" = "Plan : %@";
 "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”." = "« %@ » n’existe pas dans l’espace de travail — choisissez un dossier existant, ou modifiez la tâche et activez « Créer le dossier et le dépôt git ».";
-"The planning session ended before filing phases — click Plan to retry." = "La session de planification s’est terminée avant de déposer des phases — cliquez sur Planifier pour réessayer.";
-"The planning session timed out without filing phases — click Plan to retry." = "La session de planification a expiré sans déposer de phases — cliquez sur Planifier pour réessayer.";
 "The planning session never started — is the workspace running? Click Plan to retry." = "La session de planification n’a jamais démarré — l’espace de travail est-il lancé ? Cliquez sur Planifier pour réessayer.";
 "Claude exited before filing phases — click Plan to retry." = "Claude a quitté avant de déposer des phases — cliquez sur Planifier pour réessayer.";
-"The planning session was interrupted — click Plan to retry." = "La session de planification a été interrompue — cliquez sur Planifier pour réessayer.";
 "Merge → %@" = "Fusion → %@";
 "PR: %@" = "PR : %@";
 
@@ -1381,7 +1368,6 @@
 "Types every drafted comment into the coding agent running in the active tab." = "Saisit chaque commentaire en brouillon dans l’agent de code de l’onglet actif.";
 
 /* Plan column — batch selection bar */
-"Delete %d selected phase(s)?" = "Supprimer %d phase(s) sélectionnée(s) ?";
 "Remove every selected phase from the board" = "Retirer du tableau toutes les phases sélectionnées";
 
 /* Coding board — session restart */
@@ -1679,7 +1665,6 @@
 "The workspace did not start in time" = "L’espace de travail n’a pas démarré à temps";
 "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again." = "L’agent n’est jamais apparu. L’espace de travail utilise peut-être un ancien agent interne à la VM — redémarrez-le (Machines virtuelles › ⋯ › Redémarrer) et réessayez.";
 "Under the Hood" = "Sous le capot";
-"New task" = "Nouvelle tâche";
 "Describe what you want done (⌘N)" = "Décrivez ce que vous voulez faire (⌘N)";
 "Search tasks" = "Rechercher dans les tâches";
 "Virtual Machines" = "Machines virtuelles";
@@ -1774,9 +1759,6 @@
 "The task's checkout is gone, so there is nothing to resume into." = "La copie de travail de la tâche a disparu, il n’y a donc rien dans quoi reprendre.";
 "Reopen the agent on this task's branch to keep working — the task goes back to In Progress. If the branch was cleaned up, you'll be offered a fresh start instead." = "Rouvrir l’agent sur la branche de cette tâche pour continuer — la tâche repasse « En cours ». Si la branche a été nettoyée, un nouveau départ vous sera proposé à la place.";
 "Needs a fresh start" = "Nécessite un nouveau départ";
-"The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch." = "La copie de travail de %@ a disparu et n’a pas pu être recréée dans %@. Recommencer relance la tâche sur une nouvelle branche.";
-"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch." = "La branche %@ de la tâche n’existe plus dans %@ — sa copie de travail a été retirée (fusionnée puis nettoyée, ou supprimée). Recommencer relance la tâche sur une nouvelle branche.";
-"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@." = "Le dossier du dépôt « %@ » a disparu de l’espace de travail, il n’y a donc rien dans quoi reprendre. Recommencer relance la tâche depuis le début%@.";
 ", cloning the repository first" = ", en clonant d’abord le dépôt";
 "Waking the workspace…" = "Réveil de l’espace de travail…";
 "Starting the workspace…" = "Démarrage de l’espace de travail…";
@@ -1792,7 +1774,7 @@
 "The machine it runs on — running" = "La machine sur laquelle elle tourne — en cours";
 "The machine it runs on — asleep, wakes up when you start" = "La machine sur laquelle elle tourne — en veille, se réveille au démarrage";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "Où elle travaille : un dossier neuf, l’un des vôtres, ou un dépôt à récupérer";
-"⏎ start   ⌥⏎ newline" = "⏎ démarrer   ⌥⏎ nouvelle ligne";
+"⏎ start   ⇧⏎ newline" = "⏎ démarrer   ⇧⏎ nouvelle ligne";
 "Start the session (⏎)" = "Démarrer la session (⏎)";
 "Working in this folder — click to start in a new folder instead" = "Travaille dans ce dossier — cliquez pour démarrer dans un nouveau dossier";
 "Work in this folder again" = "Retravailler dans ce dossier";
@@ -1811,7 +1793,7 @@
 "Up one folder" = "Dossier parent";
 "No folders in here yet." = "Aucun dossier ici pour l’instant.";
 "The machine's folders can't be read right now." = "Les dossiers de la machine ne peuvent pas être lus pour le moment.";
-"Message %@…  (or drop files)" = "Message à %@…  (ou déposez des fichiers)";
+"Message %@… (or drop files)" = "Message à %@… (ou déposez des fichiers)";
 "Ready · %@" = "Prêt · %@";
 "Ended · %@ ago" = "Terminée · il y a %@";
 "End “%@”?" = "Terminer « %@ » ?";
@@ -2017,7 +1999,7 @@
 "Streaming to bromure.io" = "Diffusion vers bromure.io";
 "Signed in to bromure.io" = "Connecté à bromure.io";
 "Log out" = "Se déconnecter";
-"Message the agent…  (or drop files)" = "Message à l’agent…  (ou déposez des fichiers)";
+"Message the agent… (or drop files)" = "Message à l’agent… (ou déposez des fichiers)";
 "Drop to attach" = "Déposez pour joindre";
 "Loading transcript…" = "Chargement de la transcription…";
 "Say what you need — the agent is listening." = "Dites ce dont vous avez besoin — l’agent écoute.";
@@ -2100,6 +2082,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "autorisé — validation du certificat ignorée (X-bromure-insecure) ; aucun identifiant injecté";
 "To-dos" = "À faire";
 "⎋ stop   ⏎ send" = "⎋ arrêter   ⏎ envoyer";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ arrêter   ⏎ envoyer   ⇧⏎ nouvelle ligne";
 "Stop the agent (Esc)" = "Arrêter l’agent (Échap)";
 "Completed" = "Terminé";
 "Reopened" = "Rouvert";
@@ -2800,7 +2783,7 @@
 "Viewed" = "Vu";
 "Viewed — click to unmark" = "Vu — cliquez pour retirer";
 "What the changes are compared against" = "Ce à quoi les modifications sont comparées";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ ajouter   ⌥⏎ nouvelle ligne   ⇧⌘⏎ envoyer à l’agent";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ ajouter   ⇧⏎ nouvelle ligne   ⇧⌘⏎ envoyer à l’agent";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (actuelle)";
@@ -2834,7 +2817,7 @@
 "The current commit" = "Le commit actuel";
 "This machine has no branches made by Bromure." = "Cette machine n’a aucune branche créée par Bromure.";
 "last commit %@" = "dernier commit %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ ajouter   ⌥⏎ nouvelle ligne   ⇧⌘⏎ renvoyer";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ ajouter   ⇧⏎ nouvelle ligne   ⇧⌘⏎ renvoyer";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "Ne répond qu’à votre compte Slack — les canaux et tous les autres sont ignorés.";
@@ -3127,3 +3110,1033 @@
 "%@ stopped as it started: %@" = "%@ s'est arrêté au démarrage : %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ appartenait à la session archivée « %@ », utilisée pour la dernière fois le %@. Le réutiliser pour cette session ?";
 "Delegation" = "Délégation";
+
+/* Added for hotfixes-v5 */
+"Requests" = "Demandes";
+"Working for others" = "Travail pour d’autres";
+"The model the agent last answered with" = "Le modèle avec lequel l’agent a répondu en dernier";
+"Time the agent spent working: %d turns, the longest %@" = "Temps de travail de l’agent : %d tours, le plus long %@";
+"Erasing and restoring storage is done on the server Mac." = "L’effacement et la restauration du stockage se font sur le Mac serveur.";
+"Home folder size" = "Taille du dossier personnel";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d Go (sa taille actuelle — un dossier personnel ne peut pas rétrécir) à 1024 Go. Un dossier plus grand prend effet au prochain démarrage de l’espace de travail. L’image disque n’occupe que la place utilisée par ses fichiers.";
+"Queued — sent when the agent is done" = "En attente — envoyé quand l’agent aura fini";
+"Queued — sent when %@ is done" = "En attente — envoyé quand %@ aura fini";
+"Queued — the agent reads it next" = "En attente — l’agent le lira ensuite";
+"Queued — %@ reads it next" = "En attente — %@ le lira ensuite";
+"Don't send it" = "Ne pas l’envoyer";
+"Chart" = "Graphique";
+"Video" = "Vidéo";
+"Open in its own window" = "Ouvrir dans sa propre fenêtre";
+"Play video" = "Lire la vidéo";
+"Not an image or a video this app can show." = "Ni une image ni une vidéo que cette app peut afficher.";
+"This window can't read files from that machine." = "Cette fenêtre ne peut pas lire les fichiers de cette machine.";
+"Couldn't read %@." = "Impossible de lire %@.";
+"That image couldn't be decoded." = "Impossible de décoder cette image.";
+"Couldn't prepare the video." = "Impossible de préparer la vidéo.";
+"The chart couldn't be drawn: %@" = "Le graphique n’a pas pu être dessiné : %@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "Ouvrir dans sa propre fenêtre (dans le fil, ⌥-défilement zoome le graphique)";
+"No timed turns yet: the timeline fills in as the agent works." = "Pas encore de tour chronométré : la chronologie se remplit au fil du travail de l’agent.";
+"Hover a bar for what the agent was doing · click a turn to zoom in" = "Survolez une barre pour voir ce que faisait l’agent · cliquez sur un tour pour zoomer";
+"All turns" = "Tous les tours";
+"(no message)" = "(aucun message)";
+"of work across %d turns" = "de travail sur %d tours";
+"in this turn" = "dans ce tour";
+"tool calls" = "appels d’outils";
+"files edited" = "fichiers modifiés";
+"longest solo run" = "plus long travail en solo";
+"Worked %@ on its own" = "A travaillé %@ tout seul";
+"%d tool calls without a single prompt — “%@”" = "%d appels d’outils sans une seule relance — « %@ »";
+"See it" = "Voir";
+"“%@” — %@, %d tool calls · click to zoom in" = "« %@ » — %@, %d appels d’outils · cliquez pour zoomer";
+"Thinking & writing — %@" = "Réflexion et rédaction — %@";
+"No timed turns in this room yet." = "Pas encore de tour chronométré dans ce salon.";
+"of combined work by %d agents" = "de travail cumulé par %d agents";
+"at once, at peak" = "en même temps, au pic";
+"worked the most" = "a le plus travaillé";
+"Hover a bar for who was doing what, and for how long" = "Survolez une barre pour voir qui faisait quoi, et combien de temps";
+"Thinking & writing" = "Réflexion et rédaction";
+"Edits" = "Modifications";
+"Reading & search" = "Lecture et recherche";
+"Web" = "Web";
+"Sub-agents" = "Sous-agents";
+"MCP tools" = "Outils MCP";
+"Other tools" = "Autres outils";
+"%@ — timeline" = "%@ — chronologie";
+"Room timeline: who worked when, and on what" = "Chronologie du salon : qui a travaillé quand, et sur quoi";
+"Time the agent spent working: %d turns, the longest %@ — click for where it went" = "Temps de travail de l’agent : %d tours, le plus long %@ — cliquez pour voir où il est passé";
+
+/* Installer: Local Network access (Sequoia) */
+"Bromure Needs Local Network Access" = "Bromure a besoin de l’accès au réseau local";
+"The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "Le programme d’installation n’a pas pu joindre Bromure sur ce Mac. Sur macOS Sequoia, autorisez Bromure Agentic Coding dans Réglages Système › Confidentialité et sécurité › Réseau local.\n\nL’installation continue en téléchargeant directement. Si l’option est déjà activée, désactivez-la puis réactivez-la, ou redémarrez votre Mac : le réseau des machines virtuelles de Sequoia peut rester bloqué jusque-là.";
+"Open Local Network Settings" = "Ouvrir les réglages Réseau local";
+
+/* Models: your environment (auto mode) */
+"Applies to every workspace from its next launch." = "S’applique à chaque espace de travail dès son prochain lancement.";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "Ouvrir un terminal ici, dans le dossier de cette session";
+"Drag to resize" = "Faites glisser pour redimensionner";
+"Hide — the shell keeps running (⌃`)" = "Masquer — le shell continue de tourner (⌃`)";
+"Close the terminal (ends the shell)" = "Fermer le terminal (termine le shell)";
+"The terminal isn't available right now." = "Le terminal n’est pas disponible pour le moment.";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "Mise à jour…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "Rien n’a changé depuis le début de ce tour.";
+
+/* Repository watches + Automations hub */
+"%1$@ · ×%2$d" = "%1$@ · ×%2$d";
+"%1$d new finding(s) in %2$@" = "%1$d nouveau(x) constat(s) dans %2$@";
+"%d dismissed" = "%d écarté(s)";
+"%d duplicate" = "%d doublon(s)";
+"%d finding(s)" = "%d constat(s)";
+"%d fixed" = "%d corrigé(s)";
+"%d need attention" = "%d à traiter";
+"%d new" = "%d nouveau(x)";
+"%d scanning continuously" = "%d analysé(s) en continu";
+"A fix is a coding task on its own branch — it waits in review for you before anything merges. At most three automatic fixes run at once per repository." = "Un correctif est une tâche de code sur sa propre branche — il attend votre revue avant toute fusion. Au plus trois correctifs automatiques s’exécutent simultanément par dépôt.";
+"A repository watch manages this automation — edit the watch in the Automations hub's Repositories tab. Changes made here are replaced the next time the watch is saved." = "Une surveillance de dépôt gère cette automatisation — modifiez la surveillance dans l’onglet « Dépôts » du hub Automatisations. Les modifications faites ici seront remplacées au prochain enregistrement de la surveillance.";
+"A watch scans a GitHub repository with an agent in one of your workspaces: the whole codebase on a schedule, and every new commit and pull request as they land. Findings are deduplicated across scans." = "Une surveillance analyse un dépôt GitHub avec un agent dans l’un de vos espaces de travail : tout le code selon un calendrier, ainsi que chaque nouveau commit et chaque nouvelle pull request dès leur arrivée. Les constats sont dédoublonnés d’une analyse à l’autre.";
+"Agent working on the fix" = "Agent en train de corriger";
+"All" = "Tous";
+"All %d" = "Tous (%d)";
+"All repositories" = "Tous les dépôts";
+"Any severity" = "Toute gravité";
+"Bug" = "Bug";
+"Bugs" = "Bugs";
+"Checkout in the workspace" = "Emplacement dans l’espace de travail";
+"Closed" = "Fermé";
+"Commit" = "Commit";
+"Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "Les analyses de commits et de pull requests soumettent du texte tiers à un agent : elles nécessitent donc le modèle PromptGuard. Il est téléchargé à l’enregistrement de la surveillance ; tant qu’il n’est pas prêt, ces analyses sont bloquées.";
+"Commits" = "Commits";
+"Couldn't clone %1$@ into %2$@ — %3$@" = "Impossible de cloner %1$@ dans %2$@ — %3$@";
+"Critical" = "Critique";
+"Critical finding in %@" = "Constat critique dans %@";
+"Delete Finding" = "Supprimer le constat";
+"Dependency" = "Dépendance";
+"Dismiss this finding?" = "Écarter ce constat ?";
+"Dismissed" = "Écarté";
+"Dismiss…" = "Écarter…";
+"Duplicate of" = "Doublon de";
+"Edit Workspace…" = "Modifier l’espace de travail…";
+"Every new commit" = "Chaque nouveau commit";
+"Every new pull request" = "Chaque nouvelle pull request";
+"Evidence" = "Preuves";
+"Finding" = "Constat";
+"Findings" = "Constats";
+"Findings appear here as the repository watches scan. Watch a repository from the Repositories tab." = "Les constats apparaissent ici au fil des analyses des surveillances de dépôts. Surveillez un dépôt depuis l’onglet « Dépôts ».";
+"Findings pipeline" = "Pipeline des constats";
+"First seen" = "Vu pour la première fois";
+"Fix" = "Corriger";
+"Fix closed without merging" = "Correctif fermé sans fusion";
+"Fix merged" = "Correctif fusionné";
+"Fix not started" = "Correctif non démarré";
+"Fix: %@" = "Corriger : %@";
+"Fixed" = "Corrigé";
+"Fixed in the last 30 days" = "Corrigés ces 30 derniers jours";
+"Fixes" = "Correctifs";
+"Flagged by the prompt-injection screen" = "Signalé par le filtre d’injection de prompt";
+"Flagged by the prompt-injection screen: %@" = "Signalé par le filtre d’injection de prompt : %@";
+"For critical findings" = "Pour les constats critiques";
+"For high and critical" = "Pour élevée et critique";
+"For medium and above" = "Pour moyenne et plus";
+"Full repository scan" = "Analyse complète du dépôt";
+"Full scan" = "Analyse complète";
+"High" = "Élevée";
+"In progress" = "En cours";
+"In review" = "En revue";
+"Info" = "Info";
+"Instructions for the scanning agent" = "Instructions pour l’agent d’analyse";
+"Its scans stop and its automations are removed. Its findings are deleted too; fix tasks already started stay on the task board." = "Ses analyses s’arrêtent et ses automatisations sont supprimées. Ses constats sont également supprimés ; les tâches de correction déjà lancées restent sur le tableau des tâches.";
+"Last seen" = "Vu pour la dernière fois";
+"Later scans that see it again won't reopen it." = "Les analyses ultérieures qui le retrouveront ne le rouvriront pas.";
+"Location" = "Emplacement";
+"Look for" = "Rechercher";
+"Low" = "Faible";
+"Mark as %@" = "Marquer comme %@";
+"Medium" = "Moyenne";
+"Needs attention" = "À traiter";
+"Never" = "Jamais";
+"New" = "Nouveau";
+"No findings yet" = "Aucun constat pour l’instant";
+"No scans yet — they appear here as the watches run." = "Aucune analyse pour l’instant — elles apparaîtront ici au fil des surveillances.";
+"No watched repositories" = "Aucun dépôt surveillé";
+"Nothing needs you right now." = "Rien ne requiert votre attention pour le moment.";
+"Open findings" = "Constats ouverts";
+"Other" = "Autre";
+"Pick a repository (owner/name)." = "Choisissez un dépôt (owner/name).";
+"Pipeline" = "Pipeline";
+"Planning" = "Planification";
+"Pull requests" = "Pull requests";
+"Quality" = "Qualité";
+"Ready for review" = "Prêt pour la revue";
+"Reappeared after being marked fixed" = "Réapparu après avoir été marqué comme corrigé";
+"Reason (optional)" = "Motif (facultatif)";
+"Recent scans" = "Analyses récentes";
+"Recommendation" = "Recommandation";
+"Reported by" = "Signalé par";
+"Resolved by a scan: %@" = "Résolu par une analyse : %@";
+"Run a full scan of %@ now" = "Lancer maintenant une analyse complète de %@";
+"Scan Now" = "Analyser maintenant";
+"Scans" = "Analyses";
+"Search findings" = "Rechercher dans les constats";
+"Security" = "Sécurité";
+"Security and bugs" = "Sécurité et bugs";
+"Security vulnerabilities" = "Vulnérabilités de sécurité";
+"Seen" = "Vu";
+"Severity" = "Gravité";
+"Start Fix Anyway" = "Corriger quand même";
+"Start fixes automatically" = "Lancer les correctifs automatiquement";
+"Stop Watching" = "Arrêter la surveillance";
+"Stop Watching…" = "Arrêter la surveillance…";
+"Stop watching %@?" = "Arrêter de surveiller %@ ?";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and a fix agent would read it too. Check it before starting a fix." = "Le filtre d’injection de prompt l’a signalé (%@). Il provient d’un agent qui lisait le contenu du dépôt, et un agent de correction le lirait aussi. Vérifiez-le avant de lancer un correctif.";
+"These credentials ask before each use, which stalls an unattended scan until you answer: %@" = "Ces identifiants demandent une confirmation avant chaque utilisation, ce qui bloque une analyse sans surveillance jusqu’à votre réponse : %@";
+"This finding's text was flagged" = "Le texte de ce constat a été signalé";
+"This workspace has no github.com token — scans poll GitHub with it." = "Cet espace de travail n’a pas de token github.com — les analyses interrogent GitHub avec celui-ci.";
+"Watch" = "Surveiller";
+"Watch a GitHub Repository" = "Surveiller un dépôt GitHub";
+"Watch a GitHub Repository…" = "Surveiller un dépôt GitHub…";
+"Watch and Scan Now" = "Surveiller et analyser maintenant";
+"Watch on %@" = "Surveiller %@";
+"Watched repositories" = "Dépôts surveillés";
+"What's wrong" = "Problème";
+"Where the repository is (or will be cloned) inside the workspace." = "Emplacement du dépôt (existant ou à cloner) dans l’espace de travail.";
+"default branch" = "branche par défaut";
+"last %@" = "dernière : %@";
+"reported %d times" = "signalé %d fois";
+"watching" = "surveillé";
+"watching · checked %@" = "surveillé · vérifié %@";
+"…and %d more" = "… et %d de plus";
+"Clear Filters" = "Effacer les filtres";
+"Findings by severity and status" = "Constats par gravité et statut";
+"No matching findings" = "Aucun constat correspondant";
+"Nothing matches these filters." = "Rien ne correspond à ces filtres.";
+"Repositories this workspace's token can reach" = "Dépôts accessibles avec le token de cet espace de travail";
+"Start a Fix" = "Lancer un correctif";
+"Watch a Repository…" = "Surveiller un dépôt…";
+"Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "Correctif lancé — un agent y travaille sur sa propre branche. Il passera à « En revue » une fois prêt.";
+"Full scan of %@ requested — it shows under Recent scans once the agent starts." = "Analyse complète de %@ demandée — elle apparaîtra dans « Analyses récentes » dès que l’agent démarrera.";
+"Now watching %@." = "%@ est maintenant surveillé.";
+"%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ travaille sur votre prompt dans une nouvelle branche de %2$@, dans %3$@";
+"%d run(s) need your attention" = "%d exécution(s) requièrent votre attention";
+"(a disposable copy)" = "(une copie jetable)";
+"A schedule, or something happening on GitHub or Linear." = "Un calendrier, ou un événement sur GitHub ou Linear.";
+"An agent picks up that item with your prompt — screened for prompt injection first" = "Un agent prend en charge cet élément avec votre prompt — après un contrôle d’injection de prompt";
+"An agent reviews the whole repository weekly, and every new commit and pull request" = "Un agent examine tout le dépôt chaque semaine, ainsi que chaque nouveau commit et chaque pull request";
+"An agent starts in one of your workspaces with your prompt, on a fresh branch" = "Un agent démarre dans l’un de vos espaces de travail avec votre prompt, sur une nouvelle branche";
+"Another one finishes" = "Une autre se termine";
+"At set times" = "À heures fixes";
+"At the time you pick — every weekday at 9:00, hourly, weekly…" = "À l’heure choisie — chaque jour ouvré à 9:00, toutes les heures, chaque semaine…";
+"Backlog, dismiss, mark fixed…" = "Backlog, écarter, marquer comme corrigé…";
+"Change the status" = "Changer le statut";
+"Dismiss (Not an Issue)" = "Écarter (pas un problème)";
+"Each item runs once, on its own branch, listed on the Runs tab" = "Chaque élément s’exécute une fois, sur sa propre branche, et apparaît dans l’onglet « Exécutions »";
+"Each run starts this agent with your prompt, on a fresh branch." = "Chaque exécution démarre cet agent avec votre prompt, sur une nouvelle branche.";
+"Every %1$@ at %2$@" = "Chaque %1$@ à %2$@";
+"Every %d hours" = "Toutes les %d heures";
+"Every %d minutes" = "Toutes les %d minutes";
+"Every automation runs an agent unattended in one of your workspaces, under its credentials and guardrails." = "Chaque automatisation exécute un agent sans surveillance dans l’un de vos espaces de travail, avec ses identifiants et ses garde-fous.";
+"Every day at %@" = "Tous les jours à %@";
+"Every hour" = "Toutes les heures";
+"Every weekday at %@" = "Chaque jour ouvré à %@";
+"Findings are collected and deduplicated across scans, by severity" = "Les constats sont collectés et dédoublonnés d’une analyse à l’autre, par gravité";
+"Full scan %1$@ %2$02d:00" = "Analyse complète %1$@ %2$02d:00";
+"GitHub & Linear events" = "Événements GitHub et Linear";
+"Hasn't run yet" = "Pas encore exécutée";
+"Insert:" = "Insérer :";
+"Issue" = "Issue";
+"Last run %@" = "Dernière exécution : %@";
+"Mark as Fixed" = "Marquer comme corrigé";
+"Mark as New" = "Marquer comme nouveau";
+"Marked fixed by hand" = "Marqué comme corrigé manuellement";
+"Move to Backlog" = "Placer dans le backlog";
+"Name this automation" = "Nommez cette automatisation";
+"Needs a token" = "Nécessite un token";
+"New issue" = "Nouvelle issue";
+"Next %@" = "Prochaine : %@";
+"No event automations — e.g. review every new pull request" = "Aucune automatisation sur événement — par exemple, examiner chaque nouvelle pull request";
+"No open findings" = "Aucun constat ouvert";
+"No scheduled automations — e.g. a weekday-morning triage of open issues" = "Aucune automatisation planifiée — par exemple, un tri des issues ouvertes chaque matin de semaine";
+"Nothing runs on its own yet" = "Rien ne s’exécute encore tout seul";
+"One click starts a fix on its own branch — you review before anything merges" = "Un clic lance un correctif sur sa propre branche — vous l’examinez avant toute fusion";
+"Open Runs" = "Ouvrir les exécutions";
+"Open Task" = "Ouvrir la tâche";
+"Opened on GitHub" = "Ouverte sur GitHub";
+"Pick what should start an agent. Every automation runs unattended in one of your workspaces, under its credentials and guardrails." = "Choisissez ce qui doit démarrer un agent. Chaque automatisation s’exécute sans surveillance dans l’un de vos espaces de travail, avec ses identifiants et ses garde-fous.";
+"Pull request" = "Pull request";
+"Pushed to a branch" = "Poussé sur une branche";
+"React when something happens on GitHub or Linear." = "Réagir quand quelque chose se produit sur GitHub ou Linear.";
+"Reopen" = "Rouvrir";
+"Retry the Fix" = "Relancer le correctif";
+"Run an agent on a prompt, on a schedule." = "Exécuter un agent sur un prompt, selon un calendrier.";
+"Run now" = "Exécuter maintenant";
+"Running now" = "En cours d’exécution";
+"Runs" = "Exécutions";
+"Scan Now only" = "« Analyser maintenant » uniquement";
+"Scan now" = "Analyser maintenant";
+"Scanning" = "Analyse en cours";
+"Scans run as automations in the workspace you choose, with its GitHub token. Nothing is changed in the repository until you start a fix and merge it." = "Les analyses s’exécutent comme des automatisations dans l’espace de travail choisi, avec son token GitHub. Rien n’est modifié dans le dépôt tant que vous ne lancez pas un correctif et ne le fusionnez pas.";
+"Set Up" = "Configurer";
+"Show Details" = "Afficher les détails";
+"Show Findings" = "Afficher les constats";
+"Show Runs" = "Afficher les exécutions";
+"Step %d" = "Étape %d";
+"The fix couldn't start: %@" = "Le correctif n’a pas pu démarrer : %@";
+"The session closes; its transcript and branch stay for you to review" = "La session se ferme ; sa transcription et sa branche restent disponibles pour votre revue";
+"The session stays open for you to check" = "La session reste ouverte pour que vous puissiez vérifier";
+"The workspace's credentials and guardrails apply to every run." = "Les identifiants et garde-fous de l’espace de travail s’appliquent à chaque exécution.";
+"Then" = "Ensuite";
+"Watching · checked %@" = "Surveillé · vérifié %@";
+"What" = "Quoi";
+"What happens" = "Déroulement";
+"What should run on its own?" = "Qu’est-ce qui doit s’exécuter tout seul ?";
+"What the agent does" = "Ce que fait l’agent";
+"When" = "Quand";
+"When a Linear issue is assigned to you" = "Quand une issue Linear vous est assignée";
+"When a commit lands on %1$@ of %2$@" = "Quand un commit arrive sur %1$@ de %2$@";
+"When a pull request is opened on %@" = "Quand une pull request est ouverte sur %@";
+"When a pull request, issue or commit lands on GitHub, a Linear issue appears, or another automation finishes" = "Quand une pull request, une issue ou un commit arrive sur GitHub, qu’une issue Linear apparaît ou qu’une autre automatisation se termine";
+"When an issue on %@ is assigned to you" = "Quand une issue de %@ vous est assignée";
+"When an unassigned Linear issue is created" = "Quand une issue Linear non assignée est créée";
+"When an unassigned issue is opened on %@" = "Quand une issue non assignée est ouverte sur %@";
+"When it runs" = "Quand elle s’exécute";
+"When “%@” finishes" = "Quand « %@ » se termine";
+"Where it runs" = "Où elle s’exécute";
+"You find its result on the Runs tab: transcript and branch" = "Vous retrouvez son résultat dans l’onglet « Exécutions » : transcription et branche";
+"a repository" = "un dépôt";
+"against %@" = "vers %@";
+"another automation" = "une autre automatisation";
+"every commit" = "chaque commit";
+"every pull request" = "chaque pull request";
+"the default branch" = "la branche par défaut";
+"the home folder" = "le dossier personnel";
+"touching %@" = "touchant %@";
+"“%@” is starting — follow it on the Runs tab." = "« %@ » démarre — suivez-la dans l’onglet « Exécutions ».";
+"%d comment(s)" = "%d commentaire(s)";
+"Agents at work" = "Agents au travail";
+"An agent fixes it on a branch of its own — or the Switchboard proposes which of your running sessions should. You review the change before anything merges." = "Un agent le corrige sur sa propre branche — ou le Standard propose laquelle de vos sessions en cours devrait s’en charger. Vous examinez la modification avant toute fusion.";
+"Ask a Room's Switchboard" = "Demander au Standard d’une salle";
+"Ask the Switchboard Instead…" = "Demander plutôt au Standard…";
+"Ask the Switchboard Who Should Fix It" = "Demander au Standard qui doit le corriger";
+"Asked the Switchboard — it will propose a session and wait for your OK." = "Standard sollicité — il proposera une session et attendra votre accord.";
+"Briefs waiting to start" = "Briefs en attente de démarrage";
+"Merged or closed" = "Fusionnées ou fermées";
+"No phases yet — click Plan on a backlog card to have an agent split it into ordered phases." = "Aucune phase pour l’instant — cliquez sur « Planifier » sur une carte du backlog pour qu’un agent la découpe en phases ordonnées.";
+"Phases, in order" = "Phases, dans l’ordre";
+"Sent to the Switchboard to find who fixes it" = "Envoyé au Standard pour trouver qui le corrige";
+"Sent to the “%@” room's Switchboard to find who fixes it" = "Envoyé au Standard de la salle « %@ » pour trouver qui le corrige";
+"Session gone" = "Session disparue";
+"Start a Fix Session" = "Lancer une session de correction";
+"Waiting for your review" = "En attente de votre revue";
+"Code Review" = "Revue de code";
+"Code review" = "Revue de code";
+"Continuous code review for your GitHub repositories" = "Revue de code continue de vos dépôts GitHub";
+"Keep a GitHub repository continuously reviewed for vulnerabilities and bugs." = "Faire examiner en continu un dépôt GitHub à la recherche de vulnérabilités et de bugs.";
+"No repository is watched — set up a continuous code review" = "Aucun dépôt surveillé — configurez une revue de code continue";
+"%@ says:" = "%@ dit :";
+"Answer %@" = "Répondre à %@";
+"Answer…" = "Répondre…";
+"Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back." = "Livré, mais aucun worktree n’a été trouvé sur la branche %@ — le diff ne peut pas être affiché. Lisez le résumé ou renvoyez-le.";
+"Handing over" = "Transmission";
+"Question" = "Question";
+"Show the session working on it" = "Afficher la session qui y travaille";
+"That session no longer exists." = "Cette session n’existe plus.";
+"The room has no Switchboard to take the task." = "La salle n’a pas de Standard pour prendre la tâche.";
+"Your answer" = "Votre réponse";
+"#%1$d in %2$@'s queue" = "N° %1$d dans la file de %2$@";
+"@nickname or #room" = "@surnom ou #salle";
+"A new agent" = "Un nouvel agent";
+"A new agent (in its own worktree)" = "Un nouvel agent (dans son propre worktree)";
+"A new agent each (%d at a time)" = "Un nouvel agent pour chacune (%d à la fois)";
+"A room" = "Une salle";
+"A session" = "Une session";
+"A session or room pushes its branch and opens a pull request before the card moves to Testing/Review." = "Une session ou une salle pousse sa branche et ouvre une pull request avant que la carte passe en « Tests/Revue ».";
+"Added “%@”" = "« %@ » ajoutée";
+"Assign" = "Attribuer";
+"Assign…" = "Attribuer…";
+"Auto-pickup: off" = "Prise en charge automatique : désactivée";
+"Details (optional)" = "Détails (facultatif)";
+"In its own fresh worktree — queued with the other new-agent tasks" = "Dans son propre nouveau worktree — en file avec les autres tâches pour nouveaux agents";
+"New agent" = "Nouvel agent";
+"New backlog items go to" = "Les nouveaux éléments du backlog vont à";
+"New items → %@" = "Nouveaux éléments → %@";
+"Next for %@" = "Prochaine pour %@";
+"No session or room matches." = "Aucune session ni salle ne correspond.";
+"No sessions yet — start one, give it a @nickname, and it can take tasks from the board." = "Aucune session pour l’instant — lancez-en une, donnez-lui un @surnom, et elle pourra prendre des tâches du tableau.";
+"Nobody — I start them" = "Personne — je les lance";
+"Open a pull request when done" = "Ouvrir une pull request une fois terminé";
+"Pull request #%@" = "Pull request #%@";
+"Quick Task…" = "Tâche rapide…";
+"Sessions and rooms open a pull request when done" = "Les sessions et salles ouvrent une pull request une fois terminé";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Testing/Review. To give it to a session or a room, use Assign." = "Directement en « En cours » : un nouvel agent réalise toute la tâche dans un nouveau worktree et vous remet le diff dans « Tests/Revue ». Pour la confier à une session ou une salle, utilisez « Attribuer ».";
+"The room's Switchboard picks a member" = "Le Standard de la salle choisit un membre";
+"This session (%@)" = "Cette session (%@)";
+"Unassign" = "Retirer l’attribution";
+"Who picks it up" = "Qui la prend en charge";
+"Who picks this task up" = "Qui prend en charge cette tâche";
+"Who picks this up?" = "Qui s’en charge ?";
+"Who picks up new backlog items on their own and takes them to Testing/Review. Each task can still be assigned by hand." = "Qui prend en charge de lui-même les nouveaux éléments du backlog et les mène jusqu’à « Tests/Revue ». Chaque tâche peut toujours être attribuée manuellement.";
+"busy — it takes this after its current work" = "occupée — la prendra après son travail en cours";
+"New task — or ⇧⌥Space from any app for a quick one" = "Nouvelle tâche — ou ⇧⌥Espace depuis n’importe quelle app pour une tâche rapide";
+"%@ picks it up on its own and takes it to Testing/Review." = "%@ la prend en charge de lui-même et la mène jusqu’à « Tests/Revue ».";
+"A new agent picks it up from the queue and takes it to Testing/Review." = "Un nouvel agent la prend dans la file et la mène jusqu’à « Tests/Revue ».";
+"Add Task" = "Ajouter la tâche";
+"Describe the task — what's wrong, where, what done looks like. Markdown welcome." = "Décrivez la tâche — ce qui ne va pas, où, et à quoi ressemble le résultat attendu. Markdown bienvenu.";
+"Description" = "Description";
+"What needs doing?  @agent to assign" = "Que faut-il faire ?  @agent pour attribuer";
+"busy — takes it after its current work" = "occupée — la prend après son travail en cours";
+"in its own worktree" = "dans son propre worktree";
+"the room's Switchboard picks a member" = "le Standard de la salle choisit un membre";
+"↩ add · ⌘↩ add another · ⇥⇥ full editor" = "↩ ajouter · ⌘↩ en ajouter une autre · ⇥⇥ éditeur complet";
+"%@ works in its own workspace and folder, with its own agent" = "%@ travaille dans son propre espace de travail et dossier, avec son propre agent";
+"%@'s Switchboard picks a member" = "Le Standard de %@ choisit un membre";
+"@switchboard" = "@switchboard";
+"The Switchboard — it picks a session" = "Le Standard — il choisit une session";
+"The app's Switchboard picks the session best placed for it" = "Le Standard de l’app choisit la session la mieux placée";
+"There's no workspace to run the Switchboard in." = "Aucun espace de travail où exécuter le Standard.";
+"picks the session best placed for it" = "choisit la session la mieux placée";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "Décrivez votre environnement";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "Ce que les contrôles de sécurité de vos agents doivent savoir de votre monde : votre organisation, vos serveurs et leur rôle, les dépôts et domaines auxquels vous faites confiance, ce qu’il est sûr de modifier. Un fait par ligne. Le mode auto de Claude s’en sert pour distinguer le travail courant des actions risquées.";
+"Variables" = "Variables";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "Faire confiance à ce dossier ?";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ sur %@";
+"%@ · downloaded" = "%@ · téléchargé";
+"%@ · sent by the agent" = "%@ · envoyé par l’agent";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "Impossible de lire le fichier sur la machine — est-il toujours là, et la machine est-elle démarrée ?";
+"Couldn't write the file here." = "Impossible d’écrire le fichier ici.";
+"Downloaded" = "Téléchargé";
+"Save As…" = "Enregistrer sous…";
+"Save or Share" = "Enregistrer ou partager";
+"Saved to %@" = "Enregistré dans %@";
+"Sent by the agent" = "Envoyé par l’agent";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "Ajouter des instructions";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "Ajoutées au prompt système de l’agent quand une session démarre avec elles. Décrivez qui doit être l’agent et comment il doit travailler — « Tu es un… ».";
+"Careful reviewer" = "Relecteur minutieux";
+"Delete these instructions" = "Supprimer ces instructions";
+"Edit instructions…" = "Modifier les instructions…";
+"Instructions" = "Instructions";
+"Instructions added to the agent's system prompt (“You are a…”)" = "Instructions ajoutées au prompt système de l’agent (« Tu es un… »)";
+"Instructions without a name or text are not kept." = "Les instructions sans nom ou sans texte ne sont pas conservées.";
+"New instructions" = "Nouvelles instructions";
+"No instructions" = "Aucune instruction";
+"No instructions yet. Add some with +." = "Aucune instruction pour l’instant. Ajoutez-en avec +.";
+"Teacher" = "Professeur";
+"The agent as it comes" = "L’agent tel quel";
+"Untitled" = "Sans titre";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "Tu es un ingénieur senior méticuleux qui relit les modifications avant leur mise en production. Cherche d’abord les bugs, les cas limites et les problèmes de sécurité, explique ton raisonnement, et préfère de petites modifications bien testées aux grandes réécritures.";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "Tu es un professeur patient. Explique ce que tu fais et pourquoi au fur et à mesure, en langage simple, et signale ce que l’utilisateur peut apprendre de chaque étape.";
+
+/* Local model context window */
+"%@ context" = "Contexte %@";
+"Context?" = "Contexte ?";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "Le serveur n’indique pas la taille de contexte de ce modèle — les agents supposent 128K. Cliquez pour la saisir.";
+"The context window agents are told this model has. Click to change it." = "La fenêtre de contexte annoncée aux agents pour ce modèle. Cliquez pour la modifier.";
+"Context window" = "Fenêtre de contexte";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "Combien de tokens %@ peut prendre. Chaque agent qui l’utilise en est informé, pour compacter au bon moment.";
+"e.g. 1M, 256K or 131072" = "p. ex. 1M, 256K ou 131072";
+"Enter a number of tokens, like 1M or 200K." = "Saisissez un nombre de tokens, comme 1M ou 200K.";
+"Use the server's value" = "Utiliser la valeur du serveur";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "Ouvrez la page de connexion et approuvez l’accès.";
+"Approve the sign-in in your browser; it should show this code:" = "Approuvez la connexion dans votre navigateur ; il doit afficher ce code :";
+"Open the sign-in page and check that it shows this code:" = "Ouvrez la page de connexion et vérifiez qu’elle affiche ce code :";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "Votre script de personnalisation (%@) est illisible — l’image est construite sans lui.";
+"Run my customize script after Bromure's setup" = "Exécuter mon script de personnalisation après l’installation de Bromure";
+"No script chosen" = "Aucun script choisi";
+"Last Log" = "Dernier journal";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "S’exécute en root dans l’image de base après l’installation des agents, à chaque reconstruction ou mise à jour de l’image : tout espace de travail créé ou réinitialisé ensuite dispose de ce qu’il installe. Tracé avec bash -x ; la sortie est enregistrée dans ~/Library/Logs/BromureAC/base-image-customize.log. En cas d’échec, l’image actuelle est conservée.";
+"Choose the shell script to run inside the base image" = "Choisissez le script shell à exécuter dans l’image de base";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "Télécharger l’image prête";
+"The latest published image, then the recommended packages. A few minutes." = "La dernière image publiée, puis les paquets recommandés. Quelques minutes.";
+"Recommended" = "Recommandé";
+"Rebuild locally" = "Reconstruire localement";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "Construite de zéro sur ce Mac avec l’installateur complet. Environ 10 minutes.";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Vos espaces de travail ne sont pas modifiés — chacun propose de se réinitialiser sur la nouvelle image à son prochain démarrage.";
+"Download & Update" = "Télécharger et mettre à jour";
+"Rebuild" = "Reconstruire";
+"Update the base image" = "Mettre à jour l’image de base";
+"New workspaces start from this image: the system, the coding agents and their tools." = "Les nouveaux espaces de travail partent de cette image : le système, les agents de code et leurs outils.";
+"Customize the image" = "Personnaliser l’image";
+"Choose Script…" = "Choisir un script…";
+"Change…" = "Modifier…";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "S’exécute en root dans l’image après l’installation des agents, à chaque reconstruction ou mise à jour : les espaces de travail nouveaux ou réinitialisés disposent de ce qu’il installe. Tracé avec bash -x dans ~/Library/Logs/BromureAC/base-image-customize.log. En cas d’échec, l’image actuelle est conservée.";
+"Your customize script failed — the current image is kept. See %@" = "Votre script de personnalisation a échoué — l’image actuelle est conservée. Voir %@";
+"%@ says" = "%@ dit";
+"The agent" = "L’agent";
+"Ask %@ to Merge into %@" = "Demander à %@ de fusionner dans %@";
+"Ask %@ to Merge" = "Demander à %@ de fusionner";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "Demande à l’agent qui l’a fait de fusionner sa branche là où il a travaillé ; la carte passe à Terminé quand il en rend compte. Maintenez pour fusionner en un seul commit, ouvrir une pull request ou choisir une autre branche.";
+"%@ merges %@ into…" = "%@ fusionne %@ dans…";
+"%@ — where it started" = "%@ — là où il a commencé";
+"Loading branches…" = "Chargement des branches…";
+"Squash into one commit" = "Fusionner en un seul commit";
+"Ask %@ to Merge into…" = "Demander à %@ de fusionner dans…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Choisissez la branche : l’agent qui a fait le travail le fusionne là où il a travaillé, et la carte passe à Terminé quand il en rend compte.";
+"Mark as Done" = "Marquer comme terminé";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Passe la tâche à Terminé telle quelle — rien n’est fusionné, et le worktree et sa branche restent.";
+"Confirm" = "Confirmer";
+"Created %@" = "Créée %@";
+"Modified %@" = "Modifiée %@";
+"Updated %@" = "Mise à jour %@";
+"GitHub rejected this workspace's token" = "GitHub a refusé le jeton de cet espace de travail";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "Le jeton github.com a expiré, a été révoqué ou est mal saisi (HTTP 401). Mettez-le à jour dans %@ › Identifiants, ou choisissez un autre espace de travail.";
+"Fix the workspace's GitHub token to watch a repository." = "Corrigez le jeton GitHub de l’espace de travail pour surveiller un dépôt.";
+"Assigned to %@ — click to change" = "Assignée à %@ — cliquez pour changer";
+"Click to fold the error" = "Cliquez pour replier l’erreur";
+"Click to read the whole error" = "Cliquez pour lire toute l’erreur";
+"Deleted workspace" = "Espace de travail supprimé";
+"Open Coding Tasks (⇧⌘T)" = "Ouvrir Tâches de code (⇧⌘T)";
+"No open tasks" = "Aucune tâche ouverte";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "Chaque fois qu’une automatisation se déclenche, son exécution apparaît ici — planifiée, en cours, puis terminée. Créez une automatisation pour commencer.";
+"Open Automations" = "Ouvrir Automatisations";
+"Open Automations (⇧⌘A)" = "Ouvrir Automatisations (⇧⌘A)";
+"View" = "Présentation";
+"Help" = "Aide";
+"Close Window" = "Fermer la fenêtre";
+"Toggle Sidebar" = "Afficher/masquer la barre latérale";
+"Toggle Files Pane" = "Afficher/masquer le panneau Fichiers";
+"Toggle Browser Pane" = "Afficher/masquer le panneau Navigateur";
+"Enter Full Screen" = "Passer en plein écran";
+"Zoom" = "Réduire/agrandir";
+"%@ Manual" = "Manuel de %@";
+"Add a note about this workspace" = "Ajoutez une note sur cet espace de travail";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "Évalue les fichiers d'instructions / réglages que chaque agent charge comme référence : CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi et omp) et GROK.md (Grok), ainsi que leurs variantes imbriquées et globales. Télécharge ~571 Mo à la première activation.";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "Les règles de connexions sortantes se modifient sur le Mac qui exécute cet espace de travail.";
+"Click a protection that's off to turn it on in that workspace's settings." = "Cliquez sur une protection désactivée pour l'activer dans les réglages de cet espace de travail.";
+"Turn on…" = "Activer…";
+"%1$@ is on for %2$@. Click to change it." = "%1$@ est activé pour %2$@. Cliquez pour le modifier.";
+"%1$@ is off for %2$@. Click to turn it on." = "%1$@ est désactivé pour %2$@. Cliquez pour l'activer.";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "non analysé — %@";
+"blocked, not sent — %@" = "bloqué, non envoyé — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@ (%2$d fois, la dernière est affichée)";
+
+"Security…" = "Sécurité…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "Télécharger la version actuelle";
+"Update" = "Mettre à jour";
+"an unknown version" = "une version inconnue";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "Obsolète : l'image partagée est en %@ ; cette version d'Agentic Coding utilise la %@. Ouvrez Bromure pour qu'il mette à jour son image du navigateur, ou téléchargez la version actuelle pour Agentic Coding seulement (utilisée à la place de l'image partagée jusqu'à ce que Bromure la rattrape).";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "Obsolète : cette image est en %@ ; la version actuelle est la %@. Mettez à jour pour la télécharger.";
+"The Linux machine behind this session — available while it runs" = "La machine Linux derrière cette session — disponible tant qu'elle tourne";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "1 média affiché";
+"%d media items shown" = "%d médias affichés";
+"1 chart shown" = "1 graphique affiché";
+"%d charts shown" = "%d graphiques affichés";
+"1 file sent" = "1 fichier envoyé";
+"%d files sent" = "%d fichiers envoyés";
+"1 tool result" = "1 résultat d’outil";
+"%d tool results" = "%d résultats d’outils";
+"Available when the workspace is running" = "Disponible quand l’espace de travail est en marche";
+"Video available when the workspace is running" = "Vidéo disponible quand l’espace de travail est en marche";
+"Image available when the workspace is running" = "Image disponible quand l’espace de travail est en marche";
+
+/* Fat client: link states (reconnecting / key rejected / host key changed) */
+"“%@” didn't accept this Mac's key" = "« %@ » n’a pas accepté la clé de ce Mac";
+"“%@” presented a different host key" = "« %@ » a présenté une autre clé d’hôte";
+"Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection." = "Son identité ne correspond plus à celle que ce Mac a approuvée. Si le Mac distant a été réinstallé, reconnectez-vous via Se connecter à un Bromure distant… pour vérifier la nouvelle clé ; sinon, quelqu’un intercepte peut-être la connexion.";
+"Reconnecting to %@…" = "Reconnexion à %@…";
+"The connection dropped. What you see is from just before; it picks up again on its own." = "La connexion a été coupée. Ce que vous voyez date d’il y a un instant ; elle reprend d’elle-même.";
+
+/* Coding Tasks: landing an approved task (2026-10) */
+"Ready to land" = "Prête à intégrer";
+"Landing — merging into %@…" = "Intégration — fusion dans %@…";
+"Landing — %1$@ is opening a pull request into %2$@…" = "Intégration — %1$@ ouvre une pull request vers %2$@…";
+"Landing — %1$@ is merging into %2$@…" = "Intégration — %1$@ fusionne dans %2$@…";
+"Needs you — %@" = "Vous attend — %@";
+"marked by you" = "marquée par vous";
+"reported by %@, not verified" = "signalée par %@, non vérifiée";
+"the agent" = "l’agent";
+"PR #%@ opened" = "PR n° %@ ouverte";
+"Marked done by you" = "Marquée terminée par vous";
+"All its phases are done" = "Toutes ses phases sont terminées";
+"The agent couldn't land it." = "L’agent n’a pas pu l’intégrer.";
+"Couldn't read the branch's repository or where it started — is the workspace running?" = "Impossible de lire le dépôt de la branche ou son point de départ — l’espace de travail est-il démarré ?";
+"The branch %@ doesn't exist in the repository any more — merge into another branch." = "La branche %@ n’existe plus dans le dépôt — fusionnez dans une autre branche.";
+"The task's branch %@ is gone from the repository." = "La branche de la tâche, %@, a disparu du dépôt.";
+"The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry." = "La copie de %@ a des modifications non validées dans des fichiers touchés par cette tâche — validez-les ou mettez-les de côté (stash), puis réessayez.";
+"The repository has no remote to open a pull request on — merge it instead." = "Le dépôt n’a pas de dépôt distant pour ouvrir une pull request — fusionnez plutôt.";
+"Couldn't reach the session that did the task." = "Impossible de joindre la session qui a fait la tâche.";
+"Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel." = "Intégration bloquée — l’agent n’a pas terminé après 20 minutes. Ouvrez sa session pour voir où il en est, puis réessayez ou annulez.";
+"%@ stopped before it landed — open its session to see why, then retry." = "%@ s’est arrêté avant l’intégration — ouvrez sa session pour voir pourquoi, puis réessayez.";
+"The app quit while landing this — retry." = "L’app a quitté pendant l’intégration — réessayez.";
+"Mark done without merging?" = "Marquer comme terminée sans fusionner ?";
+"Mark Done" = "Marquer comme terminée";
+"The agent is stopped. Nothing is merged; the branch %@ and its checkout are kept in the workspace." = "L’agent est arrêté. Rien n’est fusionné ; la branche %@ et sa copie restent dans l’espace de travail.";
+"Nothing is merged. The branch %@ and its checkout are kept in the workspace." = "Rien n’est fusionné. La branche %@ et sa copie restent dans l’espace de travail.";
+"Discard this branch?" = "Abandonner cette branche ?";
+"The branch %@ and its checkout are deleted and the agent's session is put away. The task goes to Done as closed without merging; its transcript is kept." = "La branche %@ et sa copie sont supprimées et la session de l’agent est archivée. La tâche passe dans Terminé comme fermée sans fusion ; sa transcription est conservée.";
+"Merge into %@?" = "Fusionner dans %@ ?";
+"Bromure merges it directly when it can; otherwise %1$@, the agent that wrote it, rebases onto %2$@, fixes conflicts, runs the tests and merges. Afterwards the branch is removed and the session archived." = "Bromure fusionne directement quand c’est possible ; sinon %1$@, l’agent qui l’a écrit, rebase sur %2$@, résout les conflits, lance les tests et fusionne. Ensuite la branche est supprimée et la session archivée.";
+"Sessions and rooms open a pull request at delivery (skips review)" = "Les sessions et salons ouvrent une pull request à la livraison (sans revue)";
+"Who new tasks are queued for when you create them — they pick them up on their own and take them to Review. Each task can still be assigned by hand." = "À qui les nouvelles tâches sont confiées à leur création — ils les prennent d’eux-mêmes et les amènent en Revue. Chaque tâche peut toujours être attribuée à la main.";
+"Tasks waiting to start" = "Tâches en attente de démarrage";
+"Move to Review" = "Passer en Revue";
+"Stop & Return to Backlog" = "Arrêter et remettre dans le backlog";
+"Nothing done yet" = "Rien de terminé pour l’instant";
+"Merged, opened as pull requests, or closed" = "Fusionnées, ouvertes en pull request ou fermées";
+"Open Pull Request" = "Ouvrir une pull request";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Review. To give it to a session or a room, use Assign." = "Directement en cours : un nouvel agent fait toute la tâche dans un worktree neuf et vous présente le diff en Revue. Pour la confier à une session ou un salon, utilisez Attribuer.";
+"Open a pull request at delivery (skips review)" = "Ouvrir une pull request à la livraison (sans revue)";
+"No code changes — read the report" = "Aucune modification de code — lisez le rapport";
+"Assigned to %@" = "Attribuée à %@";
+"Workspace: %@" = "Espace de travail : %@";
+"Agent: %@" = "Agent : %@";
+"Folder: %@" = "Dossier : %@";
+"Folder" = "Dossier";
+"Clone this repository first (optional)" = "Cloner d’abord ce dépôt (facultatif)";
+"Make the folder and an empty git repository when they don't exist yet — tasks run on their own branch." = "Créer le dossier et un dépôt git vide s’ils n’existent pas encore — les tâches travaillent sur leur propre branche.";
+"When approved" = "Une fois approuvée";
+"Workspace default (%@)" = "Valeur de l’espace de travail (%@)";
+"What happens when you approve the task in Review: merged into the branch it came from, or opened as a pull request." = "Ce qui se passe quand vous approuvez la tâche en Revue : fusion dans la branche d’origine, ou ouverture d’une pull request.";
+"A new agent picks it up from the queue and takes it to Review." = "Un nouvel agent la prend dans la file et l’amène en Revue.";
+"%@ picks it up on its own and takes it to Review." = "%@ la prend de lui-même et l’amène en Revue.";
+"Send Back" = "Renvoyer";
+"Send Back (%d)" = "Renvoyer (%d)";
+"This task isn't in Review any more." = "Cette tâche n’est plus en Revue.";
+"%1$@ worked on %2$@ in %3$@" = "%1$@ a travaillé sur %2$@ dans %3$@";
+"%1$@ worked in %2$@" = "%1$@ a travaillé dans %2$@";
+"%1$@ (+%2$d −%3$d) vs %4$@" = "%1$@ (+%2$d −%3$d) par rapport à %4$@";
+"%d uncommitted" = "%d non validées";
+"%1$@ moved %2$d commits since" = "%1$@ a avancé de %2$d commits depuis";
+"%@ checkout clean" = "copie de %@ propre";
+"%@ checkout has uncommitted changes" = "la copie de %@ a des modifications non validées";
+"%@ not checked out" = "%@ n’est extraite nulle part";
+"remote: %@" = "dépôt distant : %@";
+"none" = "aucun";
+"can't reach the machine for the details" = "machine injoignable pour les détails";
+"%@'s final report" = "Rapport final de %@";
+"No code changes to merge" = "Aucune modification de code à fusionner";
+"Reading the agent's report…" = "Lecture du rapport de l’agent…";
+"Cancel Landing" = "Annuler l’intégration";
+"The task produced no code: it goes to Done as it is." = "La tâche n’a produit aucun code : elle passe dans Terminé telle quelle.";
+"View Pull Request #%@" = "Voir la pull request n° %@";
+"Mark Merged" = "Marquer comme fusionnée";
+"The pull request was merged on the forge: the task goes to Done as merged." = "La pull request a été fusionnée sur la forge : la tâche passe dans Terminé comme fusionnée.";
+"More" = "Plus";
+"Merge into Another Branch…" = "Fusionner dans une autre branche…";
+"Keep Branch — Mark Done" = "Garder la branche — marquer comme terminée";
+"Open a pull request for the branch; hold for the other ways to land it." = "Ouvrir une pull request pour la branche ; maintenir pour les autres façons de l’intégrer.";
+"Merge the branch; hold for the other ways to land it." = "Fusionner la branche ; maintenir pour les autres façons de l’intégrer.";
+"Mark done without merging — the branch is kept." = "Marquer comme terminée sans fusionner — la branche est conservée.";
+"Open a pull request into %@?" = "Ouvrir une pull request vers %@ ?";
+"Squash & merge into %@?" = "Squash et fusionner dans %@ ?";
+"%1$@ is ahead of %2$@ with nothing in the way: Bromure merges it directly." = "%1$@ est en avance sur %2$@ et rien ne s’y oppose : Bromure fusionne directement.";
+"Into" = "Dans";
+"Afterwards the session is archived; the branch stays for the pull request." = "Ensuite la session est archivée ; la branche reste pour la pull request.";
+"Afterwards the session is archived; the branch and its checkout are kept." = "Ensuite la session est archivée ; la branche et sa copie sont conservées.";
+"Afterwards the branch is removed and the session archived." = "Ensuite la branche est supprimée et la session archivée.";
+"Keep branch" = "Garder la branche";
+"%1$@ says it's done, but Bromure doesn't see it in %2$@: %3$@" = "%1$@ dit que c’est fait, mais Bromure ne le voit pas dans %2$@ : %3$@";
+"The planning session ended." = "La session de planification est terminée.";
+"The planning session has ended" = "La session de planification est terminée";
+"Merge into the branch" = "Fusionner dans la branche";
+"Open a pull request" = "Ouvrir une pull request";
+"When a task is approved" = "Quand une tâche est approuvée";
+"What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise." = "Ce que fait le bouton principal de la Revue d’une tâche de code : la fusionner dans sa branche d’origine, ou ouvrir une pull request. Chaque espace de travail et chaque tâche peut choisir autrement.";
+"App default (%@)" = "Valeur de l’app (%@)";
+"What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise." = "Ce que fait le bouton principal de la Revue pour les tâches de code de cet espace de travail. Chaque tâche peut toujours choisir autrement.";
+
+/* Coding Tasks vocabulary + start/live-state (2026-10) */
+"Start %d Selected" = "Démarrer les %d sélectionnées";
+"Off: the session or room hands its branch back for your review, and lands it once you approve. On: it pushes and opens a pull request before the task moves to Review." = "Désactivé : la session ou le salon vous rend sa branche pour revue et l’intègre une fois approuvée. Activé : il pousse et ouvre une pull request avant que la tâche passe en Revue.";
+"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phases with dependencies into the Plan column." = "Enregistre, puis ouvre une session de planification visible : l’agent explore le dépôt (posez-lui des questions — il vous voit) et dépose des phases ordonnées avec dépendances dans la colonne Planifier.";
+"%1$@, the agent that wrote it, will rebase onto %2$@, run the tests, push %3$@ to %4$@ and open a pull request. You'll see its progress on the task and in its session." = "%1$@, l’agent qui l’a écrit, va rebaser sur %2$@, lancer les tests, pousser %3$@ vers %4$@ et ouvrir une pull request. Vous suivrez sa progression sur la tâche et dans sa session.";
+"%1$@, the agent that wrote it, will rebase onto %2$@, fix conflicts, run the tests and merge. You'll see its progress on the task and in its session." = "%1$@, l’agent qui l’a écrit, va rebaser sur %2$@, résoudre les conflits, lancer les tests et fusionner. Vous suivrez sa progression sur la tâche et dans sa session.";
+"The planning session timed out without filing phases — click Plan First to retry." = "La session de planification a expiré sans déposer de phases — cliquez sur Planifier d’abord pour réessayer.";
+"The planning session ended before filing phases — click Plan First to retry." = "La session de planification s’est terminée avant de déposer des phases — cliquez sur Planifier d’abord pour réessayer.";
+"The planning session didn't start — %@ may not be set up in this workspace. Open a session there to check, then click Plan First to retry." = "La session de planification n’a pas démarré — %@ n’est peut-être pas configuré dans cet espace de travail. Ouvrez-y une session pour vérifier, puis cliquez sur Planifier d’abord pour réessayer.";
+"%@ exited before filing phases — click Plan First to retry." = "%@ s’est arrêté avant de déposer les phases — cliquez sur Planifier d’abord pour réessayer.";
+"The planning session was interrupted — click Plan First to retry." = "La session de planification a été interrompue — cliquez sur Planifier d’abord pour réessayer.";
+"The checkout for %@ is gone and couldn't be re-created in %@. Start Over runs the task again on a new branch." = "La copie de travail de %@ a disparu et n’a pas pu être recréée dans %@. Recommencer relance la tâche sur une nouvelle branche.";
+"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start Over runs the task again on a new branch." = "La branche %@ de la tâche n’existe plus dans %@ — sa copie de travail a été retirée (fusionnée puis nettoyée, ou supprimée). Recommencer relance la tâche sur une nouvelle branche.";
+"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start Over runs the task again from scratch%@." = "Le dossier du dépôt « %@ » a disparu de l’espace de travail, il n’y a donc rien dans quoi reprendre. Recommencer relance la tâche depuis le début%@.";
+"Plan First" = "Planifier d’abord";
+"Remove Task" = "Retirer la tâche";
+"Remove Task Only" = "Retirer la tâche uniquement";
+"Stop & Discard Branch" = "Arrêter et abandonner la branche";
+"Discarding ends the agent's session and deletes its branch and worktree, with any uncommitted or unmerged work. “Remove Task Only” leaves them in the workspace." = "Abandonner met fin à la session de l’agent et supprime sa branche et son worktree, avec tout travail non commité ou non fusionné. « Retirer la tâche uniquement » les laisse dans l’espace de travail.";
+"Unassigned — I'll start it" = "Non assignée — je la lancerai";
+"New tasks: Unassigned" = "Nouvelles tâches : non assignées";
+"New tasks: assigned to %@" = "Nouvelles tâches : attribuées à %@";
+"Assign new tasks to" = "Attribuer les nouvelles tâches à";
+"No phases yet — click Plan First on a Backlog task." = "Pas encore de phases — cliquez sur « Planifier d’abord » sur une tâche du backlog.";
+"Starts every selected phase. Phases whose dependencies aren't Done queue and start automatically when they are." = "Démarre chaque phase sélectionnée. Les phases dont les dépendances ne sont pas terminées sont mises en file et démarrent automatiquement dès qu’elles le sont.";
+"A visible planning session is running — click the task to open it; phases appear in the Plan column as it files them." = "Une session de planification visible est en cours — cliquez sur la tâche pour l’ouvrir ; les phases apparaissent dans la colonne Planifier au fur et à mesure.";
+"A planner agent reads the task and the repository, then files ordered phases (with dependencies) in the Plan column." = "Un agent planificateur lit la tâche et le dépôt, puis dépose des phases ordonnées (avec dépendances) dans la colonne Planifier.";
+"Start it from the board, or Plan First to split it into phases." = "Lancez-la depuis le tableau, ou « Planifier d’abord » pour la découper en phases.";
+"Remove %d selected phase(s)?" = "Retirer %d phase(s) sélectionnée(s) ?";
+"Your task" = "Votre tâche";
+"Start Over" = "Recommencer";
+"Runs the task again from scratch on a new branch." = "Relance la tâche de zéro sur une nouvelle branche.";
+"The agent is waiting at its prompt without having handed the task over — open its session to see where it is." = "L’agent attend à son invite sans avoir rendu la tâche — ouvrez sa session pour voir où il en est.";
+"Checking the workspace and the folder — the task moves to In Progress once its agent can start." = "Vérification de l’espace de travail et du dossier — la tâche passe En cours dès que son agent peut démarrer.";
+"Connecting…" = "Connexion…";
+"Waiting for the host's first update." = "En attente de la première mise à jour de l’hôte.";
+
+/* Task landing / review QA fixes */
+"Planning in the terminal — open it to watch and answer." = "Planification dans le terminal — ouvrez-le pour suivre et répondre.";
+"The %@ checkout has uncommitted changes — if they touch the same files, the merge stops until you commit or stash them there." = "La copie de %@ a des modifications non validées — si elles touchent les mêmes fichiers, la fusion s'arrête jusqu'à ce que vous les validiez ou les mettiez de côté (stash).";
+"Your review comments didn't reach the agent — they're still pending. Restart Session sends them." = "Vos commentaires de revue ne sont pas parvenus à l'agent — ils restent en attente. « Relancer la session » les envoie.";
+"%1$@ is ahead of %2$@: Bromure merges it directly." = "%1$@ est en avance sur %2$@ : Bromure le fusionne directement.";
+"%1$@ adds nothing %2$@ doesn't already have: the task goes to Done." = "%1$@ n'apporte rien que %2$@ n'ait déjà : la tâche passe à Terminé.";
+"The %1$@ checkout has uncommitted changes — if they touch the same files, %2$@ can't merge until you commit or stash them there." = "La copie de %1$@ a des modifications non validées — si elles touchent les mêmes fichiers, %2$@ ne peut pas fusionner tant que vous ne les avez pas validées ou mises de côté (stash).";
+"%@ didn't start in the task's session — open it to see why, then Restart Session." = "%@ n'a pas démarré dans la session de la tâche — ouvrez-la pour voir pourquoi, puis « Relancer la session ».";
+"%1$@, the agent that wrote it, will %2$@. You'll see its progress on the task and in its session." = "%1$@, l'agent qui l'a écrit, va %2$@. Vous suivrez sa progression sur la tâche et dans sa session.";
+"%@ moved 1 commit since" = "%@ a avancé d'1 commit depuis";
+"Checking the branch…" = "Vérification de la branche…";
+"Comment on the whole change instead" = "Commenter plutôt l'ensemble du changement";
+"commit what's left uncommitted" = "valider ce qui reste non validé";
+"Landed or closed" = "Intégrées ou fermées";
+"Merge the branch." = "Fusionner la branche.";
+"merge" = "fusionner";
+"No code changes" = "Aucune modification de code";
+"Open a pull request for the branch." = "Ouvrir une pull request pour la branche.";
+"Other ways to land it" = "Autres façons de l'intégrer";
+"Read Report" = "Lire le rapport";
+"rebase onto %@ and fix conflicts" = "rebaser sur %@ et résoudre les conflits";
+"run the tests" = "lancer les tests";
+"squash it into one commit" = "le regrouper en un seul commit";
+
+/* Task delivery, landing hand-over, undelivered review comments */
+"%@ kept a menu open in the task's session, so the message wasn't typed — open the session, answer it, then try again." = "%@ a laissé un menu ouvert dans la session de la tâche, le message n'a donc pas été saisi — ouvrez la session, répondez-y, puis réessayez.";
+"Couldn't check on the agent in the task's session — is the workspace running?" = "Impossible de vérifier l'agent dans la session de la tâche — l'espace de travail est-il démarré ?";
+"Handing over to %@…" = "Transmission à %@…";
+"The landing brief didn't reach %@." = "Les instructions d'intégration ne sont pas parvenues à %@.";
+"%d review comment(s) that never reached the agent will be discarded." = "%d commentaire(s) de revue jamais transmis à l'agent seront supprimés.";
+"%d comment(s) didn't reach the agent before it handed the task back. Send them back again?" = "%d commentaire(s) ne sont pas parvenus à l'agent avant qu'il ne rende la tâche. Les renvoyer ?";
+"Send Back Again" = "Renvoyer à nouveau";
+"not delivered" = "non transmis";
+"The agent handed the task back before this comment reached it." = "L'agent a rendu la tâche avant que ce commentaire ne lui parvienne.";
+"Report" = "Rapport";
+
+/* Task board QA fixes (launch watch, plurals, card menus) */
+"1 comment" = "1 commentaire";
+"%d comments" = "%d commentaires";
+"1 comment drafted" = "1 commentaire en brouillon";
+"%d comments drafted" = "%d commentaires en brouillon";
+"1 review comment that never reached the agent will be discarded." = "1 commentaire de revue qui n’a jamais atteint l’agent sera supprimé.";
+"%d review comments that never reached the agent will be discarded." = "%d commentaires de revue qui n’ont jamais atteint l’agent seront supprimés.";
+"1 comment didn't reach the agent before it handed the task back. Send it back again?" = "1 commentaire n’a pas atteint l’agent avant qu’il ne rende la tâche. Le renvoyer ?";
+"%d comments didn't reach the agent before it handed the task back. Send them back again?" = "%d commentaires n’ont pas atteint l’agent avant qu’il ne rende la tâche. Les renvoyer ?";
+"Deselect" = "Désélectionner";
+"Select" = "Sélectionner";
+"Retry Landing" = "Réessayer l’intégration";
+"Read Transcript" = "Lire la transcription";
+"Phase %d" = "Phase %d";
+"Selected" = "Sélectionnée";
+"In backlog" = "Dans le backlog";
+"Land it again with the same choices" = "L’intégrer à nouveau avec les mêmes choix";
+"There's unsent text in %@'s input box in the task's session, so the message wasn't typed — open the session, send or clear it, then try again." = "Il reste du texte non envoyé dans la zone de saisie de %@ dans la session de la tâche : le message n’a pas été saisi — ouvrez la session, envoyez-le ou effacez-le, puis réessayez.";
+"%@ exited right after it started (status %d) — open the session to see why, then Restart Session." = "%@ s’est arrêté juste après son démarrage (code %d) — ouvrez la session pour voir pourquoi, puis Redémarrer la session.";
+"%@ quit right after it started — open the session to see why, then Restart Session." = "%@ a quitté juste après son démarrage — ouvrez la session pour voir pourquoi, puis Redémarrer la session.";
+"Close without landing" = "Fermer sans intégrer";
+"%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ ne tourne plus dans la session de la tâche (il ne reste qu’un shell) : rien n’a été saisi — Redémarrer la session pour le relancer.";
+"The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "L’onglet de la session de la tâche a disparu ou appartient maintenant à autre chose : rien n’y a été saisi — Redémarrer la session pour relancer %@.";
+"The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "Le message n’a pas été saisi : l’onglet de la session n’affiche plus son agent. Reprenez la session pour réessayer.";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "Non envoyé — l’onglet de la session a disparu ou appartient maintenant à autre chose.";
+"Not sent — the agent isn't running in the session's tab any more." = "Non envoyé — l’agent ne tourne plus dans l’onglet de la session.";
+"No such task." = "Cette tâche n’existe pas.";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "La tâche est dans « Examiner » : son agent a terminé. Renvoyez-la plutôt vers « En cours », ou abandonnez sa branche.";
+"The task is done: there's no agent to stop." = "La tâche est terminée : il n’y a aucun agent à arrêter.";
+"The task isn't running: there's no agent to stop." = "La tâche n’est pas en cours : il n’y a aucun agent à arrêter.";
+"Waiting — the agent is asking you something; answer the card first" = "En attente — l’agent vous pose une question ; répondez d’abord à la carte";
+"Waiting — %@ is asking you something; answer the card first" = "En attente — %@ vous pose une question ; répondez d’abord à la carte";
+"Not sent — the agent is asking you something. Answer it first, then send again." = "Non envoyé — l’agent vous pose une question. Répondez-y d’abord, puis renvoyez.";
+"Not sent — typing it into the session failed. Edit it or send it again." = "Non envoyé — la saisie dans la session a échoué. Modifiez-le ou renvoyez-le.";
+"Restart Session relaunches %@ on this task's worktree." = "Redémarrer la session relance %@ sur le worktree de cette tâche.";
+"Task brief" = "Énoncé de la tâche";
+"Show less" = "Afficher moins";
+"Show more" = "Afficher plus";
+"Copy Reply" = "Copier la réponse";
+"Copy as Markdown" = "Copier en Markdown";
+"Copy the whole reply as Markdown" = "Copier toute la réponse en Markdown";
+"Showing first %@ of %@ characters" = "Affichage des %@ premiers caractères sur %@";
+"Copy full output" = "Copier la sortie complète";
+"Copy this file's diff" = "Copier le diff de ce fichier";
+"Copy Diff" = "Copier le diff";
+"Copy the whole diff shown here as a patch" = "Copier tout le diff affiché ici sous forme de patch";
+"Copy Pane History" = "Copier l’historique du panneau";
+"Copied 1 line" = "1 ligne copiée";
+"Copied %@ lines" = "%@ lignes copiées";
+"Couldn't read the terminal's history" = "Impossible de lire l’historique du terminal";
+"Copy message" = "Copier le message";
+"%@ characters" = "%@ caractères";
+"Showing the start of %@ characters" = "Début d’un message de %@ caractères";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "Remis — en file d’attente chez l’agent";
+"Delivered — queued by %@" = "Remis — en file d’attente chez %@";
+"1 delegation call" = "1 appel de délégation";
+"%d delegation calls" = "%d appels de délégation";
+"downloaded — install scripts could not be checked" = "téléchargé — les scripts d’installation n’ont pas pu être vérifiés";
+"Bromure — approval needed" = "Bromure — approbation requise";
+"No answer within %d s counts as Don't allow." = "Sans réponse dans %d s, la demande est refusée.";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "L’agent veut exécuter :\n\n%@\n\nL’approbation ne couvre que cette requête précise — toute autre écriture redemandera.";
+"Allow this request for 15 minutes" = "Autoriser cette requête pendant 15 minutes";
+"Allow this request for the rest of the session" = "Autoriser cette requête pour le reste de la session";
+"Provider unreachable" = "Fournisseur injoignable";
+"Usage limit reached" = "Limite d’utilisation atteinte";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Approbations Kimi";
+"Never ask" = "Ne jamais demander";
+"Ask before sensitive actions" = "Demander avant les actions sensibles";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "Ne jamais demander : Kimi Code exécute chaque commande, modification et outil sans s’arrêter, et tranche seul ses questions et ses plans — la VM de l’espace de travail et les garde-fous de Bromure constituent la limite de sécurité. Demander avant les actions sensibles (mode « Ask When Needed » de Kimi) : les commandes et modifications ordinaires s’exécutent toujours sans demander ; Kimi ne s’arrête qu’avant de toucher à des fichiers sensibles (comme .env ou les clés SSH), de lancer des commandes dangereuses (comme rm -rf) ou de quitter le mode Plan, et lorsqu’il a une question à vous poser. S’applique au prochain démarrage ou à la prochaine reprise.";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "Bloqué par Bromure — injection de prompt";
+"Blocked by Bromure — rogue instructions" = "Bloqué par Bromure — instructions malveillantes";
+"Blocked by Bromure — credential leak" = "Bloqué par Bromure — fuite d’identifiants";
+"Blocked by Bromure — supply chain" = "Bloqué par Bromure — chaîne d’approvisionnement";
+"Blocked by Bromure — client certificate" = "Bloqué par Bromure — certificat client";
+"Blocked by Bromure" = "Bloqué par Bromure";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "Rien n’a atteint le fournisseur. La Chronologie de sécurité donne les détails ; renvoyez le message une fois le problème réglé.";
+"Credential approval" = "Approbation d’identifiants";
+"allowed for 1 hour" = "autorisé pendant 1 heure";
+"allowed for 5 minutes" = "autorisé pendant 5 minutes";
+"allowed for the rest of the session" = "autorisé pour le reste de la session";
+"denied — no answer in time; the next request asks again" = "refusé — pas de réponse à temps ; la prochaine requête redemandera";
+"denied — you said no a moment ago" = "refusé — vous venez de dire non";
+"denied by you" = "refusé par vous";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "Magasin de connexions illisible — Bromure ne l’écrasera pas. Les connexions qu’il contient sont indisponibles tant qu’il ne peut pas être relu.";
+"Last refreshed %@" = "Dernière actualisation %@";
+"Not refreshed since sign-in" = "Pas actualisé depuis la connexion";
+"access token expires %@" = "le jeton d’accès expire %@";
+"access token renews on next use" = "le jeton d’accès sera renouvelé à la prochaine utilisation";
+"(exit code %d)" = "(code de sortie %d)";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "Non remis — l’agent ne l’a pas pris en compte. Modifiez-le ou renvoyez-le.";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Désactivé par défaut : les agents d’ici n’atteignent aucun autre espace de travail tant que vous n’en cochez pas un ci-dessous (ou activez « Tous les espaces de travail »).";
+"Closes the editor without saving changes" = "Ferme l’éditeur sans enregistrer les modifications";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok demande si xAI peut conserver vos données de code";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "Vous pose une question";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "Rien n'a atteint le fournisseur. Bromure retire la sortie d'outil bloquée des requêtes suivantes de cette conversation : vous pouvez envoyer votre prochain message. Si l'agent échoue encore, revenez dans la conversation avant cette étape ou démarrez une nouvelle session.";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "Sans réponse dans %1$d s : « %2$@ ».";
+"The workspace %@ will be shut down." = "L’espace de travail %@ sera éteint.";
+"The workspaces %@ will be shut down." = "Les espaces de travail %@ seront éteints.";
+"The workspace %@ will be suspended and resume where it left off." = "L’espace de travail %@ sera suspendu et reprendra là où il s’est arrêté.";
+"The workspaces %@ will be suspended and resume where they left off." = "Les espaces de travail %@ seront suspendus et reprendront là où ils se sont arrêtés.";
+
+/* QA round 4 */
+"“%@”" = "« %@ »";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "Cette boîte de dialogue ne tient pas dans le terminal de l’agent : ses choix ne peuvent pas s’afficher ici. Répondez-y dans le terminal.";
+"Open the terminal" = "Ouvrir le terminal";
+"Opt out" = "Refuser";
+"Opt in" = "Accepter";
+"Grok's own setting; you can change it later in Grok's /settings." = "Un réglage propre à Grok ; vous pourrez le modifier plus tard dans /settings de Grok.";
+
+"Listing its tools" = "Liste de ses outils";
+"Looking up %@" = "Consultation de %@";
+"Reading earlier output" = "Lecture d’une sortie précédente";
+"Reading earlier output #%@" = "Lecture de la sortie précédente nº %@";
+"tool lookup" = "consultation d’outil";
+"earlier output" = "sortie précédente";
+"Instructions for the agent" = "Instructions pour l’agent";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "Non remis — le message est dans la zone de saisie de l’agent, mais sa touche Entrée n’a pas été prise en compte. Appuyez sur Entrée dans le terminal, ou videz la zone et renvoyez-le.";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "1 commentaire de revue n’a pas encore atteint l’agent — fusionner maintenant se fera sans lui.";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "%d commentaires de revue n’ont pas encore atteint l’agent — fusionner maintenant se fera sans eux.";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "En attente — un menu est ouvert dans le terminal de l'agent ; répondez-y ou fermez-le";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "En attente — un menu est ouvert dans le terminal de %@ ; répondez-y ou fermez-le";
+"Open terminal" = "Ouvrir le terminal";
+"Dismiss (Esc)" = "Fermer (Échap)";
+"Conversation compacted" = "Conversation compactée";
+"The agent's work is its report above — there is no diff to read." = "Le travail de l'agent est son compte rendu ci-dessus — il n'y a pas de diff à lire.";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "La machine de connexion n’a pas été prête à temps : la connexion à %@ n’a pas pu démarrer.";
+"The %@ sign-in command didn't start in the sign-in machine." = "La commande de connexion à %@ n’a pas démarré dans la machine de connexion.";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "La machine de connexion est restée occupée (%1$@) : la connexion à %2$@ n’a pas pu démarrer.";
+"Couldn't start the %@ sign-in" = "Impossible de démarrer la connexion à %@";
+"Retry types the sign-in command into the sign-in machine again." = "Réessayer saisit à nouveau la commande de connexion dans la machine de connexion.";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "Abonnement %@ non connecté";
+"using API key" = "clé d’API utilisée";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Les modifications s’appliquent à un espace de travail en cours d’exécution dès l’enregistrement, sans redémarrage. Décochez une règle pour la désactiver sans la supprimer, ou utilisez son menu horloge pour l’activer pour une durée limitée.";
+"Time limit" = "Durée";
+"On — untick to switch this rule off without deleting it" = "Activée — décochez pour désactiver cette règle sans la supprimer";
+"Off — this rule is ignored until you tick it" = "Désactivée — cette règle est ignorée tant que vous ne la cochez pas";
+"On for 15 minutes" = "Activer pendant 15 minutes";
+"On for 1 hour" = "Activer pendant 1 heure";
+"On until the workspace stops" = "Activer jusqu’à l’arrêt de l’espace de travail";
+"Make permanent" = "Rendre permanente";
+"until stop" = "jusqu’à l’arrêt";
+"expired" = "expirée";
+"On until this workspace stops, then switched off automatically" = "Activée jusqu’à l’arrêt de cet espace de travail, puis désactivée automatiquement";
+"Switches off automatically at %@" = "Se désactive automatiquement à %@";
+"Turn this rule on for a limited time" = "Activer cette règle pour une durée limitée";
+"%@ — default policy" = "%@ — règle par défaut";
+"Allow…" = "Autoriser…";
+"Rule…" = "Règle…";
+"Block…" = "Bloquer…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "Modifiez les règles de pare-feu de cet espace de travail dans ses réglages, sur le Mac qui l’exécute.";
+"Allow %@" = "Autoriser %@";
+"Allow all of %@" = "Autoriser tout %@";
+"Block %@" = "Bloquer %@";
+"Block all of %@" = "Bloquer tout %@";
+"Switch off rule “%@”" = "Désactiver la règle « %@ »";
+"Remove rule “%@”" = "Supprimer la règle « %@ »";
+"The rule that allowed this is no longer in the workspace's rules." = "La règle qui a autorisé ceci ne figure plus dans les règles de l’espace de travail.";
+"Always" = "Toujours";
+"For 15 minutes" = "Pendant 15 minutes";
+"For 1 hour" = "Pendant 1 heure";
+"Until the workspace stops" = "Jusqu’à l’arrêt de l’espace de travail";
+"Add a rule allowing this destination — applies to the running workspace at once" = "Ajouter une règle autorisant cette destination — s’applique immédiatement à l’espace de travail en cours";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "Désactiver la règle qui a autorisé ceci, ou bloquer la destination — s’applique immédiatement";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "Nouveaux commits depuis la dernière revue";
+"The full repository (baseline)" = "Le dépôt entier (référence)";
+"New commits" = "Nouveaux commits";
+"Baseline review at %@" = "Revue de référence à %@";
+"Review of new commits %1$@…%2$@" = "Revue des nouveaux commits %1$@…%2$@";
+"Review of the last %1$d commits up to %2$@" = "Revue des %1$d derniers commits jusqu’à %2$@";
+"No new commits since the last review (%@)" = "Aucun nouveau commit depuis la dernière revue (%@)";
+"%@ (not set up here)" = "%@ (non configuré ici)";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ n’est pas configuré dans cet espace de travail — une revue sans surveillance s’arrêterait à sa connexion. Ajoutez-le dans les réglages de l’espace de travail (ou connectez-vous depuis une session de celui-ci) avant la première analyse.";
+"Scheduled review" = "Revue planifiée";
+"Start with a full-repository baseline" = "Commencer par une revue de référence du dépôt entier";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "Les analyses de commits et de pull requests commencent avec ce qui arrive après la création de la surveillance. Utilisez « Lancer la revue de référence » pour le code existant.";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "Chaque revue ne couvre que les commits arrivés sur %@ depuis la précédente — rapide et économique. Rien de nouveau : pas d’exécution.";
+"Reviewed through %1$@ (%2$@)." = "Revu jusqu’à %1$@ (%2$@).";
+"The first review covers the whole repository; later ones only what's new." = "La première revue couvre le dépôt entier ; les suivantes, seulement les nouveautés.";
+"Nothing reviewed yet: the first review covers the last %d commits." = "Rien n’a encore été revu : la première revue couvre les %d derniers commits.";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "Chaque revue parcourt tout le code, en commençant par les zones les plus risquées. Approfondie, mais un gros dépôt prend plus de temps et consomme plus de jetons.";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "Revue des nouveaux commits de %@ demandée — elle apparaîtra dans « Analyses récentes » dès que l’agent démarrera (pas d’exécution si rien n’est arrivé depuis la dernière revue).";
+"Now watching %@ — the first review is starting." = "%@ est maintenant surveillé — la première revue démarre.";
+"Run Baseline Now" = "Lancer la revue de référence";
+"Review the commits that landed since the last review" = "Revoir les commits arrivés depuis la dernière revue";
+"Review the whole repository" = "Revoir le dépôt entier";
+"Review the new commits on %@ now" = "Revoir maintenant les nouveaux commits de %@";
+"New commits %1$@ %2$02d:00" = "Nouveaux commits %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "autorisé";
+"deny" = "refusé";
+"“%@” no longer allows it" = "« %@ » ne l’autorise plus";
+"connection closed — %@" = "connexion fermée — %@";
+"Blocked now" = "Bloqué désormais";
+"Allowed now" = "Autorisé désormais";
+"Blocked now by “%@”" = "Bloqué désormais par « %@ »";
+"Allowed now by “%@”" = "Autorisé désormais par « %@ »";
+"Blocked now by the default policy" = "Bloqué désormais par la politique par défaut";
+"Allowed now by the default policy" = "Autorisé désormais par la politique par défaut";
+"“%@” exists and is off" = "« %@ » existe et est désactivée";
+"“%@” is on until the workspace stops" = "« %@ » est active jusqu’à l’arrêt de l’espace de travail";
+"“%1$@” is on until %2$@" = "« %1$@ » est active jusqu’à %2$@";
+"“%@” is already on, with no time limit" = "« %@ » est déjà active, sans limite de durée";
+"The workspace's rules have changed since this connection" = "Les règles de l’espace de travail ont changé depuis cette connexion";
+"Log allowed connections" = "Journaliser les connexions autorisées";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "Liste aussi dans la chronologie de sécurité les connexions que le pare-feu laisse passer — une ligne par destination, répétitions regroupées — pour pouvoir bloquer un hôte depuis là. Désactivé : seules les connexions bloquées sont listées. Tant que vous n’avez pas choisi, l’option est active si l’espace de travail a des règles.";
+"Enable rule %@" = "Activer la règle %@";
+"Time limit set" = "Limite de durée définie";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "Les règles ont changé en dehors de l’éditeur (une action de la chronologie de sécurité ou une limite de durée). La modification a été fusionnée avec vos modifications non enregistrées.";
+"The rules changed outside the editor while you have unsaved edits." = "Les règles ont changé en dehors de l’éditeur alors que vous avez des modifications non enregistrées.";
+"Reload" = "Recharger";
+"Keep my edits" = "Garder mes modifications";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "connexion fermée (proxy) — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "connexion fermée (directe) — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "Également vu comme : %@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "Monter la règle";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "Descendre la règle";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "Supprimer la règle";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "Lister aussi les connexions autorisées dans la chronologie de sécurité";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "Chargement de la conversation…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "Chargement de la conversation antérieure… (%@ sur %@)";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "Impossible de charger cette conversation : la machine n’a pas répondu à temps.";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "La conversation de cette session est introuvable sur sa machine.";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "Demander à une session de le corriger";
+"Ask a Session Instead…" = "Demander plutôt à une session…";
+"Ask a Session or the Switchboard…" = "Demander à une session ou au Standard…";
+"Show the findings for %@" = "Afficher les constats de %@";
+"Sent to %@ to fix" = "Envoyé à %@ pour correction";
+"Sent to %@ — it works on the fix in its own session." = "Envoyé à %@ — la correction se fait dans sa propre session.";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "Le dépôt n’a aucun remote où pousser — fusionnez sans pousser.";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "Fusionné dans %@, mais impossible de joindre l’espace de travail pour pousser — est-il démarré ?";
+"Merge & Push" = "Fusionner et pousser";
+"Push %1$@ to %2$@" = "Pousser %1$@ vers %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Terminé quand %1$@/%2$@ l’a. Si %1$@ a avancé, %3$@ tire, résout les conflits et pousse.";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "Impossible de l’envoyer à %1$@ : %2$@";
+"that session is gone" = "cette session n’existe plus";
+"the server didn't answer" = "le serveur n’a pas répondu";
+"the server runs an older Bromure — update it to hand findings to a session" = "le serveur exécute une ancienne version de Bromure — mettez-le à jour pour confier des constats à une session";
+"the server refused it" = "le serveur l’a refusé";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "Impossible de le confier à %1$@ : %2$@";
+"a menu or dialog stayed open in that session" = "un menu ou une boîte de dialogue est resté ouvert dans cette session";
+"something else was typed in that session's input box" = "autre chose était saisi dans la zone de saisie de cette session";
+"Couldn't hand it to the Switchboard: %@" = "Impossible de le confier au Standard : %@";
+"the Switchboard session is gone" = "la session du Standard n’existe plus";
+"the message couldn't be typed into the Switchboard" = "le message n’a pas pu être saisi dans le Standard";
+"the Switchboard's agent never started" = "l’agent du Standard n’a jamais démarré";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "son texte a été signalé par le filtre d’injection de prompt (%@) — confirmez-le avant de le confier à un agent";
+"Hand It Over Anyway" = "Le confier quand même";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "Le filtre d’injection de prompt l’a signalé (%@). Il provient d’un agent qui lisait le contenu du dépôt, et l’agent à qui vous le confiez le lirait aussi. Vérifiez-le avant de le confier.";
+"Couldn't start the fix: %@" = "Impossible de lancer le correctif : %@";
+"Couldn't ask the Switchboard: %@" = "Impossible de demander au Standard : %@";
+"that finding is gone" = "ce constat n’existe plus";
+"couldn't start the fix" = "impossible de lancer le correctif";
+"no Switchboard could be started" = "aucun Standard n’a pu être démarré";

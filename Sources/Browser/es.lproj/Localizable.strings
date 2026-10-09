@@ -759,3 +759,48 @@
 "Strict Site Isolation" = "Aislamiento estricto de sitios";
 "Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to." = "Ejecuta cada sitio web en su propio proceso, lo que protege a los sitios entre s\U00ED pero consume mucha memoria en p\U00E1ginas llenas de anuncios (decenas de procesos para una sola pesta\U00F1a). Desactivado, solo los sitios en los que inicias sesi\U00F3n tienen un proceso propio.";
 "Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly." = "Anima el desplazamiento con la rueda del rat\U00F3n para una sensaci\U00F3n m\U00E1s suave. El desplazamiento con el trackpad siempre sigue tus dedos con exactitud.";
+
+/* Setup window & starting splash (2026 redesign) */
+"Starting the browser engine\U2026" = "Iniciando el motor del navegador\U2026";
+"Download" = "Descarga";
+"Install" = "Instalaci\U00F3n";
+"Personalize" = "Personalizaci\U00F3n";
+"Launch" = "Inicio";
+"Welcome" = "Bienvenida";
+"Browse without leaving a trace" = "Navegue sin dejar rastro";
+"Bromure opens every window in its own throwaway Linux VM. Close it, and everything it touched is gone." = "Bromure abre cada ventana en su propia VM Linux desechable. Ci\U00E9rrela y todo lo que toc\U00F3 desaparece.";
+"Isolated by design" = "Aislado por dise\U00F1o";
+"Sites run in a separate VM, never on your Mac." = "Los sitios se ejecutan en una VM aparte, nunca en su Mac.";
+"Fresh every time" = "Siempre como nuevo";
+"Each session starts from a clean image \U2014 or keep a profile when you want one." = "Cada sesi\U00F3n parte de una imagen limpia, o conserve un perfil cuando lo necesite.";
+"Ready in a second" = "Listo en un segundo";
+"A VM is always warmed up, so new windows open instantly." = "Siempre hay una VM precalentada, as\U00ED que las ventanas nuevas se abren al instante.";
+"First-time setup" = "Configuraci\U00F3n inicial";
+"Rebuilding" = "Reconstrucci\U00F3n";
+"Updating" = "Actualizaci\U00F3n";
+"Almost there" = "Ya casi est\U00E1";
+"Setting up Bromure" = "Configurando Bromure";
+"Rebuilding your browser image" = "Reconstruyendo su imagen del navegador";
+"Updating your browser image" = "Actualizando su imagen del navegador";
+"The image is ready. Warming up the first VM so your browser opens instantly." = "La imagen est\U00E1 lista. Precalentando la primera VM para que el navegador se abra al instante.";
+"Downloading the Linux + Chromium image and personalizing it for this Mac. This only happens once." = "Descargando la imagen de Linux + Chromium y personaliz\U00E1ndola para este Mac. Solo ocurre una vez.";
+"The old image was removed. A fresh copy is being downloaded and personalized for this Mac." = "Se elimin\U00F3 la imagen anterior. Se est\U00E1 descargando una copia nueva y personaliz\U00E1ndola para este Mac.";
+"Fetching the latest image, with current Linux and browser security updates." = "Obteniendo la imagen m\U00E1s reciente, con las actualizaciones de seguridad actuales de Linux y del navegador.";
+"Bringing your browser image up to date with this version of Bromure." = "Actualizando su imagen del navegador para esta versi\U00F3n de Bromure.";
+"Setup stopped" = "Configuraci\U00F3n detenida";
+"The browser image couldn't be installed. Check your connection and try again." = "No se pudo instalar la imagen del navegador. Compruebe su conexi\U00F3n e int\U00E9ntelo de nuevo.";
+"Every window runs in its own disposable VM." = "Cada ventana se ejecuta en su propia VM desechable.";
+"One-time download, personalized for this Mac." = "Descarga \U00FAnica, personalizada para este Mac.";
+"A browser window opens as soon as it's ready." = "Se abrir\U00E1 una ventana del navegador en cuanto est\U00E9 lista.";
+"Starting Bromure" = "Iniciando Bromure";
+"Warming up a fresh VM. The first window after launch takes a few seconds longer." = "Precalentando una VM nueva. La primera ventana tras el inicio tarda unos segundos m\U00E1s.";
+"Copy Details" = "Copiar detalles";
+"Copy the console output" = "Copiar la salida de la consola";
+"Hide Details" = "Ocultar detalles";
+"Show Details" = "Mostrar detalles";
+
+/* Open New Windows With */
+"Open New Windows With" = "Abrir ventanas nuevas con";
+"The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "El perfil que Bromure abre al iniciarlo, al hacer clic en su icono del Dock o al pulsar \U2318N sin ninguna ventana del navegador delante. \U201C\U00DAltimo perfil usado\U201D elige el que us\U00F3 m\U00E1s recientemente. Tambi\U00E9n puede ajustarlo desde el men\U00FA de perfil de cualquier ventana.";
+"Last Used Profile" = "\U00DAltimo perfil usado";
+"Open New Windows with \U201C%@\U201D" = "Abrir ventanas nuevas con \U201C%@\U201D";

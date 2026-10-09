@@ -55,6 +55,18 @@ final class SwitchMitmForwarder: VMNetTCPInterceptor, @unchecked Sendable {
         openFlow(ref, profileID: profileID, seg: seg)
     }
 
+    /// The firewall now denies this established flow (a rule was switched off
+    /// or expired mid-connection): drop it, closing the MiTM side and its
+    /// upstream connection. The switch already RST the guest.
+    func flowDenied(portID: Int, ipPacket: [UInt8]) {
+        guard let seg = UtunPacket.parse(ipPacket) else { return }
+        let ref = FlowRef(portID: portID, key: UtunForwarder.FlowKey(seg))
+        lock.lock()
+        let victim = flows.removeValue(forKey: ref)
+        lock.unlock()
+        victim?.close()
+    }
+
     func portClosed(portID: Int) {
         lock.lock()
         let victims = flows.filter { $0.key.portID == portID }

@@ -205,6 +205,7 @@ enum FatClientKeyStore {
     }
 }
 
+#if !AGENT_HOST   // the Bromure Agent Host dials servers, but keeps no host list
 /// UI-facing, observable store of configured remote hosts. Delegates all path /
 /// transport work to `RemoteTransport`.
 @MainActor
@@ -252,6 +253,7 @@ final class RemoteHostStore {
 
     func client(for host: RemoteHost) -> ControlClient { RemoteTransport.client(for: host) }
 }
+#endif
 
 // MARK: - Guest file names
 

@@ -379,7 +379,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Quit Bromure Agentic Coding?";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "%d VM(s) currently running (%@) will be closed according to each workspace's close action.";
+"The workspace %@ is running. It will be closed according to its close action." = "The workspace %@ is running. It will be closed according to its close action.";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d workspaces are running (%2$@). Each will be closed according to its close action.";
+"The infrastructure machine %@ is running and will be suspended." = "The infrastructure machine %@ is running and will be suspended.";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d infrastructure machines are running (%2$@) and will be suspended.";
 "Quit" = "Quit";
 
 /* Guardrails: new prompt-on-write mode */
@@ -469,7 +472,6 @@
 "Allow this request" = "Allow this request";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it.";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable.";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.";
 "Possible %@ in “%@”" = "Possible %@ in “%@”";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?";
@@ -1229,34 +1231,24 @@
 "Backlog" = "Backlog";
 "No tasks yet — write one." = "No tasks yet — write one.";
 "Plan" = "Plan";
-"No phases yet — click Plan on a backlog card." = "No phases yet — click Plan on a backlog card.";
-"Start %d selected" = "Start %d selected";
-"One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are." = "One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are.";
 "Move to Testing" = "Move to Testing";
 "Close Without Merging" = "Close Without Merging";
-"Stop Agent & Delete Worktree" = "Stop Agent & Delete Worktree";
-"Remove Card Only" = "Remove Card Only";
 "Testing/Review" = "Testing/Review";
 "Nothing to review" = "Nothing to review";
 "Merge into %@…" = "Merge into %@…";
 "parent" = "parent";
 "Back to In Progress" = "Back to In Progress";
-"Delete Worktree & Branch" = "Delete Worktree & Branch";
 "Nothing shipped yet" = "Nothing shipped yet";
 "Remove from board" = "Remove from board";
 "Remove “%@”?" = "Remove “%@”?";
-"Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace." = "Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace.";
 "This can't be undone." = "This can't be undone.";
 "queued" = "queued";
 "Starts automatically when its dependencies are Done." = "Starts automatically when its dependencies are Done.";
 "Phases that must be Done before this one starts." = "Phases that must be Done before this one starts.";
 "Untitled task" = "Untitled task";
 "planning — click to watch" = "planning — click to watch";
-"A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them." = "A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them.";
 "Plan reviewed by the agent" = "Plan reviewed by the agent";
 "part of “%@”" = "part of “%@”";
-"A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column." = "A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column.";
-"One shot" = "One shot";
 "Straight to In Progress: the agent does the whole task autonomously and hands you the diff in Testing/Review." = "Straight to In Progress: the agent does the whole task autonomously and hands you the diff in Testing/Review.";
 "starting…" = "starting…";
 "session gone" = "session gone";
@@ -1279,9 +1271,7 @@
 "Write" = "Write";
 "Preview" = "Preview";
 "Starting the task launches the agent in a fresh worktree of the repository with this brief as its prompt. It works on its own branch and commits its changes; you review the diff in Testing, then merge." = "Starting the task launches the agent in a fresh worktree of the repository with this brief as its prompt. It works on its own branch and commits its changes; you review the diff in Testing, then merge.";
-"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column." = "Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column.";
 "Planning — %@" = "Planning — %@";
-"Your brief" = "Your brief";
 "The agent explores the repository and may ask you questions here, then files the plan's phases onto the board." = "The agent explores the repository and may ask you questions here, then files the plan's phases onto the board.";
 "1 question answered — %@" = "1 question answered — %@";
 "%d questions answered — %@" = "%d questions answered — %@";
@@ -1345,7 +1335,7 @@
 "The transcript file has no readable entries." = "The transcript file has no readable entries.";
 "No transcript" = "No transcript";
 "This run's transcript couldn't be read." = "This run's transcript couldn't be read.";
-"⏎ send   ⌥⏎ newline" = "⏎ send   ⌥⏎ newline";
+"⏎ send   ⇧⏎ newline" = "⏎ send   ⇧⏎ newline";
 "Send (⏎)" = "Send (⏎)";
 "The agent asked" = "The agent asked";
 "The agent is asking %d questions — answer them all, then Submit" = "The agent is asking %d questions — answer them all, then Submit";
@@ -1367,11 +1357,8 @@
 "Couldn't reach the workspace — is it running?" = "Couldn't reach the workspace — is it running?";
 "Plan: %@" = "Plan: %@";
 "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”." = "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”.";
-"The planning session ended before filing phases — click Plan to retry." = "The planning session ended before filing phases — click Plan to retry.";
-"The planning session timed out without filing phases — click Plan to retry." = "The planning session timed out without filing phases — click Plan to retry.";
 "The planning session never started — is the workspace running? Click Plan to retry." = "The planning session never started — is the workspace running? Click Plan to retry.";
 "Claude exited before filing phases — click Plan to retry." = "Claude exited before filing phases — click Plan to retry.";
-"The planning session was interrupted — click Plan to retry." = "The planning session was interrupted — click Plan to retry.";
 "Merge → %@" = "Merge → %@";
 "PR: %@" = "PR: %@";
 
@@ -1382,7 +1369,6 @@
 "Types every drafted comment into the coding agent running in the active tab." = "Types every drafted comment into the coding agent running in the active tab.";
 
 /* Plan column — batch selection bar */
-"Delete %d selected phase(s)?" = "Delete %d selected phase(s)?";
 "Remove every selected phase from the board" = "Remove every selected phase from the board";
 
 /* Coding board — session restart */
@@ -1614,7 +1600,7 @@
 "Block" = "Block";
 
 /* Sessions-first UI */
-"New Session…" = "New Session…";
+"New Session…" = "New session…";
 "New session" = "New session";
 "Start an agent (⌘N)" = "Start an agent (⌘N)";
 "Search sessions" = "Search sessions";
@@ -1688,7 +1674,6 @@
 "The workspace did not start in time" = "The workspace did not start in time";
 "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again." = "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again.";
 "Under the Hood" = "Under the Hood";
-"New task" = "New task";
 "Describe what you want done (⌘N)" = "Describe what you want done (⌘N)";
 "Search tasks" = "Search tasks";
 "Virtual Machines" = "Virtual Machines";
@@ -1753,7 +1738,6 @@
 "Review changes" = "Review changes";
 "Plan" = "Plan";
 "Transcript" = "Transcript";
-"Your brief" = "Your brief";
 "What do you want to get done?" = "What do you want to get done?";
 "Edit the task" = "Edit the task";
 "The agent reads the code, drafts a plan and asks its questions before writing anything." = "The agent reads the code, drafts a plan and asks its questions before writing anything.";
@@ -1789,9 +1773,6 @@
 "The task's checkout is gone, so there is nothing to resume into." = "The task's checkout is gone, so there is nothing to resume into.";
 "Reopen the agent on this task's branch to keep working — the task goes back to In Progress. If the branch was cleaned up, you'll be offered a fresh start instead." = "Reopen the agent on this task's branch to keep working — the task goes back to In Progress. If the branch was cleaned up, you'll be offered a fresh start instead.";
 "Needs a fresh start" = "Needs a fresh start";
-"The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch." = "The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch.";
-"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch." = "The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch.";
-"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@." = "The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@.";
 ", cloning the repository first" = ", cloning the repository first";
 "Waking the workspace…" = "Waking the workspace…";
 "Starting the workspace…" = "Starting the workspace…";
@@ -1807,7 +1788,7 @@
 "The machine it runs on — running" = "The machine it runs on — running";
 "The machine it runs on — asleep, wakes up when you start" = "The machine it runs on — asleep, wakes up when you start";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "Where it works: a fresh folder, one of yours, or a repository to check out";
-"⏎ start   ⌥⏎ newline" = "⏎ start   ⌥⏎ newline";
+"⏎ start   ⇧⏎ newline" = "⏎ start   ⇧⏎ newline";
 "Start the session (⏎)" = "Start the session (⏎)";
 "Working in this folder — click to start in a new folder instead" = "Working in this folder — click to start in a new folder instead";
 "Work in this folder again" = "Work in this folder again";
@@ -1826,7 +1807,7 @@
 "Up one folder" = "Up one folder";
 "No folders in here yet." = "No folders in here yet.";
 "The machine's folders can't be read right now." = "The machine's folders can't be read right now.";
-"Message %@…  (or drop files)" = "Message %@…  (or drop files)";
+"Message %@… (or drop files)" = "Message %@… (or drop files)";
 "Ready · %@" = "Ready · %@";
 "Ended · %@ ago" = "Ended · %@ ago";
 "End “%@”?" = "End “%@”?";
@@ -2052,7 +2033,7 @@
 "Streaming to bromure.io" = "Streaming to bromure.io";
 "Signed in to bromure.io" = "Signed in to bromure.io";
 "Log out" = "Log out";
-"Message the agent…  (or drop files)" = "Message the agent…  (or drop files)";
+"Message the agent… (or drop files)" = "Message the agent… (or drop files)";
 "Drop to attach" = "Drop to attach";
 "Loading transcript…" = "Loading transcript…";
 "Say what you need — the agent is listening." = "Say what you need — the agent is listening.";
@@ -2135,6 +2116,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected";
 "To-dos" = "To-dos";
 "⎋ stop   ⏎ send" = "⎋ stop   ⏎ send";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ stop   ⏎ send   ⇧⏎ newline";
 "Stop the agent (Esc)" = "Stop the agent (Esc)";
 "Completed" = "Completed";
 "Reopened" = "Reopened";
@@ -2565,10 +2547,10 @@
 "Its sessions keep running and go back to the list. The room's Switchboard is archived." = "Its sessions keep running and go back to the list. The room's Switchboard is archived.";
 "Lime" = "Lime";
 "Move to Room" = "Move to Room";
-"New Room" = "New Room";
-"New Room…" = "New Room…";
-"New Session" = "New Session";
-"New Session in Room" = "New Session in Room";
+"New Room" = "New room";
+"New Room…" = "New room…";
+"New Session" = "New session";
+"New Session in Room" = "New session in room";
 "New session in “%@”" = "New session in “%@”";
 "Next Room" = "Next Room";
 "Open as Session" = "Open as Session";
@@ -2627,7 +2609,7 @@
 "Latest blocks" = "Latest blocks";
 "Machines" = "Machines";
 "Message %@ — it wakes up and carries on…" = "Message %@ — it wakes up and carries on…";
-"New Machine…" = "New Machine…";
+"New Machine…" = "New machine…";
 "Packages checked" = "Packages checked";
 "Pop Out to Its Own Window" = "Pop Out to Its Own Window";
 "Preferences" = "Preferences";
@@ -2835,7 +2817,7 @@
 "Viewed" = "Viewed";
 "Viewed — click to unmark" = "Viewed — click to unmark";
 "What the changes are compared against" = "What the changes are compared against";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (current)";
@@ -2869,7 +2851,7 @@
 "The current commit" = "The current commit";
 "This machine has no branches made by Bromure." = "This machine has no branches made by Bromure.";
 "last commit %@" = "last commit %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "Answers your Slack account only — channels and everyone else are ignored.";
@@ -3162,3 +3144,1033 @@
 "%@ stopped as it started: %@" = "%@ stopped as it started: %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?";
 "Delegation" = "Delegation";
+
+/* Added for hotfixes-v5 */
+"Requests" = "Requests";
+"Working for others" = "Working for others";
+"The model the agent last answered with" = "The model the agent last answered with";
+"Time the agent spent working: %d turns, the longest %@" = "Time the agent spent working: %d turns, the longest %@";
+"Erasing and restoring storage is done on the server Mac." = "Erasing and restoring storage is done on the server Mac.";
+"Home folder size" = "Home folder size";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.";
+"Queued — sent when the agent is done" = "Queued — sent when the agent is done";
+"Queued — sent when %@ is done" = "Queued — sent when %@ is done";
+"Queued — the agent reads it next" = "Queued — the agent reads it next";
+"Queued — %@ reads it next" = "Queued — %@ reads it next";
+"Don't send it" = "Don't send it";
+"Chart" = "Chart";
+"Video" = "Video";
+"Open in its own window" = "Open in its own window";
+"Play video" = "Play video";
+"Not an image or a video this app can show." = "Not an image or a video this app can show.";
+"This window can't read files from that machine." = "This window can't read files from that machine.";
+"Couldn't read %@." = "Couldn't read %@.";
+"That image couldn't be decoded." = "That image couldn't be decoded.";
+"Couldn't prepare the video." = "Couldn't prepare the video.";
+"The chart couldn't be drawn: %@" = "The chart couldn't be drawn: %@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "Open in its own window (inline, ⌥-scroll zooms the chart)";
+"No timed turns yet: the timeline fills in as the agent works." = "No timed turns yet: the timeline fills in as the agent works.";
+"Hover a bar for what the agent was doing · click a turn to zoom in" = "Hover a bar for what the agent was doing · click a turn to zoom in";
+"All turns" = "All turns";
+"(no message)" = "(no message)";
+"of work across %d turns" = "of work across %d turns";
+"in this turn" = "in this turn";
+"tool calls" = "tool calls";
+"files edited" = "files edited";
+"longest solo run" = "longest solo run";
+"Worked %@ on its own" = "Worked %@ on its own";
+"%d tool calls without a single prompt — “%@”" = "%d tool calls without a single prompt — “%@”";
+"See it" = "See it";
+"“%@” — %@, %d tool calls · click to zoom in" = "“%@” — %@, %d tool calls · click to zoom in";
+"Thinking & writing — %@" = "Thinking & writing — %@";
+"No timed turns in this room yet." = "No timed turns in this room yet.";
+"of combined work by %d agents" = "of combined work by %d agents";
+"at once, at peak" = "at once, at peak";
+"worked the most" = "worked the most";
+"Hover a bar for who was doing what, and for how long" = "Hover a bar for who was doing what, and for how long";
+"Thinking & writing" = "Thinking & writing";
+"Edits" = "Edits";
+"Reading & search" = "Reading & search";
+"Web" = "Web";
+"Sub-agents" = "Sub-agents";
+"MCP tools" = "MCP tools";
+"Other tools" = "Other tools";
+"%@ — timeline" = "%@ — timeline";
+"Room timeline: who worked when, and on what" = "Room timeline: who worked when, and on what";
+"Time the agent spent working: %d turns, the longest %@ — click for where it went" = "Time the agent spent working: %d turns, the longest %@ — click for where it went";
+
+/* Installer: Local Network access (Sequoia) */
+"Bromure Needs Local Network Access" = "Bromure Needs Local Network Access";
+"The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then.";
+"Open Local Network Settings" = "Open Local Network Settings";
+
+/* Models: your environment (auto mode) */
+"Applies to every workspace from its next launch." = "Applies to every workspace from its next launch.";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "Open a terminal here, in this session's folder";
+"Drag to resize" = "Drag to resize";
+"Hide — the shell keeps running (⌃`)" = "Hide — the shell keeps running (⌃`)";
+"Close the terminal (ends the shell)" = "Close the terminal (ends the shell)";
+"The terminal isn't available right now." = "The terminal isn't available right now.";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "Catching up…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "Nothing has changed since this turn began.";
+
+/* Repository watches + Automations hub */
+"%1$@ · ×%2$d" = "%1$@ · ×%2$d";
+"%1$d new finding(s) in %2$@" = "%1$d new finding(s) in %2$@";
+"%d dismissed" = "%d dismissed";
+"%d duplicate" = "%d duplicate";
+"%d finding(s)" = "%d finding(s)";
+"%d fixed" = "%d fixed";
+"%d need attention" = "%d need attention";
+"%d new" = "%d new";
+"%d scanning continuously" = "%d scanning continuously";
+"A fix is a coding task on its own branch — it waits in review for you before anything merges. At most three automatic fixes run at once per repository." = "A fix is a coding task on its own branch — it waits in review for you before anything merges. At most three automatic fixes run at once per repository.";
+"A repository watch manages this automation — edit the watch in the Automations hub's Repositories tab. Changes made here are replaced the next time the watch is saved." = "A repository watch manages this automation — edit the watch in the Automations hub's Repositories tab. Changes made here are replaced the next time the watch is saved.";
+"A watch scans a GitHub repository with an agent in one of your workspaces: the whole codebase on a schedule, and every new commit and pull request as they land. Findings are deduplicated across scans." = "A watch scans a GitHub repository with an agent in one of your workspaces: the whole codebase on a schedule, and every new commit and pull request as they land. Findings are deduplicated across scans.";
+"Agent working on the fix" = "Agent working on the fix";
+"All" = "All";
+"All %d" = "All %d";
+"All repositories" = "All repositories";
+"Any severity" = "Any severity";
+"Bug" = "Bug";
+"Bugs" = "Bugs";
+"Checkout in the workspace" = "Checkout in the workspace";
+"Closed" = "Closed";
+"Commit" = "Commit";
+"Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked.";
+"Commits" = "Commits";
+"Couldn't clone %1$@ into %2$@ — %3$@" = "Couldn't clone %1$@ into %2$@ — %3$@";
+"Critical" = "Critical";
+"Critical finding in %@" = "Critical finding in %@";
+"Delete Finding" = "Delete Finding";
+"Dependency" = "Dependency";
+"Dismiss this finding?" = "Dismiss this finding?";
+"Dismissed" = "Dismissed";
+"Dismiss…" = "Dismiss…";
+"Duplicate of" = "Duplicate of";
+"Edit Workspace…" = "Edit Workspace…";
+"Every new commit" = "Every new commit";
+"Every new pull request" = "Every new pull request";
+"Evidence" = "Evidence";
+"Finding" = "Finding";
+"Findings" = "Findings";
+"Findings appear here as the repository watches scan. Watch a repository from the Repositories tab." = "Findings appear here as the repository watches scan. Watch a repository from the Repositories tab.";
+"Findings pipeline" = "Findings pipeline";
+"First seen" = "First seen";
+"Fix" = "Fix";
+"Fix closed without merging" = "Fix closed without merging";
+"Fix merged" = "Fix merged";
+"Fix not started" = "Fix not started";
+"Fix: %@" = "Fix: %@";
+"Fixed" = "Fixed";
+"Fixed in the last 30 days" = "Fixed in the last 30 days";
+"Fixes" = "Fixes";
+"Flagged by the prompt-injection screen" = "Flagged by the prompt-injection screen";
+"Flagged by the prompt-injection screen: %@" = "Flagged by the prompt-injection screen: %@";
+"For critical findings" = "For critical findings";
+"For high and critical" = "For high and critical";
+"For medium and above" = "For medium and above";
+"Full repository scan" = "Full repository scan";
+"Full scan" = "Full scan";
+"High" = "High";
+"In progress" = "In progress";
+"In review" = "In review";
+"Info" = "Info";
+"Instructions for the scanning agent" = "Instructions for the scanning agent";
+"Its scans stop and its automations are removed. Its findings are deleted too; fix tasks already started stay on the task board." = "Its scans stop and its automations are removed. Its findings are deleted too; fix tasks already started stay on the task board.";
+"Last seen" = "Last seen";
+"Later scans that see it again won't reopen it." = "Later scans that see it again won't reopen it.";
+"Location" = "Location";
+"Look for" = "Look for";
+"Low" = "Low";
+"Mark as %@" = "Mark as %@";
+"Medium" = "Medium";
+"Needs attention" = "Needs attention";
+"Never" = "Never";
+"New" = "New";
+"No findings yet" = "No findings yet";
+"No scans yet — they appear here as the watches run." = "No scans yet — they appear here as the watches run.";
+"No watched repositories" = "No watched repositories";
+"Nothing needs you right now." = "Nothing needs you right now.";
+"Open findings" = "Open findings";
+"Other" = "Other";
+"Pick a repository (owner/name)." = "Pick a repository (owner/name).";
+"Pipeline" = "Pipeline";
+"Planning" = "Planning";
+"Pull requests" = "Pull requests";
+"Quality" = "Quality";
+"Ready for review" = "Ready for review";
+"Reappeared after being marked fixed" = "Reappeared after being marked fixed";
+"Reason (optional)" = "Reason (optional)";
+"Recent scans" = "Recent scans";
+"Recommendation" = "Recommendation";
+"Reported by" = "Reported by";
+"Resolved by a scan: %@" = "Resolved by a scan: %@";
+"Run a full scan of %@ now" = "Run a full scan of %@ now";
+"Scan Now" = "Scan Now";
+"Scans" = "Scans";
+"Search findings" = "Search findings";
+"Security" = "Security";
+"Security and bugs" = "Security and bugs";
+"Security vulnerabilities" = "Security vulnerabilities";
+"Seen" = "Seen";
+"Severity" = "Severity";
+"Start Fix Anyway" = "Start Fix Anyway";
+"Start fixes automatically" = "Start fixes automatically";
+"Stop Watching" = "Stop Watching";
+"Stop Watching…" = "Stop Watching…";
+"Stop watching %@?" = "Stop watching %@?";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and a fix agent would read it too. Check it before starting a fix." = "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and a fix agent would read it too. Check it before starting a fix.";
+"These credentials ask before each use, which stalls an unattended scan until you answer: %@" = "These credentials ask before each use, which stalls an unattended scan until you answer: %@";
+"This finding's text was flagged" = "This finding's text was flagged";
+"This workspace has no github.com token — scans poll GitHub with it." = "This workspace has no github.com token — scans poll GitHub with it.";
+"Watch" = "Watch";
+"Watch a GitHub Repository" = "Watch a GitHub Repository";
+"Watch a GitHub Repository…" = "Watch a GitHub Repository…";
+"Watch and Scan Now" = "Watch and Scan Now";
+"Watch on %@" = "Watch on %@";
+"Watched repositories" = "Watched repositories";
+"What's wrong" = "What's wrong";
+"Where the repository is (or will be cloned) inside the workspace." = "Where the repository is (or will be cloned) inside the workspace.";
+"default branch" = "default branch";
+"last %@" = "last %@";
+"reported %d times" = "reported %d times";
+"watching" = "watching";
+"watching · checked %@" = "watching · checked %@";
+"…and %d more" = "…and %d more";
+"Clear Filters" = "Clear Filters";
+"Findings by severity and status" = "Findings by severity and status";
+"No matching findings" = "No matching findings";
+"Nothing matches these filters." = "Nothing matches these filters.";
+"Repositories this workspace's token can reach" = "Repositories this workspace's token can reach";
+"Start a Fix" = "Start a Fix";
+"Watch a Repository…" = "Watch a Repository…";
+"Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.";
+"Full scan of %@ requested — it shows under Recent scans once the agent starts." = "Full scan of %@ requested — it shows under Recent scans once the agent starts.";
+"Now watching %@." = "Now watching %@.";
+"%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ works on your prompt in a new branch of %2$@, in %3$@";
+"%d run(s) need your attention" = "%d run(s) need your attention";
+"(a disposable copy)" = "(a disposable copy)";
+"A schedule, or something happening on GitHub or Linear." = "A schedule, or something happening on GitHub or Linear.";
+"An agent picks up that item with your prompt — screened for prompt injection first" = "An agent picks up that item with your prompt — screened for prompt injection first";
+"An agent reviews the whole repository weekly, and every new commit and pull request" = "An agent reviews the whole repository weekly, and every new commit and pull request";
+"An agent starts in one of your workspaces with your prompt, on a fresh branch" = "An agent starts in one of your workspaces with your prompt, on a fresh branch";
+"Another one finishes" = "Another one finishes";
+"At set times" = "At set times";
+"At the time you pick — every weekday at 9:00, hourly, weekly…" = "At the time you pick — every weekday at 9:00, hourly, weekly…";
+"Backlog, dismiss, mark fixed…" = "Backlog, dismiss, mark fixed…";
+"Change the status" = "Change the status";
+"Dismiss (Not an Issue)" = "Dismiss (Not an Issue)";
+"Each item runs once, on its own branch, listed on the Runs tab" = "Each item runs once, on its own branch, listed on the Runs tab";
+"Each run starts this agent with your prompt, on a fresh branch." = "Each run starts this agent with your prompt, on a fresh branch.";
+"Every %1$@ at %2$@" = "Every %1$@ at %2$@";
+"Every %d hours" = "Every %d hours";
+"Every %d minutes" = "Every %d minutes";
+"Every automation runs an agent unattended in one of your workspaces, under its credentials and guardrails." = "Every automation runs an agent unattended in one of your workspaces, under its credentials and guardrails.";
+"Every day at %@" = "Every day at %@";
+"Every hour" = "Every hour";
+"Every weekday at %@" = "Every weekday at %@";
+"Findings are collected and deduplicated across scans, by severity" = "Findings are collected and deduplicated across scans, by severity";
+"Full scan %1$@ %2$02d:00" = "Full scan %1$@ %2$02d:00";
+"GitHub & Linear events" = "GitHub & Linear events";
+"Hasn't run yet" = "Hasn't run yet";
+"Insert:" = "Insert:";
+"Issue" = "Issue";
+"Last run %@" = "Last run %@";
+"Mark as Fixed" = "Mark as Fixed";
+"Mark as New" = "Mark as New";
+"Marked fixed by hand" = "Marked fixed by hand";
+"Move to Backlog" = "Move to Backlog";
+"Name this automation" = "Name this automation";
+"Needs a token" = "Needs a token";
+"New issue" = "New issue";
+"Next %@" = "Next %@";
+"No event automations — e.g. review every new pull request" = "No event automations — e.g. review every new pull request";
+"No open findings" = "No open findings";
+"No scheduled automations — e.g. a weekday-morning triage of open issues" = "No scheduled automations — e.g. a weekday-morning triage of open issues";
+"Nothing runs on its own yet" = "Nothing runs on its own yet";
+"One click starts a fix on its own branch — you review before anything merges" = "One click starts a fix on its own branch — you review before anything merges";
+"Open Runs" = "Open Runs";
+"Open Task" = "Open Task";
+"Opened on GitHub" = "Opened on GitHub";
+"Pick what should start an agent. Every automation runs unattended in one of your workspaces, under its credentials and guardrails." = "Pick what should start an agent. Every automation runs unattended in one of your workspaces, under its credentials and guardrails.";
+"Pull request" = "Pull request";
+"Pushed to a branch" = "Pushed to a branch";
+"React when something happens on GitHub or Linear." = "React when something happens on GitHub or Linear.";
+"Reopen" = "Reopen";
+"Retry the Fix" = "Retry the Fix";
+"Run an agent on a prompt, on a schedule." = "Run an agent on a prompt, on a schedule.";
+"Run now" = "Run now";
+"Running now" = "Running now";
+"Runs" = "Runs";
+"Scan Now only" = "Scan Now only";
+"Scan now" = "Scan now";
+"Scanning" = "Scanning";
+"Scans run as automations in the workspace you choose, with its GitHub token. Nothing is changed in the repository until you start a fix and merge it." = "Scans run as automations in the workspace you choose, with its GitHub token. Nothing is changed in the repository until you start a fix and merge it.";
+"Set Up" = "Set Up";
+"Show Details" = "Show Details";
+"Show Findings" = "Show Findings";
+"Show Runs" = "Show Runs";
+"Step %d" = "Step %d";
+"The fix couldn't start: %@" = "The fix couldn't start: %@";
+"The session closes; its transcript and branch stay for you to review" = "The session closes; its transcript and branch stay for you to review";
+"The session stays open for you to check" = "The session stays open for you to check";
+"The workspace's credentials and guardrails apply to every run." = "The workspace's credentials and guardrails apply to every run.";
+"Then" = "Then";
+"Watching · checked %@" = "Watching · checked %@";
+"What" = "What";
+"What happens" = "What happens";
+"What should run on its own?" = "What should run on its own?";
+"What the agent does" = "What the agent does";
+"When" = "When";
+"When a Linear issue is assigned to you" = "When a Linear issue is assigned to you";
+"When a commit lands on %1$@ of %2$@" = "When a commit lands on %1$@ of %2$@";
+"When a pull request is opened on %@" = "When a pull request is opened on %@";
+"When a pull request, issue or commit lands on GitHub, a Linear issue appears, or another automation finishes" = "When a pull request, issue or commit lands on GitHub, a Linear issue appears, or another automation finishes";
+"When an issue on %@ is assigned to you" = "When an issue on %@ is assigned to you";
+"When an unassigned Linear issue is created" = "When an unassigned Linear issue is created";
+"When an unassigned issue is opened on %@" = "When an unassigned issue is opened on %@";
+"When it runs" = "When it runs";
+"When “%@” finishes" = "When “%@” finishes";
+"Where it runs" = "Where it runs";
+"You find its result on the Runs tab: transcript and branch" = "You find its result on the Runs tab: transcript and branch";
+"a repository" = "a repository";
+"against %@" = "against %@";
+"another automation" = "another automation";
+"every commit" = "every commit";
+"every pull request" = "every pull request";
+"the default branch" = "the default branch";
+"the home folder" = "the home folder";
+"touching %@" = "touching %@";
+"“%@” is starting — follow it on the Runs tab." = "“%@” is starting — follow it on the Runs tab.";
+"%d comment(s)" = "%d comment(s)";
+"Agents at work" = "Agents at work";
+"An agent fixes it on a branch of its own — or the Switchboard proposes which of your running sessions should. You review the change before anything merges." = "An agent fixes it on a branch of its own — or the Switchboard proposes which of your running sessions should. You review the change before anything merges.";
+"Ask a Room's Switchboard" = "Ask a Room's Switchboard";
+"Ask the Switchboard Instead…" = "Ask the Switchboard Instead…";
+"Ask the Switchboard Who Should Fix It" = "Ask the Switchboard Who Should Fix It";
+"Asked the Switchboard — it will propose a session and wait for your OK." = "Asked the Switchboard — it will propose a session and wait for your OK.";
+"Briefs waiting to start" = "Briefs waiting to start";
+"Merged or closed" = "Merged or closed";
+"No phases yet — click Plan on a backlog card to have an agent split it into ordered phases." = "No phases yet — click Plan on a backlog card to have an agent split it into ordered phases.";
+"Phases, in order" = "Phases, in order";
+"Sent to the Switchboard to find who fixes it" = "Sent to the Switchboard to find who fixes it";
+"Sent to the “%@” room's Switchboard to find who fixes it" = "Sent to the “%@” room's Switchboard to find who fixes it";
+"Session gone" = "Session gone";
+"Start a Fix Session" = "Start a Fix Session";
+"Waiting for your review" = "Waiting for your review";
+"Code Review" = "Code Review";
+"Code review" = "Code review";
+"Continuous code review for your GitHub repositories" = "Continuous code review for your GitHub repositories";
+"Keep a GitHub repository continuously reviewed for vulnerabilities and bugs." = "Keep a GitHub repository continuously reviewed for vulnerabilities and bugs.";
+"No repository is watched — set up a continuous code review" = "No repository is watched — set up a continuous code review";
+"%@ says:" = "%@ says:";
+"Answer %@" = "Answer %@";
+"Answer…" = "Answer…";
+"Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back." = "Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back.";
+"Handing over" = "Handing over";
+"Question" = "Question";
+"Show the session working on it" = "Show the session working on it";
+"That session no longer exists." = "That session no longer exists.";
+"The room has no Switchboard to take the task." = "The room has no Switchboard to take the task.";
+"Your answer" = "Your answer";
+"#%1$d in %2$@'s queue" = "#%1$d in %2$@'s queue";
+"@nickname or #room" = "@nickname or #room";
+"A new agent" = "A new agent";
+"A new agent (in its own worktree)" = "A new agent (in its own worktree)";
+"A new agent each (%d at a time)" = "A new agent each (%d at a time)";
+"A room" = "A room";
+"A session" = "A session";
+"A session or room pushes its branch and opens a pull request before the card moves to Testing/Review." = "A session or room pushes its branch and opens a pull request before the card moves to Testing/Review.";
+"Added “%@”" = "Added “%@”";
+"Assign" = "Assign";
+"Assign…" = "Assign…";
+"Auto-pickup: off" = "Auto-pickup: off";
+"Details (optional)" = "Details (optional)";
+"In its own fresh worktree — queued with the other new-agent tasks" = "In its own fresh worktree — queued with the other new-agent tasks";
+"New agent" = "New agent";
+"New backlog items go to" = "New backlog items go to";
+"New items → %@" = "New items → %@";
+"Next for %@" = "Next for %@";
+"No session or room matches." = "No session or room matches.";
+"No sessions yet — start one, give it a @nickname, and it can take tasks from the board." = "No sessions yet — start one, give it a @nickname, and it can take tasks from the board.";
+"Nobody — I start them" = "Nobody — I start them";
+"Open a pull request when done" = "Open a pull request when done";
+"Pull request #%@" = "Pull request #%@";
+"Quick Task…" = "Quick Task…";
+"Sessions and rooms open a pull request when done" = "Sessions and rooms open a pull request when done";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Testing/Review. To give it to a session or a room, use Assign." = "Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Testing/Review. To give it to a session or a room, use Assign.";
+"The room's Switchboard picks a member" = "The room's Switchboard picks a member";
+"This session (%@)" = "This session (%@)";
+"Unassign" = "Unassign";
+"Who picks it up" = "Who picks it up";
+"Who picks this task up" = "Who picks this task up";
+"Who picks this up?" = "Who picks this up?";
+"Who picks up new backlog items on their own and takes them to Testing/Review. Each task can still be assigned by hand." = "Who picks up new backlog items on their own and takes them to Testing/Review. Each task can still be assigned by hand.";
+"busy — it takes this after its current work" = "busy — it takes this after its current work";
+"New task — or ⇧⌥Space from any app for a quick one" = "New task — or ⇧⌥Space from any app for a quick one";
+"%@ picks it up on its own and takes it to Testing/Review." = "%@ picks it up on its own and takes it to Testing/Review.";
+"A new agent picks it up from the queue and takes it to Testing/Review." = "A new agent picks it up from the queue and takes it to Testing/Review.";
+"Add Task" = "Add Task";
+"Describe the task — what's wrong, where, what done looks like. Markdown welcome." = "Describe the task — what's wrong, where, what done looks like. Markdown welcome.";
+"Description" = "Description";
+"What needs doing?  @agent to assign" = "What needs doing?  @agent to assign";
+"busy — takes it after its current work" = "busy — takes it after its current work";
+"in its own worktree" = "in its own worktree";
+"the room's Switchboard picks a member" = "the room's Switchboard picks a member";
+"↩ add · ⌘↩ add another · ⇥⇥ full editor" = "↩ add · ⌘↩ add another · ⇥⇥ full editor";
+"%@ works in its own workspace and folder, with its own agent" = "%@ works in its own workspace and folder, with its own agent";
+"%@'s Switchboard picks a member" = "%@'s Switchboard picks a member";
+"@switchboard" = "@switchboard";
+"The Switchboard — it picks a session" = "The Switchboard — it picks a session";
+"The app's Switchboard picks the session best placed for it" = "The app's Switchboard picks the session best placed for it";
+"There's no workspace to run the Switchboard in." = "There's no workspace to run the Switchboard in.";
+"picks the session best placed for it" = "picks the session best placed for it";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "Describe your environment";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions.";
+"Variables" = "Variables";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "Trust this folder?";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ of %@";
+"%@ · downloaded" = "%@ · downloaded";
+"%@ · sent by the agent" = "%@ · sent by the agent";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "Couldn't read the file on the machine — is it still there, and is the machine running?";
+"Couldn't write the file here." = "Couldn't write the file here.";
+"Downloaded" = "Downloaded";
+"Save As…" = "Save As…";
+"Save or Share" = "Save or Share";
+"Saved to %@" = "Saved to %@";
+"Sent by the agent" = "Sent by the agent";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "Add instructions";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”.";
+"Careful reviewer" = "Careful reviewer";
+"Delete these instructions" = "Delete these instructions";
+"Edit instructions…" = "Edit instructions…";
+"Instructions" = "Instructions";
+"Instructions added to the agent's system prompt (“You are a…”)" = "Instructions added to the agent's system prompt (“You are a…”)";
+"Instructions without a name or text are not kept." = "Instructions without a name or text are not kept.";
+"New instructions" = "New instructions";
+"No instructions" = "No instructions";
+"No instructions yet. Add some with +." = "No instructions yet. Add some with +.";
+"Teacher" = "Teacher";
+"The agent as it comes" = "The agent as it comes";
+"Untitled" = "Untitled";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites.";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step.";
+
+/* Local model context window */
+"%@ context" = "%@ context";
+"Context?" = "Context?";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "The server doesn't say how much context this model takes — agents assume 128K. Click to enter it.";
+"The context window agents are told this model has. Click to change it." = "The context window agents are told this model has. Click to change it.";
+"Context window" = "Context window";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "How many tokens %@ can take. Every agent using it is told, so it compacts at the right time.";
+"e.g. 1M, 256K or 131072" = "e.g. 1M, 256K or 131072";
+"Enter a number of tokens, like 1M or 200K." = "Enter a number of tokens, like 1M or 200K.";
+"Use the server's value" = "Use the server's value";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "Open the sign-in page and approve access.";
+"Approve the sign-in in your browser; it should show this code:" = "Approve the sign-in in your browser; it should show this code:";
+"Open the sign-in page and check that it shows this code:" = "Open the sign-in page and check that it shows this code:";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "Your customize script (%@) can't be read — the image is built without it.";
+"Run my customize script after Bromure's setup" = "Run my customize script after Bromure's setup";
+"No script chosen" = "No script chosen";
+"Last Log" = "Last Log";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept.";
+"Choose the shell script to run inside the base image" = "Choose the shell script to run inside the base image";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "Download prebuilt";
+"The latest published image, then the recommended packages. A few minutes." = "The latest published image, then the recommended packages. A few minutes.";
+"Recommended" = "Recommended";
+"Rebuild locally" = "Rebuild locally";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "Built from scratch on this Mac with the full installer. About 10 minutes.";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts.";
+"Download & Update" = "Download & Update";
+"Rebuild" = "Rebuild";
+"Update the base image" = "Update the base image";
+"New workspaces start from this image: the system, the coding agents and their tools." = "New workspaces start from this image: the system, the coding agents and their tools.";
+"Customize the image" = "Customize the image";
+"Choose Script…" = "Choose Script…";
+"Change…" = "Change…";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept.";
+"Your customize script failed — the current image is kept. See %@" = "Your customize script failed — the current image is kept. See %@";
+"%@ says" = "%@ says";
+"The agent" = "The agent";
+"Ask %@ to Merge into %@" = "Ask %@ to Merge into %@";
+"Ask %@ to Merge" = "Ask %@ to Merge";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options.";
+"%@ merges %@ into…" = "%@ merges %@ into…";
+"%@ — where it started" = "%@ — where it started";
+"Loading branches…" = "Loading branches…";
+"Squash into one commit" = "Squash into one commit";
+"Ask %@ to Merge into…" = "Ask %@ to Merge into…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back.";
+"Mark as Done" = "Mark as Done";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay.";
+"Confirm" = "Confirm";
+"Created %@" = "Created %@";
+"Modified %@" = "Modified %@";
+"Updated %@" = "Updated %@";
+"GitHub rejected this workspace's token" = "GitHub rejected this workspace's token";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace.";
+"Fix the workspace's GitHub token to watch a repository." = "Fix the workspace's GitHub token to watch a repository.";
+"Assigned to %@ — click to change" = "Assigned to %@ — click to change";
+"Click to fold the error" = "Click to fold the error";
+"Click to read the whole error" = "Click to read the whole error";
+"Deleted workspace" = "Deleted workspace";
+"Open Coding Tasks (⇧⌘T)" = "Open Coding Tasks (⇧⌘T)";
+"No open tasks" = "No open tasks";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started.";
+"Open Automations" = "Open Automations";
+"Open Automations (⇧⌘A)" = "Open Automations (⇧⌘A)";
+"View" = "View";
+"Help" = "Help";
+"Close Window" = "Close Window";
+"Toggle Sidebar" = "Toggle Sidebar";
+"Toggle Files Pane" = "Toggle Files Pane";
+"Toggle Browser Pane" = "Toggle Browser Pane";
+"Enter Full Screen" = "Enter Full Screen";
+"Zoom" = "Zoom";
+"%@ Manual" = "%@ Manual";
+"Add a note about this workspace" = "Add a note about this workspace";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable.";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "Outbound connection rules are edited on the Mac that runs this workspace.";
+"Click a protection that's off to turn it on in that workspace's settings." = "Click a protection that's off to turn it on in that workspace's settings.";
+"Turn on…" = "Turn on…";
+"%1$@ is on for %2$@. Click to change it." = "%1$@ is on for %2$@. Click to change it.";
+"%1$@ is off for %2$@. Click to turn it on." = "%1$@ is off for %2$@. Click to turn it on.";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "not scanned — %@";
+"blocked, not sent — %@" = "blocked, not sent — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@ (%2$d times, last one shown)";
+
+"Security…" = "Security…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "Download Current Version";
+"Update" = "Update";
+"an unknown version" = "an unknown version";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up).";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "Outdated: this image is %@; the current version is %@. Update to download it.";
+"The Linux machine behind this session — available while it runs" = "The Linux machine behind this session — available while it runs";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "1 media item shown";
+"%d media items shown" = "%d media items shown";
+"1 chart shown" = "1 chart shown";
+"%d charts shown" = "%d charts shown";
+"1 file sent" = "1 file sent";
+"%d files sent" = "%d files sent";
+"1 tool result" = "1 tool result";
+"%d tool results" = "%d tool results";
+"Available when the workspace is running" = "Available when the workspace is running";
+"Video available when the workspace is running" = "Video available when the workspace is running";
+"Image available when the workspace is running" = "Image available when the workspace is running";
+
+/* Fat client: link states (reconnecting / key rejected / host key changed) */
+"“%@” didn't accept this Mac's key" = "“%@” didn't accept this Mac's key";
+"“%@” presented a different host key" = "“%@” presented a different host key";
+"Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection." = "Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection.";
+"Reconnecting to %@…" = "Reconnecting to %@…";
+"The connection dropped. What you see is from just before; it picks up again on its own." = "The connection dropped. What you see is from just before; it picks up again on its own.";
+
+/* Coding Tasks: landing an approved task (2026-10) */
+"Ready to land" = "Ready to land";
+"Landing — merging into %@…" = "Landing — merging into %@…";
+"Landing — %1$@ is opening a pull request into %2$@…" = "Landing — %1$@ is opening a pull request into %2$@…";
+"Landing — %1$@ is merging into %2$@…" = "Landing — %1$@ is merging into %2$@…";
+"Needs you — %@" = "Needs you — %@";
+"marked by you" = "marked by you";
+"reported by %@, not verified" = "reported by %@, not verified";
+"the agent" = "the agent";
+"PR #%@ opened" = "PR #%@ opened";
+"Marked done by you" = "Marked done by you";
+"All its phases are done" = "All its phases are done";
+"The agent couldn't land it." = "The agent couldn't land it.";
+"Couldn't read the branch's repository or where it started — is the workspace running?" = "Couldn't read the branch's repository or where it started — is the workspace running?";
+"The branch %@ doesn't exist in the repository any more — merge into another branch." = "The branch %@ doesn't exist in the repository any more — merge into another branch.";
+"The task's branch %@ is gone from the repository." = "The task's branch %@ is gone from the repository.";
+"The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry." = "The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry.";
+"The repository has no remote to open a pull request on — merge it instead." = "The repository has no remote to open a pull request on — merge it instead.";
+"Couldn't reach the session that did the task." = "Couldn't reach the session that did the task.";
+"Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel." = "Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel.";
+"%@ stopped before it landed — open its session to see why, then retry." = "%@ stopped before it landed — open its session to see why, then retry.";
+"The app quit while landing this — retry." = "The app quit while landing this — retry.";
+"Mark done without merging?" = "Mark done without merging?";
+"Mark Done" = "Mark Done";
+"The agent is stopped. Nothing is merged; the branch %@ and its checkout are kept in the workspace." = "The agent is stopped. Nothing is merged; the branch %@ and its checkout are kept in the workspace.";
+"Nothing is merged. The branch %@ and its checkout are kept in the workspace." = "Nothing is merged. The branch %@ and its checkout are kept in the workspace.";
+"Discard this branch?" = "Discard this branch?";
+"The branch %@ and its checkout are deleted and the agent's session is put away. The task goes to Done as closed without merging; its transcript is kept." = "The branch %@ and its checkout are deleted and the agent's session is put away. The task goes to Done as closed without merging; its transcript is kept.";
+"Merge into %@?" = "Merge into %@?";
+"Bromure merges it directly when it can; otherwise %1$@, the agent that wrote it, rebases onto %2$@, fixes conflicts, runs the tests and merges. Afterwards the branch is removed and the session archived." = "Bromure merges it directly when it can; otherwise %1$@, the agent that wrote it, rebases onto %2$@, fixes conflicts, runs the tests and merges. Afterwards the branch is removed and the session archived.";
+"Sessions and rooms open a pull request at delivery (skips review)" = "Sessions and rooms open a pull request at delivery (skips review)";
+"Who new tasks are queued for when you create them — they pick them up on their own and take them to Review. Each task can still be assigned by hand." = "Who new tasks are queued for when you create them — they pick them up on their own and take them to Review. Each task can still be assigned by hand.";
+"Tasks waiting to start" = "Tasks waiting to start";
+"Move to Review" = "Move to Review";
+"Stop & Return to Backlog" = "Stop & Return to Backlog";
+"Nothing done yet" = "Nothing done yet";
+"Merged, opened as pull requests, or closed" = "Merged, opened as pull requests, or closed";
+"Open Pull Request" = "Open Pull Request";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Review. To give it to a session or a room, use Assign." = "Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Review. To give it to a session or a room, use Assign.";
+"Open a pull request at delivery (skips review)" = "Open a pull request at delivery (skips review)";
+"No code changes — read the report" = "No code changes — read the report";
+"Assigned to %@" = "Assigned to %@";
+"Workspace: %@" = "Workspace: %@";
+"Agent: %@" = "Agent: %@";
+"Folder: %@" = "Folder: %@";
+"Folder" = "Folder";
+"Clone this repository first (optional)" = "Clone this repository first (optional)";
+"Make the folder and an empty git repository when they don't exist yet — tasks run on their own branch." = "Make the folder and an empty git repository when they don't exist yet — tasks run on their own branch.";
+"When approved" = "When approved";
+"Workspace default (%@)" = "Workspace default (%@)";
+"What happens when you approve the task in Review: merged into the branch it came from, or opened as a pull request." = "What happens when you approve the task in Review: merged into the branch it came from, or opened as a pull request.";
+"A new agent picks it up from the queue and takes it to Review." = "A new agent picks it up from the queue and takes it to Review.";
+"%@ picks it up on its own and takes it to Review." = "%@ picks it up on its own and takes it to Review.";
+"Send Back" = "Send Back";
+"Send Back (%d)" = "Send Back (%d)";
+"This task isn't in Review any more." = "This task isn't in Review any more.";
+"%1$@ worked on %2$@ in %3$@" = "%1$@ worked on %2$@ in %3$@";
+"%1$@ worked in %2$@" = "%1$@ worked in %2$@";
+"%1$@ (+%2$d −%3$d) vs %4$@" = "%1$@ (+%2$d −%3$d) vs %4$@";
+"%d uncommitted" = "%d uncommitted";
+"%1$@ moved %2$d commits since" = "%1$@ moved %2$d commits since";
+"%@ checkout clean" = "%@ checkout clean";
+"%@ checkout has uncommitted changes" = "%@ checkout has uncommitted changes";
+"%@ not checked out" = "%@ not checked out";
+"remote: %@" = "remote: %@";
+"none" = "none";
+"can't reach the machine for the details" = "can't reach the machine for the details";
+"%@'s final report" = "%@'s final report";
+"No code changes to merge" = "No code changes to merge";
+"Reading the agent's report…" = "Reading the agent's report…";
+"Cancel Landing" = "Cancel Landing";
+"The task produced no code: it goes to Done as it is." = "The task produced no code: it goes to Done as it is.";
+"View Pull Request #%@" = "View Pull Request #%@";
+"Mark Merged" = "Mark Merged";
+"The pull request was merged on the forge: the task goes to Done as merged." = "The pull request was merged on the forge: the task goes to Done as merged.";
+"More" = "More";
+"Merge into Another Branch…" = "Merge into Another Branch…";
+"Keep Branch — Mark Done" = "Keep Branch — Mark Done";
+"Open a pull request for the branch; hold for the other ways to land it." = "Open a pull request for the branch; hold for the other ways to land it.";
+"Merge the branch; hold for the other ways to land it." = "Merge the branch; hold for the other ways to land it.";
+"Mark done without merging — the branch is kept." = "Mark done without merging — the branch is kept.";
+"Open a pull request into %@?" = "Open a pull request into %@?";
+"Squash & merge into %@?" = "Squash & merge into %@?";
+"%1$@ is ahead of %2$@ with nothing in the way: Bromure merges it directly." = "%1$@ is ahead of %2$@ with nothing in the way: Bromure merges it directly.";
+"Into" = "Into";
+"Afterwards the session is archived; the branch stays for the pull request." = "Afterwards the session is archived; the branch stays for the pull request.";
+"Afterwards the session is archived; the branch and its checkout are kept." = "Afterwards the session is archived; the branch and its checkout are kept.";
+"Afterwards the branch is removed and the session archived." = "Afterwards the branch is removed and the session archived.";
+"Keep branch" = "Keep branch";
+"%1$@ says it's done, but Bromure doesn't see it in %2$@: %3$@" = "%1$@ says it's done, but Bromure doesn't see it in %2$@: %3$@";
+"The planning session ended." = "The planning session ended.";
+"The planning session has ended" = "The planning session has ended";
+"Merge into the branch" = "Merge into the branch";
+"Open a pull request" = "Open a pull request";
+"When a task is approved" = "When a task is approved";
+"What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise." = "What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise.";
+"App default (%@)" = "App default (%@)";
+"What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise." = "What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise.";
+
+/* Coding Tasks vocabulary + start/live-state (2026-10) */
+"Start %d Selected" = "Start %d Selected";
+"Off: the session or room hands its branch back for your review, and lands it once you approve. On: it pushes and opens a pull request before the task moves to Review." = "Off: the session or room hands its branch back for your review, and lands it once you approve. On: it pushes and opens a pull request before the task moves to Review.";
+"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phases with dependencies into the Plan column." = "Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phases with dependencies into the Plan column.";
+"%1$@, the agent that wrote it, will rebase onto %2$@, run the tests, push %3$@ to %4$@ and open a pull request. You'll see its progress on the task and in its session." = "%1$@, the agent that wrote it, will rebase onto %2$@, run the tests, push %3$@ to %4$@ and open a pull request. You'll see its progress on the task and in its session.";
+"%1$@, the agent that wrote it, will rebase onto %2$@, fix conflicts, run the tests and merge. You'll see its progress on the task and in its session." = "%1$@, the agent that wrote it, will rebase onto %2$@, fix conflicts, run the tests and merge. You'll see its progress on the task and in its session.";
+"The planning session timed out without filing phases — click Plan First to retry." = "The planning session timed out without filing phases — click Plan First to retry.";
+"The planning session ended before filing phases — click Plan First to retry." = "The planning session ended before filing phases — click Plan First to retry.";
+"The planning session didn't start — %@ may not be set up in this workspace. Open a session there to check, then click Plan First to retry." = "The planning session didn't start — %@ may not be set up in this workspace. Open a session there to check, then click Plan First to retry.";
+"%@ exited before filing phases — click Plan First to retry." = "%@ exited before filing phases — click Plan First to retry.";
+"The planning session was interrupted — click Plan First to retry." = "The planning session was interrupted — click Plan First to retry.";
+"The checkout for %@ is gone and couldn't be re-created in %@. Start Over runs the task again on a new branch." = "The checkout for %@ is gone and couldn't be re-created in %@. Start Over runs the task again on a new branch.";
+"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start Over runs the task again on a new branch." = "The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start Over runs the task again on a new branch.";
+"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start Over runs the task again from scratch%@." = "The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start Over runs the task again from scratch%@.";
+"Plan First" = "Plan First";
+"Remove Task" = "Remove Task";
+"Remove Task Only" = "Remove Task Only";
+"Stop & Discard Branch" = "Stop & Discard Branch";
+"Discarding ends the agent's session and deletes its branch and worktree, with any uncommitted or unmerged work. “Remove Task Only” leaves them in the workspace." = "Discarding ends the agent's session and deletes its branch and worktree, with any uncommitted or unmerged work. “Remove Task Only” leaves them in the workspace.";
+"Unassigned — I'll start it" = "Unassigned — I'll start it";
+"New tasks: Unassigned" = "New tasks: Unassigned";
+"New tasks: assigned to %@" = "New tasks: assigned to %@";
+"Assign new tasks to" = "Assign new tasks to";
+"No phases yet — click Plan First on a Backlog task." = "No phases yet — click Plan First on a Backlog task.";
+"Starts every selected phase. Phases whose dependencies aren't Done queue and start automatically when they are." = "Starts every selected phase. Phases whose dependencies aren't Done queue and start automatically when they are.";
+"A visible planning session is running — click the task to open it; phases appear in the Plan column as it files them." = "A visible planning session is running — click the task to open it; phases appear in the Plan column as it files them.";
+"A planner agent reads the task and the repository, then files ordered phases (with dependencies) in the Plan column." = "A planner agent reads the task and the repository, then files ordered phases (with dependencies) in the Plan column.";
+"Start it from the board, or Plan First to split it into phases." = "Start it from the board, or Plan First to split it into phases.";
+"Remove %d selected phase(s)?" = "Remove %d selected phase(s)?";
+"Your task" = "Your task";
+"Start Over" = "Start Over";
+"Runs the task again from scratch on a new branch." = "Runs the task again from scratch on a new branch.";
+"The agent is waiting at its prompt without having handed the task over — open its session to see where it is." = "The agent is waiting at its prompt without having handed the task over — open its session to see where it is.";
+"Checking the workspace and the folder — the task moves to In Progress once its agent can start." = "Checking the workspace and the folder — the task moves to In Progress once its agent can start.";
+"Connecting…" = "Connecting…";
+"Waiting for the host's first update." = "Waiting for the host's first update.";
+
+/* Task landing / review QA fixes */
+"Planning in the terminal — open it to watch and answer." = "Planning in the terminal — open it to watch and answer.";
+"The %@ checkout has uncommitted changes — if they touch the same files, the merge stops until you commit or stash them there." = "The %@ checkout has uncommitted changes — if they touch the same files, the merge stops until you commit or stash them there.";
+"Your review comments didn't reach the agent — they're still pending. Restart Session sends them." = "Your review comments didn't reach the agent — they're still pending. Restart Session sends them.";
+"%1$@ is ahead of %2$@: Bromure merges it directly." = "%1$@ is ahead of %2$@: Bromure merges it directly.";
+"%1$@ adds nothing %2$@ doesn't already have: the task goes to Done." = "%1$@ adds nothing %2$@ doesn't already have: the task goes to Done.";
+"The %1$@ checkout has uncommitted changes — if they touch the same files, %2$@ can't merge until you commit or stash them there." = "The %1$@ checkout has uncommitted changes — if they touch the same files, %2$@ can't merge until you commit or stash them there.";
+"%@ didn't start in the task's session — open it to see why, then Restart Session." = "%@ didn't start in the task's session — open it to see why, then Restart Session.";
+"%1$@, the agent that wrote it, will %2$@. You'll see its progress on the task and in its session." = "%1$@, the agent that wrote it, will %2$@. You'll see its progress on the task and in its session.";
+"%@ moved 1 commit since" = "%@ moved 1 commit since";
+"Checking the branch…" = "Checking the branch…";
+"Comment on the whole change instead" = "Comment on the whole change instead";
+"commit what's left uncommitted" = "commit what's left uncommitted";
+"Landed or closed" = "Landed or closed";
+"Merge the branch." = "Merge the branch.";
+"merge" = "merge";
+"No code changes" = "No code changes";
+"Open a pull request for the branch." = "Open a pull request for the branch.";
+"Other ways to land it" = "Other ways to land it";
+"Read Report" = "Read Report";
+"rebase onto %@ and fix conflicts" = "rebase onto %@ and fix conflicts";
+"run the tests" = "run the tests";
+"squash it into one commit" = "squash it into one commit";
+
+/* Task delivery, landing hand-over, undelivered review comments */
+"%@ kept a menu open in the task's session, so the message wasn't typed — open the session, answer it, then try again." = "%@ kept a menu open in the task's session, so the message wasn't typed — open the session, answer it, then try again.";
+"Couldn't check on the agent in the task's session — is the workspace running?" = "Couldn't check on the agent in the task's session — is the workspace running?";
+"Handing over to %@…" = "Handing over to %@…";
+"The landing brief didn't reach %@." = "The landing brief didn't reach %@.";
+"%d review comment(s) that never reached the agent will be discarded." = "%d review comment(s) that never reached the agent will be discarded.";
+"%d comment(s) didn't reach the agent before it handed the task back. Send them back again?" = "%d comment(s) didn't reach the agent before it handed the task back. Send them back again?";
+"Send Back Again" = "Send Back Again";
+"not delivered" = "not delivered";
+"The agent handed the task back before this comment reached it." = "The agent handed the task back before this comment reached it.";
+"Report" = "Report";
+
+/* Task board QA fixes (launch watch, plurals, card menus) */
+"1 comment" = "1 comment";
+"%d comments" = "%d comments";
+"1 comment drafted" = "1 comment drafted";
+"%d comments drafted" = "%d comments drafted";
+"1 review comment that never reached the agent will be discarded." = "1 review comment that never reached the agent will be discarded.";
+"%d review comments that never reached the agent will be discarded." = "%d review comments that never reached the agent will be discarded.";
+"1 comment didn't reach the agent before it handed the task back. Send it back again?" = "1 comment didn't reach the agent before it handed the task back. Send it back again?";
+"%d comments didn't reach the agent before it handed the task back. Send them back again?" = "%d comments didn't reach the agent before it handed the task back. Send them back again?";
+"Deselect" = "Deselect";
+"Select" = "Select";
+"Retry Landing" = "Retry Landing";
+"Read Transcript" = "Read Transcript";
+"Phase %d" = "Phase %d";
+"Selected" = "Selected";
+"In backlog" = "In backlog";
+"Land it again with the same choices" = "Land it again with the same choices";
+"There's unsent text in %@'s input box in the task's session, so the message wasn't typed — open the session, send or clear it, then try again." = "There's unsent text in %@'s input box in the task's session, so the message wasn't typed — open the session, send or clear it, then try again.";
+"%@ exited right after it started (status %d) — open the session to see why, then Restart Session." = "%@ exited right after it started (status %d) — open the session to see why, then Restart Session.";
+"%@ quit right after it started — open the session to see why, then Restart Session." = "%@ quit right after it started — open the session to see why, then Restart Session.";
+"Close without landing" = "Close without landing";
+"%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back.";
+"The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back.";
+"The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again.";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "Not sent — the session's tab is gone or now belongs to something else.";
+"Not sent — the agent isn't running in the session's tab any more." = "Not sent — the agent isn't running in the session's tab any more.";
+"No such task." = "No such task.";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead.";
+"The task is done: there's no agent to stop." = "The task is done: there's no agent to stop.";
+"The task isn't running: there's no agent to stop." = "The task isn't running: there's no agent to stop.";
+"Waiting — the agent is asking you something; answer the card first" = "Waiting — the agent is asking you something; answer the card first";
+"Waiting — %@ is asking you something; answer the card first" = "Waiting — %@ is asking you something; answer the card first";
+"Not sent — the agent is asking you something. Answer it first, then send again." = "Not sent — the agent is asking you something. Answer it first, then send again.";
+"Not sent — typing it into the session failed. Edit it or send it again." = "Not sent — typing it into the session failed. Edit it or send it again.";
+"Restart Session relaunches %@ on this task's worktree." = "Restart Session relaunches %@ on this task's worktree.";
+"Task brief" = "Task brief";
+"Show less" = "Show less";
+"Show more" = "Show more";
+"Copy Reply" = "Copy Reply";
+"Copy as Markdown" = "Copy as Markdown";
+"Copy the whole reply as Markdown" = "Copy the whole reply as Markdown";
+"Showing first %@ of %@ characters" = "Showing first %@ of %@ characters";
+"Copy full output" = "Copy full output";
+"Copy this file's diff" = "Copy this file's diff";
+"Copy Diff" = "Copy Diff";
+"Copy the whole diff shown here as a patch" = "Copy the whole diff shown here as a patch";
+"Copy Pane History" = "Copy Pane History";
+"Copied 1 line" = "Copied 1 line";
+"Copied %@ lines" = "Copied %@ lines";
+"Couldn't read the terminal's history" = "Couldn't read the terminal's history";
+"Copy message" = "Copy message";
+"%@ characters" = "%@ characters";
+"Showing the start of %@ characters" = "Showing the start of %@ characters";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "Delivered — queued by the agent";
+"Delivered — queued by %@" = "Delivered — queued by %@";
+"1 delegation call" = "1 delegation call";
+"%d delegation calls" = "%d delegation calls";
+"downloaded — install scripts could not be checked" = "downloaded — install scripts could not be checked";
+"Bromure — approval needed" = "Bromure — approval needed";
+"No answer within %d s counts as Don't allow." = "No answer within %d s counts as Don't allow.";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again.";
+"Allow this request for 15 minutes" = "Allow this request for 15 minutes";
+"Allow this request for the rest of the session" = "Allow this request for the rest of the session";
+"Provider unreachable" = "Provider unreachable";
+"Usage limit reached" = "Usage limit reached";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi approvals";
+"Never ask" = "Never ask";
+"Ask before sensitive actions" = "Ask before sensitive actions";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume.";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "Blocked by Bromure — prompt injection";
+"Blocked by Bromure — rogue instructions" = "Blocked by Bromure — rogue instructions";
+"Blocked by Bromure — credential leak" = "Blocked by Bromure — credential leak";
+"Blocked by Bromure — supply chain" = "Blocked by Bromure — supply chain";
+"Blocked by Bromure — client certificate" = "Blocked by Bromure — client certificate";
+"Blocked by Bromure" = "Blocked by Bromure";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "Nothing reached the provider. The Security Timeline has the details; send again once it's resolved.";
+"Credential approval" = "Credential approval";
+"allowed for 1 hour" = "allowed for 1 hour";
+"allowed for 5 minutes" = "allowed for 5 minutes";
+"allowed for the rest of the session" = "allowed for the rest of the session";
+"denied — no answer in time; the next request asks again" = "denied — no answer in time; the next request asks again";
+"denied — you said no a moment ago" = "denied — you said no a moment ago";
+"denied by you" = "denied by you";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again.";
+"Last refreshed %@" = "Last refreshed %@";
+"Not refreshed since sign-in" = "Not refreshed since sign-in";
+"access token expires %@" = "access token expires %@";
+"access token renews on next use" = "access token renews on next use";
+"(exit code %d)" = "(exit code %d)";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "Not delivered — the agent didn't take it in. Edit it or send it again.";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace).";
+"Closes the editor without saving changes" = "Closes the editor without saving changes";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok asks whether xAI may keep your coding data";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "Asking you something";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session.";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "No answer within %1$d s means “%2$@”.";
+"The workspace %@ will be shut down." = "The workspace %@ will be shut down.";
+"The workspaces %@ will be shut down." = "The workspaces %@ will be shut down.";
+"The workspace %@ will be suspended and resume where it left off." = "The workspace %@ will be suspended and resume where it left off.";
+"The workspaces %@ will be suspended and resume where they left off." = "The workspaces %@ will be suspended and resume where they left off.";
+
+/* QA round 4 */
+"“%@”" = "“%@”";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal.";
+"Open the terminal" = "Open the terminal";
+"Opt out" = "Opt out";
+"Opt in" = "Opt in";
+"Grok's own setting; you can change it later in Grok's /settings." = "Grok's own setting; you can change it later in Grok's /settings.";
+
+"Listing its tools" = "Listing its tools";
+"Looking up %@" = "Looking up %@";
+"Reading earlier output" = "Reading earlier output";
+"Reading earlier output #%@" = "Reading earlier output #%@";
+"tool lookup" = "tool lookup";
+"earlier output" = "earlier output";
+"Instructions for the agent" = "Instructions for the agent";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again.";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "1 review comment hasn't reached the agent yet — landing now merges without it.";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "%d review comments haven't reached the agent yet — landing now merges without them.";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "Waiting — a menu is open in the agent's terminal; answer it there or dismiss it";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "Waiting — a menu is open in %@'s terminal; answer it there or dismiss it";
+"Open terminal" = "Open terminal";
+"Dismiss (Esc)" = "Dismiss (Esc)";
+"Conversation compacted" = "Conversation compacted";
+"The agent's work is its report above — there is no diff to read." = "The agent's work is its report above — there is no diff to read.";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "The sign-in machine didn't become ready, so the %@ sign-in couldn't start.";
+"The %@ sign-in command didn't start in the sign-in machine." = "The %@ sign-in command didn't start in the sign-in machine.";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "The sign-in machine stayed busy (%1$@), so the %2$@ sign-in couldn't start.";
+"Couldn't start the %@ sign-in" = "Couldn't start the %@ sign-in";
+"Retry types the sign-in command into the sign-in machine again." = "Retry types the sign-in command into the sign-in machine again.";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "%@ subscription not signed in";
+"using API key" = "using API key";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.";
+"Time limit" = "Time limit";
+"On — untick to switch this rule off without deleting it" = "On — untick to switch this rule off without deleting it";
+"Off — this rule is ignored until you tick it" = "Off — this rule is ignored until you tick it";
+"On for 15 minutes" = "On for 15 minutes";
+"On for 1 hour" = "On for 1 hour";
+"On until the workspace stops" = "On until the workspace stops";
+"Make permanent" = "Make permanent";
+"until stop" = "until stop";
+"expired" = "expired";
+"On until this workspace stops, then switched off automatically" = "On until this workspace stops, then switched off automatically";
+"Switches off automatically at %@" = "Switches off automatically at %@";
+"Turn this rule on for a limited time" = "Turn this rule on for a limited time";
+"%@ — default policy" = "%@ — default policy";
+"Allow…" = "Allow…";
+"Rule…" = "Rule…";
+"Block…" = "Block…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "Change this workspace's firewall rules in its settings on the Mac that runs it.";
+"Allow %@" = "Allow %@";
+"Allow all of %@" = "Allow all of %@";
+"Block %@" = "Block %@";
+"Block all of %@" = "Block all of %@";
+"Switch off rule “%@”" = "Switch off rule “%@”";
+"Remove rule “%@”" = "Remove rule “%@”";
+"The rule that allowed this is no longer in the workspace's rules." = "The rule that allowed this is no longer in the workspace's rules.";
+"Always" = "Always";
+"For 15 minutes" = "For 15 minutes";
+"For 1 hour" = "For 1 hour";
+"Until the workspace stops" = "Until the workspace stops";
+"Add a rule allowing this destination — applies to the running workspace at once" = "Add a rule allowing this destination — applies to the running workspace at once";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "Switch off the rule that allowed this, or block the destination — applies at once";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "New commits since the last review";
+"The full repository (baseline)" = "The full repository (baseline)";
+"New commits" = "New commits";
+"Baseline review at %@" = "Baseline review at %@";
+"Review of new commits %1$@…%2$@" = "Review of new commits %1$@…%2$@";
+"Review of the last %1$d commits up to %2$@" = "Review of the last %1$d commits up to %2$@";
+"No new commits since the last review (%@)" = "No new commits since the last review (%@)";
+"%@ (not set up here)" = "%@ (not set up here)";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan.";
+"Scheduled review" = "Scheduled review";
+"Start with a full-repository baseline" = "Start with a full-repository baseline";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code.";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run.";
+"Reviewed through %1$@ (%2$@)." = "Reviewed through %1$@ (%2$@).";
+"The first review covers the whole repository; later ones only what's new." = "The first review covers the whole repository; later ones only what's new.";
+"Nothing reviewed yet: the first review covers the last %d commits." = "Nothing reviewed yet: the first review covers the last %d commits.";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens.";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review).";
+"Now watching %@ — the first review is starting." = "Now watching %@ — the first review is starting.";
+"Run Baseline Now" = "Run Baseline Now";
+"Review the commits that landed since the last review" = "Review the commits that landed since the last review";
+"Review the whole repository" = "Review the whole repository";
+"Review the new commits on %@ now" = "Review the new commits on %@ now";
+"New commits %1$@ %2$02d:00" = "New commits %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "allow";
+"deny" = "deny";
+"“%@” no longer allows it" = "“%@” no longer allows it";
+"connection closed — %@" = "connection closed — %@";
+"Blocked now" = "Blocked now";
+"Allowed now" = "Allowed now";
+"Blocked now by “%@”" = "Blocked now by “%@”";
+"Allowed now by “%@”" = "Allowed now by “%@”";
+"Blocked now by the default policy" = "Blocked now by the default policy";
+"Allowed now by the default policy" = "Allowed now by the default policy";
+"“%@” exists and is off" = "“%@” exists and is off";
+"“%@” is on until the workspace stops" = "“%@” is on until the workspace stops";
+"“%1$@” is on until %2$@" = "“%1$@” is on until %2$@";
+"“%@” is already on, with no time limit" = "“%@” is already on, with no time limit";
+"The workspace's rules have changed since this connection" = "The workspace's rules have changed since this connection";
+"Log allowed connections" = "Log allowed connections";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules.";
+"Enable rule %@" = "Enable rule %@";
+"Time limit set" = "Time limit set";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits.";
+"The rules changed outside the editor while you have unsaved edits." = "The rules changed outside the editor while you have unsaved edits.";
+"Reload" = "Reload";
+"Keep my edits" = "Keep my edits";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "connection closed (proxy) — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "connection closed (direct) — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "Also seen as: %@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "Move rule up";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "Move rule down";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "Delete rule";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "List allowed connections in the Security Timeline too";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "Loading conversation…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "Loading earlier conversation… (%@ of %@)";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "Couldn't load this conversation — the machine didn't answer in time.";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "This session's conversation wasn't found on its machine.";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "Ask a Session to Fix It";
+"Ask a Session Instead…" = "Ask a Session Instead…";
+"Ask a Session or the Switchboard…" = "Ask a Session or the Switchboard…";
+"Show the findings for %@" = "Show the findings for %@";
+"Sent to %@ to fix" = "Sent to %@ to fix";
+"Sent to %@ — it works on the fix in its own session." = "Sent to %@ — it works on the fix in its own session.";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "The repository has no remote to push to — merge it without pushing.";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "Merged into %@, but couldn't reach the workspace to push it — is it running?";
+"Merge & Push" = "Merge & Push";
+"Push %1$@ to %2$@" = "Push %1$@ to %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes.";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "Couldn't send it to %1$@: %2$@";
+"that session is gone" = "that session is gone";
+"the server didn't answer" = "the server didn't answer";
+"the server runs an older Bromure — update it to hand findings to a session" = "the server runs an older Bromure — update it to hand findings to a session";
+"the server refused it" = "the server refused it";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "Couldn't hand it to %1$@: %2$@";
+"a menu or dialog stayed open in that session" = "a menu or dialog stayed open in that session";
+"something else was typed in that session's input box" = "something else was typed in that session's input box";
+"Couldn't hand it to the Switchboard: %@" = "Couldn't hand it to the Switchboard: %@";
+"the Switchboard session is gone" = "the Switchboard session is gone";
+"the message couldn't be typed into the Switchboard" = "the message couldn't be typed into the Switchboard";
+"the Switchboard's agent never started" = "the Switchboard's agent never started";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent";
+"Hand It Over Anyway" = "Hand It Over Anyway";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over.";
+"Couldn't start the fix: %@" = "Couldn't start the fix: %@";
+"Couldn't ask the Switchboard: %@" = "Couldn't ask the Switchboard: %@";
+"that finding is gone" = "that finding is gone";
+"couldn't start the fix" = "couldn't start the fix";
+"no Switchboard could be started" = "no Switchboard could be started";

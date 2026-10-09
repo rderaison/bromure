@@ -16,6 +16,13 @@ import Foundation
 @MainActor
 protocol MCPLineHandler: AnyObject {
     func handle(line: String, branch: String?) async -> String?
+    /// The answer to `line` couldn't be written (the connection is gone):
+    /// whatever answering it took must not count as seen.
+    @MainActor func responseNotWritten(to line: String, branch: String?)
+}
+
+extension MCPLineHandler {
+    @MainActor func responseNotWritten(to line: String, branch: String?) {}
 }
 
 @MainActor
@@ -61,6 +68,9 @@ final class TaskBoardMCPServer: MCPLineHandler {
         case "tools/call":
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
+            if name == "board_report_landing" {
+                return respond(id: id, result: await reportLanding(args: args, branch: branch))
+            }
             return respond(id: id, result: callTool(name: name, args: args, branch: branch))
         default:
             guard id != nil else { return nil }
@@ -72,33 +82,39 @@ final class TaskBoardMCPServer: MCPLineHandler {
 
     static let serverInstructions = """
     Tools for the Bromure coding board. This session IS a board task: \
-    board_get_task returns your card (brief, review comments, plan); \
-    board_set_plan records the agreed plan on the card; \
-    board_create_subtasks files follow-up work as new backlog cards \
+    board_get_task returns your task (description, review comments, plan); \
+    board_set_plan records the agreed plan on the task; \
+    board_create_subtasks files follow-up work as phases in the Plan column \
     (declare inter-phase ordering in dependsOn — prose is not enforced); \
     board_set_dependencies corrects a filed phase's dependency list; \
-    board_ready_for_review hands this task to the Testing/Review column — \
-    call it as your last action once everything is committed.
+    board_ready_for_review hands this task to the Review column — \
+    call it as your last action once everything is committed; \
+    board_report_landing reports how landing an approved task went \
+    (merged, pr_opened, or blocked with the reason).
     """
 
     static let toolDefinitions: [[String: Any]] = [
         [
             "name": "board_get_task",
-            "description": "The coding-board card this session is working on: title, brief, stage, plan, and review comments.",
+            "description": "The coding-board task this session is working on: title, description, stage, plan, and review comments.",
             "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
         ],
         [
             "name": "board_set_plan",
-            "description": "Record the agreed implementation plan (markdown) on this task's card. Overwrites the previous plan.",
+            "description": "Record the agreed implementation plan (markdown) on this task. Overwrites the previous plan.",
             "inputSchema": [
                 "type": "object",
-                "properties": ["plan": ["type": "string", "description": "The plan, markdown."]],
+                "properties": [
+                    "plan": ["type": "string", "description": "The plan, markdown."],
+                    "phaseCount": ["type": "integer",
+                                   "description": "How many phases the plan has in total (filed or still to file). The brief only counts as done once that many phases are filed and done."],
+                ],
                 "required": ["plan"],
             ],
         ],
         [
             "name": "board_create_subtasks",
-            "description": "File follow-up work as ordered cards in the board's Plan column, linked to this task (same workspace and repository). Use for work that is out of scope for this session. Each may declare dependsOn: 1-based phase numbers (counting ALL phases filed for this task so far, across calls, in filing order) that must be DONE before it can start. dependsOn metadata is the ONLY sequencing the board enforces — dependencies described in a phase's text are ignored, and a phase without dependsOn can start in parallel with everything else.",
+            "description": "File follow-up work as ordered phases (tasks) in the board's Plan column, linked to this task (same workspace and repository). Use for work that is out of scope for this session. Each may declare dependsOn: 1-based phase numbers (counting ALL phases filed for this task so far, across calls, in filing order) that must be DONE before it can start. dependsOn metadata is the ONLY sequencing the board enforces — dependencies described in a phase's text are ignored, and a phase without dependsOn can start in parallel with everything else.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -108,7 +124,7 @@ final class TaskBoardMCPServer: MCPLineHandler {
                             "type": "object",
                             "properties": [
                                 "title": ["type": "string"],
-                                "details": ["type": "string", "description": "Markdown brief."],
+                                "details": ["type": "string", "description": "Markdown description of the phase."],
                                 "dependsOn": ["type": "array", "items": ["type": "integer"],
                                               "description": "1-based phase numbers this one waits for, counting all phases filed for this task so far (earlier calls included)."],
                             ],
@@ -142,10 +158,39 @@ final class TaskBoardMCPServer: MCPLineHandler {
         ],
         [
             "name": "board_ready_for_review",
-            "description": "Hand this task to the Testing/Review column. Call ONLY after all work is committed to the branch.",
+            "description": "Hand this task to the Review column. Call ONLY after all work is committed to the branch.",
             "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
         ],
+        [
+            "name": "board_report_landing",
+            "description": "Report how landing this approved task went: \"merged\" once the target branch has your work (Bromure checks it in git), \"pr_opened\" with the pull request's URL, or \"blocked\" with the reason when you can't land it.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "status": ["type": "string", "enum": ["merged", "pr_opened", "blocked"]],
+                    "summary": ["type": "string", "description": "One line: what landed where, or what's in the way."],
+                    "prURL": ["type": "string", "description": "The pull request's URL (pr_opened)."],
+                ],
+                "required": ["status", "summary"],
+            ],
+        ],
     ]
+
+    /// board_report_landing: the task's agent says how its landing went.
+    private func reportLanding(args: [String: Any], branch: String?) async -> [String: Any] {
+        // A task Bromure just saw land (Done, in its post-landing grace)
+        // still answers its agent's report.
+        guard let task = resolveTask(branch: branch) ?? recentlyLandedTask(branch: branch) else {
+            return errorResult("This session isn't bound to a board task (branch: \(branch ?? "none")).")
+        }
+        guard let engine = engine() else { return errorResult("board unavailable") }
+        let status = args["status"] as? String ?? ""
+        let summary = args["summary"] as? String ?? ""
+        let r = await engine.reportLanding(task.id, status: status, summary: summary,
+                                           prURL: args["prURL"] as? String)
+        BACDebug.log("tasks", "“\(task.title)”: landing reported via MCP (\(status))")
+        return r.ok ? textResult(r.message) : errorResult(r.message)
+    }
 
     /// The task this connection is working on: the branch's live task in
     /// this workspace (in progress or already in review for late calls).
@@ -164,6 +209,19 @@ final class TaskBoardMCPServer: MCPLineHandler {
                 : "waits for \(deps.map(String.init).joined(separator: ", "))"
             return "\(numByID[p.id]!). \(p.title) (\(suffix))"
         }.joined(separator: "\n")
+    }
+
+    /// The branch's Done task while it is still in its post-landing grace.
+    private func recentlyLandedTask(branch: String?) -> CodingTask? {
+        guard let branch, branch.hasPrefix("wt/"), let store = store(),
+              let engine = engine() else { return nil }
+        let slugPart = String(branch.dropFirst(3))
+        return store.tasks.first { t in
+            guard t.profileID == profileID, t.stage == .done,
+                  engine.inLandingGrace(t.id), let slug = t.branchSlug else { return false }
+            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
+                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
+        }
     }
 
     private func resolveTask(branch: String?) -> CodingTask? {
@@ -207,14 +265,16 @@ final class TaskBoardMCPServer: MCPLineHandler {
                   !plan.trimmingCharacters(in: .whitespaces).isEmpty else {
                 return errorResult("plan (markdown) is required")
             }
+            let phaseCount = (args["phaseCount"] as? Int).flatMap { (1...200).contains($0) ? $0 : nil }
             store.mutate(task.id) {
                 $0.plan = plan
+                if let phaseCount { $0.plannedPhases = phaseCount }
                 // A planner session delivering output ends the card's
                 // in-flight spinner.
                 if $0.stage == .backlog { $0.validatedAt = Date() }
             }
             BACDebug.log("tasks", "“\(task.title)”: plan recorded via MCP")
-            return textResult("Plan recorded on the card.")
+            return textResult("Plan recorded on the task.")
         case "board_create_subtasks":
             guard let raw = args["subtasks"] as? [[String: Any]], !raw.isEmpty else {
                 return errorResult("subtasks (non-empty array) is required")
@@ -281,10 +341,10 @@ final class TaskBoardMCPServer: MCPLineHandler {
             BACDebug.log("tasks", "“\(task.title)”: \(titles.count) subtask(s) filed via MCP")
             // Echo the RECORDED graph so the planner can catch a phase it
             // forgot to sequence (prose dependencies are not enforced).
-            return textResult("Filed \(titles.count) card(s). Recorded phase list:\n"
+            return textResult("Filed \(titles.count) phase(s). Recorded phase list:\n"
                 + dependencyGraphSummary(parentID: task.id, store: store)
                 + "\nOnly dependsOn metadata sequences phases — anything only "
-                + "stated in a brief is NOT enforced. Fix omissions with "
+                + "stated in a phase's description is NOT enforced. Fix omissions with "
                 + "board_set_dependencies.")
         case "board_set_dependencies":
             guard let raw = args["dependencies"] as? [[String: Any]], !raw.isEmpty else {
@@ -325,7 +385,7 @@ final class TaskBoardMCPServer: MCPLineHandler {
                 return errorResult("could not move the task to review — is the branch still checked out?")
             }
             BACDebug.log("tasks", "“\(task.title)”: handed to review via MCP")
-            return textResult("Task moved to Testing/Review. The user reviews the diff from here.")
+            return textResult("Task moved to Review. The user reviews the diff from here; when they approve it you may be asked to land it.")
         default:
             return errorResult("Unknown tool: \(name)")
         }
@@ -471,25 +531,29 @@ final class TaskMCPVsockBridge: NSObject {
                         if BACDebug.enabled, line.contains("\"tools/call\"") {
                             BACDebug.log("mcp", "tools/call dispatched after \(BACDebug.ms(arrived))")
                         }
-                        if let resp = await self.server.handle(line: line, branch: bound) {
-                            self.writeLine(resp)
+                        if let resp = await self.server.handle(line: line, branch: bound),
+                           !self.writeLine(resp) {
+                            self.server.responseNotWritten(to: line, branch: bound)
                         }
                     }
                 }
             }
         }
 
-        private func writeLine(_ s: String) {
-            guard fd >= 0 else { return }
+        /// Whether all of it was written (false: the connection is gone).
+        @discardableResult
+        private func writeLine(_ s: String) -> Bool {
+            guard fd >= 0, readSource != nil else { return false }
             var data = Data(s.utf8); data.append(0x0A)
-            data.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
+            return data.withUnsafeBytes { raw -> Bool in
+                guard let base = raw.baseAddress else { return false }
                 var off = 0, rem = raw.count
                 while rem > 0 {
                     let w = Darwin.write(fd, base.advanced(by: off), rem)
-                    if w <= 0 { break }
+                    if w <= 0 { return false }
                     off += w; rem -= w
                 }
+                return true
             }
         }
     }

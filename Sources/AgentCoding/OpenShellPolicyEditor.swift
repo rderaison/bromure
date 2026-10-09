@@ -24,7 +24,8 @@ struct FirewallEditor: View {
             .frame(maxWidth: 360)
 
             switch mode {
-            case .rules:     EgressRulesEditor(pfText: $draft.egressRules)
+            case .rules:     EgressRulesEditor(pfText: $draft.egressRules, profileID: draft.id,
+                                               logAllowed: $draft.logAllowedConnections)
             case .openShell: OpenShellPolicyEditor(draft: $draft)
             }
         }

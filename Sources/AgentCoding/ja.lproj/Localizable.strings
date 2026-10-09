@@ -378,7 +378,10 @@
 
 /* App quit confirmation alert (⌘Q with running VMs) */
 "Quit Bromure Agentic Coding?" = "Bromure Agentic Coding を終了しますか？";
-"%d VM(s) currently running (%@) will be closed according to each workspace's close action." = "現在実行中の %d 個の VM (%@) は、各ワークスペースの終了動作に従って閉じられます。";
+"The workspace %@ is running. It will be closed according to its close action." = "ワークスペース %@ が実行中です。終了動作に従って閉じられます。";
+"%1$d workspaces are running (%2$@). Each will be closed according to its close action." = "%1$d 個のワークスペースが実行中です (%2$@)。それぞれの終了動作に従って閉じられます。";
+"The infrastructure machine %@ is running and will be suspended." = "インフラストラクチャマシン %@ が実行中です。サスペンドされます。";
+"%1$d infrastructure machines are running (%2$@) and will be suspended." = "%1$d 台のインフラストラクチャマシンが実行中です (%2$@)。サスペンドされます。";
 "Quit" = "終了";
 
 /* Guardrails: new prompt-on-write mode */
@@ -468,7 +471,6 @@
 "Allow this request" = "このリクエストを許可";
 "Bromure scans the agent's AI traffic on-device for injected instructions — nothing leaves the Mac. Each detector uses a local model, downloaded from bromure.io the first time you enable it." = "Bromure はエージェントの AI トラフィックを端末上で解析し、注入された指示を検出します。データは Mac の外に出ません。各検出器はローカルモデルを使用し、初回有効化時に bromure.io からダウンロードされます。";
 "Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable." = "エージェントが読み込むファイル内容・Web ページ・ツール出力を評価します（Prompt Guard）。悪意あるリポジトリに隠された「以前の指示を無視 / 機密を持ち出す」を検出します。初回有効化時に約 272 MB をダウンロードします。";
-"Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable." = "Claude Code・Codex・Grok が権威として読み込む CLAUDE.md・AGENTS.md・GROK.md などの指示／設定ファイルを評価します。初回有効化時に約 571 MB をダウンロードします。";
 "“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "「記録して続行」は検出をセキュリティログ ウインドウに記録します。「どうするか確認する」はリクエストを一時停止し、該当テキストを表示します。「ブロック」はリクエストを失敗させます。";
 "Possible %@ in “%@”" = "「%@」に %@ の可能性";
 "Bromure flagged content the agent is about to send to the model (from %@). Review it below — allow it through, or block this request?" = "エージェントがモデルに送信しようとしている内容（%@ から）を Bromure が検出しました。下記を確認し、許可するかこのリクエストをブロックしてください。";
@@ -1228,34 +1230,24 @@
 "Backlog" = "バックログ";
 "No tasks yet — write one." = "タスクはまだありません — 作成してください。";
 "Plan" = "計画";
-"No phases yet — click Plan on a backlog card." = "フェーズはまだありません — バックログのカードで「計画」をクリックしてください。";
-"Start %d selected" = "選択した%d件を開始";
-"One-shots every selected phase. Phases whose dependencies aren't Done queue and auto-start when they are." = "選択した各フェーズを一括実行します。依存関係が完了していないフェーズは待機し、完了すると自動的に開始されます。";
 "Move to Testing" = "「テスト」に移動";
 "Close Without Merging" = "マージせずに閉じる";
-"Stop Agent & Delete Worktree" = "エージェントを停止してworktreeを削除";
-"Remove Card Only" = "カードのみ削除";
 "Testing/Review" = "テスト／レビュー";
 "Nothing to review" = "レビュー待ちはありません";
 "Merge into %@…" = "%@にマージ…";
 "parent" = "親ブランチ";
 "Back to In Progress" = "「進行中」に戻す";
-"Delete Worktree & Branch" = "worktreeとブランチを削除";
 "Nothing shipped yet" = "完了したものはまだありません";
 "Remove from board" = "ボードから削除";
 "Remove “%@”?" = "「%@」を削除しますか？";
-"Stopping deletes the agent session and its uncommitted/unmerged work in the worktree. “Remove Card Only” leaves them in the workspace." = "停止するとエージェントセッションと、worktree内の未コミット／未マージの作業が削除されます。「カードのみ削除」ならワークスペースに残ります。";
 "This can't be undone." = "この操作は取り消せません。";
 "queued" = "待機中";
 "Starts automatically when its dependencies are Done." = "依存関係が完了すると自動的に開始されます。";
 "Phases that must be Done before this one starts." = "このフェーズの開始前に完了している必要のあるフェーズ。";
 "Untitled task" = "無題のタスク";
 "planning — click to watch" = "計画中 — クリックして表示";
-"A visible planning session is running — click the card to open it; phases appear in the Plan column as it files them." = "計画セッションが実行中です — カードをクリックすると開きます。フェーズは登録されると「計画」列に表示されます。";
 "Plan reviewed by the agent" = "エージェントが計画をレビュー済み";
 "part of “%@”" = "「%@」の一部";
-"A planner agent reads the brief and the repository, then files ordered phase cards (with dependencies) in the Plan column." = "プランナーエージェントがブリーフとリポジトリを読み、順序付きのフェーズカード（依存関係付き）を「計画」列に登録します。";
-"One shot" = "ワンショット";
 "Straight to In Progress: the agent does the whole task autonomously and hands you the diff in Testing/Review." = "そのまま「進行中」へ：エージェントがタスク全体を自律的に実行し、テスト／レビューで差分を提示します。";
 "starting…" = "開始中…";
 "session gone" = "セッション消失";
@@ -1278,9 +1270,7 @@
 "Write" = "編集";
 "Preview" = "プレビュー";
 "Starting the task launches the agent in a fresh worktree of the repository with this brief as its prompt. It works on its own branch and commits its changes; you review the diff in Testing, then merge." = "タスクを開始すると、このブリーフをプロンプトとして、リポジトリの新しいworktreeでエージェントが起動します。専用ブランチで作業してコミットし、あなたはテストで差分をレビューしてからマージします。";
-"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column." = "保存してから、見える計画セッションを開きます。エージェントがリポジトリを調査し（質問できます — あなたが見えています）、依存関係付きの順序付きフェーズカードを「計画」列に登録します。";
 "Planning — %@" = "計画 — %@";
-"Your brief" = "あなたのブリーフ";
 "The agent explores the repository and may ask you questions here, then files the plan's phases onto the board." = "エージェントはリポジトリを調査し、ここで質問することがあります。その後、計画のフェーズをボードに登録します。";
 "1 question answered — %@" = "1件の質問に回答済み — %@";
 "%d questions answered — %@" = "%d件の質問に回答済み — %@";
@@ -1344,7 +1334,7 @@
 "The transcript file has no readable entries." = "トランスクリプトファイルに読み取れる項目がありません。";
 "No transcript" = "トランスクリプトなし";
 "This run's transcript couldn't be read." = "この実行のトランスクリプトを読み取れませんでした。";
-"⏎ send   ⌥⏎ newline" = "⏎ 送信   ⌥⏎ 改行";
+"⏎ send   ⇧⏎ newline" = "⏎ 送信   ⇧⏎ 改行";
 "Send (⏎)" = "送信 (⏎)";
 "The agent asked" = "エージェントからの質問（回答済み）";
 "The agent is asking %d questions — answer them all, then Submit" = "エージェントが%d件の質問をしています — すべて回答してから送信してください";
@@ -1366,11 +1356,8 @@
 "Couldn't reach the workspace — is it running?" = "ワークスペースに接続できません — 起動していますか？";
 "Plan: %@" = "計画: %@";
 "“%@” doesn't exist in the workspace — pick an existing folder, or edit the task and enable “Create folder & git repo”." = "「%@」はワークスペースに存在しません — 既存のフォルダを選ぶか、タスクを編集して「フォルダとgitリポジトリを作成」を有効にしてください。";
-"The planning session ended before filing phases — click Plan to retry." = "フェーズを登録する前に計画セッションが終了しました — 「計画」をクリックして再試行してください。";
-"The planning session timed out without filing phases — click Plan to retry." = "計画セッションがフェーズを登録しないままタイムアウトしました — 「計画」をクリックして再試行してください。";
 "The planning session never started — is the workspace running? Click Plan to retry." = "計画セッションが開始されませんでした — ワークスペースは起動していますか？「計画」をクリックして再試行してください。";
 "Claude exited before filing phases — click Plan to retry." = "フェーズを登録する前にClaudeが終了しました — 「計画」をクリックして再試行してください。";
-"The planning session was interrupted — click Plan to retry." = "計画セッションが中断されました — 「計画」をクリックして再試行してください。";
 "Merge → %@" = "マージ → %@";
 "PR: %@" = "PR: %@";
 
@@ -1381,7 +1368,6 @@
 "Types every drafted comment into the coding agent running in the active tab." = "下書きしたコメントをすべて、アクティブなタブで実行中のコーディングエージェントに入力します。";
 
 /* Plan column — batch selection bar */
-"Delete %d selected phase(s)?" = "選択した%d件のフェーズを削除しますか？";
 "Remove every selected phase from the board" = "選択したすべてのフェーズをボードから削除";
 
 /* Coding board — session restart */
@@ -1679,7 +1665,6 @@
 "The workspace did not start in time" = "ワークスペースが時間内に起動しませんでした";
 "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again." = "エージェントが現れませんでした。ワークスペースが古い VM 内エージェントを使っている可能性があります — 再起動（仮想マシン › ⋯ › 再起動）してからやり直してください。";
 "Under the Hood" = "内部を表示";
-"New task" = "新規タスク";
 "Describe what you want done (⌘N)" = "やってほしいことを書きます (⌘N)";
 "Search tasks" = "タスクを検索";
 "Virtual Machines" = "仮想マシン";
@@ -1774,9 +1759,6 @@
 "The task's checkout is gone, so there is nothing to resume into." = "タスクのチェックアウトがなくなっているため、再開する場所がありません。";
 "Reopen the agent on this task's branch to keep working — the task goes back to In Progress. If the branch was cleaned up, you'll be offered a fresh start instead." = "このタスクのブランチでエージェントを開き直して作業を続けます — タスクは「進行中」に戻ります。ブランチが片付けられていた場合は、代わりに最初からのやり直しが提案されます。";
 "Needs a fresh start" = "最初からのやり直しが必要";
-"The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch." = "%@ のチェックアウトがなくなっており、%@ に再作成できませんでした。「最初からやり直す」で新しいブランチでタスクを実行し直します。";
-"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch." = "タスクのブランチ %@ は %@ にもう存在しません — チェックアウトが削除されました（マージ後に片付けられたか、削除されたか）。「最初からやり直す」で新しいブランチでタスクを実行し直します。";
-"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@." = "リポジトリのフォルダ「%@」がワークスペースからなくなっているため、再開する場所がありません。「最初からやり直す」でタスクを最初から実行し直します%@。";
 ", cloning the repository first" = "（先にリポジトリをクローンします）";
 "Waking the workspace…" = "ワークスペースを起こしています…";
 "Starting the workspace…" = "ワークスペースを起動しています…";
@@ -1792,7 +1774,7 @@
 "The machine it runs on — running" = "実行するマシン — 実行中";
 "The machine it runs on — asleep, wakes up when you start" = "実行するマシン — スリープ中、開始すると起動します";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "作業場所：新しいフォルダ、既存のフォルダ、またはチェックアウトするリポジトリ";
-"⏎ start   ⌥⏎ newline" = "⏎ 開始   ⌥⏎ 改行";
+"⏎ start   ⇧⏎ newline" = "⏎ 開始   ⇧⏎ 改行";
 "Start the session (⏎)" = "セッションを開始 (⏎)";
 "Working in this folder — click to start in a new folder instead" = "このフォルダで作業中 — クリックすると代わりに新しいフォルダで開始します";
 "Work in this folder again" = "もう一度このフォルダで作業";
@@ -1811,7 +1793,7 @@
 "Up one folder" = "1 つ上のフォルダへ";
 "No folders in here yet." = "ここにはまだフォルダがありません。";
 "The machine's folders can't be read right now." = "マシンのフォルダを今は読み取れません。";
-"Message %@…  (or drop files)" = "%@ にメッセージ…  （ファイルのドロップも可）";
+"Message %@… (or drop files)" = "%@ にメッセージ…（ファイルのドロップも可）";
 "Ready · %@" = "準備完了 · %@";
 "Ended · %@ ago" = "終了 · %@前";
 "End “%@”?" = "「%@」を終了しますか？";
@@ -2017,7 +1999,7 @@
 "Streaming to bromure.io" = "bromure.io にストリーミング中";
 "Signed in to bromure.io" = "bromure.io にサインイン済み";
 "Log out" = "ログアウト";
-"Message the agent…  (or drop files)" = "エージェントにメッセージ…  （ファイルのドロップも可）";
+"Message the agent… (or drop files)" = "エージェントにメッセージ…（ファイルのドロップも可）";
 "Drop to attach" = "ドロップして添付";
 "Loading transcript…" = "トランスクリプトを読み込んでいます…";
 "Say what you need — the agent is listening." = "必要なことを伝えてください — エージェントが聞いています。";
@@ -2100,6 +2082,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "許可 — 証明書の検証をスキップ (X-bromure-insecure)。認証情報は注入されません";
 "To-dos" = "To-do";
 "⎋ stop   ⏎ send" = "⎋ 停止   ⏎ 送信";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ 停止   ⏎ 送信   ⇧⏎ 改行";
 "Stop the agent (Esc)" = "エージェントを停止 (Esc)";
 "Completed" = "完了";
 "Reopened" = "再開";
@@ -2800,7 +2783,7 @@
 "Viewed" = "確認済み";
 "Viewed — click to unmark" = "確認済み — クリックで解除";
 "What the changes are compared against" = "変更の比較対象";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ コメント追加   ⌥⏎ 改行   ⇧⌘⏎ エージェントに送信";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ コメント追加   ⇧⏎ 改行   ⇧⌘⏎ エージェントに送信";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (現在)";
@@ -2834,7 +2817,7 @@
 "The current commit" = "現在のコミット";
 "This machine has no branches made by Bromure." = "このマシンには Bromure が作成したブランチがありません。";
 "last commit %@" = "最終コミット %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ コメント追加   ⌥⏎ 改行   ⇧⌘⏎ 差し戻す";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ コメント追加   ⇧⏎ 改行   ⇧⌘⏎ 差し戻す";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "あなたの Slack アカウントにだけ応答します。チャンネルや他の人は無視されます。";
@@ -3127,3 +3110,1033 @@
 "%@ stopped as it started: %@" = "%1$@ は起動時に停止しました：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ はアーカイブ済みのセッション「%2$@」が使っていました（最終使用 %3$@）。このセッションで再利用しますか？";
 "Delegation" = "委任";
+
+/* Added for hotfixes-v5 */
+"Requests" = "リクエスト";
+"Working for others" = "他のセッションの依頼";
+"The model the agent last answered with" = "エージェントが最後に応答したモデル";
+"Time the agent spent working: %d turns, the longest %@" = "エージェントの作業時間：%d ターン、最長 %@";
+"Erasing and restoring storage is done on the server Mac." = "ストレージの消去と復元はサーバーの Mac で行います。";
+"Home folder size" = "ホームフォルダのサイズ";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "%d GB（現在のサイズ。ホームは縮小できません）から 1024 GB まで。大きくしたホームはワークスペースの次回起動時に反映されます。ディスクイメージはファイルが使う分だけ容量を消費します。";
+"Queued — sent when the agent is done" = "待機中 — エージェントの作業が終わると送信します";
+"Queued — sent when %@ is done" = "待機中 — %@ の作業が終わると送信します";
+"Queued — the agent reads it next" = "待機中 — エージェントが次に読みます";
+"Queued — %@ reads it next" = "待機中 — %@ が次に読みます";
+"Don't send it" = "送信しない";
+"Chart" = "グラフ";
+"Video" = "ビデオ";
+"Open in its own window" = "別ウインドウで開く";
+"Play video" = "ビデオを再生";
+"Not an image or a video this app can show." = "このアプリで表示できる画像やビデオではありません。";
+"This window can't read files from that machine." = "このウインドウからはそのマシンのファイルを読めません。";
+"Couldn't read %@." = "%@ を読み込めませんでした。";
+"That image couldn't be decoded." = "画像をデコードできませんでした。";
+"Couldn't prepare the video." = "ビデオを準備できませんでした。";
+"The chart couldn't be drawn: %@" = "グラフを描画できませんでした：%@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "別ウインドウで開く（チャット内では ⌥ + スクロールでグラフを拡大）";
+"No timed turns yet: the timeline fills in as the agent works." = "まだ計測済みのターンはありません。エージェントの作業に合わせてタイムラインが埋まっていきます。";
+"Hover a bar for what the agent was doing · click a turn to zoom in" = "バーにポインタを置くとエージェントの作業内容を表示 · ターンをクリックで拡大";
+"All turns" = "すべてのターン";
+"(no message)" = "（メッセージなし）";
+"of work across %d turns" = "%d ターンの作業";
+"in this turn" = "このターン";
+"tool calls" = "ツール呼び出し";
+"files edited" = "編集したファイル";
+"longest solo run" = "最長の単独作業";
+"Worked %@ on its own" = "%@ 自力で作業しました";
+"%d tool calls without a single prompt — “%@”" = "指示なしで %d 回のツール呼び出し —「%@」";
+"See it" = "見る";
+"“%@” — %@, %d tool calls · click to zoom in" = "「%@」— %@、ツール呼び出し %d 回 · クリックで拡大";
+"Thinking & writing — %@" = "思考と執筆 — %@";
+"No timed turns in this room yet." = "このルームにはまだ計測済みのターンはありません。";
+"of combined work by %d agents" = "%d 個のエージェントによる合計作業";
+"at once, at peak" = "同時稼働（ピーク）";
+"worked the most" = "最も長く作業";
+"Hover a bar for who was doing what, and for how long" = "バーにポインタを置くと、誰が何をどれだけしていたかを表示";
+"Thinking & writing" = "思考と執筆";
+"Edits" = "編集";
+"Reading & search" = "読み取りと検索";
+"Web" = "Web";
+"Sub-agents" = "サブエージェント";
+"MCP tools" = "MCP ツール";
+"Other tools" = "その他のツール";
+"%@ — timeline" = "%@ — タイムライン";
+"Room timeline: who worked when, and on what" = "ルームのタイムライン：誰がいつ何に取り組んだか";
+"Time the agent spent working: %d turns, the longest %@ — click for where it went" = "エージェントの作業時間：%d ターン、最長 %@ — クリックで内訳を表示";
+
+/* Installer: Local Network access (Sequoia) */
+"Bromure Needs Local Network Access" = "Bromure にはローカルネットワークへのアクセスが必要です";
+"The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "インストーラがこの Mac 上の Bromure に接続できませんでした。macOS Sequoia では、システム設定 › プライバシーとセキュリティ › ローカルネットワーク で Bromure Agentic Coding を許可してください。\n\nインストールは直接ダウンロードして続行します。すでにオンになっている場合は、一度オフにしてからオンに戻すか、Mac を再起動してください。Sequoia の仮想マシンのネットワークは、それまで停止したままになることがあります。";
+"Open Local Network Settings" = "ローカルネットワーク設定を開く";
+
+/* Models: your environment (auto mode) */
+"Applies to every workspace from its next launch." = "各ワークスペースの次回起動から適用されます。";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "このセッションのフォルダでターミナルを開く";
+"Drag to resize" = "ドラッグしてサイズを変更";
+"Hide — the shell keeps running (⌃`)" = "隠す — シェルは動き続けます (⌃`)";
+"Close the terminal (ends the shell)" = "ターミナルを閉じる (シェルを終了)";
+"The terminal isn't available right now." = "ターミナルは現在使用できません。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "最新の内容を取得中…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "このターンの開始以降、変更はありません。";
+
+/* Repository watches + Automations hub */
+"%1$@ · ×%2$d" = "%1$@ · ×%2$d";
+"%1$d new finding(s) in %2$@" = "%2$@ で %1$d 件の新しい検出事項";
+"%d dismissed" = "却下 %d 件";
+"%d duplicate" = "重複 %d 件";
+"%d finding(s)" = "検出事項 %d 件";
+"%d fixed" = "修正済み %d 件";
+"%d need attention" = "要対応 %d 件";
+"%d new" = "新規 %d 件";
+"%d scanning continuously" = "%d 件を継続スキャン中";
+"A fix is a coding task on its own branch — it waits in review for you before anything merges. At most three automatic fixes run at once per repository." = "修正は専用ブランチ上のコーディングタスクです。マージされる前にレビュー待ちになります。自動修正は 1 つのリポジトリにつき同時に最大 3 件まで実行されます。";
+"A repository watch manages this automation — edit the watch in the Automations hub's Repositories tab. Changes made here are replaced the next time the watch is saved." = "このオートメーションはリポジトリ監視によって管理されています。監視の編集はオートメーションハブの「リポジトリ」タブで行ってください。ここで行った変更は、次に監視を保存したときに置き換えられます。";
+"A watch scans a GitHub repository with an agent in one of your workspaces: the whole codebase on a schedule, and every new commit and pull request as they land. Findings are deduplicated across scans." = "監視は、ワークスペースのいずれかでエージェントを使って GitHub リポジトリをスキャンします。コードベース全体をスケジュールに従って、また新しいコミットやプルリクエストは届くたびにスキャンします。検出事項はスキャン間で重複排除されます。";
+"Agent working on the fix" = "エージェントが修正中";
+"All" = "すべて";
+"All %d" = "すべて (%d)";
+"All repositories" = "すべてのリポジトリ";
+"Any severity" = "すべての重大度";
+"Bug" = "バグ";
+"Bugs" = "バグ";
+"Checkout in the workspace" = "ワークスペース内のチェックアウト先";
+"Closed" = "クローズ";
+"Commit" = "コミット";
+"Commit and pull-request scans put third-party text in front of an agent, so they require the PromptGuard model. It downloads when you save the watch; until it's ready, those scans are blocked." = "コミットとプルリクエストのスキャンでは第三者のテキストをエージェントに渡すため、PromptGuard モデルが必要です。監視を保存するとダウンロードされます。準備ができるまで、これらのスキャンはブロックされます。";
+"Commits" = "コミット";
+"Couldn't clone %1$@ into %2$@ — %3$@" = "%1$@ を %2$@ にクローンできませんでした — %3$@";
+"Critical" = "緊急";
+"Critical finding in %@" = "%@ に緊急の検出事項";
+"Delete Finding" = "検出事項を削除";
+"Dependency" = "依存関係";
+"Dismiss this finding?" = "この検出事項を却下しますか?";
+"Dismissed" = "却下";
+"Dismiss…" = "却下…";
+"Duplicate of" = "重複元";
+"Edit Workspace…" = "ワークスペースを編集…";
+"Every new commit" = "新しいコミットごと";
+"Every new pull request" = "新しいプルリクエストごと";
+"Evidence" = "根拠";
+"Finding" = "検出事項";
+"Findings" = "検出事項";
+"Findings appear here as the repository watches scan. Watch a repository from the Repositories tab." = "リポジトリ監視がスキャンすると、ここに検出事項が表示されます。「リポジトリ」タブからリポジトリを監視してください。";
+"Findings pipeline" = "検出事項パイプライン";
+"First seen" = "初回検出";
+"Fix" = "修正";
+"Fix closed without merging" = "修正はマージされずにクローズされました";
+"Fix merged" = "修正をマージ済み";
+"Fix not started" = "修正未開始";
+"Fix: %@" = "修正: %@";
+"Fixed" = "修正済み";
+"Fixed in the last 30 days" = "過去 30 日間に修正";
+"Fixes" = "修正";
+"Flagged by the prompt-injection screen" = "プロンプトインジェクション検査でフラグ付け";
+"Flagged by the prompt-injection screen: %@" = "プロンプトインジェクション検査でフラグ付け: %@";
+"For critical findings" = "緊急の検出事項";
+"For high and critical" = "高以上";
+"For medium and above" = "中以上";
+"Full repository scan" = "リポジトリ全体のスキャン";
+"Full scan" = "フルスキャン";
+"High" = "高";
+"In progress" = "進行中";
+"In review" = "レビュー中";
+"Info" = "情報";
+"Instructions for the scanning agent" = "スキャンエージェントへの指示";
+"Its scans stop and its automations are removed. Its findings are deleted too; fix tasks already started stay on the task board." = "スキャンが停止し、オートメーションが削除されます。検出事項も削除されます。すでに開始された修正タスクはタスクボードに残ります。";
+"Last seen" = "最終検出";
+"Later scans that see it again won't reopen it." = "以降のスキャンで再び検出されても、再オープンされません。";
+"Location" = "場所";
+"Look for" = "検出対象";
+"Low" = "低";
+"Mark as %@" = "%@ としてマーク";
+"Medium" = "中";
+"Needs attention" = "要対応";
+"Never" = "しない";
+"New" = "新規";
+"No findings yet" = "検出事項はまだありません";
+"No scans yet — they appear here as the watches run." = "スキャンはまだありません。監視が実行されるとここに表示されます。";
+"No watched repositories" = "監視中のリポジトリはありません";
+"Nothing needs you right now." = "今は対応が必要なものはありません。";
+"Open findings" = "未解決の検出事項";
+"Other" = "その他";
+"Pick a repository (owner/name)." = "リポジトリを選択してください (owner/name)。";
+"Pipeline" = "パイプライン";
+"Planning" = "計画中";
+"Pull requests" = "プルリクエスト";
+"Quality" = "品質";
+"Ready for review" = "レビュー待ち";
+"Reappeared after being marked fixed" = "修正済みとマークされた後に再発";
+"Reason (optional)" = "理由 (任意)";
+"Recent scans" = "最近のスキャン";
+"Recommendation" = "推奨事項";
+"Reported by" = "報告元";
+"Resolved by a scan: %@" = "スキャンにより解決: %@";
+"Run a full scan of %@ now" = "%@ のフルスキャンを今すぐ実行";
+"Scan Now" = "今すぐスキャン";
+"Scans" = "スキャン";
+"Search findings" = "検出事項を検索";
+"Security" = "セキュリティ";
+"Security and bugs" = "セキュリティとバグ";
+"Security vulnerabilities" = "セキュリティ脆弱性";
+"Seen" = "検出";
+"Severity" = "重大度";
+"Start Fix Anyway" = "それでも修正を開始";
+"Start fixes automatically" = "修正を自動的に開始";
+"Stop Watching" = "監視を停止";
+"Stop Watching…" = "監視を停止…";
+"Stop watching %@?" = "%@ の監視を停止しますか?";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and a fix agent would read it too. Check it before starting a fix." = "プロンプトインジェクション検査でフラグが付けられました (%@)。これはリポジトリの内容を読んだエージェントによるもので、修正エージェントもこれを読むことになります。修正を開始する前に確認してください。";
+"These credentials ask before each use, which stalls an unattended scan until you answer: %@" = "これらの認証情報は使用のたびに確認を求めるため、応答するまで無人スキャンが停止します: %@";
+"This finding's text was flagged" = "この検出事項のテキストにフラグが付けられました";
+"This workspace has no github.com token — scans poll GitHub with it." = "このワークスペースには github.com のトークンがありません。スキャンではこのトークンを使って GitHub をポーリングします。";
+"Watch" = "監視";
+"Watch a GitHub Repository" = "GitHub リポジトリを監視";
+"Watch a GitHub Repository…" = "GitHub リポジトリを監視…";
+"Watch and Scan Now" = "監視して今すぐスキャン";
+"Watch on %@" = "%@ を監視";
+"Watched repositories" = "監視中のリポジトリ";
+"What's wrong" = "問題点";
+"Where the repository is (or will be cloned) inside the workspace." = "ワークスペース内でリポジトリがある (またはクローンされる) 場所。";
+"default branch" = "デフォルトブランチ";
+"last %@" = "最終 %@";
+"reported %d times" = "%d 回報告";
+"watching" = "監視中";
+"watching · checked %@" = "監視中 · %@ に確認";
+"…and %d more" = "…ほか %d 件";
+"Clear Filters" = "フィルタをクリア";
+"Findings by severity and status" = "重大度とステータス別の検出事項";
+"No matching findings" = "一致する検出事項はありません";
+"Nothing matches these filters." = "これらのフィルタに一致するものはありません。";
+"Repositories this workspace's token can reach" = "このワークスペースのトークンでアクセスできるリポジトリ";
+"Start a Fix" = "修正を開始";
+"Watch a Repository…" = "リポジトリを監視…";
+"Fix started — an agent is working on it in its own branch. It moves to In review when it's ready." = "修正を開始しました。エージェントが専用のブランチで作業しています。準備ができると「レビュー中」に移動します。";
+"Full scan of %@ requested — it shows under Recent scans once the agent starts." = "%@ のフルスキャンをリクエストしました。エージェントが開始すると「最近のスキャン」に表示されます。";
+"Now watching %@." = "%@ の監視を開始しました。";
+"%1$@ works on your prompt in a new branch of %2$@, in %3$@" = "%1$@ が %3$@ で、%2$@ の新しいブランチ上でプロンプトに取り組みます";
+"%d run(s) need your attention" = "%d 件の実行に対応が必要です";
+"(a disposable copy)" = "(使い捨てのコピー)";
+"A schedule, or something happening on GitHub or Linear." = "スケジュール、または GitHub や Linear での出来事。";
+"An agent picks up that item with your prompt — screened for prompt injection first" = "エージェントがプロンプトに従ってその項目に取り組みます。事前にプロンプトインジェクションの検査が行われます";
+"An agent reviews the whole repository weekly, and every new commit and pull request" = "エージェントがリポジトリ全体を毎週、また新しいコミットとプルリクエストをすべてレビューします";
+"An agent starts in one of your workspaces with your prompt, on a fresh branch" = "エージェントがワークスペースのいずれかで、新しいブランチ上でプロンプトとともに起動します";
+"Another one finishes" = "別のオートメーションが完了";
+"At set times" = "決まった時刻に";
+"At the time you pick — every weekday at 9:00, hourly, weekly…" = "指定した時刻に — 平日 9:00、1 時間ごと、毎週…";
+"Backlog, dismiss, mark fixed…" = "バックログ、却下、修正済みにする…";
+"Change the status" = "ステータスを変更";
+"Dismiss (Not an Issue)" = "却下 (問題なし)";
+"Each item runs once, on its own branch, listed on the Runs tab" = "各項目は専用ブランチで 1 回ずつ実行され、「実行」タブに表示されます";
+"Each run starts this agent with your prompt, on a fresh branch." = "各実行では、新しいブランチ上でこのエージェントがプロンプトとともに起動します。";
+"Every %1$@ at %2$@" = "毎週%1$@ %2$@";
+"Every %d hours" = "%d 時間ごと";
+"Every %d minutes" = "%d 分ごと";
+"Every automation runs an agent unattended in one of your workspaces, under its credentials and guardrails." = "すべてのオートメーションは、ワークスペースのいずれかで、その認証情報とガードレールのもとでエージェントを無人実行します。";
+"Every day at %@" = "毎日 %@";
+"Every hour" = "1 時間ごと";
+"Every weekday at %@" = "平日 %@";
+"Findings are collected and deduplicated across scans, by severity" = "検出事項はスキャン間で収集・重複排除され、重大度ごとにまとめられます";
+"Full scan %1$@ %2$02d:00" = "フルスキャン %1$@ %2$02d:00";
+"GitHub & Linear events" = "GitHub と Linear のイベント";
+"Hasn't run yet" = "まだ実行されていません";
+"Insert:" = "挿入:";
+"Issue" = "Issue";
+"Last run %@" = "前回の実行 %@";
+"Mark as Fixed" = "修正済みにする";
+"Mark as New" = "新規にする";
+"Marked fixed by hand" = "手動で修正済みにしました";
+"Move to Backlog" = "バックログに移動";
+"Name this automation" = "このオートメーションに名前を付ける";
+"Needs a token" = "トークンが必要";
+"New issue" = "新しい Issue";
+"Next %@" = "次回 %@";
+"No event automations — e.g. review every new pull request" = "イベントのオートメーションはありません — 例: 新しいプルリクエストをすべてレビュー";
+"No open findings" = "未解決の検出事項はありません";
+"No scheduled automations — e.g. a weekday-morning triage of open issues" = "スケジュールされたオートメーションはありません — 例: 平日の朝に未解決の Issue をトリアージ";
+"Nothing runs on its own yet" = "まだ自動で実行されるものはありません";
+"One click starts a fix on its own branch — you review before anything merges" = "ワンクリックで専用ブランチ上の修正を開始 — マージ前に確認できます";
+"Open Runs" = "実行を開く";
+"Open Task" = "タスクを開く";
+"Opened on GitHub" = "GitHub で作成";
+"Pick what should start an agent. Every automation runs unattended in one of your workspaces, under its credentials and guardrails." = "エージェントを起動するきっかけを選んでください。すべてのオートメーションは、ワークスペースのいずれかで、その認証情報とガードレールのもとで無人実行されます。";
+"Pull request" = "プルリクエスト";
+"Pushed to a branch" = "ブランチにプッシュ";
+"React when something happens on GitHub or Linear." = "GitHub や Linear で何かが起きたときに反応します。";
+"Reopen" = "再オープン";
+"Retry the Fix" = "修正を再試行";
+"Run an agent on a prompt, on a schedule." = "プロンプトでエージェントをスケジュール実行します。";
+"Run now" = "今すぐ実行";
+"Running now" = "実行中";
+"Runs" = "実行";
+"Scan Now only" = "「今すぐスキャン」のみ";
+"Scan now" = "今すぐスキャン";
+"Scanning" = "スキャン中";
+"Scans run as automations in the workspace you choose, with its GitHub token. Nothing is changed in the repository until you start a fix and merge it." = "スキャンは、選択したワークスペースでその GitHub トークンを使ってオートメーションとして実行されます。修正を開始してマージするまで、リポジトリには何も変更されません。";
+"Set Up" = "設定";
+"Show Details" = "詳細を表示";
+"Show Findings" = "検出事項を表示";
+"Show Runs" = "実行を表示";
+"Step %d" = "ステップ %d";
+"The fix couldn't start: %@" = "修正を開始できませんでした: %@";
+"The session closes; its transcript and branch stay for you to review" = "セッションは終了します。トランスクリプトとブランチは確認用に残ります";
+"The session stays open for you to check" = "確認できるようにセッションは開いたままになります";
+"The workspace's credentials and guardrails apply to every run." = "ワークスペースの認証情報とガードレールがすべての実行に適用されます。";
+"Then" = "その後";
+"Watching · checked %@" = "監視中 · %@ に確認";
+"What" = "内容";
+"What happens" = "処理の流れ";
+"What should run on its own?" = "何を自動で実行しますか?";
+"What the agent does" = "エージェントの作業内容";
+"When" = "タイミング";
+"When a Linear issue is assigned to you" = "Linear の Issue が自分に割り当てられたとき";
+"When a commit lands on %1$@ of %2$@" = "%2$@ の %1$@ にコミットが届いたとき";
+"When a pull request is opened on %@" = "%@ でプルリクエストが作成されたとき";
+"When a pull request, issue or commit lands on GitHub, a Linear issue appears, or another automation finishes" = "GitHub にプルリクエスト、Issue、コミットが届いたとき、Linear の Issue が現れたとき、または別のオートメーションが完了したとき";
+"When an issue on %@ is assigned to you" = "%@ の Issue が自分に割り当てられたとき";
+"When an unassigned Linear issue is created" = "未割り当ての Linear の Issue が作成されたとき";
+"When an unassigned issue is opened on %@" = "%@ で未割り当ての Issue が作成されたとき";
+"When it runs" = "実行タイミング";
+"When “%@” finishes" = "「%@」が完了したとき";
+"Where it runs" = "実行場所";
+"You find its result on the Runs tab: transcript and branch" = "結果は「実行」タブで確認できます: トランスクリプトとブランチ";
+"a repository" = "リポジトリ";
+"against %@" = "(ベース: %@)";
+"another automation" = "別のオートメーション";
+"every commit" = "すべてのコミット";
+"every pull request" = "すべてのプルリクエスト";
+"the default branch" = "デフォルトブランチ";
+"the home folder" = "ホームフォルダ";
+"touching %@" = "(%@ を変更)";
+"“%@” is starting — follow it on the Runs tab." = "「%@」を開始しています。「実行」タブで進行状況を確認できます。";
+"%d comment(s)" = "コメント %d 件";
+"Agents at work" = "作業中のエージェント";
+"An agent fixes it on a branch of its own — or the Switchboard proposes which of your running sessions should. You review the change before anything merges." = "エージェントが専用のブランチで修正します。または、実行中のどのセッションが修正すべきかをスイッチボードが提案します。マージされる前に変更を確認できます。";
+"Ask a Room's Switchboard" = "ルームのスイッチボードに尋ねる";
+"Ask the Switchboard Instead…" = "代わりにスイッチボードに尋ねる…";
+"Ask the Switchboard Who Should Fix It" = "誰が修正すべきかスイッチボードに尋ねる";
+"Asked the Switchboard — it will propose a session and wait for your OK." = "スイッチボードに尋ねました。セッションを提案し、承認を待ちます。";
+"Briefs waiting to start" = "開始待ちのブリーフ";
+"Merged or closed" = "マージ済みまたはクローズ";
+"No phases yet — click Plan on a backlog card to have an agent split it into ordered phases." = "フェーズはまだありません。バックログのカードで「計画」をクリックすると、エージェントが順序付きのフェーズに分割します。";
+"Phases, in order" = "フェーズ (順番)";
+"Sent to the Switchboard to find who fixes it" = "修正担当を決めるためスイッチボードに送信しました";
+"Sent to the “%@” room's Switchboard to find who fixes it" = "修正担当を決めるため「%@」ルームのスイッチボードに送信しました";
+"Session gone" = "セッション消失";
+"Start a Fix Session" = "修正セッションを開始";
+"Waiting for your review" = "レビュー待ち";
+"Code Review" = "コードレビュー";
+"Code review" = "コードレビュー";
+"Continuous code review for your GitHub repositories" = "GitHub リポジトリの継続的なコードレビュー";
+"Keep a GitHub repository continuously reviewed for vulnerabilities and bugs." = "GitHub リポジトリの脆弱性とバグを継続的にレビューします。";
+"No repository is watched — set up a continuous code review" = "監視中のリポジトリはありません — 継続的なコードレビューを設定しましょう";
+"%@ says:" = "%@ からの報告:";
+"Answer %@" = "%@ に回答";
+"Answer…" = "回答…";
+"Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back." = "納品されましたが、ブランチ %@ のワークツリーが見つからないため差分を表示できません。概要を読むか、差し戻してください。";
+"Handing over" = "引き渡し中";
+"Question" = "質問";
+"Show the session working on it" = "作業中のセッションを表示";
+"That session no longer exists." = "そのセッションはもう存在しません。";
+"The room has no Switchboard to take the task." = "このルームにはタスクを受け取るスイッチボードがありません。";
+"Your answer" = "あなたの回答";
+"#%1$d in %2$@'s queue" = "%2$@ のキューで %1$d 番目";
+"@nickname or #room" = "@ニックネーム または #ルーム";
+"A new agent" = "新しいエージェント";
+"A new agent (in its own worktree)" = "新しいエージェント (専用ワークツリー内)";
+"A new agent each (%d at a time)" = "タスクごとに新しいエージェント (同時に %d 件)";
+"A room" = "ルーム";
+"A session" = "セッション";
+"A session or room pushes its branch and opens a pull request before the card moves to Testing/Review." = "セッションまたはルームがブランチをプッシュしてプルリクエストを作成してから、カードが「テスト／レビュー」に移動します。";
+"Added “%@”" = "「%@」を追加しました";
+"Assign" = "割り当て";
+"Assign…" = "割り当て…";
+"Auto-pickup: off" = "自動受け取り: オフ";
+"Details (optional)" = "詳細 (任意)";
+"In its own fresh worktree — queued with the other new-agent tasks" = "専用の新しいワークツリーで — 新しいエージェント向けの他のタスクと一緒にキューに入ります";
+"New agent" = "新しいエージェント";
+"New backlog items go to" = "新しいバックログ項目の送り先";
+"New items → %@" = "新しい項目 → %@";
+"Next for %@" = "%@ の次のタスク";
+"No session or room matches." = "一致するセッションまたはルームはありません。";
+"No sessions yet — start one, give it a @nickname, and it can take tasks from the board." = "セッションはまだありません。セッションを開始して @ニックネーム を付けると、ボードからタスクを受け取れるようになります。";
+"Nobody — I start them" = "なし — 自分で開始";
+"Open a pull request when done" = "完了したらプルリクエストを作成";
+"Pull request #%@" = "プルリクエスト #%@";
+"Quick Task…" = "クイックタスク…";
+"Sessions and rooms open a pull request when done" = "セッションとルームは完了時にプルリクエストを作成";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Testing/Review. To give it to a session or a room, use Assign." = "そのまま「進行中」へ: 新しいエージェントが新規ワークツリーでタスク全体を行い、「テスト／レビュー」で差分を渡します。セッションやルームに渡すには「割り当て」を使用してください。";
+"The room's Switchboard picks a member" = "ルームのスイッチボードがメンバーを選びます";
+"This session (%@)" = "このセッション (%@)";
+"Unassign" = "割り当てを解除";
+"Who picks it up" = "担当者";
+"Who picks this task up" = "このタスクの担当者";
+"Who picks this up?" = "誰が担当しますか?";
+"Who picks up new backlog items on their own and takes them to Testing/Review. Each task can still be assigned by hand." = "新しいバックログ項目を自動的に受け取り、「テスト／レビュー」まで進める担当者。各タスクは引き続き手動で割り当てることもできます。";
+"busy — it takes this after its current work" = "ビジー — 現在の作業の後に受け取ります";
+"New task — or ⇧⌥Space from any app for a quick one" = "新規タスク — どのアプリからでも ⇧⌥Space ですばやく作成";
+"%@ picks it up on its own and takes it to Testing/Review." = "%@ が自動的に受け取り、「テスト／レビュー」まで進めます。";
+"A new agent picks it up from the queue and takes it to Testing/Review." = "新しいエージェントがキューから受け取り、「テスト／レビュー」まで進めます。";
+"Add Task" = "タスクを追加";
+"Describe the task — what's wrong, where, what done looks like. Markdown welcome." = "タスクを説明してください — 何が問題か、どこか、完了の状態はどうなるか。Markdown も使えます。";
+"Description" = "説明";
+"What needs doing?  @agent to assign" = "何をしますか?  @agent で割り当て";
+"busy — takes it after its current work" = "ビジー — 現在の作業の後に受け取ります";
+"in its own worktree" = "専用ワークツリー内";
+"the room's Switchboard picks a member" = "ルームのスイッチボードがメンバーを選びます";
+"↩ add · ⌘↩ add another · ⇥⇥ full editor" = "↩ 追加 · ⌘↩ 続けて追加 · ⇥⇥ フルエディタ";
+"%@ works in its own workspace and folder, with its own agent" = "%@ は独自のワークスペースとフォルダで、独自のエージェントを使って作業します";
+"%@'s Switchboard picks a member" = "%@ のスイッチボードがメンバーを選びます";
+"@switchboard" = "@switchboard";
+"The Switchboard — it picks a session" = "スイッチボード — セッションを選びます";
+"The app's Switchboard picks the session best placed for it" = "アプリのスイッチボードが最適なセッションを選びます";
+"There's no workspace to run the Switchboard in." = "スイッチボードを実行するワークスペースがありません。";
+"picks the session best placed for it" = "最適なセッションを選びます";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "環境を説明する";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "エージェントの安全チェックが知っておくべきこと：組織、サーバーとその用途、信頼するリポジトリとドメイン、変更してよいもの。1 行に 1 つ。Claude の自動モードは、これを使って日常的な作業と危険な操作を見分けます。";
+"Variables" = "変数";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "このフォルダを信頼しますか？";
+
+/* Files sent by the agent (send_file) */
+"%@ of %@" = "%@ / %@";
+"%@ · downloaded" = "%@ · ダウンロード済み";
+"%@ · sent by the agent" = "%@ · エージェントが送信";
+"Couldn't read the file on the machine — is it still there, and is the machine running?" = "マシン上のファイルを読み込めませんでした。ファイルがまだ存在し、マシンが起動しているか確認してください。";
+"Couldn't write the file here." = "ここにファイルを書き込めませんでした。";
+"Downloaded" = "ダウンロード済み";
+"Save As…" = "別名で保存…";
+"Save or Share" = "保存または共有";
+"Saved to %@" = "%@ に保存しました";
+"Sent by the agent" = "エージェントが送信";
+
+/* Session instructions (system-prompt presets) */
+"Add instructions" = "指示を追加";
+"Added to the agent's system prompt when a session starts with them. Describe who the agent should be and how it should work — “You are a…”." = "この指示で開始したセッションでは、エージェントのシステムプロンプトに追加されます。エージェントがどんな役割で、どう作業すべきかを記述してください（「あなたは…です」）。";
+"Careful reviewer" = "慎重なレビュアー";
+"Delete these instructions" = "この指示を削除";
+"Edit instructions…" = "指示を編集…";
+"Instructions" = "指示";
+"Instructions added to the agent's system prompt (“You are a…”)" = "エージェントのシステムプロンプトに追加される指示（「あなたは…です」）";
+"Instructions without a name or text are not kept." = "名前またはテキストのない指示は保存されません。";
+"New instructions" = "新しい指示";
+"No instructions" = "指示なし";
+"No instructions yet. Add some with +." = "まだ指示がありません。+ で追加してください。";
+"Teacher" = "先生";
+"The agent as it comes" = "そのままのエージェント";
+"Untitled" = "無題";
+"You are a meticulous senior engineer reviewing changes before they ship. Look for bugs, edge cases and security issues first, explain your reasoning, and prefer small, well-tested changes over large rewrites." = "あなたはリリース前に変更をレビューする几帳面なシニアエンジニアです。まずバグ、エッジケース、セキュリティ上の問題を探し、理由を説明し、大きな書き直しよりも小さくて十分にテストされた変更を優先してください。";
+"You are a patient teacher. Explain what you are doing and why as you go, in plain language, and point out what the user could learn from each step." = "あなたは辛抱強い先生です。作業しながら、何をなぜしているのかを平易な言葉で説明し、各ステップからユーザーが学べることを示してください。";
+
+/* Local model context window */
+"%@ context" = "コンテキスト %@";
+"Context?" = "コンテキスト?";
+"The server doesn't say how much context this model takes — agents assume 128K. Click to enter it." = "サーバーはこのモデルのコンテキスト長を公開していません。エージェントは 128K と見なします。クリックして入力してください。";
+"The context window agents are told this model has. Click to change it." = "このモデルについてエージェントに伝えるコンテキストウィンドウです。クリックして変更します。";
+"Context window" = "コンテキストウィンドウ";
+"How many tokens %@ can take. Every agent using it is told, so it compacts at the right time." = "%@ が扱えるトークン数です。このモデルを使うすべてのエージェントに伝えられ、適切なタイミングで圧縮されます。";
+"e.g. 1M, 256K or 131072" = "例: 1M、256K、131072";
+"Enter a number of tokens, like 1M or 200K." = "1M や 200K のようにトークン数を入力してください。";
+"Use the server's value" = "サーバーの値を使用";
+
+/* Agent sign-in: device-code flows */
+"Open the sign-in page and approve access." = "サインインページを開いてアクセスを承認してください。";
+"Approve the sign-in in your browser; it should show this code:" = "ブラウザでサインインを承認してください。次のコードが表示されているはずです：";
+"Open the sign-in page and check that it shows this code:" = "サインインページを開き、次のコードが表示されていることを確認してください：";
+/* Base image customize script */
+"Your customize script (%@) can't be read — the image is built without it." = "カスタマイズスクリプト（%@）を読み込めません。イメージはそれなしで作成されます。";
+"Run my customize script after Bromure's setup" = "Bromure のセットアップ後にカスタマイズスクリプトを実行";
+"No script chosen" = "スクリプトが選択されていません";
+"Last Log" = "前回のログ";
+"Runs as root inside the base image after the agents are installed, on every rebuild or image update, so every workspace created or reset afterwards has what it installs. Traced with bash -x; the output is saved to ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "エージェントのインストール後、ベースイメージ内で root として実行されます。再構築やイメージ更新のたびに実行されるため、その後に作成またはリセットされたワークスペースにはインストールした内容が含まれます。bash -x でトレースされ、出力は ~/Library/Logs/BromureAC/base-image-customize.log に保存されます。失敗した場合は現在のイメージが維持されます。";
+"Choose the shell script to run inside the base image" = "ベースイメージ内で実行するシェルスクリプトを選択してください";
+
+/* Rebuild Base Image window */
+"Download prebuilt" = "ビルド済みをダウンロード";
+"The latest published image, then the recommended packages. A few minutes." = "最新の公開イメージを取得し、推奨パッケージを適用します。数分かかります。";
+"Recommended" = "推奨";
+"Rebuild locally" = "ローカルで再構築";
+"Built from scratch on this Mac with the full installer. About 10 minutes." = "この Mac 上でフルインストーラーを使って一から作成します。約 10 分かかります。";
+"Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "ワークスペースは変更されません。次回起動時に、それぞれ新しいイメージへのリセットを提案します。";
+"Download & Update" = "ダウンロードして更新";
+"Rebuild" = "再構築";
+"Update the base image" = "ベースイメージを更新";
+"New workspaces start from this image: the system, the coding agents and their tools." = "新しいワークスペースはこのイメージから始まります：システム、コーディングエージェント、そのツール。";
+"Customize the image" = "イメージをカスタマイズ";
+"Choose Script…" = "スクリプトを選択…";
+"Change…" = "変更…";
+"Runs as root inside the image after the agents are installed, on every rebuild or update, so new and reset workspaces have what it installs. Traced with bash -x into ~/Library/Logs/BromureAC/base-image-customize.log. If it fails, the current image is kept." = "エージェントのインストール後、再構築や更新のたびにイメージ内で root として実行されるため、新規またはリセットしたワークスペースにはインストール内容が含まれます。bash -x で ~/Library/Logs/BromureAC/base-image-customize.log にトレースされます。失敗した場合は現在のイメージが維持されます。";
+"Your customize script failed — the current image is kept. See %@" = "カスタマイズスクリプトが失敗しました。現在のイメージは維持されます。%@ を参照してください";
+"%@ says" = "%@ のコメント";
+"The agent" = "エージェント";
+"Ask %@ to Merge into %@" = "%@ に %@ へのマージを依頼";
+"Ask %@ to Merge" = "%@ にマージを依頼";
+"Asks the agent that did it to merge its branch where it worked; the card goes Done when it reports back. Hold for squash, pull-request, and other-branch options." = "作業したエージェントに、作業した場所で自分のブランチをマージするよう依頼します。報告があるとカードは完了になります。長押しでスカッシュ、プルリクエスト、別のブランチを選べます。";
+"%@ merges %@ into…" = "%@ が %@ をマージする先…";
+"%@ — where it started" = "%@ — 作業を始めた場所";
+"Loading branches…" = "ブランチを読み込み中…";
+"Squash into one commit" = "1 つのコミットにまとめる";
+"Ask %@ to Merge into…" = "%@ にマージ先を指定して依頼…";
+"Pick the branch: the agent that did it merges its work into it where it worked, and the card goes Done when it reports back." = "ブランチを選んでください。作業したエージェントが作業した場所でマージし、報告があるとカードは完了になります。";
+"Mark as Done" = "完了にする";
+"Moves the task to Done as it is — nothing is merged, and the worktree and its branch stay." = "タスクをそのまま完了にします。何もマージされず、ワークツリーとブランチは残ります。";
+"Confirm" = "確認";
+"Created %@" = "作成 %@";
+"Modified %@" = "変更 %@";
+"Updated %@" = "更新 %@";
+"GitHub rejected this workspace's token" = "GitHub がこのワークスペースのトークンを拒否しました";
+"The github.com token is expired, revoked, or mistyped (HTTP 401). Update it in %@ › Credentials, or pick another workspace." = "github.com のトークンが期限切れ、取り消し済み、または入力ミスです (HTTP 401)。%@ › 資格情報 で更新するか、別のワークスペースを選んでください。";
+"Fix the workspace's GitHub token to watch a repository." = "リポジトリを監視するには、ワークスペースの GitHub トークンを修正してください。";
+"Assigned to %@ — click to change" = "%@ に割り当て済み — クリックで変更";
+"Click to fold the error" = "クリックでエラーを折りたたむ";
+"Click to read the whole error" = "クリックでエラー全文を表示";
+"Deleted workspace" = "削除されたワークスペース";
+"Open Coding Tasks (⇧⌘T)" = "コーディングタスクを開く (⇧⌘T)";
+"No open tasks" = "未完了のタスクはありません";
+"Each time an automation fires, its run shows up here — scheduled, in progress, then done. Create an automation to get started." = "オートメーションが実行されるたびに、その実行がここに表示されます — 予定、実行中、完了の順に。まずはオートメーションを作成してください。";
+"Open Automations" = "オートメーションを開く";
+"Open Automations (⇧⌘A)" = "オートメーションを開く (⇧⌘A)";
+"View" = "表示";
+"Help" = "ヘルプ";
+"Close Window" = "ウインドウを閉じる";
+"Toggle Sidebar" = "サイドバーの表示/非表示";
+"Toggle Files Pane" = "ファイルパネルの表示/非表示";
+"Toggle Browser Pane" = "ブラウザパネルの表示/非表示";
+"Enter Full Screen" = "フルスクリーンにする";
+"Zoom" = "拡大/縮小";
+"%@ Manual" = "%@ マニュアル";
+"Add a note about this workspace" = "このワークスペースについてのメモを追加";
+
+/* Security UI: Firewall pane, Overview protection cells, prompt-injection agents (WS-B) */
+"Scores the instruction / settings files every agent loads as authority: CLAUDE.md (Claude Code), AGENTS.md (Codex, Kimi and omp) and GROK.md (Grok), plus their nested and global variants. Downloads ~571 MB on first enable." = "各エージェントが権威として読み込む指示 / 設定ファイルを評価します: CLAUDE.md（Claude Code）、AGENTS.md（Codex、Kimi、omp）、GROK.md（Grok）と、そのネストされた版およびグローバル版。初回有効化時に約 571 MB をダウンロードします。";
+"Outbound connection rules are edited on the Mac that runs this workspace." = "送信接続のルールは、このワークスペースを実行している Mac で編集します。";
+"Click a protection that's off to turn it on in that workspace's settings." = "オフになっている保護をクリックすると、そのワークスペースの設定でオンにできます。";
+"Turn on…" = "オンにする…";
+"%1$@ is on for %2$@. Click to change it." = "%2$@ では %1$@ がオンです。クリックして変更します。";
+"%1$@ is off for %2$@. Click to turn it on." = "%2$@ では %1$@ がオフです。クリックしてオンにします。";
+/* Security Timeline: skipped content scans, coalesced rows (WS-B) */
+"not scanned — %@" = "スキャンされていません — %@";
+"blocked, not sent — %@" = "ブロック、未送信 — %@";
+"%1$@ (%2$d times, last one shown)" = "%1$@（%2$d 回、最新のものを表示）";
+
+"Security…" = "セキュリティ…";
+
+/* Browser image row, session toolbar */
+"Download Current Version" = "最新バージョンをダウンロード";
+"Update" = "アップデート";
+"an unknown version" = "不明なバージョン";
+"Outdated: the shared image is %@; this version of Agentic Coding uses %@. Open Bromure and let it update its browser image, or download the current version for Agentic Coding only (used instead of the shared one until Bromure catches up)." = "古くなっています：共有イメージは %1$@ ですが、このバージョンの Agentic Coding は %2$@ を使用します。Bromure を開いてブラウザイメージをアップデートさせるか、Agentic Coding 専用に最新バージョンをダウンロードしてください（Bromure が追いつくまで共有イメージの代わりに使用されます）。";
+"Outdated: this image is %@; the current version is %@. Update to download it." = "古くなっています：このイメージは %1$@ で、最新バージョンは %2$@ です。アップデートしてダウンロードしてください。";
+"The Linux machine behind this session — available while it runs" = "このセッションの裏にある Linux マシン — 実行中のみ利用できます";
+
+/* B69/B70 activity line + paused display cards */
+"1 media item shown" = "メディア表示 1 件";
+"%d media items shown" = "メディア表示 %d 件";
+"1 chart shown" = "グラフ表示 1 件";
+"%d charts shown" = "グラフ表示 %d 件";
+"1 file sent" = "ファイル送信 1 件";
+"%d files sent" = "ファイル送信 %d 件";
+"1 tool result" = "ツール結果 1 件";
+"%d tool results" = "ツール結果 %d 件";
+"Available when the workspace is running" = "ワークスペースの実行中に利用できます";
+"Video available when the workspace is running" = "動画はワークスペースの実行中に表示できます";
+"Image available when the workspace is running" = "画像はワークスペースの実行中に表示できます";
+
+/* Fat client: link states (reconnecting / key rejected / host key changed) */
+"“%@” didn't accept this Mac's key" = "「%@」はこの Mac の鍵を受け付けませんでした";
+"“%@” presented a different host key" = "「%@」が異なるホスト鍵を提示しました";
+"Its identity no longer matches the one this Mac trusted. If the remote Mac was reinstalled, connect to it again from Connect to Remote Bromure… to review the new key; otherwise someone may be intercepting the connection." = "この Mac が信頼した ID と一致しなくなりました。リモートの Mac を再インストールした場合は「リモートの Bromure に接続…」から接続し直して新しい鍵を確認してください。そうでない場合、接続が傍受されている可能性があります。";
+"Reconnecting to %@…" = "%@ に再接続中…";
+"The connection dropped. What you see is from just before; it picks up again on its own." = "接続が切れました。表示されているのは直前の状態です。接続は自動的に復旧します。";
+
+/* Coding Tasks: landing an approved task (2026-10) */
+"Ready to land" = "統合の準備完了";
+"Landing — merging into %@…" = "統合中 — %@ へマージしています…";
+"Landing — %1$@ is opening a pull request into %2$@…" = "統合中 — %1$@ が %2$@ へのプルリクエストを作成しています…";
+"Landing — %1$@ is merging into %2$@…" = "統合中 — %1$@ が %2$@ へマージしています…";
+"Needs you — %@" = "対応が必要です — %@";
+"marked by you" = "あなたがマーク";
+"reported by %@, not verified" = "%@ が報告、未検証";
+"the agent" = "エージェント";
+"PR #%@ opened" = "PR #%@ を作成済み";
+"Marked done by you" = "あなたが完了にしました";
+"All its phases are done" = "すべてのフェーズが完了しました";
+"The agent couldn't land it." = "エージェントは統合できませんでした。";
+"Couldn't read the branch's repository or where it started — is the workspace running?" = "ブランチのリポジトリまたは作成元を読み取れませんでした — ワークスペースは起動していますか?";
+"The branch %@ doesn't exist in the repository any more — merge into another branch." = "ブランチ %@ はリポジトリにもう存在しません — 別のブランチへマージしてください。";
+"The task's branch %@ is gone from the repository." = "タスクのブランチ %@ がリポジトリからなくなっています。";
+"The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry." = "%@ のチェックアウトに、このタスクが触れるファイルの未コミットの変更があります — そこでコミットまたは stash してから再試行してください。";
+"The repository has no remote to open a pull request on — merge it instead." = "リポジトリにプルリクエストを作成できるリモートがありません — 代わりにマージしてください。";
+"Couldn't reach the session that did the task." = "タスクを行ったセッションに接続できませんでした。";
+"Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel." = "統合が止まっています — 20 分経ってもエージェントが完了していません。セッションを開いて状況を確認し、再試行するかキャンセルしてください。";
+"%@ stopped before it landed — open its session to see why, then retry." = "%@ は統合する前に停止しました — セッションを開いて理由を確認し、再試行してください。";
+"The app quit while landing this — retry." = "統合中にアプリが終了しました — 再試行してください。";
+"Mark done without merging?" = "マージせずに完了にしますか?";
+"Mark Done" = "完了にする";
+"The agent is stopped. Nothing is merged; the branch %@ and its checkout are kept in the workspace." = "エージェントを停止します。何もマージされず、ブランチ %@ とそのチェックアウトはワークスペースに残ります。";
+"Nothing is merged. The branch %@ and its checkout are kept in the workspace." = "何もマージされません。ブランチ %@ とそのチェックアウトはワークスペースに残ります。";
+"Discard this branch?" = "このブランチを破棄しますか?";
+"The branch %@ and its checkout are deleted and the agent's session is put away. The task goes to Done as closed without merging; its transcript is kept." = "ブランチ %@ とそのチェックアウトを削除し、エージェントのセッションをアーカイブします。タスクはマージなしで閉じたものとして「完了」へ移り、トランスクリプトは保持されます。";
+"Merge into %@?" = "%@ にマージしますか?";
+"Bromure merges it directly when it can; otherwise %1$@, the agent that wrote it, rebases onto %2$@, fixes conflicts, runs the tests and merges. Afterwards the branch is removed and the session archived." = "可能な場合は Bromure が直接マージします。そうでなければ、書いたエージェントの %1$@ が %2$@ にリベースし、競合を解決し、テストを実行してマージします。その後ブランチは削除され、セッションはアーカイブされます。";
+"Sessions and rooms open a pull request at delivery (skips review)" = "セッションとルームは納品時にプルリクエストを作成 (レビューなし)";
+"Who new tasks are queued for when you create them — they pick them up on their own and take them to Review. Each task can still be assigned by hand." = "作成した新しいタスクを誰のキューに入れるか — 自分で受け取り、「レビュー」まで進めます。各タスクは手動でも割り当てられます。";
+"Tasks waiting to start" = "開始待ちのタスク";
+"Move to Review" = "レビューへ移動";
+"Stop & Return to Backlog" = "停止してバックログに戻す";
+"Nothing done yet" = "完了したものはまだありません";
+"Merged, opened as pull requests, or closed" = "マージ済み、プルリクエスト作成済み、またはクローズ";
+"Open Pull Request" = "プルリクエストを作成";
+"Straight to In Progress: a new agent does the whole task in a fresh worktree and hands you the diff in Review. To give it to a session or a room, use Assign." = "直接「進行中」へ: 新しいエージェントが新しい worktree でタスク全体を行い、「レビュー」で差分を渡します。セッションやルームに任せるには「割り当て」を使います。";
+"Open a pull request at delivery (skips review)" = "納品時にプルリクエストを作成 (レビューなし)";
+"No code changes — read the report" = "コードの変更なし — レポートを読む";
+"Assigned to %@" = "%@ に割り当て";
+"Workspace: %@" = "ワークスペース: %@";
+"Agent: %@" = "エージェント: %@";
+"Folder: %@" = "フォルダ: %@";
+"Folder" = "フォルダ";
+"Clone this repository first (optional)" = "先にこのリポジトリをクローン (任意)";
+"Make the folder and an empty git repository when they don't exist yet — tasks run on their own branch." = "フォルダと空の git リポジトリがまだなければ作成します — タスクは専用のブランチで動きます。";
+"When approved" = "承認時";
+"Workspace default (%@)" = "ワークスペースの既定 (%@)";
+"What happens when you approve the task in Review: merged into the branch it came from, or opened as a pull request." = "「レビュー」でタスクを承認したときの動作: 作成元のブランチへのマージ、またはプルリクエストの作成。";
+"A new agent picks it up from the queue and takes it to Review." = "新しいエージェントがキューから受け取り、「レビュー」まで進めます。";
+"%@ picks it up on its own and takes it to Review." = "%@ が自分で受け取り、「レビュー」まで進めます。";
+"Send Back" = "差し戻す";
+"Send Back (%d)" = "差し戻す (%d)";
+"This task isn't in Review any more." = "このタスクはもう「レビュー」にありません。";
+"%1$@ worked on %2$@ in %3$@" = "%1$@ が %3$@ で %2$@ を作業しました";
+"%1$@ worked in %2$@" = "%1$@ が %2$@ で作業しました";
+"%1$@ (+%2$d −%3$d) vs %4$@" = "%1$@ (+%2$d −%3$d)、%4$@ との比較";
+"%d uncommitted" = "未コミット %d 件";
+"%1$@ moved %2$d commits since" = "%1$@ はその後 %2$d コミット進みました";
+"%@ checkout clean" = "%@ のチェックアウトはクリーン";
+"%@ checkout has uncommitted changes" = "%@ のチェックアウトに未コミットの変更あり";
+"%@ not checked out" = "%@ はチェックアウトされていません";
+"remote: %@" = "リモート: %@";
+"none" = "なし";
+"can't reach the machine for the details" = "詳細を取得するためにマシンに接続できません";
+"%@'s final report" = "%@ の最終レポート";
+"No code changes to merge" = "マージするコードの変更はありません";
+"Reading the agent's report…" = "エージェントのレポートを読み込み中…";
+"Cancel Landing" = "統合をキャンセル";
+"The task produced no code: it goes to Done as it is." = "このタスクはコードを生成しませんでした: そのまま「完了」へ移ります。";
+"View Pull Request #%@" = "プルリクエスト #%@ を表示";
+"Mark Merged" = "マージ済みにする";
+"The pull request was merged on the forge: the task goes to Done as merged." = "プルリクエストはフォージ上でマージされました: タスクはマージ済みとして「完了」へ移ります。";
+"More" = "その他";
+"Merge into Another Branch…" = "別のブランチにマージ…";
+"Keep Branch — Mark Done" = "ブランチを残して完了にする";
+"Open a pull request for the branch; hold for the other ways to land it." = "ブランチのプルリクエストを作成します。長押しで他の統合方法を表示します。";
+"Merge the branch; hold for the other ways to land it." = "ブランチをマージします。長押しで他の統合方法を表示します。";
+"Mark done without merging — the branch is kept." = "マージせずに完了にします — ブランチは残ります。";
+"Open a pull request into %@?" = "%@ へのプルリクエストを作成しますか?";
+"Squash & merge into %@?" = "%@ にスカッシュしてマージしますか?";
+"%1$@ is ahead of %2$@ with nothing in the way: Bromure merges it directly." = "%1$@ は %2$@ より先行していて妨げるものがありません: Bromure が直接マージします。";
+"Into" = "マージ先";
+"Afterwards the session is archived; the branch stays for the pull request." = "その後セッションはアーカイブされ、ブランチはプルリクエストのために残ります。";
+"Afterwards the session is archived; the branch and its checkout are kept." = "その後セッションはアーカイブされ、ブランチとそのチェックアウトは残ります。";
+"Afterwards the branch is removed and the session archived." = "その後ブランチは削除され、セッションはアーカイブされます。";
+"Keep branch" = "ブランチを残す";
+"%1$@ says it's done, but Bromure doesn't see it in %2$@: %3$@" = "%1$@ は完了したと言っていますが、Bromure には %2$@ に見当たりません: %3$@";
+"The planning session ended." = "計画セッションは終了しました。";
+"The planning session has ended" = "計画セッションは終了しました";
+"Merge into the branch" = "ブランチにマージ";
+"Open a pull request" = "プルリクエストを作成";
+"When a task is approved" = "タスクが承認されたとき";
+"What Review's main button does for a coding task: merge it into the branch it came from, or open a pull request. Each workspace and each task can choose otherwise." = "コーディングタスクの「レビュー」のメインボタンの動作: 作成元のブランチへのマージ、またはプルリクエストの作成。ワークスペースやタスクごとに変更できます。";
+"App default (%@)" = "アプリの既定 (%@)";
+"What Review's main button does for coding tasks in this workspace. Each task can still choose otherwise." = "このワークスペースのコーディングタスクで「レビュー」のメインボタンが行う動作。タスクごとに変更できます。";
+
+/* Coding Tasks vocabulary + start/live-state (2026-10) */
+"Start %d Selected" = "選択した%d件を開始";
+"Off: the session or room hands its branch back for your review, and lands it once you approve. On: it pushes and opens a pull request before the task moves to Review." = "オフ: セッションやルームはブランチをレビューに戻し、承認後に統合します。オン: タスクが「レビュー」に移る前に push してプルリクエストを作成します。";
+"Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phases with dependencies into the Plan column." = "保存してから、見える計画セッションを開きます。エージェントがリポジトリを調査し（質問できます — あなたが見えています）、依存関係付きの順序付きフェーズを「計画」列に登録します。";
+"%1$@, the agent that wrote it, will rebase onto %2$@, run the tests, push %3$@ to %4$@ and open a pull request. You'll see its progress on the task and in its session." = "書いたエージェントの %1$@ が %2$@ にリベースし、テストを実行し、%3$@ を %4$@ に push してプルリクエストを作成します。進行状況はタスクとそのセッションで確認できます。";
+"%1$@, the agent that wrote it, will rebase onto %2$@, fix conflicts, run the tests and merge. You'll see its progress on the task and in its session." = "書いたエージェントの %1$@ が %2$@ にリベースし、競合を解決し、テストを実行してマージします。進行状況はタスクとそのセッションで確認できます。";
+"The planning session timed out without filing phases — click Plan First to retry." = "計画セッションがフェーズを登録しないままタイムアウトしました — 「先に計画」をクリックして再試行してください。";
+"The planning session ended before filing phases — click Plan First to retry." = "フェーズを登録する前に計画セッションが終了しました — 「先に計画」をクリックして再試行してください。";
+"The planning session didn't start — %@ may not be set up in this workspace. Open a session there to check, then click Plan First to retry." = "計画セッションが開始されませんでした — このワークスペースで %@ が設定されていない可能性があります。そこでセッションを開いて確認してから、「先に計画」をクリックして再試行してください。";
+"%@ exited before filing phases — click Plan First to retry." = "%@ はフェーズを登録する前に終了しました — 「先に計画」をクリックして再試行してください。";
+"The planning session was interrupted — click Plan First to retry." = "計画セッションが中断されました — 「先に計画」をクリックして再試行してください。";
+"The checkout for %@ is gone and couldn't be re-created in %@. Start Over runs the task again on a new branch." = "%@ のチェックアウトがなくなっており、%@ に再作成できませんでした。「最初からやり直す」で新しいブランチでタスクを実行し直します。";
+"The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start Over runs the task again on a new branch." = "タスクのブランチ %@ は %@ にもう存在しません — チェックアウトが削除されました（マージ後に片付けられたか、削除されたか）。「最初からやり直す」で新しいブランチでタスクを実行し直します。";
+"The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start Over runs the task again from scratch%@." = "リポジトリのフォルダ「%@」がワークスペースからなくなっているため、再開する場所がありません。「最初からやり直す」でタスクを最初から実行し直します%@。";
+"Plan First" = "先に計画";
+"Remove Task" = "タスクを削除";
+"Remove Task Only" = "タスクのみ削除";
+"Stop & Discard Branch" = "停止してブランチを破棄";
+"Discarding ends the agent's session and deletes its branch and worktree, with any uncommitted or unmerged work. “Remove Task Only” leaves them in the workspace." = "破棄するとエージェントのセッションが終了し、未コミット／未マージの作業を含めてブランチと worktree が削除されます。「タスクのみ削除」ならワークスペースに残ります。";
+"Unassigned — I'll start it" = "未割り当て — 自分で開始";
+"New tasks: Unassigned" = "新しいタスク: 未割り当て";
+"New tasks: assigned to %@" = "新しいタスク: %@ に割り当て";
+"Assign new tasks to" = "新しいタスクの割り当て先";
+"No phases yet — click Plan First on a Backlog task." = "フェーズはまだありません — バックログのタスクで「先に計画」をクリックしてください。";
+"Starts every selected phase. Phases whose dependencies aren't Done queue and start automatically when they are." = "選択した各フェーズを開始します。依存関係が完了していないフェーズは待機し、完了すると自動的に開始されます。";
+"A visible planning session is running — click the task to open it; phases appear in the Plan column as it files them." = "計画セッションが実行中です — タスクをクリックすると開きます。フェーズは登録されると「計画」列に表示されます。";
+"A planner agent reads the task and the repository, then files ordered phases (with dependencies) in the Plan column." = "プランナーエージェントがタスクとリポジトリを読み、順序付きのフェーズ（依存関係付き）を「計画」列に登録します。";
+"Start it from the board, or Plan First to split it into phases." = "ボードから開始します。フェーズに分割するなら「先に計画」。";
+"Remove %d selected phase(s)?" = "選択した%d件のフェーズを削除しますか？";
+"Your task" = "あなたのタスク";
+"Start Over" = "最初からやり直す";
+"Runs the task again from scratch on a new branch." = "新しいブランチでタスクを最初からやり直します。";
+"The agent is waiting at its prompt without having handed the task over — open its session to see where it is." = "エージェントはタスクを引き渡さないまま入力待ちです — セッションを開いて状況を確認してください。";
+"Checking the workspace and the folder — the task moves to In Progress once its agent can start." = "ワークスペースとフォルダを確認しています — エージェントが開始できるようになると、タスクは「進行中」に移ります。";
+"Connecting…" = "接続中…";
+"Waiting for the host's first update." = "ホストからの最初の更新を待っています。";
+
+/* Task landing / review QA fixes */
+"Planning in the terminal — open it to watch and answer." = "ターミナルで計画中です — 開いて様子を見たり回答したりできます。";
+"The %@ checkout has uncommitted changes — if they touch the same files, the merge stops until you commit or stash them there." = "%@ のチェックアウトに未コミットの変更があります — 同じファイルに関わる場合、コミットまたは stash するまでマージは止まります。";
+"Your review comments didn't reach the agent — they're still pending. Restart Session sends them." = "レビューコメントがエージェントに届きませんでした — まだ保留中です。「セッションを再起動」で送信されます。";
+"%1$@ is ahead of %2$@: Bromure merges it directly." = "%1$@ は %2$@ より先に進んでいます：Bromure が直接マージします。";
+"%1$@ adds nothing %2$@ doesn't already have: the task goes to Done." = "%1$@ には %2$@ にないものがありません：タスクは完了になります。";
+"The %1$@ checkout has uncommitted changes — if they touch the same files, %2$@ can't merge until you commit or stash them there." = "%1$@ のチェックアウトに未コミットの変更があります — 同じファイルに関わる場合、コミットまたは stash するまで %2$@ はマージできません。";
+"%@ didn't start in the task's session — open it to see why, then Restart Session." = "%@ がタスクのセッションで起動しませんでした — 開いて原因を確認し、「セッションを再起動」してください。";
+"%1$@, the agent that wrote it, will %2$@. You'll see its progress on the task and in its session." = "これを書いたエージェント %1$@ が次を行います：%2$@。進捗はタスクとそのセッションで確認できます。";
+"%@ moved 1 commit since" = "%@ はその後 1 コミット進みました";
+"Checking the branch…" = "ブランチを確認中…";
+"Comment on the whole change instead" = "代わりに変更全体にコメント";
+"commit what's left uncommitted" = "未コミットの残りをコミット";
+"Landed or closed" = "取り込み済みまたはクローズ";
+"Merge the branch." = "ブランチをマージします。";
+"merge" = "マージ";
+"No code changes" = "コード変更なし";
+"Open a pull request for the branch." = "ブランチのプルリクエストを開きます。";
+"Other ways to land it" = "ほかの取り込み方法";
+"Read Report" = "レポートを読む";
+"rebase onto %@ and fix conflicts" = "%@ にリベースして競合を解決";
+"run the tests" = "テストを実行";
+"squash it into one commit" = "1 つのコミットにスカッシュ";
+
+/* Task delivery, landing hand-over, undelivered review comments */
+"%@ kept a menu open in the task's session, so the message wasn't typed — open the session, answer it, then try again." = "%@ がタスクのセッションでメニューを開いたままだったため、メッセージは入力されませんでした。セッションを開いて応答してから、もう一度お試しください。";
+"Couldn't check on the agent in the task's session — is the workspace running?" = "タスクのセッションのエージェントを確認できませんでした。ワークスペースは起動していますか？";
+"Handing over to %@…" = "%@ に引き継いでいます…";
+"The landing brief didn't reach %@." = "統合の指示が %@ に届きませんでした。";
+"%d review comment(s) that never reached the agent will be discarded." = "エージェントに届かなかったレビューコメント %d 件は破棄されます。";
+"%d comment(s) didn't reach the agent before it handed the task back. Send them back again?" = "エージェントがタスクを戻す前に、%d 件のコメントが届きませんでした。もう一度差し戻しますか？";
+"Send Back Again" = "もう一度差し戻す";
+"not delivered" = "未送信";
+"The agent handed the task back before this comment reached it." = "このコメントが届く前に、エージェントがタスクを戻しました。";
+"Report" = "レポート";
+
+/* Task board QA fixes (launch watch, plurals, card menus) */
+"1 comment" = "コメント 1 件";
+"%d comments" = "コメント %d 件";
+"1 comment drafted" = "下書きコメント 1 件";
+"%d comments drafted" = "下書きコメント %d 件";
+"1 review comment that never reached the agent will be discarded." = "エージェントに届かなかったレビューコメント 1 件は破棄されます。";
+"%d review comments that never reached the agent will be discarded." = "エージェントに届かなかったレビューコメント %d 件は破棄されます。";
+"1 comment didn't reach the agent before it handed the task back. Send it back again?" = "エージェントがタスクを戻す前に、コメント 1 件が届きませんでした。もう一度送り返しますか？";
+"%d comments didn't reach the agent before it handed the task back. Send them back again?" = "エージェントがタスクを戻す前に、コメント %d 件が届きませんでした。もう一度送り返しますか？";
+"Deselect" = "選択を解除";
+"Select" = "選択";
+"Retry Landing" = "統合を再試行";
+"Read Transcript" = "トランスクリプトを読む";
+"Phase %d" = "フェーズ %d";
+"Selected" = "選択済み";
+"In backlog" = "バックログ";
+"Land it again with the same choices" = "同じ設定でもう一度統合します";
+"There's unsent text in %@'s input box in the task's session, so the message wasn't typed — open the session, send or clear it, then try again." = "タスクのセッションで %@ の入力欄に未送信のテキストがあるため、メッセージを入力しませんでした — セッションを開いて送信または消去してから、もう一度お試しください。";
+"%@ exited right after it started (status %d) — open the session to see why, then Restart Session." = "%@ は起動直後に終了しました（ステータス %d）— セッションを開いて原因を確認し、「セッションを再起動」してください。";
+"%@ quit right after it started — open the session to see why, then Restart Session." = "%@ は起動直後に終了しました — セッションを開いて原因を確認し、「セッションを再起動」してください。";
+"Close without landing" = "統合せずに閉じる";
+"%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back." = "%@ はタスクのセッションで動作していません（シェルだけが残っています）。何も入力されませんでした — セッションを再起動して戻してください。";
+"The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back." = "タスクのセッションのタブが閉じられたか、別のものになっています。何も入力されませんでした — セッションを再起動して %@ を戻してください。";
+"The message wasn't typed: the session's tab no longer shows its agent. Resume the session to try again." = "メッセージは入力されませんでした：セッションのタブにエージェントが表示されていません。セッションを再開してもう一度お試しください。";
+
+/* Queued chat messages, task Stop */
+"Not sent — the session's tab is gone or now belongs to something else." = "未送信 — セッションのタブがなくなったか、別のものになりました。";
+"Not sent — the agent isn't running in the session's tab any more." = "未送信 — セッションのタブでエージェントが実行されていません。";
+"No such task." = "そのタスクはありません。";
+"The task is in Review: its agent has finished. Send it back to In Progress, or discard its branch, instead." = "タスクは「確認」にあります：エージェントの作業は完了しています。代わりに「進行中」に戻すか、ブランチを破棄してください。";
+"The task is done: there's no agent to stop." = "タスクは完了しています：停止するエージェントはありません。";
+"The task isn't running: there's no agent to stop." = "タスクは実行されていません：停止するエージェントはありません。";
+"Waiting — the agent is asking you something; answer the card first" = "待機中 — エージェントが質問しています。先にカードに回答してください";
+"Waiting — %@ is asking you something; answer the card first" = "待機中 — %@ が質問しています。先にカードに回答してください";
+"Not sent — the agent is asking you something. Answer it first, then send again." = "未送信 — エージェントが質問しています。先に回答してから、もう一度送信してください。";
+"Not sent — typing it into the session failed. Edit it or send it again." = "未送信 — セッションへの入力に失敗しました。編集するか、もう一度送信してください。";
+"Restart Session relaunches %@ on this task's worktree." = "「セッションを再起動」で、このタスクのワークツリー上で %@ を再起動します。";
+"Task brief" = "タスクの説明";
+"Show less" = "表示を減らす";
+"Show more" = "さらに表示";
+"Copy Reply" = "返答をコピー";
+"Copy as Markdown" = "Markdownとしてコピー";
+"Copy the whole reply as Markdown" = "返答全体をMarkdownとしてコピー";
+"Showing first %@ of %@ characters" = "%2$@文字中、最初の%1$@文字を表示しています";
+"Copy full output" = "出力全体をコピー";
+"Copy this file's diff" = "このファイルの差分をコピー";
+"Copy Diff" = "差分をコピー";
+"Copy the whole diff shown here as a patch" = "ここに表示されている差分全体をパッチとしてコピー";
+"Copy Pane History" = "ペインの履歴をコピー";
+"Copied 1 line" = "1行をコピーしました";
+"Copied %@ lines" = "%@行をコピーしました";
+"Couldn't read the terminal's history" = "ターミナルの履歴を読み取れませんでした";
+"Copy message" = "メッセージをコピー";
+"%@ characters" = "%@文字";
+"Showing the start of %@ characters" = "%@文字のうち冒頭を表示中";
+
+/* Live QA S1 */
+"Delivered — queued by the agent" = "送信済み — エージェントのキューで待機中";
+"Delivered — queued by %@" = "送信済み — %@ のキューで待機中";
+"1 delegation call" = "委任の呼び出し 1 件";
+"%d delegation calls" = "委任の呼び出し %d 件";
+"downloaded — install scripts could not be checked" = "ダウンロード済み — インストールスクリプトを確認できませんでした";
+"Bromure — approval needed" = "Bromure — 承認が必要です";
+"No answer within %d s counts as Don't allow." = "%d 秒以内に応答がない場合は「許可しない」になります。";
+"The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again." = "エージェントが次を実行しようとしています:\n\n%@\n\n承認はこのリクエストのみに適用されます — 他の書き込みでは再度確認します。";
+"Allow this request for 15 minutes" = "このリクエストを15分間許可";
+"Allow this request for the rest of the session" = "このリクエストをセッション終了まで許可";
+"Provider unreachable" = "プロバイダーに接続できません";
+"Usage limit reached" = "使用上限に達しました";
+
+/* Kimi approvals setting */
+"Kimi approvals" = "Kimi の承認";
+"Never ask" = "確認しない";
+"Ask before sensitive actions" = "機密性の高い操作の前に確認";
+"Never ask: Kimi Code runs every command, edit and tool without stopping, and decides its own questions and plans — the workspace's VM and Bromure's guardrails are the safety boundary. Ask before sensitive actions (Kimi's “Ask When Needed” mode): ordinary commands and edits still run without asking; Kimi stops only before touching sensitive files (such as .env or SSH keys), running dangerous commands (such as rm -rf), or leaving Plan mode, and when it has a question for you. Applies from the next start or resume." = "確認しない：Kimi Code はすべてのコマンド、編集、ツールを止まらずに実行し、質問やプランも自分で判断します。ワークスペースの VM と Bromure のガードレールが安全の境界になります。機密性の高い操作の前に確認（Kimi の「Ask When Needed」モード）：通常のコマンドや編集は引き続き確認なしで実行されます。Kimi が止まるのは、機密ファイル（.env や SSH 鍵など）に触れる前、危険なコマンド（rm -rf など）を実行する前、Plan モードを終了する前、そしてあなたに質問があるときだけです。次回の起動または再開から適用されます。";
+
+/* Live QA S3: Bromure's own blocks, credential approvals in the Security Timeline */
+"Blocked by Bromure — prompt injection" = "Bromure がブロック — プロンプトインジェクション";
+"Blocked by Bromure — rogue instructions" = "Bromure がブロック — 不正な指示";
+"Blocked by Bromure — credential leak" = "Bromure がブロック — 資格情報の漏えい";
+"Blocked by Bromure — supply chain" = "Bromure がブロック — サプライチェーン";
+"Blocked by Bromure — client certificate" = "Bromure がブロック — クライアント証明書";
+"Blocked by Bromure" = "Bromure がブロック";
+"Nothing reached the provider. The Security Timeline has the details; send again once it's resolved." = "プロバイダには何も届いていません。詳細はセキュリティ タイムラインで確認できます。解決したらもう一度送信してください。";
+"Credential approval" = "資格情報の承認";
+"allowed for 1 hour" = "1 時間許可";
+"allowed for 5 minutes" = "5 分間許可";
+"allowed for the rest of the session" = "セッション終了まで許可";
+"denied — no answer in time; the next request asks again" = "拒否 — 時間内に応答がありませんでした。次のリクエストで再度確認します";
+"denied — you said no a moment ago" = "拒否 — 先ほど拒否されました";
+"denied by you" = "ユーザーが拒否";
+
+/* Subscription sign-in health (Settings › Models) */
+"Login store unreadable — Bromure won't overwrite it. Sign-ins saved in it are unavailable until it can be read again." = "ログインストアを読み取れません — Bromure は上書きしません。読み取れるようになるまで、保存されたサインインは使用できません。";
+"Last refreshed %@" = "最終更新 %@";
+"Not refreshed since sign-in" = "サインイン以降は更新されていません";
+"access token expires %@" = "アクセストークンの有効期限 %@";
+"access token renews on next use" = "アクセストークンは次回使用時に更新されます";
+"(exit code %d)" = "(終了コード %d)";
+"Not delivered — the agent didn't take it in. Edit it or send it again." = "未配信 — エージェントが受け取りませんでした。編集するか、もう一度送信してください。";
+"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "デフォルトはオフ：下でチェックを入れる（または「すべてのワークスペース」をオンにする）まで、ここのエージェントは他のワークスペースに届きません。";
+"Closes the editor without saving changes" = "変更を保存せずにエディタを閉じます";
+
+/* prompt: Grok data-retention banner */
+"Grok asks whether xAI may keep your coding data" = "Grok が xAI によるコーディングデータの保持を許可するか尋ねています";
+
+/* session status: the agent shows a dialog (a picker, a question) waiting on the user */
+"Asking you something" = "質問しています";
+
+/* failure hint: a prompt-injection block, and how to go on */
+"Nothing reached the provider. Bromure removes the blocked tool output from this conversation's later requests, so you can send your next message. If the agent keeps failing, rewind the conversation past that step or start a new session." = "プロバイダーには何も送信されていません。Bromure はブロックしたツール出力をこの会話の以降のリクエストから取り除くので、次のメッセージを送信できます。エージェントが失敗し続ける場合は、その手順より前まで会話を巻き戻すか、新しいセッションを開始してください。";
+
+/* QA round 3 */
+"No answer within %1$d s means “%2$@”." = "%1$d 秒以内に応答がない場合は「%2$@」になります。";
+"The workspace %@ will be shut down." = "ワークスペース %@ はシャットダウンされます。";
+"The workspaces %@ will be shut down." = "ワークスペース %@ はシャットダウンされます。";
+"The workspace %@ will be suspended and resume where it left off." = "ワークスペース %@ はサスペンドされ、次回は中断したところから再開します。";
+"The workspaces %@ will be suspended and resume where they left off." = "ワークスペース %@ はサスペンドされ、次回は中断したところから再開します。";
+
+/* QA round 4 */
+"“%@”" = "「%@」";
+"This dialog doesn't fit in the agent's terminal, so its choices can't be shown here. Answer it in the terminal." = "このダイアログはエージェントのターミナルに収まらないため、ここでは選択肢を表示できません。ターミナルで回答してください。";
+"Open the terminal" = "ターミナルを開く";
+"Opt out" = "オプトアウト";
+"Opt in" = "オプトイン";
+"Grok's own setting; you can change it later in Grok's /settings." = "Grok 自体の設定です。あとで Grok の /settings で変更できます。";
+
+"Listing its tools" = "ツールを一覧表示";
+"Looking up %@" = "%@ を確認中";
+"Reading earlier output" = "以前の出力を読み込み中";
+"Reading earlier output #%@" = "以前の出力 #%@ を読み込み中";
+"tool lookup" = "ツールの確認";
+"earlier output" = "以前の出力";
+"Instructions for the agent" = "エージェントへの指示";
+"Not delivered — it's in the agent's input box but its Return didn't take. Press Return in the terminal, or clear the box and send it again." = "未送信 — エージェントの入力欄には入っていますが、Return が受け付けられませんでした。ターミナルで Return を押すか、入力欄を空にしてもう一度送信してください。";
+"1 review comment hasn't reached the agent yet — landing now merges without it." = "レビューコメント 1 件がまだエージェントに届いていません — 今マージすると、そのコメントは反映されません。";
+"%d review comments haven't reached the agent yet — landing now merges without them." = "レビューコメント %d 件がまだエージェントに届いていません — 今マージすると、それらのコメントは反映されません。";
+
+/* Added 2026-10-05: held-message menu actions, compaction row, no-code review */
+"Waiting — a menu is open in the agent's terminal; answer it there or dismiss it" = "待機中 — エージェントのターミナルでメニューが開いています。そこで回答するか閉じてください";
+"Waiting — a menu is open in %@'s terminal; answer it there or dismiss it" = "待機中 — %@ のターミナルでメニューが開いています。そこで回答するか閉じてください";
+"Open terminal" = "ターミナルを開く";
+"Dismiss (Esc)" = "閉じる (Esc)";
+"Conversation compacted" = "会話を圧縮しました";
+"The agent's work is its report above — there is no diff to read." = "エージェントの成果は上のレポートです — 確認する差分はありません。";
+
+/* Registration launch watchdog */
+"The sign-in machine didn't become ready, so the %@ sign-in couldn't start." = "サインイン用マシンの準備が整わなかったため、%@ のサインインを開始できませんでした。";
+"The %@ sign-in command didn't start in the sign-in machine." = "サインイン用マシンで %@ のサインインコマンドが起動しませんでした。";
+"The sign-in machine stayed busy (%@), so the %@ sign-in couldn't start." = "サインイン用マシンが処理中のままだったため（%1$@）、%2$@ のサインインを開始できませんでした。";
+"Couldn't start the %@ sign-in" = "%@ のサインインを開始できませんでした";
+"Retry types the sign-in command into the sign-in machine again." = "「再試行」でサインイン用マシンにサインインコマンドをもう一度入力します。";
+
+/* Subscription workspace vs the global API key */
+"%@ subscription not signed in" = "%@ のサブスクリプションにサインインしていません";
+"using API key" = "API キーを使用";
+
+/* Firewall: per-rule on/off, time limits, Security Timeline quick actions */
+"Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "変更は保存した時点で実行中のワークスペースに適用されます。再起動は不要です。ルールのチェックを外すと削除せずにオフにでき、時計メニューから期間限定でオンにすることもできます。";
+"Time limit" = "有効期間";
+"On — untick to switch this rule off without deleting it" = "オン — チェックを外すと、このルールを削除せずにオフにします";
+"Off — this rule is ignored until you tick it" = "オフ — チェックを入れるまで、このルールは無視されます";
+"On for 15 minutes" = "15 分間オン";
+"On for 1 hour" = "1 時間オン";
+"On until the workspace stops" = "ワークスペースが停止するまでオン";
+"Make permanent" = "常時有効にする";
+"until stop" = "停止まで";
+"expired" = "期限切れ";
+"On until this workspace stops, then switched off automatically" = "このワークスペースが停止するまでオン。その後、自動的にオフになります";
+"Switches off automatically at %@" = "%@ に自動的にオフになります";
+"Turn this rule on for a limited time" = "このルールを期間限定でオンにする";
+"%@ — default policy" = "%@ — デフォルトのポリシー";
+"Allow…" = "許可…";
+"Rule…" = "ルール…";
+"Block…" = "ブロック…";
+"Change this workspace's firewall rules in its settings on the Mac that runs it." = "このワークスペースのファイアウォールルールは、それを実行している Mac 上の設定で変更してください。";
+"Allow %@" = "%@ を許可";
+"Allow all of %@" = "%@ 全体を許可";
+"Block %@" = "%@ をブロック";
+"Block all of %@" = "%@ 全体をブロック";
+"Switch off rule “%@”" = "ルール「%@」をオフにする";
+"Remove rule “%@”" = "ルール「%@」を削除";
+"The rule that allowed this is no longer in the workspace's rules." = "これを許可したルールは、ワークスペースのルールにもうありません。";
+"Always" = "常に";
+"For 15 minutes" = "15 分間";
+"For 1 hour" = "1 時間";
+"Until the workspace stops" = "ワークスペースが停止するまで";
+"Add a rule allowing this destination — applies to the running workspace at once" = "この宛先を許可するルールを追加します — 実行中のワークスペースにすぐ適用されます";
+"Switch off the rule that allowed this, or block the destination — applies at once" = "これを許可したルールをオフにするか、宛先をブロックします — すぐに適用されます";
+
+/* Code review: review scope (baseline / new commits) and agent choice */
+"New commits since the last review" = "前回のレビュー以降の新しいコミット";
+"The full repository (baseline)" = "リポジトリ全体（ベースライン）";
+"New commits" = "新しいコミット";
+"Baseline review at %@" = "%@ でのベースラインレビュー";
+"Review of new commits %1$@…%2$@" = "新しいコミット %1$@…%2$@ のレビュー";
+"Review of the last %1$d commits up to %2$@" = "%2$@ までの直近 %1$d 件のコミットのレビュー";
+"No new commits since the last review (%@)" = "前回のレビュー以降、新しいコミットはありません（%@）";
+"%@ (not set up here)" = "%@（ここでは未設定）";
+"%1$@ isn't set up in this workspace — an unattended review would stop at its sign-in. Add it in the workspace's settings (or sign in from a session there) before the first scan." = "%1$@ はこのワークスペースで設定されていません。無人のレビューはサインインで止まってしまいます。最初のスキャンの前に、ワークスペースの設定で追加してください（またはそのワークスペースのセッションからサインインしてください）。";
+"Scheduled review" = "スケジュールされたレビュー";
+"Start with a full-repository baseline" = "リポジトリ全体のベースラインから始める";
+"Commit and pull-request scans start with what lands after the watch is created. Use Run Baseline Now for the existing code." = "コミットとプルリクエストのスキャンは、監視の作成後に届いたものから開始します。既存のコードには「今すぐベースラインを実行」を使用してください。";
+"Each review covers only the commits that landed on %@ since the previous one — quick and cheap. Nothing new: no run." = "各レビューは、前回以降に %@ に届いたコミットだけを対象にします。速くて低コストです。新しいものがなければ実行しません。";
+"Reviewed through %1$@ (%2$@)." = "%1$@ までレビュー済み（%2$@）。";
+"The first review covers the whole repository; later ones only what's new." = "最初のレビューはリポジトリ全体を対象にし、以降は新しい部分だけを対象にします。";
+"Nothing reviewed yet: the first review covers the last %d commits." = "まだ何もレビューしていません。最初のレビューは直近 %d 件のコミットを対象にします。";
+"Each review goes through the whole codebase, highest-risk areas first. Thorough, but a large repository takes longer and uses more tokens." = "各レビューはコードベース全体を、リスクの高い領域から順に確認します。徹底的ですが、大きなリポジトリでは時間がかかり、トークンも多く使います。";
+"Review of the new commits on %@ requested — it shows under Recent scans once the agent starts (no run if nothing landed since the last review)." = "%@ の新しいコミットのレビューをリクエストしました。エージェントが開始すると「最近のスキャン」に表示されます（前回のレビュー以降に何も届いていなければ実行しません）。";
+"Now watching %@ — the first review is starting." = "%@ の監視を開始しました。最初のレビューを開始しています。";
+"Run Baseline Now" = "今すぐベースラインを実行";
+"Review the commits that landed since the last review" = "前回のレビュー以降に届いたコミットをレビュー";
+"Review the whole repository" = "リポジトリ全体をレビュー";
+"Review the new commits on %@ now" = "%@ の新しいコミットを今すぐレビュー";
+"New commits %1$@ %2$02d:00" = "新しいコミット %1$@ %2$02d:00";
+
+/* Firewall QA (#38): proxy-route cuts, allowed-connection logging, editor merge */
+"allow" = "許可";
+"deny" = "拒否";
+"“%@” no longer allows it" = "「%@」では許可されなくなりました";
+"connection closed — %@" = "接続を切断 — %@";
+"Blocked now" = "現在はブロック";
+"Allowed now" = "現在は許可";
+"Blocked now by “%@”" = "現在は「%@」でブロック";
+"Allowed now by “%@”" = "現在は「%@」で許可";
+"Blocked now by the default policy" = "現在はデフォルトポリシーでブロック";
+"Allowed now by the default policy" = "現在はデフォルトポリシーで許可";
+"“%@” exists and is off" = "「%@」は存在しますがオフです";
+"“%@” is on until the workspace stops" = "「%@」はワークスペースが停止するまでオンです";
+"“%1$@” is on until %2$@" = "「%1$@」は %2$@ までオンです";
+"“%@” is already on, with no time limit" = "「%@」はすでにオンです（時間制限なし）";
+"The workspace's rules have changed since this connection" = "この接続以降にワークスペースのルールが変更されました";
+"Log allowed connections" = "許可された接続を記録";
+"Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules." = "ファイアウォールが通過させた接続もセキュリティタイムラインに表示します（宛先ごとに 1 行、繰り返しはまとめて表示）。そこからホストをブロックできます。オフ：ブロックされた接続のみを表示します。選択するまでは、ワークスペースにルールがある場合にオンになります。";
+"Enable rule %@" = "ルール %@ を有効にする";
+"Time limit set" = "時間制限あり";
+"The rules changed outside the editor (a Security Timeline action or a time limit). The change was merged into your unsaved edits." = "エディタの外でルールが変更されました（セキュリティタイムラインの操作または時間制限）。変更は未保存の編集内容に統合されました。";
+"The rules changed outside the editor while you have unsaved edits." = "未保存の編集内容がある間に、エディタの外でルールが変更されました。";
+"Reload" = "再読み込み";
+"Keep my edits" = "編集内容を保持";
+
+/* Security Timeline decision: an open connection through the workspace's HTTP proxy cut by a firewall change; %@ = why */
+"connection closed (proxy) — %@" = "接続を切断（プロキシ） — %@";
+
+/* Security Timeline decision: an open direct (not proxied) connection cut by a firewall change; %@ = why */
+"connection closed (direct) — %@" = "接続を切断（直接） — %@";
+
+/* security timeline: firewall row tooltip; %@ = the destination's other DNS names (CDN / server names), comma-separated */
+"Also seen as: %@" = "別名: %@";
+
+/* firewall rule button accessibility label */
+"Move rule up" = "ルールを上へ移動";
+
+/* firewall rule button accessibility label */
+"Move rule down" = "ルールを下へ移動";
+
+/* firewall rule button accessibility label */
+"Delete rule" = "ルールを削除";
+
+/* firewall pane: Log allowed connections tooltip */
+"List allowed connections in the Security Timeline too" = "許可された接続もセキュリティタイムラインに表示";
+
+/* Added: transcript loading states */
+/* beautified: first transcript read in flight */
+"Loading conversation…" = "会話を読み込み中…";
+/* beautified history: bytes held of the transcript file's size */
+"Loading earlier conversation… (%@ of %@)" = "以前の会話を読み込み中…（%@ / %@）";
+/* beautified: transcript reads keep failing or timing out */
+"Couldn't load this conversation — the machine didn't answer in time." = "この会話を読み込めませんでした。マシンが時間内に応答しませんでした。";
+/* beautified: the agent works but no transcript file is found */
+"This session's conversation wasn't found on its machine." = "このセッションの会話がマシン上に見つかりませんでした。";
+
+/* Code review: ask a session to fix a finding */
+"Ask a Session to Fix It" = "セッションに修正を依頼";
+"Ask a Session Instead…" = "代わりにセッションに依頼…";
+"Ask a Session or the Switchboard…" = "セッションまたはスイッチボードに依頼…";
+"Show the findings for %@" = "%@ の検出事項を表示";
+"Sent to %@ to fix" = "修正のため %@ に送信しました";
+"Sent to %@ — it works on the fix in its own session." = "%@ に送信しました — 修正はそのセッション内で行われます。";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "リポジトリにプッシュ先のリモートがありません — プッシュせずにマージしてください。";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "%@ にマージしましたが、プッシュのためにワークスペースに接続できません — 起動していますか？";
+"Merge & Push" = "マージしてプッシュ";
+"Push %1$@ to %2$@" = "%1$@ を %2$@ にプッシュ";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ に反映された時点で完了です。%1$@ が先に進んでいる場合は、%3$@ がプルしてコンフリクトを解決し、プッシュします。";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "%1$@ に送信できませんでした: %2$@";
+"that session is gone" = "そのセッションはもうありません";
+"the server didn't answer" = "サーバーが応答しませんでした";
+"the server runs an older Bromure — update it to hand findings to a session" = "サーバーは古い Bromure を実行しています — 検出事項をセッションに渡すにはアップデートしてください";
+"the server refused it" = "サーバーが拒否しました";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "%1$@ に渡せませんでした: %2$@";
+"a menu or dialog stayed open in that session" = "そのセッションでメニューまたはダイアログが開いたままでした";
+"something else was typed in that session's input box" = "そのセッションの入力欄に別の内容が入力されていました";
+"Couldn't hand it to the Switchboard: %@" = "スイッチボードに渡せませんでした: %@";
+"the Switchboard session is gone" = "スイッチボードのセッションはもうありません";
+"the message couldn't be typed into the Switchboard" = "メッセージをスイッチボードに入力できませんでした";
+"the Switchboard's agent never started" = "スイッチボードのエージェントが起動しませんでした";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "本文がプロンプトインジェクション検査でフラグ付けされました (%@) — エージェントに渡す前に確認してください";
+"Hand It Over Anyway" = "それでも渡す";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "プロンプトインジェクション検査でフラグが付けられました (%@)。これはリポジトリの内容を読んだエージェントによるもので、渡す先のエージェントもこれを読むことになります。渡す前に確認してください。";
+"Couldn't start the fix: %@" = "修正を開始できませんでした: %@";
+"Couldn't ask the Switchboard: %@" = "スイッチボードに依頼できませんでした: %@";
+"that finding is gone" = "その検出事項はもうありません";
+"couldn't start the fix" = "修正を開始できませんでした";
+"no Switchboard could be started" = "スイッチボードを起動できませんでした";

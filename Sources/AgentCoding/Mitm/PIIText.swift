@@ -142,8 +142,29 @@ enum PIIText {
                                      label: label, score: 1, heuristic: true))
             }
         }
+        for re in streetRules {
+            for m in re.matches(in: text, range: all) {
+                spans.append(PIISpan(start: m.range.location, end: NSMaxRange(m.range),
+                                     label: .streetName, score: 1, heuristic: true))
+            }
+        }
         return spans
     }
+
+    /// Street lines written the usual ways, so an address doesn't hinge on
+    /// the model's confidence (QA: "42 Example Street, Springfield" went out
+    /// as is in a Claude turn and was only caught on the third omp request).
+    /// Capitalized words between the number and a street-type word keep code
+    /// ("3 new keys", "200 OK") out. City, state and postal code stay.
+    private static let streetTypes = "Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|Square|Sq|Terrace|Ter|Way|Highway|Hwy|Parkway|Pkwy|Circle|Cir|Trail|Close|Crescent|Row|Alley"
+    private static let streetRules: [NSRegularExpression] = [
+        // "42 Example Street", "1427 Juniper Hollow Rd.", "10B Main St, Apt 4".
+        regex(#"(?<![\w.\-/:#])\d{1,6}[A-Za-z]?[ \t\x{00a0}]+(?:(?:[NSEW]|North|South|East|West)\.?[ \t\x{00a0}]+)?(?:\p{Lu}[\p{L}'\x{2019}\-]*[ \t\x{00a0}]+){1,4}(?:"# + streetTypes + #")\b\.?(?:,?[ \t\x{00a0}]+(?:Apt|Apartment|Suite|Ste|Unit|Floor|Fl|#)\.?[ \t]*#?[ \t]*[0-9A-Za-z\-]{1,6}\b)?"#),
+        // "Hauptstraße 5", "Kirchgasse 12a", "Lindenweg 3".
+        regex(#"(?<![\w.\-/])\p{Lu}\p{Ll}+(?:straße|strasse|gasse|weg|allee|platz|laan|straat|vej|gatan|gade)[ \t\x{00a0}]+\d{1,4}[a-z]?\b"#),
+        // "12 rue de la Paix", "5 bis avenue Victor Hugo", "3 calle Mayor".
+        regex(#"(?<![\w.\-/])\d{1,4}(?:[ \t]?(?:bis|ter))?,?[ \t\x{00a0}]+(?i:rue|avenue|boulevard|bd|allée|impasse|chemin|place|quai|calle|avenida|rua|via)[ \t\x{00a0}]+(?:(?:de|du|des|la|le|del|da|do|dos|l'|d')[ \t]*)*\p{Lu}[\p{L}'\x{2019}\-]*(?:[ \t\x{00a0}]+\p{Lu}[\p{L}'\x{2019}\-]*){0,3}"#),
+    ]
 
     // MARK: Code gate
 
@@ -180,6 +201,54 @@ enum PIIText {
             }
             start = end
         }
+        return out
+    }
+
+    // MARK: Content-defined chunks
+
+    /// Split a long text into line-aligned chunks whose boundaries depend on
+    /// the content, not on positions: a cut falls after a line whose hash
+    /// hits (once the chunk holds `minChunk` units), or at the first line end
+    /// past `maxChunk`. Text appended to, or edited inside, a big string
+    /// (a growing log, a re-sent tool output, a pasted document with a line
+    /// changed) then re-yields the same chunks everywhere else, so the
+    /// detector's per-chunk cache only scans what's new. PII never straddles
+    /// a line, so a cut at a line end loses nothing. A line longer than
+    /// `hardLimit` (minified data) is cut at a space, else hard.
+    static func contentChunks(_ text: String, minChunk: Int = 2048, maxChunk: Int = 8192,
+                              hardLimit: Int = 16384) -> [Range<Int>] {
+        let u = Array(text.utf16)
+        guard u.count > maxChunk else { return u.isEmpty ? [] : [0..<u.count] }
+        var out: [Range<Int>] = []
+        var start = 0
+        var lineHash: UInt64 = 0xcbf29ce484222325
+        var lastSpace = -1
+        var i = 0
+        while i < u.count {
+            let c = u[i]
+            i += 1
+            if c == 0x0A {
+                let len = i - start
+                if len >= maxChunk || (len >= minChunk && lineHash % 4 == 0) {
+                    out.append(start..<i)
+                    start = i
+                    lastSpace = -1
+                }
+                lineHash = 0xcbf29ce484222325
+                continue
+            }
+            lineHash = (lineHash ^ UInt64(c)) &* 0x100000001b3
+            if c == 0x20 { lastSpace = i }
+            if i - start >= hardLimit {
+                var cut = lastSpace > start + hardLimit / 2 ? lastSpace : i
+                if cut < u.count, (0xDC00...0xDFFF).contains(u[cut]) { cut += 1 }   // keep a surrogate pair whole
+                out.append(start..<cut)
+                start = cut
+                i = max(i, cut)
+                lastSpace = -1
+            }
+        }
+        if start < u.count { out.append(start..<u.count) }
         return out
     }
 
@@ -270,13 +339,23 @@ enum PIIText {
         let unk: Int32
         let cls: Int32
         let sep: Int32
+        /// Longest vocabulary entry in scalars (a `##` piece counted with its
+        /// prefix): the greedy match never tries a longer candidate. Without
+        /// the bound a 60-letter random word cost ~1,800 string probes.
+        let maxPieceScalars: Int
         static let maxCharsPerWord = 100
+        /// A word that falls apart into this many pieces is noise — a random
+        /// id, base64, a hash — not a word a name could be: one [UNK] (as BERT
+        /// does for an over-long word), which also keeps it from filling the
+        /// model's windows. QA: a 200 KB paste of random letters took 10.5 s.
+        static let maxPiecesPerWord = 8
 
         init(vocab: [String: Int32]) {
             self.vocab = vocab
             unk = vocab["[UNK]"] ?? 100
             cls = vocab["[CLS]"] ?? 101
             sep = vocab["[SEP]"] ?? 102
+            maxPieceScalars = max(1, vocab.keys.lazy.map { $0.unicodeScalars.count }.max() ?? 1)
         }
 
         init(vocabFile: URL) throws {
@@ -348,7 +427,12 @@ enum PIIText {
             var found: [Token] = []
             var start = 0
             while start < word.count {
-                var end = word.count
+                if found.count >= Self.maxPiecesPerWord {
+                    out.append(Token(id: unk, start: rangeStart, end: rangeEnd, isSubword: false))
+                    return
+                }
+                let prefix = start > 0 ? 2 : 0
+                var end = min(word.count, start + max(1, maxPieceScalars - prefix))
                 var hit: Int32? = nil
                 while start < end {
                     var s = start > 0 ? "##" : ""
@@ -525,7 +609,10 @@ enum PIIText {
     }
 
     private static func canBridge(_ ns: NSString, _ a: PIISpan, _ b: PIISpan) -> Bool {
-        guard a.label == b.label else { return false }
+        // A given name and a surname side by side are one person's name
+        // ("Jane Q." + "Example", "Mary-Ann" + "O'Neil"): one span, one
+        // stand-in — not "<stand-in>. Example" or three names counted.
+        guard a.label == b.label || (a.label.isName && b.label.isName) else { return false }
         let (l, r) = a.start <= b.start ? (a, b) : (b, a)
         guard r.start >= l.end else { return false }
         guard r.start - l.end <= 8 else { return false }
@@ -577,6 +664,23 @@ enum PIIText {
                 s.end = span.end + m.range.length
             }
         }
+        // A name that ends on a middle initial ("Jane Q", "John F") goes on
+        // past the initial's period to the surname the model missed:
+        // "Jane Q. Example", "John F. Kennedy", "Ann B. O'Neil-Smith".
+        if s.end == span.end, span.end - span.start >= 3, isInitial(ns, span.end - 1),
+           ns.substring(with: NSRange(location: span.start, length: span.end - 1 - span.start))
+               .contains(where: { $0 == " " || $0 == "\u{00a0}" }) {
+            let rTo2 = min(ns.length, span.end + 40)
+            let tail = ns.substring(with: NSRange(location: span.end, length: rTo2 - span.end))
+            if let m = initialTail.firstMatch(in: tail, range: NSRange(location: 0, length: (tail as NSString).length)),
+               span.end + m.range.length <= rightBound {
+                s.end = span.end + m.range.length
+            }
+        }
         return s
     }
+
+    /// After a middle initial: its period, a space, then a capitalized word
+    /// (apostrophes and hyphens inside it: "O'Neil", "Smith-Jones").
+    private static let initialTail = regex(#"^\.[ \x{00a0}]{1,2}[\p{Lu}][\p{L}\p{M}]*(?:['\x{2019}\-][\p{L}][\p{L}\p{M}]*)*"#)
 }

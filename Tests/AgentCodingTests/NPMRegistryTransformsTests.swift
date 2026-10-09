@@ -222,4 +222,75 @@ struct NPMRegistryTransformsTests {
         #expect(outHead.contains("X-Bromure-Rewritten: supply-chain"))
         #expect(Array(outBody) == bodyBytes)
     }
+
+    // MARK: - real tarball fixture
+
+    /// Tests/Fixtures/npm-postinstall-fixture.tgz: a real `tar czf` npm
+    /// package with a postinstall script and a body that compresses ~19:1
+    /// (core-js compresses ~15:1 — the ratio that used to truncate the
+    /// one-shot gunzip and let the tarball through with its scripts).
+    private func fixtureResponse() throws -> Data {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Fixtures/npm-postinstall-fixture.tgz")
+        let tgz = try Data(contentsOf: url)
+        var resp = Data("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: \(tgz.count)\r\n\r\n".utf8)
+        resp.append(tgz)
+        return resp
+    }
+
+    /// Extract one member of a .tgz with the system tar (proves the rewritten
+    /// archive is a valid gzip+tar, not just something our walker accepts).
+    private func untar(_ tgz: Data, member: String) throws -> Data {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("npmfx-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("p.tgz")
+        try tgz.write(to: file)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        p.arguments = ["-xzOf", file.path, member]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        try p.run()
+        let out = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        #expect(p.terminationStatus == 0)
+        return out
+    }
+
+    @Test("A real, highly compressible tarball has its postinstall stripped and stays a valid archive")
+    func stripsRealTarball() throws {
+        let resp = try fixtureResponse()
+        let (out, result) = NPMRegistryTransforms.inspectTarball(rawResponse: resp)
+        #expect(result == .stripped)
+        let sep = out.range(of: Data("\r\n\r\n".utf8))!
+        let head = String(decoding: out.subdata(in: 0..<sep.lowerBound), as: UTF8.self)
+        let body = out.subdata(in: sep.upperBound..<out.count)
+        #expect(head.contains("Content-Length: \(body.count)"))
+        let pkg = try JSONSerialization.jsonObject(with: try untar(body, member: "package/package.json")) as! [String: Any]
+        let scripts = pkg["scripts"] as? [String: String] ?? [:]
+        #expect(scripts["postinstall"] == nil)
+        #expect(scripts["test"] == "node index.js")
+        // Every other member comes through intact.
+        let bulk = try untar(body, member: "package/bulk.js")
+        #expect(bulk.count > 3_000_000)
+        #expect(try untar(body, member: "package/index.js") == Data("module.exports = 42;\n".utf8))
+        // The legacy entry point agrees.
+        #expect(NPMRegistryTransforms.stripScriptsFromTarball(rawResponse: resp).didStrip)
+    }
+
+    @Test("A truncated tarball is reported as unreadable, never as clean")
+    func truncatedTarballFails() throws {
+        let resp = try fixtureResponse()
+        let cut = resp.prefix(resp.count - 5000)
+        let (out, result) = NPMRegistryTransforms.inspectTarball(rawResponse: Data(cut))
+        if case .failed = result {} else { Issue.record("expected .failed, got \(result)") }
+        #expect(out == Data(cut))
+    }
+
+    @Test("A non-200 tarball response is left alone")
+    func errorStatusNotApplicable() {
+        let resp = Data("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found".utf8)
+        #expect(NPMRegistryTransforms.inspectTarball(rawResponse: resp).result == .notApplicable)
+    }
 }

@@ -163,6 +163,7 @@ final class PlanSessionWindowManager {
         } else {
             model.phase = await context.liveBranch(task) != nil ? .live : .starting
         }
+        if model.phase == .live, model.liveSince == nil { model.liveSince = Date() }
         if previous == .starting, model.phase == .live,
            let win = windows[taskID], win.isVisible, !win.isKeyWindow {
             // The session tab surfacing is exactly when this window used to
@@ -202,7 +203,7 @@ private struct PlanBriefCard: View {
                 Image(systemName: "doc.text")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.accentColor)
-                Text(NSLocalizedString("Your brief", comment: "plan window"))
+                Text(NSLocalizedString("Your task", comment: "plan window"))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
@@ -293,6 +294,9 @@ final class PlanSessionModel {
     /// — latched, and used to hide the "Open Terminal" escape hatch, which
     /// has nothing to open for a streamed session.
     var streamed = false
+    /// When the tmux session was first seen live — a transcript that hasn't
+    /// shown up a while later means this agent's isn't readable here.
+    var liveSince: Date?
 
     init(taskID: UUID, title: String, workspaceName: String, accentHex: String) {
         self.taskID = taskID
@@ -426,12 +430,48 @@ private struct PlanSessionView: View {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         if model.items.isEmpty {
                             VStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text(NSLocalizedString(
-                                    "Waiting for the agent's first words…",
-                                    comment: "plan window"))
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
+                                if case .ended(let why) = model.phase {
+                                    // Over before it said anything: say why,
+                                    // no spinner.
+                                    Image(systemName: "exclamationmark.triangle")
+                                        .foregroundStyle(.orange)
+                                    Text(why ?? NSLocalizedString("The planning session ended.", comment: "plan window"))
+                                        .font(.system(size: 11.5))
+                                        .multilineTextAlignment(.center)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    TimelineView(.periodic(from: .now, by: 5)) { ctx in
+                                        if !model.streamed, model.phase == .live,
+                                           let since = model.liveSince,
+                                           ctx.date.timeIntervalSince(since) > 20 {
+                                            // Its words aren't readable from
+                                            // here (an agent whose transcript
+                                            // this window can't follow): say
+                                            // where they are.
+                                            VStack(spacing: 8) {
+                                                Image(systemName: "terminal")
+                                                    .foregroundStyle(.secondary)
+                                                Text(NSLocalizedString(
+                                                    "Planning in the terminal — open it to watch and answer.",
+                                                    comment: "plan window"))
+                                                    .font(.system(size: 11.5))
+                                                    .foregroundStyle(.secondary)
+                                                Button(NSLocalizedString("Open Terminal", comment: "review"),
+                                                       action: onOpenTerminal)
+                                                    .controlSize(.small)
+                                            }
+                                        } else {
+                                            VStack(spacing: 8) {
+                                                ProgressView().controlSize(.small)
+                                                Text(NSLocalizedString(
+                                                    "Waiting for the agent's first words…",
+                                                    comment: "plan window"))
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.top, 60)
@@ -524,7 +564,9 @@ private struct PlanSessionView: View {
                 ChatComposer(
                     placeholder: model.phase == .live
                         ? NSLocalizedString("Answer the agent…", comment: "plan window")
-                        : NSLocalizedString("Session not accepting input",
+                        : model.phase == .starting
+                        ? NSLocalizedString("Starting the planning session…", comment: "plan window")
+                        : NSLocalizedString("The planning session has ended",
                                             comment: "plan window"),
                     text: $draft,
                     disabled: model.phase != .live,

@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 
 /// Per-profile, per-scope consent gate for the `.promptOnWrite`
 /// guardrail mode. Mirrors `ConsentBroker` in shape (actor, coalescing
@@ -118,12 +117,12 @@ public actor GuardrailsConsentBroker {
                         scopeDisplayName: String,
                         operation: String) async -> Bool {
         let key = Self.storeKey(profileID: profileID, scope: scope)
-        let now = Date()
+        let checkedAt = Date()
 
         FileHandle.standardError.write(Data(
             "[guardrails-consent] check \(scope) for profile \(profileID.uuidString.prefix(8))\n".utf8))
 
-        if let mem = denies[key], mem.expiration > now {
+        if let mem = denies[key], mem.expiration > checkedAt {
             FileHandle.standardError.write(Data(
                 "[guardrails-consent] live deny for \(scope) — auto-deny\n".utf8))
             return false
@@ -131,7 +130,7 @@ public actor GuardrailsConsentBroker {
             denies.removeValue(forKey: key)
         }
 
-        if let g = grants[key], g.expiration > now {
+        if let g = grants[key], g.expiration > checkedAt {
             FileHandle.standardError.write(Data(
                 "[guardrails-consent] live grant for \(scope) — auto-allow\n".utf8))
             return true
@@ -153,42 +152,32 @@ public actor GuardrailsConsentBroker {
         pending[key] = []
 
         let profileName = profileNames[profileID] ?? "(unknown profile)"
+        // Non-modal, deadline → deny; fat client / terminal when attached.
+        // The approval covers exactly the operation shown (the caller scopes
+        // `scope` to it), and the copy says so.
+        let title = String(format: NSLocalizedString(
+            "Allow write on “%@” from workspace “%@”?",
+            comment: "Guardrails write prompt: scope display name + profile name"),
+            scopeDisplayName, profileName)
+        let message = String(format: NSLocalizedString(
+            "The agent wants to run:\n\n%@\n\nApproving covers only this exact request — any other write asks again.",
+            comment: "Guardrails write prompt body: the exact operation (verb + path, or the SQL)"), operation)
+        let choices = [NSLocalizedString("Allow this request for 15 minutes", comment: "Guardrails prompt button"),
+                       NSLocalizedString("Allow once", comment: ""),
+                       NSLocalizedString("Allow this request for the rest of the session", comment: "Guardrails prompt button"),
+                       NSLocalizedString("Don't allow", comment: "")]
+        let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: message,
+                                             choices: choices, denyIndex: choices.count - 1,
+                                             style: .warning)
         let decision: Decision
-        let route = RemoteConsent.route(for: profileID)
-        if route == .localAlert {
-            decision = await Self.askUser(profileName: profileName,
-                                          scopeDisplayName: scopeDisplayName,
-                                          operation: operation)
-        } else {
-            // Remote: a fat client renders a native NSAlert on its own Mac (over
-            // the tunnel); a plain SSH/CLI attach gets the tmux popup. Same
-            // choices and index mapping either way; nil (deny/timeout) → deny.
-            let title = String(format: NSLocalizedString(
-                "Allow write on “%@” from workspace “%@”?",
-                comment: "Guardrails write prompt: scope display name + profile name"),
-                scopeDisplayName, profileName)
-            let choices = [NSLocalizedString("Allow for 15 minutes", comment: ""),
-                           NSLocalizedString("Allow once", comment: ""),
-                           NSLocalizedString("Allow for the rest of the session", comment: ""),
-                           NSLocalizedString("Don't allow", comment: "")]
-            let idx: Int?
-            if route == .fatClient {
-                idx = await RemoteConsent.chooseOnFatClient(
-                    profileID: profileID, title: title, message: operation,
-                    choices: choices, denyIndex: choices.count - 1)
-            } else {
-                idx = await Task.detached {
-                    RemoteConsent.choose(profileID: profileID, title: title,
-                                         message: operation, choices: choices)
-                }.value
-            }
-            switch idx {
-            case 0:  decision = .allow15min
-            case 1:  decision = .allowOnce
-            case 2:  decision = .allowSession
-            default: decision = .deny
-            }
+        switch idx {
+        case 0:  decision = .allow15min
+        case 1:  decision = .allowOnce
+        case 2:  decision = .allowSession
+        default: decision = .deny
         }
+        // Grant lifetimes start at the answer.
+        let now = Date()
 
         let allow: Bool
         switch decision {
@@ -266,35 +255,5 @@ public actor GuardrailsConsentBroker {
     public func revokeEverything() {
         grants.removeAll()
         denies.removeAll()
-    }
-
-    @MainActor
-    private static func askUser(profileName: String,
-                                scopeDisplayName: String,
-                                operation: String) -> Decision {
-        let alert = NSAlert()
-        alert.messageText = String(
-            format: NSLocalizedString(
-                "Allow write on “%@” from workspace “%@”?",
-                comment: "Guardrails write prompt: scope display name + profile name"),
-            scopeDisplayName, profileName)
-        // The operation goes in the body verbatim so the user sees
-        // the exact query / verb / resource that's about to fire.
-        // It can be a multi-line SQL statement; NSAlert renders
-        // newlines.
-        alert.informativeText = operation
-        alert.alertStyle = .warning
-        // Default action is the safer of the two long grants — 15 min.
-        alert.addButton(withTitle: NSLocalizedString("Allow for 15 minutes", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Allow once", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Allow for the rest of the session", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Don't allow", comment: ""))
-        NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:  return .allow15min
-        case .alertSecondButtonReturn: return .allowOnce
-        case .alertThirdButtonReturn:  return .allowSession
-        default:                        return .deny
-        }
     }
 }

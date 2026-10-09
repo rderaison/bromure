@@ -56,6 +56,8 @@ final class ACAutomationServer {
     // does) otherwise got the pre-change state for up to the TTL.
     private static let mutationLock = NSLock()
     nonisolated(unsafe) private static var mutationGeneration = 0
+    /// This app run, for `generation` ordering across restarts.
+    static let epoch = UUID().uuidString
     static func noteMutation() {
         mutationLock.lock(); mutationGeneration &+= 1; mutationLock.unlock()
     }
@@ -69,7 +71,16 @@ final class ACAutomationServer {
     static func isMutating(_ method: String, path: String) -> Bool {
         guard method != "GET", method != "HEAD" else { return false }
         let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
-        return !(bare.hasSuffix("/exec") || bare.hasSuffix("/file"))
+        return !(bare.hasSuffix("/exec") || bare.hasSuffix("/file") || bare.hasSuffix("/type"))
+    }
+
+    /// `/vms/{id}/type` → the id (percent-decoded), else nil.
+    static func typeRouteID(_ path: String) -> String? {
+        let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        guard bare.hasPrefix("/vms/"), bare.hasSuffix("/type") else { return nil }
+        let id = String(bare.dropFirst("/vms/".count).dropLast("/type".count))
+        guard !id.isEmpty, !id.contains("/") else { return nil }
+        return id.removingPercentEncoding ?? id
     }
     let port: UInt16
     let bindAddress: String
@@ -128,6 +139,10 @@ final class ACAutomationServer {
     var onListDelegations: (() -> [[String: Any]])?
     /// Rooms of sessions, for the fat client's mirror.
     var onListAgentRooms: (() -> [[String: Any]])?
+    /// Session instructions presets: listed in /state, replaced whole by
+    /// POST /instruction-presets {presets: [...]}.
+    var onListInstructionPresets: (() -> [[String: Any]])?
+    var onSetInstructionPresets: (([[String: Any]]) -> Void)?
     /// POST /agent-rooms/{action} (id nil) or /agent-rooms/{id}/{action}.
     var onAgentRoomCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
@@ -152,6 +167,11 @@ final class ACAutomationServer {
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
+    /// A chat message typed into a pane, guarded and confirmed here, next to
+    /// the agent (`PaneTypeGuard.runType`): the guard's output, nil when the
+    /// machine couldn't be asked. One request for a remote client instead of
+    /// one per typing step.
+    var onTypeIntoPane: ((_ profileID: String, _ target: PaneTarget, _ text: String) async -> String?)?
     /// Resolve an id-or-name to the canonical profile UUID string, so interactive
     /// attach state is keyed the same way the consent broker queries it (by UUID).
     var onResolveProfileID: ((_ idOrName: String) -> String?)?
@@ -186,6 +206,9 @@ final class ACAutomationServer {
     /// versions. Called on the server thread.
     var onProfilePolicyRevisions: ((_ idOrName: String, _ method: String, _ sub: [String],
                                     _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
+    /// A workspace's storage layers, for a fat client's Resources pane:
+    /// where they live here (sized off the main thread by the route).
+    var onDescribeStorage: ((_ idOrName: String) -> ProfileStorageContext?)?
     var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
     /// Full-fidelity Profile JSON (secrets blanked) for the `workspaces edit`
     /// round-trip + the TUI raw-JSON hatch. nil when the workspace is unknown.
@@ -260,6 +283,9 @@ final class ACAutomationServer {
     var onDeleteAutomation: ((_ id: String) -> Bool)?
     var onRunAutomation: ((_ id: String) -> Bool)?
     var onToggleAutomation: ((_ id: String) -> Bool)?
+    /// Repository watches + findings: `/watches…` and `/findings…` (path
+    /// without the leading slash). Returns the body; "error" = failure.
+    var onWatchesCommand: ((_ method: String, _ path: String, _ body: [String: Any]) async -> [String: Any])?
     /// One native file op ({"file": {...}}) in the VM's guest — the remote
     /// file browser's data plane (upload/download/list/delete as base64 JSON).
     var onGuestFileOp: ((_ idOrName: String, _ op: [String: Any], _ timeout: Int) async -> [String: Any])?
@@ -514,6 +540,9 @@ final class ACAutomationServer {
             let ms = Int(headerBlock.lowercased()[r.upperBound...]
                 .drop(while: { $0 == " " }).prefix(while: { $0.isNumber })) ?? Int.max / 2
             ConsolePresence.shared.noteRemote(idleMs: ms)
+            // Only the fat client stamps its polls: it is connected, and can
+            // show consent prompts (see `RemoteConsent.route`).
+            if path == "/state" { PendingPromptBroker.recordFatClientContact() }
         }
 
         var bodyJSON: [String: Any] = [:]
@@ -551,6 +580,77 @@ final class ACAutomationServer {
             // read the response and poll.
             if mutating { Self.noteMutation() }
             self.sendResponse(fd: fd, status: status, body: body, gzip: acceptGzip)
+        }
+        // An attached machine (Bromure Agent Host) parks its links here, and
+        // requests aimed at it go down one (MachineLinks.swift).
+        if isTrustedLocal {
+            if method == "POST", path == "/machines/link" {
+                guard let idStr = bodyJSON["id"] as? String, let id = UUID(uuidString: idStr) else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "id required"]); return
+                }
+                let name = (bodyJSON["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "Mac"
+                let owner = bodyJSON["owner"] as? String
+                // A machine may not take the id of a workspace or VM here:
+                // their traffic would be routed to it.
+                let reserved: Set<UUID> = DispatchQueue.main.sync {
+                    let lists = (self.onListWorkspaces?() ?? []) + (self.onListVMs?() ?? [])
+                    return Set(lists.compactMap { ($0["id"] as? String).flatMap(UUID.init(uuidString:)) })
+                }
+                let verdict = MachineLinkHub.shared.admit(id: id, owner: owner, reserved: reserved)
+                if case .refused(let why) = verdict {
+                    sendResponse(fd: fd, status: 403, body: ["error": why])
+                    return
+                }
+                // The 200 first: once parked, a verb may follow at any moment.
+                // A machine the user hasn't let in yet hears that it waits.
+                let fleet = verdict == .pending ? "X-Bromure-Fleet: pending\r\n" : ""
+                let head = Array("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\(fleet)\r\n".utf8)
+                guard Darwin.write(fd, head, head.count) == head.count,
+                      MachineLinkHub.shared.park(fd: fd, id: id, name: String(name.prefix(80)), owner: owner,
+                                                 reserved: reserved)
+                else { Darwin.close(fd); return }
+                return
+            }
+            if method == "POST", path == "/machines/approve" {
+                // The user's answer to a machine asking to join (or a
+                // listed / blocked one): {id, allow}.
+                guard let id = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)),
+                      let allow = bodyJSON["allow"] as? Bool else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "id and allow required"]); return
+                }
+                guard MachineLinkHub.shared.decide(id: id, allow: allow) else {
+                    sendResponse(fd: fd, status: 404, body: ["error": "No such machine"]); return
+                }
+                sendResponse(fd: fd, status: 200, body: ["ok": true]); return
+            }
+            if method == "POST", path == "/machines/forget" {
+                // Unblock: the machine asks again next time it dials.
+                guard let id = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "id required"]); return
+                }
+                MachineLinkHub.shared.forget(id: id)
+                sendResponse(fd: fd, status: 200, body: ["ok": true]); return
+            }
+            if method == "POST", path == "/machines/detach" {
+                if let id = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)),
+                   !MachineLinkHub.shared.detach(id: id, owner: bodyJSON["owner"] as? String) {
+                    sendResponse(fd: fd, status: 403, body: ["error": "That machine is attached by another device"])
+                    return
+                }
+                sendResponse(fd: fd, status: 200, body: ["ok": true]); return
+            }
+            // Typed here even for an attached machine's pane: the guard's
+            // round trips then run on this host's link to it, not the
+            // remote client's.
+            if method == "POST", let id = Self.typeRouteID(path) {
+                handleType(fd: fd, profileID: id, bodyJSON: bodyJSON, gzip: acceptGzip)
+                return
+            }
+            if let machine = MachineLinkHub.shared.target(method: method, path: path, body: bodyJSON) {
+                MachineLinkHub.shared.proxy(clientFD: fd, machine: machine, method: method, path: path,
+                                            body: bodyJSON, gzip: acceptGzip)
+                return
+            }
         }
         switch (method, path) {
         case ("GET", "/health"):
@@ -807,7 +907,7 @@ final class ACAutomationServer {
         // docker-style VM control plane.
         case ("GET", "/vms"):
             let vms = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
-            sendResponse(fd: fd, status: 200, body: ["vms": vms])
+            sendResponse(fd: fd, status: 200, body: ["vms": vms + MachineLinkHub.shared.stateAdditions().vms])
 
         case ("POST", "/vms"):
             guard debugEnabled || isTrustedLocal else {
@@ -1086,6 +1186,14 @@ final class ACAutomationServer {
             }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
+        case ("POST", "/instruction-presets"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard let list = bodyJSON["presets"] as? [[String: Any]] else {
+                sendResponse(fd: fd, status: 400, body: ["error": "presets required"]); return
+            }
+            DispatchQueue.main.sync { self.onSetInstructionPresets?(list) }
+            sendResponse(fd: fd, status: 200, body: ["ok": true])
+
         case ("POST", "/agent-sessions/start"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let r = DispatchQueue.main.sync {
@@ -1149,6 +1257,22 @@ final class ACAutomationServer {
             default:
                 sendResponse(fd: fd, status: 404, body: ["error": "Not found", "path": path])
             }
+
+        // Repository watches + findings (fat client, debug hooks).
+        case (let m, let p) where p == "/watches" || p.hasPrefix("/watches/")
+                || p.hasPrefix("/findings/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let sub = String(p.dropFirst())
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any] = ["error": "not handled"]
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onWatchesCommand?(m, sub, bodyJSON) ?? ["error": "not handled"]
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: result["error"] == nil ? 200 : 400, body: result)
 
         // Fat-client automation edits: DELETE /automations/{id},
         // POST /automations/{id}/run, POST /automations/{id}/toggle.
@@ -1653,7 +1777,27 @@ final class ACAutomationServer {
             // `?full=1` → the whole Profile Codable (secrets blanked) for the
             // `workspaces edit` / raw-JSON round-trip; otherwise the compact
             // describe summary.
-            if query.contains("full=1") || query.contains("full=true") {
+            if query.contains("storage=1") {
+                guard let c = DispatchQueue.main.sync(execute: { self.onDescribeStorage?(id) }) else {
+                    sendResponse(fd: fd, status: 404, body: ["error": "Profile not found"])
+                    return
+                }
+                let m = StorageSizes.measure(base: c.baseImageURL, disk: c.profileDiskURL,
+                                             home: c.profileHomeURL, homeImage: c.profileHomeImageURL)
+                var body: [String: Any] = [
+                    "baseBytes": m.base, "diskBytes": m.disk, "homeBytes": m.home,
+                    "homeCapacity": m.homeCapacity,
+                    "hasDisk": c.profileDiskURL != nil,
+                    "hasHome": c.profileHomeURL != nil || c.profileHomeImageURL != nil,
+                    "homeIsImage": c.profileHomeImageURL != nil,
+                    "isRunning": c.isRunning,
+                ]
+                let iso = ISO8601DateFormatter()
+                if let v = c.baseImageVersion { body["baseVersion"] = v }
+                if let d = c.baseImageBuildDate { body["baseBuildDate"] = iso.string(from: d) }
+                if let t = m.homeMTime { body["homeModified"] = iso.string(from: t) }
+                sendResponse(fd: fd, status: 200, body: body)
+            } else if query.contains("full=1") || query.contains("full=true") {
                 if let d = DispatchQueue.main.sync(execute: { self.onExportProfile?(id) }) {
                     sendResponse(fd: fd, status: 200, body: d)
                 } else {
@@ -1682,6 +1826,33 @@ final class ACAutomationServer {
         default:
             sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
         }
+    }
+
+    /// POST /vms/{id}/type {target, text}: `onTypeIntoPane`. Every reply
+    /// carries "typeRoute" so a client can tell this route from an older
+    /// server's 404/405 and fall back to typing step by step.
+    private func handleType(fd: Int32, profileID: String, bodyJSON: [String: Any], gzip: Bool) {
+        guard let text = bodyJSON["text"] as? String,
+              let raw = bodyJSON["target"],
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let target = try? JSONDecoder().decode(PaneTarget.self, from: data) else {
+            sendResponse(fd: fd, status: 400, body: ["typeRoute": true, "error": "target and text required"], gzip: gzip)
+            return
+        }
+        guard let type = onTypeIntoPane else {
+            sendResponse(fd: fd, status: 501, body: ["typeRoute": true, "error": "not available"], gzip: gzip)
+            return
+        }
+        let done = DispatchSemaphore(value: 0)
+        var out: String?
+        Task {
+            out = await type(profileID, target, text)
+            done.signal()
+        }
+        done.wait()
+        var body: [String: Any] = ["typeRoute": true]
+        if let out { body["output"] = out } else { body["unreachable"] = true }
+        sendResponse(fd: fd, status: 200, body: body, gzip: gzip)
     }
 
     private func handleExec(fd: Int32, profileID: String, bodyJSON: [String: Any]) {
@@ -2168,6 +2339,7 @@ final class ACAutomationServer {
         var snapshot: [String: Any] = DispatchQueue.main.sync {
             var d: [String: Any] = [
                 "version": FatClient.protocolVersion,
+                "build": BuildInfo.dictionary,
                 "supportsPush": true,
                 "workspaces": self.onListWorkspaces?() ?? [],
                 "vms": self.onListVMs?() ?? [],
@@ -2188,7 +2360,21 @@ final class ACAutomationServer {
             if let sessions = self.onListAgentSessions?() { d["agentSessions"] = sessions }
             if let delegations = self.onListDelegations?() { d["delegations"] = delegations }
             if let rooms = self.onListAgentRooms?() { d["agentRooms"] = rooms }
+            if let presets = self.onListInstructionPresets?() { d["instructionPresets"] = presets }
             return d
+        }
+        // Machines asking to join (the fleet dialog) and the blocked ones.
+        let admissions = MachineLinkHub.shared.admissionState()
+        if !admissions.pending.isEmpty { snapshot["pendingMachines"] = admissions.pending }
+        if !admissions.blocked.isEmpty { snapshot["blockedMachines"] = admissions.blocked }
+        // Attached machines: one more workspace + VM each, and their sessions.
+        let machines = MachineLinkHub.shared.stateAdditions()
+        if !machines.workspaces.isEmpty {
+            snapshot["workspaces"] = ((snapshot["workspaces"] as? [[String: Any]]) ?? []) + machines.workspaces
+            snapshot["vms"] = ((snapshot["vms"] as? [[String: Any]]) ?? []) + machines.vms
+            if let local = snapshot["agentSessions"] as? [[String: Any]] {
+                snapshot["agentSessions"] = local + machines.sessions
+            }
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil
         // until the first VM boots the vmnet interface.
@@ -2196,6 +2382,13 @@ final class ACAutomationServer {
             snapshot["vmnetSubnet"] = subnet.cidrString
             snapshot["vmnetGateway"] = subnet.startAddressString
         }
+        // Ordering for clients: the push stream and a poll can deliver two
+        // snapshots out of order, and applying the older one after a write
+        // reverted it on screen (a rename flicked back to the old title).
+        // The generation only grows within one app run; the epoch says
+        // which run, so a restarted server isn't read as "older".
+        snapshot["generation"] = generation
+        snapshot["epoch"] = Self.epoch
         snapshotCache = snapshot
         snapshotCacheAt = Date()
         snapshotCacheGeneration = generation
@@ -2212,8 +2405,8 @@ final class ACAutomationServer {
     private func handleStateSubscribe(fd: Int32) {
         let header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
         guard Self.writeAllStreaming(fd, Data(header.utf8)) else { Darwin.close(fd); return }
-        var lastSent = Data()
         var lastSentAt = Date.distantPast
+        var lastContent = Data()
         // Pool per wake: this loop never returns to the GCD worker while the
         // subscriber is connected, so the work item's pool never drains — and
         // every wake autoreleases a snapshot build + JSON encode (+ zlib on
@@ -2227,12 +2420,19 @@ final class ACAutomationServer {
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             if poll(&pfd, 1, 0) > 0,
                (pfd.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0 { break }
+            // A held push stream is a connected fat client.
+            PendingPromptBroker.recordFatClientContact()
             let alive = autoreleasepool { () -> Bool in
                 let snapshot = buildStateSnapshot()
                 let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
+                // "Changed" is judged without what moves on its own: a VM's
+                // uptime ticks every second and the generation follows any
+                // request — an idle mirror got ~2 snapshots a second.
+                let content = (try? JSONSerialization.data(
+                    withJSONObject: Self.pushComparable(snapshot), options: [.sortedKeys])) ?? json
                 let now = Date()
-                if json != lastSent || now.timeIntervalSince(lastSentAt) > 15 {
-                    lastSent = json
+                if content != lastContent || now.timeIntervalSince(lastSentAt) > 15 {
+                    lastContent = content
                     lastSentAt = now
                     var payload = json
                     var flag: UInt8 = 0
@@ -2253,6 +2453,23 @@ final class ACAutomationServer {
         Darwin.close(fd)
     }
 
+    /// A snapshot as the push loop compares it: without the stamps that move
+    /// with every request (`generation`) and the VMs' ever-ticking uptime
+    /// (clients derive a boot time from it; a resend every 15 s keeps it).
+    nonisolated static func pushComparable(_ snapshot: [String: Any]) -> [String: Any] {
+        var d = snapshot
+        d["generation"] = nil
+        d["epoch"] = nil
+        if let vms = d["vms"] as? [[String: Any]] {
+            d["vms"] = vms.map { vm -> [String: Any] in
+                var v = vm
+                v["uptimeSeconds"] = nil
+                return v
+            }
+        }
+        return d
+    }
+
     /// Write-all that reports success, so a streaming loop stops when the peer
     /// goes away. Blocks (bounded) on EAGAIN rather than dropping bytes.
     private static func writeAllStreaming(_ fd: Int32, _ data: Data) -> Bool {
@@ -2266,7 +2483,10 @@ final class ACAutomationServer {
                 else if n < 0 && errno == EINTR { continue }
                 else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
                     var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                    if poll(&pfd, 1, 5000) <= 0 { ok = false; return }   // 5s unwritable → peer gone
+                    // 30 s unwritable → peer gone. (A slow WAN client behind
+                    // the SSH bridge's backpressure can hold a frame for
+                    // seconds; a vanished one fails the write outright.)
+                    if poll(&pfd, 1, 30_000) <= 0 { ok = false; return }
                 } else { ok = false; return }   // hard error / peer hung up
             }
         }
@@ -2324,9 +2544,12 @@ final class ACAutomationServer {
 
     /// Loop a payload out over short writes; on EAGAIN wait for the fd to
     /// drain (poll, bounded) instead of dropping the remainder. Gives up
-    /// after ~60s or on a hard error — the peer is gone either way.
+    /// after ~60s WITHOUT PROGRESS or on a hard error — the peer is gone
+    /// either way. (Not 60 s total: the SSH bridge now applies backpressure,
+    /// so a 30 MB transcript to a fat client on a slow WAN link drains at the
+    /// link's pace and legitimately takes minutes.)
     private static func writeAllData(_ fd: Int32, _ data: Data) {
-        let deadline = Date().addingTimeInterval(60)
+        var deadline = Date().addingTimeInterval(60)
         data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
             guard var base = ptr.baseAddress else { return }
             var remaining = ptr.count
@@ -2335,6 +2558,7 @@ final class ACAutomationServer {
                 if n > 0 {
                     base += n
                     remaining -= n
+                    deadline = Date().addingTimeInterval(60)
                 } else if n < 0 && errno == EINTR {
                     continue
                 } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {

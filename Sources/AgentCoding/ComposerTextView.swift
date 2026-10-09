@@ -41,6 +41,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onKey = { [weak coordinator] key in coordinator?.parent.onKey?(key) ?? false }
         textView.onSubmit = { [weak coordinator] in coordinator?.parent.onSubmit() }
         textView.onFocusChange = { [weak coordinator] focused in coordinator?.setFocused(focused) }
+        coordinator.shown = text
         let scroll = ComposerScrollView()
         scroll.documentView = textView
         scroll.hasVerticalScroller = true
@@ -65,8 +66,9 @@ struct ComposerTextView: NSViewRepresentable {
         textView.isEditable = !disabled
         // A programmatic change (the palette completing a command, a send
         // clearing the field) — never an echo of what was just typed.
-        if !coordinator.pushingText, textView.string != text {
+        if !coordinator.pushingText, !coordinator.isShowing(text) {
             textView.string = text
+            coordinator.shown = text
             textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             coordinator.remeasure()
         }
@@ -82,10 +84,29 @@ struct ComposerTextView: NSViewRepresentable {
 
         init(_ parent: ComposerTextView) { self.parent = parent }
 
+        /// What the view holds, as the native string last pushed to (or
+        /// taken from) the binding.
+        var shown = ""
+
+        /// Whether the view already shows `text`. Never `textView.string !=
+        /// text`: that string is the text storage's own, bridged lazily, and
+        /// Swift's `==` normalizes Unicode as it goes — on a 200 KB paste
+        /// with accents, milliseconds per keystroke, reading the storage a
+        /// character at a time. The same buffer is equal at once; otherwise
+        /// the UTF-8 bytes decide.
+        func isShowing(_ text: String) -> Bool {
+            ComposerText.same(text, shown)
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
+            // A native copy: a bridged `textView.string` handed to SwiftUI is
+            // compared (on every update, by every view that holds the
+            // binding) through the storage, slowly.
+            let text = ComposerText.native(textView.string)
+            shown = text
             pushingText = true
-            parent.text = textView.string
+            parent.text = text
             pushingText = false
             remeasure()
         }
@@ -131,6 +152,30 @@ struct ComposerTextView: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, abs(wanted - self.parent.height) > 0.5 else { return }
                 self.parent.height = wanted
+            }
+        }
+    }
+}
+
+/// The composer's text, fast to compare and to hand around.
+enum ComposerText {
+    /// `s` as a native, contiguous UTF-8 string (a bridged NSString's
+    /// characters copied once).
+    static func native(_ s: String) -> String {
+        var s = s
+        s.makeContiguousUTF8()
+        return s
+    }
+
+    /// Same characters, byte for byte — no Unicode normalization (a
+    /// composed and a decomposed "é" differ, which is right for "did the
+    /// field change?").
+    static func same(_ a: String, _ b: String) -> Bool {
+        var a = a, b = b
+        guard a.utf8.count == b.utf8.count else { return false }
+        return a.withUTF8 { x in
+            b.withUTF8 { y in
+                x.isEmpty || (x.baseAddress == y.baseAddress) || memcmp(x.baseAddress!, y.baseAddress!, x.count) == 0
             }
         }
     }
@@ -220,6 +265,13 @@ final class ComposerNSTextView: NSTextView {
     override func doCommand(by selector: Selector) {
         switch selector {
         case #selector(insertNewline(_:)):
+            // Shift-Return reaches here as a plain insertNewline: — AppKit
+            // binds only Option-Return to a distinct selector.
+            if let e = NSApp.currentEvent, e.type == .keyDown,
+               e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .shift {
+                insertText("\n", replacementRange: selectedRange())
+                return
+            }
             if onKey?(.enter) == true { return }
             onSubmit()
         case #selector(insertNewlineIgnoringFieldEditor(_:)), #selector(insertLineBreak(_:)):

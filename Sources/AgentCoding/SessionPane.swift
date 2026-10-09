@@ -317,7 +317,7 @@ final class SessionPane {
         }
     }
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
-    private var beautifiedModel: BeautifiedSessionModel?
+    private(set) var beautifiedModel: BeautifiedSessionModel?
     /// tmux window indices known to host a coding agent regardless of what
     /// their title says yet — a task's worktree tab is an agent tab by
     /// construction, but its OSC title only names the agent once the agent
@@ -332,7 +332,30 @@ final class SessionPane {
     /// terminal is the Linux button's business, never this pane's while a
     /// session is shown.
     var sessionOnStage = false {
-        didSet { if sessionOnStage != oldValue { updateNativeTerminalMount() } }
+        didSet {
+            guard sessionOnStage != oldValue else { return }
+            // Before anything mounts (no roster yet, the chat's first layout),
+            // the stage shows the chat's own background — a dark terminal-
+            // coloured frame flashed for a second when a session was picked.
+            if sessionOnStage && !beautifierLocked { applyContainerBackground(chat: true) }
+            updateNativeTerminalMount()
+        }
+    }
+
+    /// The container's backing: the chat's window background while the chat
+    /// is (or is about to be) on show, the terminal's colour otherwise (a
+    /// moment with no surface reads as an empty terminal, not a hole).
+    private func applyContainerBackground(chat: Bool) {
+        if chat {
+            var cg = NSColor.windowBackgroundColor.cgColor
+            containerView.effectiveAppearance.performAsCurrentDrawingAppearance {
+                cg = NSColor.windowBackgroundColor.cgColor
+            }
+            containerView.layer?.backgroundColor = cg
+        } else {
+            let bgHex = profile.resolveStyle(against: .load()).backgroundHex
+            containerView.layer?.backgroundColor = NSColor(Color(hex: bgHex)).cgColor
+        }
     }
     /// Opening messages to echo into the beautified view of a window the
     /// moment it mounts (keyed by tmux window index; consumed once) — a
@@ -549,6 +572,7 @@ final class SessionPane {
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
         containerView.layer?.opacity = Float(min(1.0, max(0.3, profile.windowOpacity)))
+        applyContainerBackground(chat: false)
         let windowIndex = model.tabs[model.activeIndex].index
         if terminalController == nil {
             terminalController = TerminalSessionController(profile: profile)
@@ -589,6 +613,7 @@ final class SessionPane {
         m.draftKey = "local:\(profile.id.uuidString):\(windowIndex)"
         if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
         m.transcriptSink = transcriptSinks[windowIndex]
+        m.cachedTranscript = SessionTranscriptCache.loadDetached
         // The tab's own terminal surface, for an interactive slash command
         // shown inline in the chat (same tmux client the Linux view uses).
         m.inlineTerminal = { [weak self] in
@@ -601,6 +626,21 @@ final class SessionPane {
         m.inlineTerminalSession = { [weak self] in
             self?.terminalController?.tmuxSessionName(forWindow: windowIndex)
         }
+        // /term: a scratch shell of its own in this session's folder, on
+        // this machine — one per session window, kept while hidden.
+        let scratchKey = "\(profile.id.uuidString.prefix(8))w\(windowIndex)"
+        m.scratchSessionName = TerminalSessionController.scratchSession(scratchKey)
+        m.scratchTerminal = { [weak self, weak m] in
+            guard let self else { return nil }
+            if self.terminalController == nil {
+                self.terminalController = TerminalSessionController(profile: self.profile)
+            }
+            let cwd = self.acDelegate?.agentSessionStore
+                .session(profileID: self.profile.id, windowIndex: windowIndex)?.cwd ?? "~"
+            return self.terminalController?.scratchView(key: scratchKey, cwd: cwd) { [weak m] in
+                m?.scratchTerminalEnded()
+            }
+        }
         // Delegations this session is part of, for the panel above the
         // composer; the user can answer a delegate's question for the agent.
         m.delegationStore = acDelegate?.delegationStore
@@ -611,6 +651,19 @@ final class SessionPane {
         }
         m.openSession = { [weak self] id in
             self?.acDelegate?.ensureUnifiedWindow().selectSession(id)
+        }
+        // A board task's session: its brief, and the board's Restart Session.
+        m.boardTask = { [weak self] in
+            guard let self, let d = self.acDelegate else { return nil }
+            let sid = d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)?.id
+            let branch = self.model.tabs.first { $0.index == windowIndex }?.worktreeBranch
+            guard let t = d.codingTaskEngine.task(profileID: self.profile.id, sessionID: sid, branch: branch)
+            else { return nil }
+            let engine = d.codingTaskEngine
+            let id = t.id
+            return BoardTaskLink(title: t.title, brief: t.details,
+                                 restart: t.stage == .inProgress ? { engine.resumeSession(id) } : nil,
+                                 lastError: t.lastError)
         }
         m.workspaceName = { [weak self] pid in self?.acDelegate?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak self] in
@@ -639,7 +692,9 @@ final class SessionPane {
         // something to show (the label reads "bash" for agents under an
         // interpreter, and a tab opened by hand carries no session hint).
         m.loadSlashCommands(
-            agent: agentHints[windowIndex] ?? BromureIcons.agentKind(forLabel: tab.shownLabel)
+            agent: agentHints[windowIndex]
+                ?? acDelegate?.agentSessionStore.session(profileID: profile.id, windowIndex: windowIndex)?.tool.rawValue
+                ?? BromureIcons.agentKind(forLabel: tab.shownLabel)
                 ?? profile.tool.rawValue,
             cwd: tab.cwd)
         // Sign-in on the host: a throwaway machine does the OAuth and the
@@ -663,11 +718,87 @@ final class SessionPane {
             else { return }
             delegate.agentSessionStore.setNeedsSignIn(s.id, needs)
         }
+        m.dialogPromptChanged = { [weak self] waiting in
+            guard let self, let delegate = self.acDelegate,
+                  let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return }
+            delegate.agentSessionStore.setAwaitingAnswer(s.id, waiting)
+        }
+        m.recordedFailureAppeared = { [weak self] in
+            guard let self, let delegate = self.acDelegate,
+                  self.model.tabs.first(where: { $0.index == windowIndex })?.agentStatus == .working
+            else { return }
+            delegate.setTabAgentStatus(self.profile.id, index: windowIndex, .needsInput)
+        }
+        m.blockSettled = { [weak self] in
+            guard let self, let delegate = self.acDelegate,
+                  self.model.tabs.first(where: { $0.index == windowIndex })?.agentStatus == .needsInput
+            else { return }
+            delegate.setTabAgentStatus(self.profile.id, index: windowIndex, .done)
+            if let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex) {
+                delegate.agentSessionStore.setAwaitingAnswer(s.id, false)
+            }
+        }
+        m.failureChanged = { [weak self] failure in
+            guard let self, let delegate = self.acDelegate,
+                  let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return }
+            delegate.agentSessionStore.setProviderError(s.id, failure.map { AgentSession.providerErrorKind($0) })
+        }
+        // A fresh chat has no card yet: an error kept from an earlier one
+        // (the agent may have recovered since) waits for this chat's own
+        // verdict, a scan away.
+        m.failureChanged?(nil)
         m.openProviderSettings = { [weak self] in
             guard let self else { return }
             self.acDelegate?.sidebarEditProfile(self.profile.id)
         }
         return m
+    }
+
+    // MARK: Chat → its window
+
+    /// Where a chat's text and keys for `window` may go: the session's
+    /// window id when the probe stamped one, and the markers the tab
+    /// carries (`@display` — the session's own launch name first —
+    /// `@worktree`), re-checked in the guest before every keystroke batch.
+    func chatPaneTarget(window: Int) -> PaneTarget {
+        let tab = model.tabs.first { $0.index == window }
+        let s = acDelegate?.sessionRecord(profileID: profile.id, windowIndex: window)
+        return .chat(window: window, windowID: s?.windowID,
+                     display: s?.launchDisplay ?? tab?.display, worktree: tab?.worktreeBranch)
+    }
+
+    /// The agent in `window` is working; nil while the roster doesn't list
+    /// that window.
+    func chatIsWorking(window: Int) -> Bool? {
+        guard model.rosterLive, let tab = model.tabs.first(where: { $0.index == window }) else { return nil }
+        return tab.agentStatus == .working
+    }
+
+    /// The Kimi session the engine pinned for the session in `window` (its
+    /// own journal, never the folder's newest).
+    /// Not pinned yet: the Kimi sessions other sessions here own, which are
+    /// never this tab's (two Kimi tabs in one folder).
+    func chatTranscriptPin(window: Int) -> TranscriptPin {
+        let s = acDelegate?.sessionRecord(profileID: profile.id, windowIndex: window)
+        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            return TranscriptPin(kimiSession: id)
+        }
+        // Grok / Codex: the session's own conversation, never the folder's
+        // newest (an archived session's, a second session's live one).
+        if let s, s.tool == .grok || s.tool == .codex || s.tool == .omp {
+            var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
+            if pin != TranscriptPin() { return pin }
+            // Not pinned yet: never another session's conversation.
+            pin.foreignConversations = acDelegate?.agentSessionStore
+                .conversationsClaimed(tool: s.tool, profileID: profile.id, besides: s.id) ?? []
+            return pin
+        }
+        var pin = TranscriptPin()
+        pin.kimiExclude = acDelegate?.agentSessionStore
+            .kimiSessionsClaimed(profileID: profile.id, besides: s?.id) ?? []
+        return pin
     }
 
     /// Mount (or keep) the beautified transcript view, unmounting the terminal
@@ -689,12 +820,16 @@ final class SessionPane {
         mountedTerminalView?.removeFromSuperview()
         mountedTerminalView = nil
         containerView.layer?.opacity = 1   // opaque chat surface, never dimmed
+        applyContainerBackground(chat: true)
         let m = makeBeautifiedModel(windowIndex: windowIndex, provider: LocalTranscriptProvider(pane: self))
         beautifiedModel = m
         beautifiedTabIndex = windowIndex
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false
+        // A long conversation's fitting height must never become the
+        // window's minimum (it pinned the window at full-screen size).
+        host.sizingOptions = []
         mountedBeautifiedHost = host
         containerView.addSubview(host, positioned: .below, relativeTo: suspendedTintView)
         NSLayoutConstraint.activate([
@@ -744,8 +879,7 @@ final class SessionPane {
         // honors the profile's window translucency.
         let opacity = viewMode == .beautified ? 1.0 : min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
-        let bgHex = newProfile.resolveStyle(against: .load()).backgroundHex
-        containerView.layer?.backgroundColor = NSColor(Color(hex: bgHex)).cgColor
+        applyContainerBackground(chat: viewMode == .beautified || (sessionOnStage && !beautifierLocked))
         terminalController?.applyProfile(newProfile)   // live appearance update
         updateNativeTerminalMount()
         host?.paneDidUpdateProfile(self)

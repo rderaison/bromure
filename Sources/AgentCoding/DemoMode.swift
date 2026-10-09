@@ -94,9 +94,26 @@ enum DemoMode {
             var branch: Branch?
             var worktreeOf: String?
         }
+        /// A local Kubernetes cluster or image registry, shown as provisioned
+        /// with the given state; `probe` / `info` name a JSON snapshot (the
+        /// engine's KubeProbe / KubeRegistryInfo), relative to the spec.
+        struct Cluster: Decodable {
+            var name: String
+            var nodes: Int?
+            var phase: String?
+            var step: String?
+            var probe: String?
+        }
+        struct Registry: Decodable {
+            var name: String
+            var phase: String?
+            var info: String?
+        }
         var workspaces: [Workspace]
         var rooms: [Room]?
         var sessions: [Session]
+        var clusters: [Cluster]?
+        var registries: [Registry]?
     }
 
     /// Write the spec's fixture into the stores; returns title → id.
@@ -122,6 +139,43 @@ enum DemoMode {
             if w.running == true { runningProfiles.insert(id) }
         }
         d.profiles = d.store.loadAll()
+
+        // Clusters and registries: records kept off auto-start (no VM is
+        // booted), status set by hand — no engine runtime exists to overwrite it.
+        let kube = d.kubeClusterStore
+        for c in spec.clusters ?? [] {
+            let n = c.nodes ?? 3
+            let slug = KubeCluster.slug(for: c.name)
+            let cluster = kube.clusters.first(where: { $0.name == c.name }) ?? KubeCluster(
+                name: c.name, spec: KubeClusterSpec(),
+                nodes: (1...n).map { KubeNodeRecord(name: "\(slug)-\($0)", role: $0 == 1 ? .server : .agent,
+                                                    index: $0, lastIP: "192.168.64.\(30 + $0)") },
+                autoStart: false, provisioned: true)
+            kube.upsert(cluster)
+            let probe = c.probe.flatMap { try? Data(contentsOf: dir.appendingPathComponent($0)) }.flatMap(KubeProbe.decode)
+            kube.setStatus(cluster.id) {
+                $0.phase = c.phase.flatMap(KubeClusterPhase.init(rawValue:)) ?? .running
+                $0.step = c.step
+                $0.nodesUp = $0.phase == .running ? n : 1
+                $0.startedAt = Date().addingTimeInterval(-2 * 3600)
+                $0.probe = probe
+                $0.hostIP = "192.168.1.24"
+            }
+        }
+        for r in spec.registries ?? [] {
+            let reg = kube.registries.first(where: { $0.name == r.name }) ?? KubeRegistry(
+                name: r.name, node: KubeNodeRecord(name: KubeCluster.slug(for: r.name), role: .server, index: 1,
+                                                   lastIP: "192.168.64.20"),
+                autoStart: false, provisioned: true)
+            kube.upsert(reg)
+            let info = r.info.flatMap { try? Data(contentsOf: dir.appendingPathComponent($0)) }.flatMap(KubeRegistryInfo.decode)
+            kube.setStatus(reg.id) {
+                $0.phase = r.phase.flatMap(KubeClusterPhase.init(rawValue:)) ?? .running
+                $0.address = reg.address
+                $0.startedAt = Date().addingTimeInterval(-2 * 3600)
+                $0.registry = info
+            }
+        }
 
         var roomIDs: [String: UUID] = [:]
         for r in spec.rooms ?? [] {

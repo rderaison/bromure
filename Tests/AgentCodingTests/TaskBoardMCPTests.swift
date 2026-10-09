@@ -51,7 +51,7 @@ struct TaskBoardMCPTests {
         ((resp["result"] as? [String: Any])?["isError"] as? Bool) == true
     }
 
-    @Test("initialize and tools/list expose the five board tools")
+    @Test("initialize and tools/list expose the six board tools")
     func handshake() async {
         let (server, _, _, branch) = makeFixture()
         let ini = parse(await server.handle(line: rpc("initialize"), branch: branch))
@@ -61,7 +61,7 @@ struct TaskBoardMCPTests {
         let tools = ((list["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
         #expect(Set(tools.compactMap { $0["name"] as? String })
             == ["board_get_task", "board_set_plan", "board_create_subtasks",
-                "board_set_dependencies", "board_ready_for_review"])
+                "board_set_dependencies", "board_ready_for_review", "board_report_landing"])
     }
 
     @Test("Tool calls without a bound task error instead of guessing")
@@ -149,5 +149,39 @@ struct TaskBoardMCPTests {
             branch: branch))
         #expect(!isError(resp), "ready_for_review errored: \(resultText(resp))")
         #expect(store.task(taskID)?.stage == .testing)
+    }
+
+    @Test("board_report_landing: blocked turns the card red; merged (no machine to check) goes Done unverified")
+    func reportLanding() async {
+        let (server, store, taskID, branch) = makeFixture()
+        store.mutate(taskID) {
+            $0.stage = .testing
+            $0.branch = branch
+            $0.parentBranch = "main"
+            $0.landing = TaskLanding(mode: .merge, target: "main", phase: .agentLanding, startedAt: Date())
+        }
+        let blocked = parse(await server.handle(
+            line: rpc("tools/call", params: ["name": "board_report_landing",
+                                             "arguments": ["status": "blocked", "summary": "tests fail on main"]]),
+            branch: branch))
+        #expect(!isError(blocked), Comment(rawValue: resultText(blocked)))
+        #expect(store.task(taskID)?.landing?.phase == .needsYou)
+        #expect(store.task(taskID)?.landing?.detail == "tests fail on main")
+        let bad = parse(await server.handle(
+            line: rpc("tools/call", params: ["name": "board_report_landing",
+                                             "arguments": ["status": "done", "summary": "x"]]),
+            branch: branch))
+        #expect(isError(bad))
+        let merged = parse(await server.handle(
+            line: rpc("tools/call", params: ["name": "board_report_landing",
+                                             "arguments": ["status": "merged", "summary": "in main"]]),
+            branch: branch))
+        #expect(!isError(merged), Comment(rawValue: resultText(merged)))
+        #expect(store.task(taskID)?.stage == .done)
+        if case .merged(let target, let verified, _)? = store.task(taskID)?.completion {
+            #expect(target == "main" && !verified)
+        } else {
+            Issue.record("expected a merged completion")
+        }
     }
 }

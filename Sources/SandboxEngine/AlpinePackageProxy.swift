@@ -11,8 +11,10 @@ import Foundation
 /// Integrity is preserved end-to-end at the package layer: apk verifies
 /// each `.apk` and the `APKINDEX` against RSA keys baked into the
 /// `alpine-keys` package we ship in the initramfs, regardless of
-/// transport. The proxy is also strictly limited to a single upstream
-/// host so a compromised guest can't use it as a generic egress relay.
+/// transport.
+///
+/// Scope (it is not an open relay): only the guest's own subnet may
+/// connect (`admitsPeer`) — never the Mac itself or the LAN.
 ///
 /// Lifecycle: bind a TCP listener on 0.0.0.0:<auto-port> before the VM
 /// boots; pass `http://<guest-visible host IP>:<port>` into the kernel
@@ -42,6 +44,8 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     /// this, so guard with a lock.
     private let contactedLock = NSLock()
     private var contactedHosts: [String: Int] = [:]
+    /// Guest connections accepted (under `contactedLock`).
+    private var acceptedCount = 0
 
     private func recordHost(_ host: String) {
         contactedLock.lock()
@@ -65,6 +69,11 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     /// The bound port (0 until `start()` succeeds).
     public private(set) var port: UInt16 = 0
 
+    /// The guest's gateway (the address it reaches us on) and its /24 —
+    /// the only peers `acceptOne` serves. Set by `start(guestGateway:)`.
+    private var gateway: UInt32 = 0
+    private static let guestMask: UInt32 = 0xFFFF_FF00
+
     public init() {}
 
     /// Guest-visible base URL for a guest whose gateway is `host` —
@@ -80,10 +89,14 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     // URLSession internally but isolated per request, which keeps
     // memory bounded.
 
-    /// Bind and start listening. Throws on bind / listen failure (e.g.
-    /// `EADDRINUSE` if another process holds the port; we bind to
-    /// kernel-assigned `port 0` so this is unlikely).
-    public func start() throws {
+    /// Bind and start listening for the guest whose gateway (the host side
+    /// of its network, the address it reaches us on) is `guestGateway`.
+    /// Bound to 0.0.0.0 — the guest's interface may not exist until its VM
+    /// boots — but only that guest's /24 is served. Throws on bind / listen
+    /// failure, or an unparsable gateway.
+    public func start(guestGateway: String) throws {
+        guard let gw = Self.ipv4(guestGateway) else { throw Error.gateway(guestGateway) }
+        gateway = gw
         // Globally ignore SIGPIPE. Our `Darwin.write` calls in
         // splice / writeStatus / writeResponse hit a closed client
         // socket the moment a guest gives up mid-download (curl
@@ -148,7 +161,9 @@ public final class AlpinePackageProxy: @unchecked Sendable {
 
         let url = URL(string: "http://\(Self.guestReachableHost):\(port)")!
         mirrorURL = url
-        Self.log("listening on 0.0.0.0:\(port); guest URL = \(url)")
+        // The guest URL is the caller's (`guestBase(host:)`, the switch's
+        // real gateway) — `url` above is only the NAT default.
+        Self.log("listening on 0.0.0.0:\(port) for the guest subnet of \(guestGateway)")
     }
 
     /// Tear the listener down. Safe to call from any thread; the cancel
@@ -163,8 +178,14 @@ public final class AlpinePackageProxy: @unchecked Sendable {
 
         contactedLock.lock()
         let snapshot = contactedHosts
+        let accepted = acceptedCount
         contactedLock.unlock()
-        guard !snapshot.isEmpty else { return }
+        guard !snapshot.isEmpty else {
+            // Nothing reached us at all: the Mac refused the guest's
+            // connections (Local Network privacy, a VPN/security agent).
+            if accepted == 0 { Self.log("no guest connection reached the proxy during this bake") }
+            return
+        }
         let lines = snapshot
             .sorted { $0.key < $1.key }
             .map { "  \($0.key)  (\($0.value) request\($0.value == 1 ? "" : "s"))" }
@@ -175,8 +196,21 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     // MARK: - Accept + serve
 
     private func acceptOne() {
-        let cfd = Darwin.accept(listenFD, nil, nil)
+        var peer = sockaddr_in()
+        var plen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let cfd = withUnsafeMutablePointer(to: &peer) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(listenFD, $0, &plen) }
+        }
         guard cfd >= 0 else { return }
+        let peerIP = peer.sin_family == sa_family_t(AF_INET) ? UInt32(bigEndian: peer.sin_addr.s_addr) : 0
+        guard Self.admitsPeer(peerIP, gateway: gateway) else {
+            Self.log("refused a connection from \(Self.ipString(peerIP)) (not the guest's subnet)")
+            Darwin.close(cfd)
+            return
+        }
+        contactedLock.lock()
+        acceptedCount += 1
+        contactedLock.unlock()
         // Per-socket SIGPIPE suppression — a closed-client write
         // returns EPIPE without signalling the process.
         var yes: Int32 = 1
@@ -203,8 +237,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         // splice bytes both ways. Used when the guest has
         // HTTPS_PROXY=http://us pointed at us. The client then does
         // TLS end-to-end through our tunnel; we never see the
-        // plaintext. Only allowed for whitelisted hosts so the proxy
-        // can't be used as a generic SOCKS-style escape hatch.
+        // plaintext. Only the guest's subnet gets this far (acceptOne).
         if req.method == "CONNECT" {
             // The 30s SO_RCVTIMEO set above is right for header reads but
             // fatal inside a long-lived tunnel: an HTTPS download is
@@ -322,7 +355,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     // MARK: - CONNECT tunnel
 
     /// Accept a CONNECT request, open a raw TCP socket to the upstream
-    /// host:port (after allowlist check), tell the client the tunnel
+    /// host:port, tell the client the tunnel
     /// is up, and splice bytes both ways until either side hits EOF.
     /// Note: we do NOT terminate TLS — the client and upstream do TLS
     /// end-to-end through the tunnel. This means CONNECT mode does
@@ -633,11 +666,31 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         }
     }
 
+    // MARK: - Scope
+
+    /// A peer the proxy serves: an address on the guest's /24 other than the
+    /// gateway itself (that's the Mac — a local process connecting to the
+    /// gateway address shows up as it).
+    static func admitsPeer(_ peer: UInt32, gateway: UInt32) -> Bool {
+        gateway != 0 && peer != gateway && (peer & guestMask) == (gateway & guestMask)
+    }
+
+    static func ipv4(_ s: String) -> UInt32? {
+        var a = in_addr()
+        guard inet_pton(AF_INET, s, &a) == 1 else { return nil }
+        return UInt32(bigEndian: a.s_addr)
+    }
+
+    static func ipString(_ a: UInt32) -> String {
+        "\(a >> 24).\(a >> 16 & 0xFF).\(a >> 8 & 0xFF).\(a & 0xFF)"
+    }
+
     private static func log(_ msg: String) {
         FileHandle.standardError.write(Data("[ac-proxy] \(msg)\n".utf8))
     }
 
     public enum Error: Swift.Error {
+        case gateway(String)
         case socket(Int32)
         case bind(Int32)
         case listen(Int32)

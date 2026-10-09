@@ -89,6 +89,8 @@ extension ACAppDelegate {
                 switch event {
                 case .status(let text):
                     wizard.signIn?.status = text
+                case .device:
+                    break   // machine sign-ins only
                 case .finished(let success, let message):
                     wizard.signIn?.status = nil
                     if success {

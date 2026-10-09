@@ -86,12 +86,12 @@ public actor SupplyChainConsentBroker {
                         scopeDisplayName: String,
                         detail: String) async -> Bool {
         let key = Self.storeKey(profileID: profileID, scope: scope)
-        let now = Date()
+        let checkedAt = Date()
 
         FileHandle.standardError.write(Data(
             "[supply-chain-consent] check \(scope) for profile \(profileID.uuidString.prefix(8))\n".utf8))
 
-        if let mem = denies[key], mem.expiration > now {
+        if let mem = denies[key], mem.expiration > checkedAt {
             FileHandle.standardError.write(Data(
                 "[supply-chain-consent] live deny for \(scope) — auto-deny\n".utf8))
             return false
@@ -99,7 +99,7 @@ public actor SupplyChainConsentBroker {
             denies.removeValue(forKey: key)
         }
 
-        if let g = grants[key], g.expiration > now {
+        if let g = grants[key], g.expiration > checkedAt {
             FileHandle.standardError.write(Data(
                 "[supply-chain-consent] live grant for \(scope) — auto-allow\n".utf8))
             return true
@@ -115,41 +115,26 @@ public actor SupplyChainConsentBroker {
         pending[key] = []
 
         let profileName = profileNames[profileID] ?? "(unknown profile)"
+        // Non-modal, deadline → deny; fat client / terminal when attached.
+        let title = String(format: NSLocalizedString(
+            "Pass through %@ from workspace “%@”?",
+            comment: "Supply-chain bypass prompt"), scopeDisplayName, profileName)
+        let choices = [NSLocalizedString("Allow for 15 minutes", comment: ""),
+                       NSLocalizedString("Allow once", comment: ""),
+                       NSLocalizedString("Allow for the rest of the session", comment: ""),
+                       NSLocalizedString("Don't allow", comment: "")]
+        let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: detail,
+                                             choices: choices, denyIndex: choices.count - 1,
+                                             style: .warning)
         let decision: Decision
-        let route = RemoteConsent.route(for: profileID)
-        if route == .localAlert {
-            decision = await Self.askUser(profileName: profileName,
-                                          scopeDisplayName: scopeDisplayName,
-                                          detail: detail)
-        } else {
-            // Remote: a fat client renders a native NSAlert on its own Mac (over
-            // the tunnel); a plain SSH/CLI attach gets the tmux popup. Same
-            // choices and index mapping either way; nil (deny/timeout) → deny.
-            let title = String(format: NSLocalizedString(
-                "Pass through %@ from workspace “%@”?",
-                comment: "Supply-chain bypass prompt"), scopeDisplayName, profileName)
-            let choices = [NSLocalizedString("Allow for 15 minutes", comment: ""),
-                           NSLocalizedString("Allow once", comment: ""),
-                           NSLocalizedString("Allow for the rest of the session", comment: ""),
-                           NSLocalizedString("Don't allow", comment: "")]
-            let idx: Int?
-            if route == .fatClient {
-                idx = await RemoteConsent.chooseOnFatClient(
-                    profileID: profileID, title: title, message: detail,
-                    choices: choices, denyIndex: choices.count - 1)
-            } else {
-                idx = await Task.detached {
-                    RemoteConsent.choose(profileID: profileID, title: title,
-                                         message: detail, choices: choices)
-                }.value
-            }
-            switch idx {
-            case 0:  decision = .allow15min
-            case 1:  decision = .allowOnce
-            case 2:  decision = .allowSession
-            default: decision = .deny
-            }
+        switch idx {
+        case 0:  decision = .allow15min
+        case 1:  decision = .allowOnce
+        case 2:  decision = .allowSession
+        default: decision = .deny
         }
+        // Grant lifetimes start at the answer.
+        let now = Date()
 
         let allow: Bool
         switch decision {
@@ -223,30 +208,5 @@ public actor SupplyChainConsentBroker {
     public func revokeEverything() {
         grants.removeAll()
         denies.removeAll()
-    }
-
-    @MainActor
-    private static func askUser(profileName: String,
-                                scopeDisplayName: String,
-                                detail: String) -> Decision {
-        let alert = NSAlert()
-        alert.messageText = String(
-            format: NSLocalizedString(
-                "Pass through %@ from workspace “%@”?",
-                comment: "Supply-chain bypass prompt"),
-            scopeDisplayName, profileName)
-        alert.informativeText = detail
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: NSLocalizedString("Allow for 15 minutes", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Allow once", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Allow for the rest of the session", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Don't allow", comment: ""))
-        NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:  return .allow15min
-        case .alertSecondButtonReturn: return .allowOnce
-        case .alertThirdButtonReturn:  return .allowSession
-        default:                        return .deny
-        }
     }
 }

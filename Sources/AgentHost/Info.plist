@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Bromure Sidecar</string>
+	<key>CFBundleExecutable</key>
+	<string>bromure-sidecar</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.bromure.sidecar</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Bromure Sidecar</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.1</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>io.bromure.sidecar.enroll</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bromure-agent-host</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1.0.1</string>
+	<!-- Sparkle: Bromure AC's scheme on its own channel. The feed serves
+	     downloads under releases-sidecar/; same SUPublicEDKey (one signing
+	     key on the build host). Sparkle compares CFBundleVersion, so it is
+	     kept equal to CFBundleShortVersionString. -->
+	<key>SUFeedURL</key>
+	<string>https://bromure.io/api/v1/release-sidecar</string>
+	<key>SUPublicEDKey</key>
+	<string>G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

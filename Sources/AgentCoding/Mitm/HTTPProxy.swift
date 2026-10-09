@@ -98,6 +98,26 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
+    /// Firewall cut (`EgressConnectionRegistry`): the upstream session in
+    /// flight, so a cut cancels it at once (an idle long-poll would otherwise
+    /// linger until its next chunk), and whether `fd` is already closed (a
+    /// cut must never `shutdown` a descriptor the process has since reused).
+    private let cutLock = NSLock()
+    private var activeUpstreamSession: URLSession?
+    private var fdClosed = false
+    private var firewallCut = false
+    /// The guest-side vsock port of a proxy-route connection (the bridge in
+    /// bromure-agentd that relays the guest's HTTPS_PROXY socket). Set by the
+    /// vsock listener; nil on the transparent route, where the switch resets
+    /// the guest's TCP flow itself.
+    var guestVsockPort: UInt32?
+    /// A firewall cut asked agentd to reset the guest's socket: `fd` is shut
+    /// / closed only once that's done (or `abortGrace` passed), so the guest
+    /// sees a reset rather than a clean end of stream first.
+    private var abortDone: DispatchSemaphore?
+    private var fdShutDown = false
+    static let abortGrace: TimeInterval = 1.5
+
     init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper,
          awsResigner: AWSResigner,
          traceStore: TraceStore,
@@ -149,7 +169,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     func run() async {
-        defer { close(fd) }
+        defer { closeFD() }
         do {
             try await drive()
         } catch {
@@ -161,8 +181,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func drive() async throws {
         let t0 = Date()
 
-        // 1. CONNECT request from client (proxy command). Treat as
-        //    ASCII — proxy headers don't legally carry non-ASCII.
+        // 1. CONNECT request from client (proxy command). Decode only the
+        //    request line (Latin-1: byte-exact, never fails) — a forward-proxy
+        //    request carries headers and possibly a body after it, and one
+        //    non-ASCII byte there must not make the whole request "malformed".
         var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
         // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
         // open the stream with `BROMURE-CLIENT 1 sport=<n> peer=<ip>\n`: the
@@ -170,11 +192,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // reports as a loopback flow. It ties the CONNECT target to the
         // process chain (NETWORK_LINEAGE.md). Optional: older guests omit it.
         let clientSport = Self.stripClientPreamble(&connectReq)
-        guard let asString = String(data: connectReq, encoding: .ascii),
-              let lineEnd = asString.range(of: "\r\n") else {
+        guard let lineEndBytes = connectReq.range(of: Data("\r\n".utf8)),
+              let firstLineStr = String(data: connectReq[connectReq.startIndex..<lineEndBytes.lowerBound],
+                                        encoding: .isoLatin1) else {
             throw MitmError.malformedHTTPRequest
         }
-        let firstLine = asString[..<lineEnd.lowerBound]
+        let firstLine = Substring(firstLineStr)
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2 else { throw MitmError.malformedHTTPRequest }
 
@@ -210,14 +233,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 throw MitmError.malformedHTTPRequest
             }
             let rewrittenLine = "\(parts[0]) \(path) \(parts.count >= 3 ? String(parts[2]) : "HTTP/1.1")"
-            var rewritten = Data(rewrittenLine.utf8)
+            var rewritten = rewrittenLine.data(using: .isoLatin1) ?? Data(rewrittenLine.utf8)
             rewritten.append(connectReq.subdata(in: reqLineEnd.lowerBound..<connectReq.count))
 
             if host.lowercased() != OpenShellAdvisor.host, egressVerdict(host: host, port: port) == .deny {
                 try? writeAll(fd: fd, bytes: Array(connectDeniedResponse(host: host, port: port).utf8))
                 return
             }
-            try await driveTLS(host: host, port: port, t0: t0, cleartext: true, prefix: rewritten)
+            reportProxyAllowed(host: host, port: port)
+            try await trackedForFirewall(host: host, port: port, route: "proxy") {
+                try await driveTLS(host: host, port: port, t0: t0, cleartext: true, prefix: rewritten)
+            }
             return
         }
 
@@ -244,24 +270,27 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return
         }
 
-        // 2. Confirm the tunnel.
-        try writeAll(fd: fd, bytes: Array("HTTP/1.1 200 Connection established\r\n\r\n".utf8))
+        reportProxyAllowed(host: host, port: port)
+        try await trackedForFirewall(host: host, port: port, route: "proxy") {
+            // 2. Confirm the tunnel.
+            try writeAll(fd: fd, bytes: Array("HTTP/1.1 200 Connection established\r\n\r\n".utf8))
 
-        // An OpenShell `tls: skip` endpoint is relayed raw, never terminated.
-        // `run()` closes `fd` on return, so the splice gets its own copy.
-        if verdict == .splice {
-            let own = dup(fd)
-            if own >= 0 {
-                if let pinned = pinnedUpstream {
-                    MitmPassthrough.splice(appFD: own, addresses: pinned, destPort: port)
-                } else {
-                    MitmPassthrough.splice(appFD: own, host: host, destPort: port)
+            // An OpenShell `tls: skip` endpoint is relayed raw, never terminated.
+            // `run()` closes `fd` on return, so the splice gets its own copy.
+            if verdict == .splice {
+                let own = dup(fd)
+                if own >= 0 {
+                    if let pinned = pinnedUpstream {
+                        MitmPassthrough.splice(appFD: own, addresses: pinned, destPort: port)
+                    } else {
+                        MitmPassthrough.splice(appFD: own, host: host, destPort: port)
+                    }
                 }
+                return
             }
-            return
-        }
 
-        try await driveTLS(host: host, port: port, t0: t0)
+            try await driveTLS(host: host, port: port, t0: t0)
+        }
     }
 
     /// The 403 for a proxied connection the firewall refused. Under an
@@ -281,21 +310,152 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: \(body.utf8.count)\r\nconnection: close\r\n\r\n\(body)"
     }
 
+
+    /// Run `body` (the life of this connection) registered with the firewall's
+    /// open-connection registry, so a rule change that denies `host:port` cuts
+    /// it mid-transfer. Re-checks the verdict once registered: a policy swap
+    /// that landed between the opening check and the registration would
+    /// otherwise miss this connection.
+    private func trackedForFirewall(host: String, port: Int, route: String,
+                                    _ body: () async throws -> Void) async throws {
+        let p16 = UInt16(truncatingIfNeeded: port)
+        let rule = guardrailsProvider()?.egressPolicy?
+            .firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text
+        let token = EgressConnectionRegistry.shared.register(
+            profileID: profileID, host: host, port: port, route: route, rule: rule) { [weak self] in
+                self?.cutForFirewall()
+            }
+        defer { EgressConnectionRegistry.shared.unregister(token) }
+        // `policy.local` (the OpenShell advisor) is answered here, never
+        // forwarded: no rule governs it.
+        if host.lowercased() != OpenShellAdvisor.host, let policy = guardrailsProvider()?.egressPolicy,
+           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16) == .deny {
+            return
+        }
+        try await body()
+    }
+
+    /// The firewall now denies this connection: close the guest side (every
+    /// blocked read/write on it fails, which ends the relay) and cancel the
+    /// upstream request in flight.
+    ///
+    /// Proxy route: the guest's client talks to agentd's bridge, which only
+    /// sees the vsock close as an end of stream and would close its client
+    /// socket gracefully (the client drains what's buffered and reports a
+    /// short transfer, curl rc=18). So agentd is asked first to RESET that
+    /// socket (`EgressConnectionRegistry.guestAbort`), like the switch resets
+    /// a cut transparent flow (rc=56); `fd` is shut once agentd confirms or
+    /// after `abortGrace`.
+    private func cutForFirewall() {
+        cutLock.lock()
+        guard !fdClosed, !firewallCut else { cutLock.unlock(); return }
+        firewallCut = true
+        let session = activeUpstreamSession
+        let abort = guestVsockPort.flatMap { port in
+            EgressConnectionRegistry.shared.guestAbort.map { (port, $0) }
+        }
+        let done = abort != nil ? DispatchSemaphore(value: 0) : nil
+        abortDone = done
+        if abort == nil {
+            fdShutDown = true
+            Darwin.shutdown(fd, SHUT_RDWR)
+        } else {
+            // Abortive on the host end too: no graceful FIN after close.
+            var lg = linger(l_onoff: 1, l_linger: 0)
+            setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, socklen_t(MemoryLayout<linger>.size))
+        }
+        cutLock.unlock()
+        session?.invalidateAndCancel()
+        guard let (port, guestAbort) = abort, let done else { return }
+        guestAbort(profileID, port) { [weak self] in
+            done.signal()
+            self?.shutdownAfterAbort()
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.abortGrace) { [weak self] in
+            self?.shutdownAfterAbort()
+        }
+    }
+
+    /// The guest's socket was reset (or the grace passed): end the relay.
+    private func shutdownAfterAbort() {
+        cutLock.lock(); defer { cutLock.unlock() }
+        guard !fdClosed, !fdShutDown else { return }
+        fdShutDown = true
+        Darwin.shutdown(fd, SHUT_RDWR)
+    }
+
+    /// Remember the upstream session in flight (cancelled at once if the
+    /// firewall already cut this connection).
+    private func noteUpstreamSession(_ session: URLSession) {
+        cutLock.lock()
+        activeUpstreamSession = session
+        let cut = firewallCut
+        cutLock.unlock()
+        if cut { session.invalidateAndCancel() }
+    }
+
+    /// Close `fd` — after which a firewall cut must leave it alone.
+    private func closeFD() {
+        // A cut waiting on agentd to reset the guest's socket: let that land
+        // first, so closing here can't reach the guest as a clean end.
+        cutLock.lock()
+        let pendingAbort = abortDone
+        cutLock.unlock()
+        if let pendingAbort {
+            _ = pendingAbort.wait(timeout: .now() + Self.abortGrace)
+            pendingAbort.signal()
+        }
+        cutLock.lock()
+        fdClosed = true
+        activeUpstreamSession = nil
+        cutLock.unlock()
+        close(fd)
+    }
+
+    /// An allowed CONNECT / forward-proxy request, for the Security Timeline —
+    /// the proxy-route twin of the switch's allowed-flow report, with the same
+    /// fields, the same "Log allowed connections" gate and the same
+    /// per-destination dedupe. The on-host local-inference endpoint is never
+    /// reported (it never leaves this Mac).
+    private func reportProxyAllowed(host: String, port: Int) {
+        guard let policy = guardrailsProvider()?.egressPolicy, policy.reportsAllowed,
+              host.lowercased() != InferenceService.localMitmHost else { return }
+        let rule = policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
+                                     port: UInt16(truncatingIfNeeded: port))?.text
+        let data: [String: AnyJSON] = ["action": .string("allow"), "proto": .string("tcp"),
+                                       "host": .string(host), "port": .int(port), "layer": .string("proxy"),
+                                       "rule": .of(rule), "by_policy": .bool(true)]
+        guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
+                                                      port: port, denied: false) else {
+            // A repeat within the dedupe window: counted on the folded row.
+            EgressReportDeduper.countRepeat(profileID: profileID, eventData: data)
+            return
+        }
+        SupplyChainLog.shared.record(
+            "[firewall] → allow tcp \(host):\(port) (\(profileID.uuidString.prefix(8)))")
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: data)
+    }
+
     /// Connection-layer egress verdict for proxied flows — the same `verdict`
     /// the switch/transparent layers apply, with a deny logged under layer
     /// "proxy". Method-level `web` restrictions and OpenShell request rules
     /// stay in the policy chain, which sees the decrypted request.
     private func egressVerdict(host: String, port: Int) -> EgressPolicy.Verdict {
         guard let policy = guardrailsProvider()?.egressPolicy else { return .allow }
-        let verdict = policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
-                                     port: UInt16(truncatingIfNeeded: port))
+        let p16 = UInt16(truncatingIfNeeded: port)
+        let verdict = policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16)
         guard verdict == .deny else { return verdict }
+        // Refused every time; reported once a minute per destination.
+        guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
+                                                      port: port, denied: true) else { return .deny }
         SupplyChainLog.shared.record(
             "[firewall] ✗ deny tcp \(host):\(port) (\(profileID.uuidString.prefix(8)))")
         BACEventEmitter.shared.emitDetached(
             profileID: profileID, eventType: "egress.firewall",
             eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                        "host": .string(host), "port": .int(port), "layer": .string("proxy")])
+                        "host": .string(host), "port": .int(port), "layer": .string("proxy"),
+                        "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text),
+                        "by_policy": .bool(true)])
         return .deny
     }
 
@@ -520,9 +680,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// exit, like `run()`.
     @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
     func runTransparentTLS(host: String, port: Int) async {
-        defer { close(fd) }
+        defer { closeFD() }
         do {
-            try await driveTLS(host: host, port: port, t0: Date())
+            try await trackedForFirewall(host: host, port: port, route: "transparent") {
+                try await driveTLS(host: host, port: port, t0: Date())
+            }
         } catch {
             FileHandle.standardError.write(Data("[mitm] \(error)\n".utf8))
         }
@@ -534,9 +696,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// `Host` header (the switch has no SNI for cleartext). Closes the FD on exit.
     @available(macOS, deprecated: 10.15, message: "shares driveTLS, which drives SecureTransport for the HTTPS path")
     func runTransparentHTTP(host: String, port: Int) async {
-        defer { close(fd) }
+        defer { closeFD() }
         do {
-            try await driveTLS(host: host, port: port, t0: Date(), cleartext: true)
+            try await trackedForFirewall(host: host, port: port, route: "transparent") {
+                try await driveTLS(host: host, port: port, t0: Date(), cleartext: true)
+            }
         } catch {
             FileHandle.standardError.write(Data("[mitm] \(error)\n".utf8))
         }
@@ -726,17 +890,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 dbQuery: dbQuery,
                 broker: guardrailsBroker,
                 profileID: profileID) {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
-                // Structured event → the Security Timeline window.
+                // Structured event → the Security Timeline window. A `web`
+                // method rule is the egress firewall's decision, recorded under
+                // the Firewall engine — not Guardrails (B39).
+                let (eventType, data) = Self.denialEvent(denial, host: host, port: port,
+                                                         method: reqMethod, path: reqPath)
+                if denial.isFirewall {
+                    SupplyChainLog.shared.record(
+                        "[firewall] ✗ deny web \(reqMethod) \(host)\(reqPath) (\(profileID.uuidString.prefix(8)))")
+                } else {
+                    FileHandle.standardError.write(Data(
+                        "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
+                }
                 BACEventEmitter.shared.emitDetached(
-                    profileID: profileID, eventType: "guardrails.block",
-                    eventData: [
-                        "host": .string(host),
-                        "method": .string(reqMethod),
-                        "path": .string(reqPath),
-                        "reason": .string(denial.reason),
-                    ])
+                    profileID: profileID, eventType: eventType, eventData: data)
                 var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: \(denial.contentType)\r\n"
                 if let t = denial.amzErrorType { resp += "x-amzn-ErrorType: \(t)\r\n" }
                 resp += "Content-Length: \(denial.body.utf8.count)\r\nConnection: close\r\n\r\n\(denial.body)"
@@ -810,15 +977,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
                store.profileForBogusKey(apiKey) != nil {
                 leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
             }
+            // Claude with account features: its OAuth stand-in as Bearer.
+            if Self.isClaudeHost(host), let bearer = Self.bearerToken(inHeaderSection: hdr),
+               Self.isClaudeStandIn(bearer, profileID: profileID) {
+                leaks = leaks.filter { $0.header.lowercased() != "authorization" }
+            }
             // Codex / Grok / Kimi: bogus Bearer on their backends.
             let codexHost = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com"
             let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
                 || host == "x.ai" || host.hasSuffix(".x.ai")
             let kimiHost = KimiRegion.isSubscriptionHost(host)
             if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
-                let codexBogus = Self.codexSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
-                let grokBogus = Self.grokSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
-                let kimiBogus = Self.kimiSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
+                let codexBogus = Self.isCodexStandIn(bearer, profileID: profileID)
+                let grokBogus = grokHost && Self.isGrokStandIn(bearer, profileID: profileID)
+                let kimiBogus = kimiHost && Self.isKimiStandIn(bearer, profileID: profileID)
                 if codexBogus || grokBogus || kimiBogus {
                     leaks = leaks.filter { $0.header.lowercased() != "authorization" }
                 }
@@ -860,6 +1032,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // sees a hard failure rather than a hung connection. We
             // never forward a single byte to the destination host
             // when a leak fires.
+            BromureBlockLog.shared.record(.credentialLeak, profileID: profileID)
             let body = "Bromure: outbound request blocked — leaked credential to non-designated host.\n"
             var resp = "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
             resp += "Content-Type: text/plain; charset=utf-8\r\n"
@@ -998,8 +1171,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 swap.modified = Self.spliceHeaderSection(
                     of: swap.modified,
                     newHeader: hdr + "\r\nAuthorization: Bearer \(mcpReal)")
-                FileHandle.standardError.write(Data(
-                    "[mitm] injected MCP bearer for \(host)\n".utf8))
+                Self.logTokenInjection("MCP bearer", host: host, profileID: profileID)
             }
         }
 
@@ -1013,6 +1185,38 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     `claudeSubStaleAccess` carries the injected token to the post-
         //     relay 401 self-heal below.
         var claudeSubStaleAccess: String? = nil
+        // 5c'. …and with account features on, the machine holds an OAuth
+        //     stand-in (ClaudeStandIn) and sends it as Bearer to Anthropic's
+        //     and Claude's hosts: a value swap for the live token.
+        if !insecure, Self.isClaudeHost(host),
+           let provider = Self.claudeSubscriptionProvider, let (_, refresher) = provider(),
+           let headerSection = Self.rawHeaderSection(of: swap.modified),
+           let bearer = Self.bearerToken(inHeaderSection: headerSection),
+           Self.isClaudeStandIn(bearer, profileID: profileID) {
+            do {
+                let access = try await refresher.accessToken(for: profileID)
+                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
+                claudeSubStaleAccess = access
+                FileHandle.standardError.write(Data(
+                    "[mitm] swapped Claude OAuth stand-in for \(host)\(reqPath)\n".utf8))
+            } catch {
+                let rejected = (error as? ClaudeSubscriptionError)?.isRejection ?? false
+                let reply = rejected
+                    ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                        "type": "error",
+                        "error": ["type": "authentication_error",
+                                  "message": "Your Claude sign-in expired. Sign in again from Bromure (the workspace's sign-in card or Preferences → Models) — not with /login inside the VM."],
+                    ])
+                    : SignInCapture.response(status: 529, reason: "Overloaded", json: [
+                        "type": "error",
+                        "error": ["type": "overloaded_error",
+                                  "message": "Bromure couldn't renew the Claude sign-in just now; retrying."],
+                    ])
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                try tls.write(reply)
+                return
+            }
+        }
         if !insecure,
            host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
            let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
@@ -1023,8 +1227,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let access = try await refresher.accessToken(for: profileID)
                 swap.modified = Self.injectClaudeSubscriptionAuth(rawRequest: swap.modified, access: access)
                 claudeSubStaleAccess = access
-                FileHandle.standardError.write(Data(
-                    "[mitm] injected Claude subscription token for \(host)\n".utf8))
+                Self.logTokenInjection("Claude subscription token", host: host, profileID: profileID)
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Claude subscription token unavailable for \(host): \(error)\n".utf8))
@@ -1061,19 +1264,34 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var codexSubStaleAccess: String? = nil
         if !insecure,
            host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
-           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
+           let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           store.profileForBogusKey(bearer) != nil {
+           Self.isCodexStandIn(bearer, profileID: profileID) {
             do {
                 let access = try await refresher.accessToken(for: profileID)
                 swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
                 codexSubStaleAccess = access
-                FileHandle.standardError.write(Data(
-                    "[mitm] injected Codex subscription token for \(host)\n".utf8))
+                Self.logTokenInjection("Codex subscription token", host: host, profileID: profileID)
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Codex subscription token unavailable for \(host): \(error)\n".utf8))
+                // Never forward the stand-in (or a dead token): answer here.
+                // A rejected / flagged login → a 401 that says where to sign
+                // in (Codex then prints its "sign in again" banner, which the
+                // session turns into a sign-in card); a transient failure → a
+                // retryable 503.
+                let rejected = (error as? CodexSubscriptionError)?.isRejection ?? false
+                let reply = rejected
+                    ? SignInCapture.response(status: 401, reason: "Unauthorized",
+                                             json: CodexSignInExpired.apiErrorJSON)
+                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
+                        "error": ["message": "Bromure couldn't renew the ChatGPT sign-in just now; retrying.",
+                                  "type": "server_error"] as [String: Any],
+                    ])
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                try tls.write(reply)
+                return
             }
         }
 
@@ -1086,19 +1304,25 @@ final class HTTPMitmConnection: @unchecked Sendable {
         if !insecure,
            host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
             || host == "x.ai" || host.hasSuffix(".x.ai"),
-           let provider = Self.grokSubscriptionProvider, let (store, refresher) = provider(),
+           let provider = Self.grokSubscriptionProvider, let (_, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           store.profileForBogusKey(bearer) != nil {
+           Self.isGrokStandIn(bearer, profileID: profileID) {
             do {
                 let access = try await refresher.accessToken(for: profileID)
                 swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
                 grokSubStaleAccess = access
-                FileHandle.standardError.write(Data(
-                    "[mitm] injected Grok subscription token for \(host)\n".utf8))
+                Self.logTokenInjection("Grok subscription token", host: host, profileID: profileID)
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Grok subscription token unavailable for \(host): \(error)\n".utf8))
+                // Never forward the stand-in (or a dead token): a rejected /
+                // flagged login → a 401 that says where to sign in; a
+                // transient failure → a retryable 503.
+                let rejected = (error as? GrokSubscriptionError)?.isRejection ?? false
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                try tls.write(Self.subscriptionUnavailableReply(provider: "Grok", rejected: rejected))
+                return
             }
         }
 
@@ -1111,19 +1335,22 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var kimiSubStaleAccess: String? = nil
         if !insecure,
            KimiRegion.isSubscriptionHost(host),
-           let provider = Self.kimiSubscriptionProvider, let (store, refresher) = provider(),
+           let provider = Self.kimiSubscriptionProvider, let (_, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           store.profileForBogusKey(bearer) != nil {
+           Self.isKimiStandIn(bearer, profileID: profileID) {
             do {
                 let access = try await refresher.accessToken(for: profileID)
                 swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
                 kimiSubStaleAccess = access
-                FileHandle.standardError.write(Data(
-                    "[mitm] injected Kimi subscription token for \(host)\n".utf8))
+                Self.logTokenInjection("Kimi subscription token", host: host, profileID: profileID)
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Kimi subscription token unavailable for \(host): \(error)\n".utf8))
+                let rejected = (error as? KimiSubscriptionError)?.isRejection ?? false
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                try tls.write(Self.subscriptionUnavailableReply(provider: "Kimi", rejected: rejected))
+                return
             }
         }
 
@@ -1134,44 +1361,91 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     auth.kimi.ai rejects is persisted as a revoked tombstone (empty
         //     access token): the CLI reports "requires login" from then on,
         //     until the next re-seed. So when the guest POSTs
-        //     `grant_type=refresh_token` with OUR stand-in, answer it here:
-        //     refresh the REAL credential host-side, hand back a fresh
-        //     stand-in access token (registered for the bearer swap) and the
-        //     same stand-in refresh, far-future expiry. The real refresh token
-        //     never enters the VM; a genuine (non-stand-in) refresh — e.g.
-        //     the registration VM's own login — passes through untouched.
+        //     `grant_type=refresh_token` with ANY of our stand-ins (an older
+        //     one too: a machine resumed across an app restart or a host-side
+        //     rotation still holds it), answer it here: refresh the REAL
+        //     credential host-side (forced, rate-limited) and hand back fresh
+        //     stand-ins minted from the current real record. The real refresh
+        //     token never enters the VM; a genuine (non-stand-in) refresh —
+        //     e.g. the registration VM's own login — passes through untouched.
+        //
+        // 5e″. Grok stand-in refresh, the same way: Grok refreshes when xAI
+        //     turns a request down (a 401 — which an unrecognised stand-in
+        //     used to cause after an app restart), and its stand-in refresh
+        //     token sent on to auth.x.ai was rejected: Grok logged out.
+        if !insecure, bodyFile == nil,
+           let reply = await Self.answerStandInRefresh(host: host, method: reqMethod, path: reqPath,
+                                                       rawRequest: swap.modified, profileID: profileID) {
+            try tls.write(reply)
+            return
+        }
+
+        // 5c''. Claude stand-in refresh: answered here with the stand-in
+        //     again (the host keeps the real login fresh), never sent on.
         if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
-           host == "auth.kimi.ai" || host == "auth.kimi.com",
-           reqPath.hasPrefix("/api/oauth/token"),
-           let provider = Self.kimiSubscriptionProvider, let (store, refresher) = provider(),
-           let real = store.record(for: profileID),
+           Self.isClaudeHost(host), reqPath.hasPrefix("/v1/oauth/token"),
+           let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
+           store.record(for: profileID) != nil,
            let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
-            let form = "?" + String(decoding: swap.modified.subdata(
-                in: bodyStart.upperBound..<swap.modified.count), as: UTF8.self)
-            if Self.urlQueryParam("grant_type", inPath: form) == "refresh_token",
-               let sent = Self.urlQueryParam("refresh_token", inPath: form),
-               sent == KimiStandIn.refresh(realRefresh: real.refreshToken, profileID: profileID) {
+            let body = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let form = "?" + String(decoding: body, as: UTF8.self)
+            let grant = (json?["grant_type"] as? String) ?? Self.urlQueryParam("grant_type", inPath: form)
+            let sent = (json?["refresh_token"] as? String) ?? Self.urlQueryParam("refresh_token", inPath: form)
+            if grant == "refresh_token", let sent, ClaudeStandIn.isRefresh(sent) {
                 let reply: Data
                 do {
                     _ = try await refresher.accessToken(for: profileID)
-                    // The refresher persists the renewed real tokens; re-read
-                    // so the stand-in is minted from the CURRENT real access.
-                    let fresh = store.record(for: profileID) ?? real
-                    let answer = KimiRefreshAnswer.build(record: fresh, profileID: profileID)
-                    store.registerBogusKey(answer.bogusAccess, for: profileID)
-                    reply = SignInCapture.response(status: 200, reason: "OK", json: answer.json)
+                    reply = SignInCapture.response(status: 200, reason: "OK",
+                                                   json: ClaudeStandIn.refreshAnswer(ClaudeStandIn.mint(profileID: profileID)))
                     FileHandle.standardError.write(Data(
-                        "[mitm] answered Kimi stand-in refresh for \(profileID.uuidString.prefix(8)) (host refreshed the real credential)\n".utf8))
+                        "[mitm] answered Claude stand-in refresh for \(profileID.uuidString.prefix(8))\n".utf8))
                 } catch {
-                    // The REAL refresh was rejected (or unreachable): tell the
-                    // CLI the truth so its existing re-login path runs, and the
-                    // store has already flagged reauth for the UI.
-                    reply = SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                    reply = SignInCapture.response(status: 400, reason: "Bad Request", json: [
                         "error": "invalid_grant",
-                        "error_description": "Bromure could not refresh the Kimi subscription on the host: \(error)",
+                        "error_description": "Bromure could not refresh the Claude subscription on the host: \(error)",
                     ])
+                }
+                try tls.write(reply)
+                return
+            }
+        }
+
+        // 5e'. Codex stand-in refresh. Codex refreshes when OpenAI turns its
+        //     token down (a 401) — which a stand-in the proxy didn't swap
+        //     used to cause — and a stand-in refresh token sent on to OpenAI
+        //     came back "Your access token could not be refreshed. Please
+        //     log out and sign in again." Answered here instead, like Kimi's:
+        //     the host refreshes the real login and Codex gets fresh stand-ins.
+        if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
+           host == "auth.openai.com", reqPath.hasPrefix("/oauth/token"),
+           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
+           store.record(for: profileID) != nil,
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
+            let body = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let form = "?" + String(decoding: body, as: UTF8.self)
+            let grant = (json?["grant_type"] as? String) ?? Self.urlQueryParam("grant_type", inPath: form)
+            let sent = (json?["refresh_token"] as? String) ?? Self.urlQueryParam("refresh_token", inPath: form)
+            if grant == "refresh_token", let sent, SubscriptionFakeMint.isCodexRefreshFake(sent) {
+                let reply: Data
+                do {
+                    // Codex only refreshes after OpenAI turned it down: refresh
+                    // the REAL login for real (not just "it isn't expired yet"),
+                    // and fail honestly when the login is dead.
+                    let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
+                    guard let fresh = store.record(for: profileID),
+                          let standIn = CodexStandIn.mint(fresh, profileID: profileID)
+                    else { throw CodexSubscriptionError.noCredential }
+                    store.registerBogusKey(standIn.access, for: profileID)
+                    reply = SignInCapture.response(status: 200, reason: "OK", json: CodexStandIn.refreshAnswer(standIn))
                     FileHandle.standardError.write(Data(
-                        "[mitm] Kimi stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
+                        "[mitm] answered Codex stand-in refresh for \(profileID.uuidString.prefix(8)) (\(refreshedNow ? "host refreshed the real credential" : "real credential refreshed moments ago; reused"))\n".utf8))
+                } catch {
+                    reply = SignInCapture.response(status: 401, reason: "Unauthorized",
+                                                   json: CodexSignInExpired.refreshRejectedJSON(error))
+                    FileHandle.standardError.write(Data(
+                        "[mitm] Codex stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
                 }
                 try tls.write(reply)
                 return
@@ -1189,11 +1463,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
            let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
            capture.matches(host: host, method: reqMethod, path: reqPath,
                            body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
-            let captureSession = upstreamSession(for: host, insecure: insecure)
-            defer { captureSession.finishTasksAndInvalidate() }
-            let upstream = try await relayUpstreamCollecting(
-                rawRequest: swap.modified, host: host, port: port,
-                session: captureSession, scheme: upstreamScheme)
+            let upstream: Data
+            if let sim = capture.simulatedReply {
+                // The sign-in simulator (e2e): the provider's reply is canned,
+                // everything else — the hook, its hop, its release here — is
+                // the real path.
+                upstream = sim
+            } else {
+                let captureSession = upstreamSession(for: host, insecure: insecure)
+                noteUpstreamSession(captureSession)
+                defer { captureSession.finishTasksAndInvalidate() }
+                upstream = try await relayUpstreamCollecting(
+                    rawRequest: swap.modified, host: host, port: port,
+                    session: captureSession, scheme: upstreamScheme)
+            }
             let status = Self.parseStatusCode(upstream)
             let body = upstream.range(of: Data("\r\n\r\n".utf8))
                 .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
@@ -1319,6 +1602,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     "method": .string("WEBSOCKET_TEXT"), "path": .string(wsPath), "reason": .string(reason),
                 ])
             }
+            // PII protection / prompt-injection detection on a model
+            // provider's socket (Codex's Responses WebSocket): frame-level
+            // relay instead of the opaque pump. nil → opaque pump.
+            // An OpenShell message policy needs the opaque pump's per-message
+            // gate, so it takes precedence: policy enforcement is never traded
+            // for scanning.
+            let contentGuard = (insecure || messagePolicy != nil || messageTransform != nil) ? nil
+                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID)
             let result = try await handleWebSocketUpgrade(
                 serverTLS: tls,
                 rawRequest: upgradeRequest,
@@ -1327,9 +1618,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 messagePolicy: messagePolicy,
                 messageTransform: messageTransform,
                 onViolation: onViolation,
+                contentGuard: contentGuard,
                 onUpstreamMessage: realtimeTap.map { tap in
                     { @Sendable msg in tap.handle(msg) }
                 })
+            // Codex's Responses WebSocket turned the injected token down:
+            // same self-heal / dead-login detection as the HTTP path below.
+            if let stale = codexSubStaleAccess, result.statusCode == 401,
+               let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider() {
+                let pid = profileID
+                let invalidated = CodexSignInExpired.isInvalidation(result.handshakeResponse)
+                Task { await refresher.noteUnauthorized(stale: stale, for: pid, invalidated: invalidated) }
+            }
             let elapsed = Date().timeIntervalSince(t0) * 1000
             let streamedAny = realtimeTap?.streamedAnyEvents ?? false
             if streamedAny {
@@ -1411,6 +1711,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     SecIdentity (Kubernetes API server et al.) when the
         //     upstream challenges for a client cert.
         let session = upstreamSession(for: host, insecure: insecure)
+        noteUpstreamSession(session)
         // URLSession strong-refs its delegate until invalidated (per
         // Apple's docs). Without this `defer`, every MITM connection
         // leaks one URLSession + one ClientCertChallengeDelegate
@@ -1888,7 +2189,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 if ecosystem == .npm,
                    policy.stripInstallScripts,
                    !policy.scriptStripAllows(ecosystem: ecosystem.rawValue, name: pkg) {
-                    var didStripFlag = false
+                    var stripResult: NPMRegistryTransforms.TarballStrip = .notApplicable
                     let relay = try await relayUpstreamBuffered(
                         rawRequest: toForward, host: upstreamHost, port: upstreamPort,
                         session: session, tls: tls, scheme: upstreamScheme,
@@ -1899,12 +2200,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     profileID: self.profileID, path: reqPath) {
                                 return substitute
                             }
-                            let (out, didStrip) = NPMRegistryTransforms
-                                .stripScriptsFromTarball(rawResponse: raw)
-                            if didStrip {
-                                didStripFlag = true
+                            let (out, result) = NPMRegistryTransforms.inspectTarball(rawResponse: raw)
+                            stripResult = result
+                            switch result {
+                            case .stripped:
                                 SupplyChainLog.shared.record(
                                     "[supply-chain] stripped install scripts from \(pkg)@\(version)")
+                            case .noScripts:
+                                SupplyChainLog.shared.record(
+                                    "[supply-chain] \(pkg)@\(version): no install scripts")
+                            case .failed(let why):
+                                // Never silent: the tarball went through as-is.
+                                SupplyChainLog.shared.record(
+                                    "[supply-chain] could NOT inspect \(pkg)@\(version) (\(why)) — install scripts NOT removed")
+                            case .notApplicable:
+                                break
                             }
                             return out
                         })
@@ -1917,9 +2227,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     swaps: swap.swaps,
                                     leaks: leaks,
                                     latencyMs: elapsed)
-                    if didStripFlag {
+                    switch stripResult {
+                    case .stripped:
                         scOutcome = "stripped"
                         scReasonKind = "scripts_stripped"
+                    case .failed(let why):
+                        scOutcome = "unchecked"
+                        scReasonKind = "scripts_unchecked"
+                        scReason = why
+                    case .noScripts, .notApplicable:
+                        break
                     }
                     return
                 }
@@ -1929,48 +2246,92 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
 
+        // Content scans (prompt injection, PII) read the request body as JSON.
+        // A content-coded body (gzip / deflate / br / zstd) is decoded here and
+        // sent upstream as identity (no Content-Encoding, fresh Content-Length),
+        // so both scans see the real text and the PII swap can rewrite it.
+        // A body that can't be decoded (an unknown coding, corrupt data, a
+        // dictionary-compressed zstd frame, a decompression bomb) FAILS CLOSED:
+        // it is answered with a 415 the agent surfaces and never leaves the Mac
+        // — forwarding it would send exactly the text the user asked us to
+        // screen. A body too large to hold in memory (spooled to disk) still
+        // goes out, recorded on the Security Timeline as "not scanned" (B36).
+        // The trace copy is decoded too, so the log-mode injection scan (run
+        // from emitTrace) and the inspector read the text, not the coding.
+        var traceRequest = request
+        if Self.isAIHost(host) {
+            let piOn = Self.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
+            let piiOn = Self.piiPolicyProvider?(profileID)?.isActive ?? false
+            if piOn || piiOn {
+                let engines = [piOn ? "prompt_injection" : nil, piiOn ? "pii" : nil].compactMap { $0 }
+                if bodyFile != nil {
+                    Self.recordScanSkipped(host: host, path: reqPath, engines: engines,
+                                           reason: "request body too large to scan", profileID: profileID)
+                } else {
+                    switch Self.decodeRequestContentEncoding(toForward) {
+                    case .identity:
+                        break
+                    case .decoded(let plain):
+                        toForward = plain
+                        if case .decoded(let plainTrace) = Self.decodeRequestContentEncoding(request) {
+                            traceRequest = plainTrace
+                        }
+                    case .undecodable(let encoding):
+                        Self.recordScanSkipped(host: host, path: reqPath, engines: engines,
+                                               reason: "\(encoding)-compressed request body could not be decoded",
+                                               profileID: profileID, blocked: true)
+                        let response = Self.undecodableBodyResponse(encoding: encoding, engines: engines)
+                        try? tls.write(response)
+                        let elapsed = Date().timeIntervalSince(t0) * 1000
+                        await emitTrace(host: host, port: port,
+                                        preSwapRequest: request,
+                                        upstreamResponse: response,
+                                        upstreamWireBytes: response.count,
+                                        responseTruncated: false,
+                                        swaps: [],
+                                        leaks: leaks,
+                                        latencyMs: elapsed)
+                        return
+                    }
+                }
+            }
+        }
+
         // Prompt-injection enforcement (ask / block). Runs pre-forward so we
         // can stop a poisoned request before the model ever sees it. `log`
         // mode is handled post-response in emitTrace (zero added latency).
         // Bounded to AI hosts: the conversation parser returns nil otherwise.
+        // Tool output the user already blocked is resent with every turn of
+        // the agent's conversation: it goes out as a neutral placeholder
+        // instead of failing each later request too (the session goes on).
+        if let pi = Self.promptInjectionPolicyProvider?(profileID), pi.isActive,
+           pi.onDetection != .log, bodyFile == nil,
+           PromptInjectionRedactions.shared.hasAny(profileID),
+           let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
+            let head = toForward.subdata(in: 0..<split.upperBound)
+            let body = toForward.subdata(in: split.upperBound..<toForward.count)
+            if let r = PromptInjectionRedactions.shared.redact(body, profileID: profileID) {
+                toForward = head + r.body
+                Self.recordInjectionRedacted(count: r.count, host: host, profileID: profileID)
+            }
+        }
         if let pi = Self.promptInjectionPolicyProvider?(profileID), pi.isActive,
            pi.onDetection != .log,
            let conv = ConversationParser.parse(host: host, requestBody: toForward,
                                                responseBody: nil) {
-            var flagged: (detector: String, method: String, source: String, preview: String)? = nil
-            if pi.detectSourceInjection {
-                let spans = Self.newToolResultSpans(in: conv)
-                if let preview = await PromptInjectionClassifier.shared.detect(spans: spans) {
-                    flagged = ("prompt injection", "model", "tool output", preview)
-                }
-            }
-            if flagged == nil, pi.detectRulesInjection {
-                // Heuristic scanner first (catches obfuscation the model can't
-                // read); then the ModernBERT semantic pass over the spans.
-                if let hit = RulesFileScanner.shared.detect(systemPrompt: conv.systemPrompt) {
-                    flagged = ("rogue instructions", "heuristic", hit.source, hit.preview)
-                } else if let preview = await PromptInjectionClassifier.claudeMd.detect(
-                            spans: RulesFileScanner.classifierSpans(conv.systemPrompt)) {
-                    flagged = ("rogue instructions", "model", "CLAUDE.md", preview)
-                }
-            }
-            if let f = flagged {
-                let detectorCode = f.detector == "rogue instructions" ? "rules" : "source"
+            if let f = await Self.detectPromptInjection(in: conv, policy: pi) {
                 let pid = profileID
                 // Record + forward the *resolved outcome* (not just the mode):
                 // block → "blocked"; ask → "allowed"/"blocked" by the user.
                 func record(outcome: String) {
-                    SupplyChainLog.shared.record(
-                        "[prompt-injection] \(outcome): \(f.detector) in \(f.source) → \(host)")
-                    PromptInjectionCloudEvent.emit(
-                        profileID: pid, detector: detectorCode, method: f.method,
-                        action: outcome, host: host, source: f.source, score: nil,
-                        signals: [], toolUseId: nil, snippet: f.preview)
+                    Self.recordPromptInjection(f, outcome: outcome, host: host, profileID: pid)
                 }
                 switch pi.onDetection {
                 case .block:
                     record(outcome: "blocked")
-                    try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
+                    PromptInjectionRedactions.shared.block(f, profileID: pid)
+                    try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source,
+                                                               instructionsWithheld: !f.ruleSpans.isEmpty))
                     return
                 case .ask:
                     let allow = await Self.promptInjectionBroker.consent(
@@ -1978,7 +2339,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         source: f.source, flaggedText: f.preview)
                     record(outcome: allow ? "allowed" : "blocked")
                     if !allow {
-                        try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source))
+                        PromptInjectionRedactions.shared.block(f, profileID: pid)
+                        try? tls.write(Self.injectionBlockResponse(detector: f.detector, source: f.source,
+                                                                   instructionsWithheld: !f.ruleSpans.isEmpty))
                         return
                     }
                 case .log:
@@ -2020,18 +2383,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         // PII protection: swap personal data in the conversation for
         // stand-ins before it leaves the Mac; the relay below puts the real
-        // values back in the reply. Not for a turn served by the on-host
-        // engine — nothing leaves the Mac there. Runs before Fusion so its
-        // fan-out never carries the real values either.
+        // values back in the reply. Not for a turn served by the on-device
+        // engine — nothing leaves the Mac there. A locally-routed turn whose
+        // engine is a custom server on another machine DOES leave the Mac:
+        // it is swapped here, before the repair/translation proxy, and the
+        // relay restores that proxy's streamed reply (`PIIEngineScope`).
+        // Runs before Fusion so its fan-out never carries the real values.
         var piiVault: PIIVault? = nil
-        if routedBackend == .cloud, bodyFile == nil,
+        let offMacEngine: String? = routedBackend == .local
+            ? PIIEngineScope.offMacEngineHost(profileID: profileID) : nil
+        if routedBackend == .cloud || offMacEngine != nil, bodyFile == nil,
            let pii = Self.piiPolicyProvider?(profileID), pii.isActive,
            let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
             let head = toForward.subdata(in: 0..<split.upperBound)
             let body = toForward.subdata(in: split.upperBound..<toForward.count)
             let encoded = Self.headerValue("Content-Encoding",
                                            inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
-            if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body) {
+            if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body,
+                                                localEngineOffMac: offMacEngine != nil) {
                 let vault = PIIVault.forProfile(profileID)
                 let t = Date()
                 let outcome = await PIIRewriter.rewriteRequest(body, policy: pii, vault: vault)
@@ -2040,8 +2409,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let ms = Date().timeIntervalSince(t) * 1000
                 // A partial scan is recorded even with nothing swapped: the
                 // Timeline must show that part of the text got pattern rules only.
+                // The Timeline names where the text really went: the
+                // custom engine's host, not the `bromure.llm` sentinel.
                 if outcome.total > 0 || outcome.partial {
-                    Self.recordPIISwaps(outcome, host: host, profileID: profileID, ms: ms)
+                    Self.recordPIISwaps(outcome, host: offMacEngine ?? host, profileID: profileID, ms: ms)
                 }
                 if outcome.total > 0 || ms > 250 || outcome.partial {
                     FileHandle.standardError.write(Data(String(
@@ -2083,7 +2454,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
             // Then the guest-facing exchange (original request → fused reply).
             await emitTrace(host: host, port: port,
-                            preSwapRequest: request,
+                            preSwapRequest: traceRequest,
                             upstreamResponse: outcome.buffer,
                             upstreamWireBytes: outcome.wireBytes,
                             responseTruncated: false,
@@ -2155,7 +2526,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
            Self.parseStatusCode(relay.buffer) == 401,
            let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider() {
             let pid = profileID
-            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+            let invalidated = CodexSignInExpired.isInvalidation(relay.buffer)
+            Task { await refresher.noteUnauthorized(stale: stale, for: pid, invalidated: invalidated) }
         }
         if let stale = grokSubStaleAccess,
            Self.parseStatusCode(relay.buffer) == 401,
@@ -2175,7 +2547,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    gated by the per-session level + host allowlist.
         let elapsed = Date().timeIntervalSince(t0) * 1000
         await emitTrace(host: host, port: port,
-                        preSwapRequest: request,
+                        preSwapRequest: traceRequest,
                         upstreamResponse: relay.buffer,
                         upstreamWireBytes: relay.wireBytes,
                         responseTruncated: relay.truncatedForTrace,
@@ -2197,7 +2569,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func isWebSocketUpgrade(rawRequest: Data) -> Bool {
         guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)),
               let headerStr = String(data: rawRequest.subdata(in: 0..<endRange.lowerBound),
-                                     encoding: .ascii) else {
+                                     encoding: .isoLatin1) else {
             return false
         }
         var sawUpgrade = false
@@ -2248,6 +2620,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                         messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)? = nil,
                                         messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)? = nil,
                                         onViolation: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
+                                        contentGuard: WSContentGuard? = nil,
                                         onUpstreamMessage: (@Sendable (WSMessage) -> Void)? = nil) async throws -> WebSocketResult {
         // This path bypasses URLSession, so it must resolve the same
         // upstream TLS material `ClientCertChallengeDelegate` supplies on
@@ -2292,6 +2665,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         let upstreamFD = try pinnedUpstream.map { try UpstreamPinning.connect($0, port: port) }
             ?? connectTCP(host: host, port: port)
+        // The handshake reads block: an upstream that never answers the
+        // upgrade (seen with Codex's reconnect loop) held its thread for
+        // good. Bounded here; the relay below polls and ignores it.
+        var handshakeDeadline = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(upstreamFD, SOL_SOCKET, SO_RCVTIMEO, &handshakeDeadline,
+                   socklen_t(MemoryLayout<timeval>.size))
         // A cleartext upgrade (`ws://`, reached on an inspected plain-HTTP
         // port) goes upstream in cleartext too.
         let upstreamTLS: MitmClientStream
@@ -2313,18 +2692,42 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // Forward the upgrade request as-is. URLSession's hop-by-hop
         // header strip would have eaten Upgrade/Connection — that's
         // exactly why we bypass it here.
-        try upstreamTLS.write(rawRequest)
+        //
+        // With content engines on, the request goes up without its
+        // Sec-WebSocket-Extensions offer: the upstream can't negotiate
+        // permessage-deflate, its 101 (relayed as-is) lists no extension, and
+        // both legs carry plain frames the relay can read and rewrite.
+        var forwardRequest = rawRequest
+        if contentGuard != nil {
+            let (stripped, offers) = WSHandshake.strippingExtensions(rawRequest)
+            forwardRequest = stripped
+            if !offers.isEmpty {
+                FileHandle.standardError.write(Data(
+                    "[mitm] WS \(host): content protection on — declined extension offer(s): \(offers.joined(separator: "; "))\n".utf8))
+            }
+        }
+        try upstreamTLS.write(forwardRequest)
         var clientBytes = rawRequest.count
 
         // Read the response headers (everything up to the first blank
         // line) and forward them to the client. We don't care about
         // status: even a 4xx/5xx upgrade refusal should be relayed
         // verbatim so the client sees the real failure.
-        let respHeaders = try readUntilDoubleCRLF(via: upstreamTLS,
+        var respHeaders = try readUntilDoubleCRLF(via: upstreamTLS,
                                                   maxBytes: 64 * 1024)
-        try serverTLS.write(respHeaders)
         var upstreamBytes = respHeaders.count
         let statusCode = parseStatusCode(rawHeaders: respHeaders)
+        // Frames the upstream sent right behind its 101 (same read) belong to
+        // the frame relay when it runs — written raw here they'd bypass it
+        // and leave its parser mid-frame.
+        var earlyFrames = Data()
+        if contentGuard != nil, statusCode == 101,
+           let end = respHeaders.range(of: Data("\r\n\r\n".utf8)), end.upperBound < respHeaders.endIndex {
+            earlyFrames = respHeaders.subdata(in: end.upperBound..<respHeaders.endIndex)
+            respHeaders = respHeaders.subdata(in: respHeaders.startIndex..<end.upperBound)
+            upstreamBytes = respHeaders.count
+        }
+        try serverTLS.write(respHeaders)
 
         // If upstream didn't switch protocols, drain any trailing
         // response body so the client sees the full upstream
@@ -2349,6 +2752,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // the pump completes, and never share a single instance
         // across both tasks.
         let counters = WSByteCounters()
+        // An extension in use anyway (an upstream answering with one it
+        // wasn't offered breaks RFC 6455 §9.1): frames we can't read, so the
+        // socket falls back to the opaque pump — and says it went unscanned.
+        var activeGuard = contentGuard
+        if let g = contentGuard, let ext = WSHandshake.extensions(inResponse: respHeaders) {
+            activeGuard = nil
+            if !earlyFrames.isEmpty { try? serverTLS.write(earlyFrames); upstreamBytes += earlyFrames.count }
+            Self.recordScanSkipped(host: host, path: g.path, engines: ["pii", "prompt_injection"],
+                                   reason: "WebSocket extension \(ext) in use", profileID: profileID)
+        }
         // permessage-deflate (RFC 7692) is what codex+OpenAI almost
         // always negotiate. Without inflating, every text frame
         // looks like binary garbage in the trace and the inspector
@@ -2385,11 +2798,37 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // under the stream's own lock and never block while holding it — the
         // `poll()`s in `pumpDirection` wait OUTSIDE the lock, so the two
         // directions can't deadlock either.
+        var noDeadline = timeval(tv_sec: 0, tv_usec: 0)
+        setsockopt(upstreamFD, SOL_SOCKET, SO_RCVTIMEO, &noDeadline, socklen_t(MemoryLayout<timeval>.size))
         serverTLS.setNonBlocking()
         upstreamTLS.setNonBlocking()
         let serverFD = serverTLS.pumpFD
         // `upstreamFD` is the connect fd from above — same fd TLSClientStream wraps.
 
+        // Streaming to or from a model provider keeps the tab "working".
+        let beatPID = profileID
+        let isModelHost = TraceLevel.aiHosts.contains { host.lowercased().contains($0) }
+        let beat = ActivityBeat(fire: isModelHost ? { Self.liveActivity?(beatPID) } : nil)
+        if let g = activeGuard {
+            FileHandle.standardError.write(Data(
+                "[mitm] WS \(host): frame-level content protection active\n".utf8))
+            let server = serverTLS
+            let upstream = upstreamTLS
+            let early = WSTransformRelay.Box<Data>()
+            if !earlyFrames.isEmpty { early.set(earlyFrames) }
+            await WSTransformRelay.run(
+                client: .init(fd: serverFD, readNB: { try server.readNB(maxBytes: 16 * 1024) },
+                              writeNB: { try server.writeNB($0) }),
+                upstream: .init(fd: upstreamFD,
+                                readNB: { if let d = early.take() { return .bytes(d) }
+                                          return try upstream.readNB(maxBytes: 16 * 1024) },
+                                writeNB: { try upstream.writeNB($0) }),
+                guard: g,
+                onClientBytes: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) },
+                onUpstreamBytes: { counters.addUpstream($0.count); beat.tick($0) },
+                // The trace records what the guest received (values restored).
+                onClientOut: { u2cCollector?.feed($0) })
+        } else {
         await withTaskGroup(of: Void.self) { group in
             let server = serverTLS
             let upstream = upstreamTLS
@@ -2397,7 +2836,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 Self.pumpDirection(
                     readFD: serverFD, readNB: { try server.readNB(maxBytes: 16 * 1024) },
                     writeFD: upstreamFD, writeNB: { try upstream.writeNB($0) },
-                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0) },
+                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) },
                     gate: inspector.map { i in { i.feed($0) } },
                     onGateStop: {
                         // Tell the client why (1008), then end the session both ways.
@@ -2409,10 +2848,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 Self.pumpDirection(
                     readFD: upstreamFD, readNB: { try upstream.readNB(maxBytes: 16 * 1024) },
                     writeFD: serverFD, writeNB: { try server.writeNB($0) },
-                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0) })
+                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); beat.tick($0) })
             }
             await group.next()
             group.cancelAll()
+        }
         }
 
         clientBytes  += counters.client
@@ -2429,6 +2869,42 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                clientBytes: clientBytes,
                                upstreamBytes: upstreamBytes,
                                statusCode: statusCode)
+    }
+
+    /// A model provider's WebSocket carrying traffic: the agent is working.
+    /// Codex talks to OpenAI over one socket kept open for the whole session,
+    /// so a turn writes no new request records — and its tab read "Ready"
+    /// while it streamed. Set by the app to the same "working" signal the
+    /// request path drives.
+    nonisolated(unsafe) static var liveActivity: (@Sendable (UUID) -> Void)?
+
+    /// At most one activity signal every couple of seconds per socket.
+    final class ActivityBeat: @unchecked Sendable {
+        private let lock = NSLock()
+        private var last = Date.distantPast
+        private let fire: (() -> Void)?
+        init(fire: (() -> Void)?) { self.fire = fire }
+        /// A chunk of relayed frames. A lone ping or pong — a socket kept
+        /// alive while idle — isn't work.
+        func tick(_ chunk: Data) {
+            guard fire != nil, !Self.isKeepAlive(chunk) else { return }
+            tick()
+        }
+
+        static func isKeepAlive(_ chunk: Data) -> Bool {
+            guard let first = chunk.first, chunk.count < 64 else { return false }
+            let opcode = first & 0x0F
+            return opcode == 0x9 || opcode == 0xA
+        }
+
+        func tick() {
+            guard let fire else { return }
+            lock.lock()
+            let due = Date().timeIntervalSince(last) >= 2
+            if due { last = Date() }
+            lock.unlock()
+            if due { fire() }
+        }
     }
 
     /// One direction of the non-blocking WebSocket relay. Drains everything
@@ -2589,7 +3065,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Pull the numeric status code out of a raw response header
     /// blob ("HTTP/1.1 101 Switching Protocols\r\n…" → 101).
     private func parseStatusCode(rawHeaders: Data) -> Int {
-        guard let str = String(data: rawHeaders.prefix(64), encoding: .ascii),
+        guard let str = String(data: rawHeaders.prefix(64), encoding: .isoLatin1),
               let lineEnd = str.range(of: "\r\n") else { return 0 }
         let parts = str[..<lineEnd.lowerBound].split(separator: " ")
         guard parts.count >= 2, let n = Int(parts[1]) else { return 0 }
@@ -2678,30 +3154,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // response was already relayed, so this adds zero agent latency.
             let piPolicy = Self.promptInjectionPolicyProvider?(profileID)
             if let pi = piPolicy, pi.isActive, pi.onDetection == .log {
-                let pid = profileID
-                if pi.detectSourceInjection {
-                    let untrusted = Self.newToolResultSpans(in: conv)
-                    if !untrusted.isEmpty {
-                        Task.detached(priority: .utility) {
-                            await PromptInjectionClassifier.shared.scanAndLog(
-                                spans: untrusted, host: host, profileID: pid)
-                        }
-                    }
-                }
-                if pi.detectRulesInjection {
-                    // Deterministic pass (hidden-Unicode + capability heuristics)
-                    // …plus the fine-tuned ModernBERT semantic pass over the same
-                    // instruction-file spans.
-                    RulesFileScanner.shared.scanAndLog(
-                        systemPrompt: conv.systemPrompt, host: host, profileID: pid)
-                    let ruleSpans = RulesFileScanner.classifierSpans(conv.systemPrompt)
-                    if !ruleSpans.isEmpty {
-                        Task.detached(priority: .utility) {
-                            await PromptInjectionClassifier.claudeMd.scanAndLog(
-                                spans: ruleSpans, host: host, profileID: pid)
-                        }
-                    }
-                }
+                Self.logPromptInjection(in: conv, policy: pi, host: host, profileID: profileID)
             }
         }
         // Audit trail for credential.token_swap: every fake → real
@@ -2770,15 +3223,44 @@ final class HTTPMitmConnection: @unchecked Sendable {
                      "store.record hop->main done host=\(host) took=\(BACDebug.ms(storeT0))")
     }
 
+    /// "injected … token" lines, at most once a minute per (what, host,
+    /// workspace): every request — every Codex WebSocket turn — gets one, and
+    /// dozens a turn drowned the log.
+    private static let injectionLogLock = NSLock()
+    nonisolated(unsafe) private static var injectionLogLast: [String: Date] = [:]
+    static func shouldLogTokenInjection(_ key: String, now: Date = Date(),
+                                        interval: TimeInterval = 60) -> Bool {
+        injectionLogLock.lock(); defer { injectionLogLock.unlock() }
+        if let last = injectionLogLast[key], now.timeIntervalSince(last) < interval { return false }
+        injectionLogLast[key] = now
+        return true
+    }
+
+    static func logTokenInjection(_ what: String, host: String, profileID: UUID) {
+        guard shouldLogTokenInjection("\(what)|\(host)|\(profileID.uuidString)") else { return }
+        FileHandle.standardError.write(Data(
+            "[mitm] injected \(what) for \(host) (logged once a minute)\n".utf8))
+    }
+
     /// Pull the untrusted `tool_result` spans that were freshly added
     /// this turn. The request re-sends the whole history every turn, so
     /// we scan only the last message that carries tool_results (the
     /// newest external ingestion) rather than re-scanning — and
     /// re-logging — every prior result. Each element is the result's
     /// `(toolUseId, content)`.
-    private static func newToolResultSpans(
+    ///
+    /// Wire shapes: Anthropic puts every result of a turn in ONE user message
+    /// as `tool_result` blocks; OpenAI Chat Completions (Kimi, Grok, Mistral,
+    /// most OpenAI-compatible agents) sends one `role: "tool"` message PER
+    /// call, whose content the parser surfaces as plain text. Those used to be
+    /// invisible to the scan (B37) — the trailing run of tool messages is now
+    /// the newest ingestion too.
+    static func newToolResultSpans(
         in conv: Conversation
     ) -> [(id: String?, content: String)] {
+        if conv.responsesItems { return newResponsesToolOutputs(in: conv) }
+        var collected: [(id: String?, content: String)] = []
+        var inToolRun = false
         for message in conv.messages.reversed() {
             var spans: [(id: String?, content: String)] = []
             for block in message.content {
@@ -2787,9 +3269,75 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     spans.append((id: toolUseId, content: content))
                 }
             }
-            if !spans.isEmpty { return spans }
+            if !spans.isEmpty {
+                // Anthropic / Responses-style results: this message is the
+                // newest ingestion on its own (plus any tool run after it).
+                return spans + collected
+            }
+            if message.role == .tool {
+                // OpenAI-chat tool message: its text is the tool's output.
+                let text = message.content.compactMap { block -> String? in
+                    if case let .text(s) = block, !s.isEmpty { return s }
+                    return nil
+                }.joined(separator: "\n")
+                if !text.isEmpty { collected.insert((id: nil, content: text), at: 0) }
+                inToolRun = true
+                continue
+            }
+            if inToolRun { break }   // the run of tool messages ended
         }
-        return []
+        return collected
+    }
+
+    /// OpenAI Responses wire (Codex, Grok): one item per message. The fresh
+    /// tool output is the trailing run of call / output items since the last
+    /// message with real text — `[…, call₁, call₂, out₁, out₂]`, or just
+    /// `[out₁]` on a WebSocket turn chained by `previous_response_id`.
+    ///
+    /// Grok (1.0.46, cli-chat-proxy /v1/responses) pairs each call with its
+    /// output (`call₁, out₁, call₂, out₂`) and slips harness notes
+    /// (`<system-reminder>` user messages) between steps; the older "outputs
+    /// after the last batch of calls only" walk stopped at the first of either
+    /// and left a shell `cat` of a planted file unscanned while its Read was
+    /// caught. Now every output in the run is a span: an output already
+    /// scanned is a verdict-cache hit (and logged once, see `scanAndLog`); a
+    /// blocked one arrives as the redaction placeholder.
+    static let maxResponsesRunSpans = 64
+    private static func newResponsesToolOutputs(
+        in conv: Conversation
+    ) -> [(id: String?, content: String)] {
+        var collected: [(id: String?, content: String)] = []
+        for message in conv.messages.reversed() {
+            var results: [(id: String?, content: String)] = []
+            var calls = 0
+            var texts: [String] = []
+            for block in message.content {
+                switch block {
+                case let .toolResult(id, content, _):
+                    if !content.isEmpty { results.append((id: id, content: content)) }
+                case .toolUse: calls += 1
+                case let .text(t): if message.role != .tool { texts.append(t) }
+                case .image: break   // a screenshot output is still output
+                case .thinking: break
+                }
+            }
+            if !results.isEmpty || calls > 0 || message.role == .tool {
+                collected.insert(contentsOf: results, at: 0)
+                if collected.count >= maxResponsesRunSpans { break }
+                continue
+            }
+            // A harness note between steps isn't the user talking.
+            if message.role == .user, !texts.isEmpty, texts.allSatisfy(isHarnessReminder) { continue }
+            break
+        }
+        return Array(collected.suffix(maxResponsesRunSpans))
+    }
+
+    /// An agent harness's own note in a user turn (`<system-reminder>…`),
+    /// not something the user typed.
+    static func isHarnessReminder(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("<system-reminder>") && t.hasSuffix("</system-reminder>")
     }
 
     /// 451 response the guest sees when a prompt-injection detection blocks the
@@ -2797,7 +3345,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// instead of the model reply; no byte reaches the AI host.
     /// One Security Timeline row per request that swapped personal data the
     /// provider hadn't seen yet (history resent every turn isn't recounted).
-    private static func recordPIISwaps(_ o: PIIRewriter.Outcome, host: String, profileID: UUID, ms: Double) {
+    static func recordPIISwaps(_ o: PIIRewriter.Outcome, host: String, profileID: UUID, ms: Double) {
         var data: [String: AnyJSON] = ["host": .string(host), "count": .int(o.total),
                                        "latency_ms": .int(Int(ms.rounded()))]
         for (kind, n) in o.newSwaps { data[kind.rawValue] = .int(n) }
@@ -2805,9 +3353,140 @@ final class HTTPMitmConnection: @unchecked Sendable {
         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "privacy.pii_swap", eventData: data)
     }
 
-    private static func injectionBlockResponse(detector: String, source: String) -> Data {
-        let body = "Bromure blocked this request: possible \(detector) detected in \(source).\n"
-        var r = "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
+    /// An AI provider host (the hosts the conversation scans apply to).
+    static func isAIHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return TraceLevel.aiHosts.contains { h.contains($0) }
+    }
+
+    enum RequestBodyDecoding: Equatable {
+        /// No (or `identity`) Content-Encoding — the body is already plain.
+        case identity
+        /// The full request rewritten with a decoded body and no
+        /// Content-Encoding header (the relay recomputes the length).
+        case decoded(Data)
+        /// Encoded with something we can't decode (an unknown coding, corrupt
+        /// data, a zstd frame that needs a dictionary, or one that inflates
+        /// past the 64 MiB cap).
+        case undecodable(String)
+    }
+
+    /// Decode a content-coded request body (gzip / deflate / br / zstd) so
+    /// the content scans can read it. The result is forwarded as identity —
+    /// every provider accepts an uncompressed body (Grok's own identity side
+    /// requests and the gzip/br path already rely on it).
+    static func decodeRequestContentEncoding(_ raw: Data) -> RequestBodyDecoding {
+        guard let sep = raw.range(of: Data("\r\n\r\n".utf8)),
+              let header = rawHeaderSection(of: raw),
+              let enc = headerValue("content-encoding", inHeaderSection: header)?
+                .trimmingCharacters(in: .whitespaces).lowercased(),
+              !enc.isEmpty, enc != "identity" else { return .identity }
+        let body = raw.subdata(in: sep.upperBound..<raw.endIndex)
+        // Stacked codings ("gzip, br") are applied in order; undo in reverse.
+        var plain = body
+        for coding in enc.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).reversed()
+        where !coding.isEmpty && coding != "identity" {
+            let next: Data?
+            switch coding {
+            case "gzip", "x-gzip", "deflate": next = decompressBody(plain, encoding: coding == "x-gzip" ? "gzip" : coding)
+            case "br": next = brotliDecode(plain)
+            case "zstd": next = try? Zstd.decompress(plain, maxOutput: 64 * 1024 * 1024)
+            default: next = nil
+            }
+            guard let next else { return .undecodable(coding) }
+            plain = next
+        }
+        let kept = header.components(separatedBy: "\r\n").filter { line in
+            guard let colon = line.firstIndex(of: ":") else { return true }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            return name != "content-encoding" && name != "content-length"
+        }
+        var newHeader = kept.joined(separator: "\r\n")
+        newHeader += "\r\nContent-Length: \(plain.count)"
+        var out = newHeader.data(using: .isoLatin1) ?? Data(newHeader.utf8)
+        out.append(Data("\r\n\r\n".utf8))
+        out.append(plain)
+        return .decoded(out)
+    }
+
+    /// Record that a request to an AI host could not go through the content
+    /// scans (prompt injection / PII) — never skip them silently. `blocked`:
+    /// the request was refused instead of forwarded (fail closed).
+    ///
+    /// Every occurrence is emitted — no host-side de-duplication, so the
+    /// audit log and the enrolled-install event stream see each request.
+    /// The Security Timeline folds repeats into one row with a count
+    /// (`coalesceKey`), so a client that hits this on every call shows
+    /// "×N" instead of one row that hides how often it happened.
+    static func recordScanSkipped(host: String, path: String, engines: [String],
+                                  reason: String, profileID: UUID, blocked: Bool = false) {
+        let verdict = blocked ? "BLOCKED, not forwarded" : "not scanned"
+        FileHandle.standardError.write(Data(
+            "[mitm] \(host) \(path): \(reason) — \(verdict) (\(engines.joined(separator: ", ")))\n".utf8))
+        SupplyChainLog.shared.record("[content-scan] \(verdict): \(reason) → \(host)")
+        var data: [String: AnyJSON] = [
+            "host": .string(host),
+            "path": .string(path),
+            "reason": .string(reason),
+            "engines": .array(engines.map { .string($0) }),
+        ]
+        if blocked { data["action"] = .string("blocked") }
+        BACEventEmitter.shared.emitDetached(
+            profileID: profileID, eventType: "content_scan.skipped", eventData: data)
+    }
+
+    /// 415 the guest sees when a request body's Content-Encoding can't be
+    /// decoded while a content scan is on for the host: the request is not
+    /// forwarded (it would leave unscanned). 415 is the status RFC 9110
+    /// §15.5.16 assigns to an unsupported content coding; the plain-text body
+    /// tells the user why their agent's call failed and what to change.
+    static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
+        let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
+            .joined(separator: " and ")
+        let body = "Bromure blocked this request: its body is \(encoding)-compressed in a way "
+            + "Bromure could not decode, so \(names) could not check it. It was not sent. "
+            + "Retry, or turn the setting off for this workspace if the agent keeps sending it.\n"
+        var r = "HTTP/1.1 415 Unsupported Media Type\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "X-Bromure-Blocked: undecodable-content-encoding\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
+    }
+
+    /// A request went out with tool output the user had blocked replaced by
+    /// the placeholder (`PromptInjectionRedactions`): the security log only —
+    /// it happens on every later turn, the Timeline already has the block.
+    static func recordInjectionRedacted(count: Int, host: String, profileID: UUID) {
+        SupplyChainLog.shared.record(
+            "[prompt-injection] redacted: \(count) blocked tool output(s) or instruction file(s) replaced by a placeholder → \(host)")
+        FileHandle.standardError.write(Data(
+            "[prompt-injection] \(host): \(count) blocked tool output(s) or instruction file(s) sent as a placeholder (workspace \(profileID.uuidString.prefix(8)))\n".utf8))
+    }
+
+    /// "Unavailable For Legal Reasons - Bromure blocked: possible prompt
+    /// injection" — the standard words first, then the block (letters,
+    /// spaces and punctuation only: a valid reason phrase).
+    static func injectionReasonPhrase(detector: String) -> String {
+        let d = detector.filter { $0.isLetter || $0 == " " || $0 == "-" }
+        return "Unavailable For Legal Reasons - Bromure blocked: possible \(d)"
+    }
+
+    static func injectionBlockResponse(detector: String, source: String,
+                                       instructionsWithheld: Bool = false) -> Data {
+        // The agent shows this text: say what happens next. Tool output that
+        // was blocked is taken out of later requests (the session goes on);
+        // rewinding or a new session clears it for good.
+        // The next step goes on its own line: agents that print one line of
+        // the error (omp's TUI wraps it; the chat card shows the line) still
+        // show a whole sentence instead of "…Bromure will replace that content".
+        let next = injectionNextStep(detector: detector, instructionsWithheld: instructionsWithheld)
+        let body = "Bromure blocked this request: possible \(detector) detected in \(source).\(next)\n"
+        // The reason phrase names the block too: an agent that reports only
+        // the status line (Grok: "API error (status 451 …): Request failed")
+        // still says which engine blocked it (`BromureBlock.of`).
+        var r = "HTTP/1.1 451 \(injectionReasonPhrase(detector: detector))\r\n"
         r += "Content-Type: text/plain; charset=utf-8\r\n"
         r += "Content-Length: \(body.utf8.count)\r\n"
         r += "Connection: close\r\n\r\n"
@@ -2824,7 +3503,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         guard let endRange = raw.range(of: Data("\r\n\r\n".utf8)) else { return raw }
         let headerData = raw.subdata(in: 0..<endRange.lowerBound)
         let bodyData   = raw.subdata(in: endRange.lowerBound..<raw.count)
-        guard let headerStr = String(data: headerData, encoding: .ascii) else { return raw }
+        // Latin-1: a non-ASCII header byte must not skip redaction (the old
+        // `.ascii` decode returned the frame unredacted on any such byte).
+        guard let headerStr = String(data: headerData, encoding: .isoLatin1) else { return raw }
 
         var lines = headerStr.components(separatedBy: "\r\n")
         for i in lines.indices {
@@ -2837,8 +3518,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         let rebuilt = lines.joined(separator: "\r\n")
         var out = Data()
-        out.reserveCapacity(rebuilt.utf8.count + bodyData.count)
-        out.append(Data(rebuilt.utf8))
+        let rebuiltBytes = rebuilt.data(using: .isoLatin1) ?? Data(rebuilt.utf8)
+        out.reserveCapacity(rebuiltBytes.count + bodyData.count)
+        out.append(rebuiltBytes)
         out.append(bodyData)
         return out
     }
@@ -2876,7 +3558,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return raw
         }
         let header = raw.subdata(in: 0..<endRange.lowerBound)
-        guard let headerStr = String(data: header, encoding: .ascii) else {
+        guard let headerStr = String(data: header, encoding: .isoLatin1) else {
             return raw
         }
         let lines = headerStr.split(separator: "\r\n")
@@ -2939,7 +3621,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
     }
 
-    /// Pull "GET /foo HTTP/1.1" → ("GET", "/foo").
     /// The standard reason phrase for a status (RFC 9110), for response heads
     /// the proxy writes itself — not Foundation's localized description.
     static func reasonPhrase(_ code: Int) -> String {
@@ -2961,13 +3642,53 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return phrases[code] ?? "Status"
     }
 
-    private static func parseRequestLine(_ raw: Data) -> (method: String, path: String) {
-        guard let str = String(data: raw.prefix(8 * 1024), encoding: .ascii),
-              let lineEnd = str.range(of: "\r\n") else {
+    /// Pull "GET /foo HTTP/1.1" → ("GET", "/foo").
+    ///
+    /// Only the request-line bytes (up to the first CRLF) are decoded. The
+    /// old code decoded the whole 8 KB prefix — headers AND the start of the
+    /// body — as ASCII, so one UTF-8 byte in a body ("héllo", "—", emoji)
+    /// turned the method into "?" and silently bypassed every method-gated
+    /// protection (firewall `web` verb rules, PII, guardrails) — B35.
+    /// Latin-1 maps every byte, so the decode itself can never fail.
+    static func parseRequestLine(_ raw: Data) -> (method: String, path: String) {
+        let window = raw.prefix(8 * 1024)
+        return parseRequestLineWindow(window)
+    }
+
+    /// The Security Timeline event for a pre-forward policy denial: a `web`
+    /// method rule is the egress firewall's (`egress.firewall`, engine
+    /// "Firewall"); everything else is a protocol guardrail (`guardrails.block`).
+    static func denialEvent(_ denial: GuardrailsConfig.Denial, host: String, port: Int,
+                            method: String, path: String) -> (String, [String: AnyJSON]) {
+        if denial.isFirewall {
+            return ("egress.firewall", [
+                "action": .string("deny"),
+                "layer": .string("web"),
+                "proto": .string("web"),
+                "host": .string(host),
+                "port": .int(port),
+                "method": .string(method),
+                "path": .string(path),
+                "reason": .string(denial.reason),
+            ])
+        }
+        return ("guardrails.block", [
+            "host": .string(host),
+            "method": .string(method),
+            "path": .string(path),
+            "reason": .string(denial.reason),
+        ])
+    }
+
+    private static func parseRequestLineWindow(_ window: Data) -> (method: String, path: String) {
+        guard let lineEnd = window.range(of: Data("\r\n".utf8)) else {
             return ("?", "/")
         }
-        let line = str[..<lineEnd.lowerBound]
-        let parts = line.split(separator: " ")
+        let lineBytes = window[window.startIndex..<lineEnd.lowerBound]
+        guard let line = String(data: lineBytes, encoding: .isoLatin1) else {
+            return ("?", "/")
+        }
+        let parts = line.split(separator: " ", omittingEmptySubsequences: true)
         guard parts.count >= 2 else { return ("?", "/") }
         return (String(parts[0]), String(parts[1]))
     }
@@ -3116,6 +3837,149 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Extract a query-string parameter from a request path
     /// (`/?query=SELECT+1&database=x` → "SELECT 1"). Percent- and
     /// `+`-decoded. nil if the path has no query string or no such key.
+    /// Anthropic's API and Claude's own hosts (claude.ai, platform.claude.com).
+    static func isClaudeHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "api.anthropic.com" || h.hasSuffix(".anthropic.com")
+            || h == "claude.ai" || h.hasSuffix(".claude.ai") || h.hasSuffix(".claude.com") || h == "claude.com"
+    }
+
+    /// Claude's OAuth stand-in, from a workspace that has a Claude login.
+    static func isClaudeStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard ClaudeStandIn.isAccess(bearer),
+              let (store, _) = claudeSubscriptionProvider?() else { return false }
+        return store.record(for: profileID) != nil
+    }
+
+    /// A Codex stand-in for this workspace: one the host registered, or one
+    /// it minted any time (its Bromure-marked signature) for a workspace that
+    /// has a Codex login — the registry is in memory, and a machine that
+    /// outlives an app restart (or a host-side refresh) still holds an older
+    /// stand-in. Only ever resolved to THIS connection's workspace's login.
+    static func isCodexStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard let (store, _) = codexSubscriptionProvider?() else { return false }
+        if store.profileForBogusKey(bearer) != nil { return true }
+        return SubscriptionFakeMint.isJWTFake(bearer) && store.record(for: profileID) != nil
+    }
+
+    /// A Grok stand-in for this workspace: one the host registered, or one
+    /// it minted any time (Bromure's mark) for a workspace that has a Grok
+    /// login — the registry is in memory, and a machine resumed across an
+    /// app restart (or a host-side refresh) still holds an older stand-in.
+    /// Only ever resolved to THIS connection's workspace's login.
+    static func isGrokStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard let (store, _) = grokSubscriptionProvider?() else { return false }
+        if store.profileForBogusKey(bearer) != nil { return true }
+        return GrokStandIn.isAccess(bearer) && store.record(for: profileID) != nil
+    }
+
+    /// Kimi's twin of ``isGrokStandIn(_:profileID:)``.
+    static func isKimiStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard let (store, _) = kimiSubscriptionProvider?() else { return false }
+        if store.profileForBogusKey(bearer) != nil { return true }
+        return KimiStandIn.isAccess(bearer) && store.record(for: profileID) != nil
+    }
+
+    /// The refresh token of a `grant_type=refresh_token` request (form or
+    /// JSON body), when `matching` says it is one of our stand-ins.
+    static func standInRefreshToken(in rawRequest: Data, matching: (String) -> Bool) -> String? {
+        guard let bodyStart = rawRequest.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let body = rawRequest.subdata(in: bodyStart.upperBound..<rawRequest.count)
+        let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        let form = "?" + String(decoding: body, as: UTF8.self)
+        let grant = (json?["grant_type"] as? String) ?? urlQueryParam("grant_type", inPath: form)
+        let sent = (json?["refresh_token"] as? String) ?? urlQueryParam("refresh_token", inPath: form)
+        guard grant == "refresh_token", let sent, matching(sent) else { return nil }
+        return sent
+    }
+
+    /// What a Grok / Kimi request carrying a stand-in hears when the host has
+    /// no usable login: never the stand-in forwarded upstream.
+    static func subscriptionUnavailableReply(provider: String, rejected: Bool) -> Data {
+        rejected
+            ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                "error": ["message": "Your \(provider) sign-in expired or was rejected. Sign in again from Bromure (the session's sign-in card or Preferences → Models).",
+                          "type": "authentication_error", "code": "sign_in_required"] as [String: Any],
+            ])
+            : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
+                "error": ["message": "Bromure couldn't renew the \(provider) sign-in just now; retrying.",
+                          "type": "server_error"] as [String: Any],
+            ])
+    }
+
+    /// The proxy's answer to a Grok / Kimi refresh the guest sent with one
+    /// of Bromure's stand-in refresh tokens (5e″ / 5f′), or nil when the
+    /// request isn't one (it then goes on untouched). Never forwards it: the
+    /// host refreshes the real login (forced, rate-limited per slot) and the
+    /// guest gets fresh stand-ins — or the truth: a rejected login as a
+    /// permanent error, a transient failure as a retryable 503.
+    static func answerStandInRefresh(host: String, method: String, path: String,
+                                     rawRequest: Data, profileID: UUID) async -> Data? {
+        guard method.uppercased() == "POST" else { return nil }
+        let pid8 = profileID.uuidString.prefix(8)
+        func outcome(_ refreshedNow: Bool) -> String {
+            refreshedNow ? "host refreshed the real credential" : "reused the host's recently refreshed credential"
+        }
+        if (host == "auth.kimi.ai" || host == "auth.kimi.com"), path.hasPrefix("/api/oauth/token"),
+           let (store, refresher) = kimiSubscriptionProvider?(),
+           store.record(for: profileID) != nil,
+           standInRefreshToken(in: rawRequest, matching: KimiStandIn.isRefresh) != nil {
+            do {
+                let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
+                // Mint from the CURRENT real record (the refresher persisted it).
+                guard let fresh = store.record(for: profileID) else { throw KimiSubscriptionError.noCredential }
+                let answer = KimiRefreshAnswer.build(record: fresh, profileID: profileID)
+                store.registerBogusKey(answer.bogusAccess, for: profileID)
+                FileHandle.standardError.write(Data(
+                    "[mitm] answered Kimi stand-in refresh for \(pid8) (\(outcome(refreshedNow)))\n".utf8))
+                return SignInCapture.response(status: 200, reason: "OK", json: answer.json)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Kimi stand-in refresh for \(pid8) failed host-side: \(error)\n".utf8))
+                // A transient failure must never read as a 401: the CLI would
+                // persist it as a revoked login.
+                let rejected = (error as? KimiSubscriptionError)?.isRejection ?? false
+                return rejected
+                    ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                        "error": "invalid_grant",
+                        "error_description": "Bromure could not refresh the Kimi subscription on the host: \(error). Sign in again from Bromure.",
+                    ])
+                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
+                        "error": "temporarily_unavailable",
+                        "error_description": "Bromure couldn't renew the Kimi sign-in just now; retrying: \(error)",
+                    ])
+            }
+        }
+        if host == "auth.x.ai", path.hasPrefix("/oauth2/token"),
+           let (store, refresher) = grokSubscriptionProvider?(),
+           store.record(for: profileID) != nil,
+           standInRefreshToken(in: rawRequest, matching: GrokStandIn.isRefresh) != nil {
+            do {
+                let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
+                guard let fresh = store.record(for: profileID) else { throw GrokSubscriptionError.noCredential }
+                let standIn = GrokStandIn.mint(fresh, profileID: profileID)
+                store.registerBogusKey(standIn.access, for: profileID)
+                FileHandle.standardError.write(Data(
+                    "[mitm] answered Grok stand-in refresh for \(pid8) (\(outcome(refreshedNow)))\n".utf8))
+                return SignInCapture.response(status: 200, reason: "OK", json: GrokStandIn.refreshAnswer(standIn))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Grok stand-in refresh for \(pid8) failed host-side: \(error)\n".utf8))
+                let rejected = (error as? GrokSubscriptionError)?.isRejection ?? false
+                return rejected
+                    ? SignInCapture.response(status: 400, reason: "Bad Request", json: [
+                        "error": "invalid_grant",
+                        "error_description": "Bromure could not refresh the Grok subscription on the host: \(error). Sign in again from Bromure.",
+                    ])
+                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
+                        "error": "temporarily_unavailable",
+                        "error_description": "Bromure couldn't renew the Grok sign-in just now; retrying: \(error)",
+                    ])
+            }
+        }
+        return nil
+    }
+
     static func urlQueryParam(_ name: String, inPath path: String) -> String? {
         guard let q = path.firstIndex(of: "?") else { return nil }
         let query = path[path.index(after: q)...]
@@ -3166,7 +4030,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
     /// Pull "HTTP/1.1 200 OK" → 200.
     private static func parseStatusCode(_ raw: Data) -> Int {
-        guard let str = String(data: raw.prefix(64), encoding: .ascii),
+        guard let str = String(data: raw.prefix(64), encoding: .isoLatin1),
               let lineEnd = str.range(of: "\r\n") else { return 0 }
         let line = str[..<lineEnd.lowerBound]
         let parts = line.split(separator: " ")
@@ -3530,7 +4394,7 @@ private func readUntilCompleteHTTP(maxBytes: Int,
            let r = buffer.range(of: Data("\r\n\r\n".utf8)) {
             headerEnd = r.upperBound
             // Parse Content-Length from headers.
-            if let str = String(data: buffer.prefix(r.lowerBound), encoding: .ascii) {
+            if let str = String(data: buffer.prefix(r.lowerBound), encoding: .isoLatin1) {
                 for line in str.split(separator: "\r\n") {
                     let lower = line.lowercased()
                     if lower.hasPrefix("content-length:") {
@@ -3719,6 +4583,22 @@ private func relayUpstreamBuffered(rawRequest: Data, host: String, port: Int,
                          truncatedForTrace: false)
 }
 
+/// Filter a client's `Accept-Encoding` down to the codings the relay can
+/// undo — gzip / deflate / br (what URLSession decodes) and identity. Anything else (zstd, compress, `*`)
+/// is dropped so the upstream can't answer with a body we'd hand to the
+/// client — or to the PII restorer — still compressed under a head that no
+/// longer says so. q-values are kept. nil when nothing usable remains.
+func mitmSanitizedAcceptEncoding(_ value: String) -> String? {
+    let allowed: Set<String> = ["gzip", "x-gzip", "deflate", "br", "identity"]
+    let kept = value.split(separator: ",").compactMap { item -> String? in
+        let token = item.trimmingCharacters(in: .whitespaces)
+        let coding = token.split(separator: ";", maxSplits: 1).first
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+        return allowed.contains(coding) ? token : nil
+    }
+    return kept.isEmpty ? nil : kept.joined(separator: ", ")
+}
+
 /// Collect the full upstream response (no TLS write side-effect).
 /// Shared between the buffered relay and any other call site that
 /// needs the full body before responding to the client.
@@ -3752,6 +4632,9 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
         case "host", "content-length", "connection", "transfer-encoding",
              "proxy-connection", "keep-alive", "te", "upgrade":
             continue
+        case "accept-encoding":
+            // Only codings we can undo (see mitmSanitizedAcceptEncoding).
+            if let v = mitmSanitizedAcceptEncoding(value) { req.setValue(v, forHTTPHeaderField: name) }
         default:
             req.setValue(value, forHTTPHeaderField: name)
         }
@@ -3823,6 +4706,46 @@ private func decompressBody(_ data: Data, encoding: String) -> Data? {
 }
 
 private enum DeflateFormat { case zlib, raw }
+
+/// Brotli decode (Compression.framework, macOS 12+) for content-coded request
+/// bodies. Output capped at 64 MiB like `inflateData`.
+private func brotliDecode(_ data: Data) -> Data? {
+    guard !data.isEmpty else { return nil }
+    let chunkSize = 64 * 1024
+    let outCap = 64 * 1024 * 1024
+    let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
+    defer { stream.deallocate() }
+    var status = compression_stream_init(stream, COMPRESSION_STREAM_DECODE, COMPRESSION_BROTLI)
+    guard status == COMPRESSION_STATUS_OK else { return nil }
+    defer { compression_stream_destroy(stream) }
+    let dstBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: chunkSize)
+    defer { dstBuf.deallocate() }
+    var out = Data()
+    return data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Data? in
+        guard let srcBase = src.baseAddress else { return nil }
+        stream.pointee.src_ptr = srcBase.assumingMemoryBound(to: UInt8.self)
+        stream.pointee.src_size = data.count
+        stream.pointee.dst_ptr = dstBuf
+        stream.pointee.dst_size = chunkSize
+        repeat {
+            status = compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+            switch status {
+            case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
+                let produced = chunkSize - stream.pointee.dst_size
+                out.append(dstBuf, count: produced)
+                if out.count > outCap { return nil }
+                stream.pointee.dst_ptr = dstBuf
+                stream.pointee.dst_size = chunkSize
+                // No progress with the input exhausted: a truncated stream.
+                if status == COMPRESSION_STATUS_OK, produced == 0,
+                   stream.pointee.src_size == 0 { return nil }
+            default:
+                return nil
+            }
+        } while status != COMPRESSION_STATUS_END
+        return out
+    }
+}
 
 private func gunzipData(_ data: Data) -> Data? {
     // gzip wrapper: 10-byte header (with optional FEXTRA/FNAME/FCOMMENT
@@ -4075,6 +4998,13 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         case "authorization", "x-api-key":
             if local && !keepGuestKey { continue }   // replaced below for the local engine
             req.setValue(value, forHTTPHeaderField: name)
+        case "accept-encoding":
+            // The response head below drops Content-Encoding and the PII
+            // restorer reads the body as text, so the upstream may only pick
+            // a coding URLSession decodes — never zstd (an agent like Grok
+            // offers it). Nothing left → omit it; URLSession then offers
+            // (and decodes) its own gzip/deflate/br.
+            if let v = mitmSanitizedAcceptEncoding(value) { req.setValue(v, forHTTPHeaderField: name) }
         default:
             req.setValue(value, forHTTPHeaderField: name)
         }

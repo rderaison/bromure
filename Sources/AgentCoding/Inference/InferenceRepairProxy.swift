@@ -258,11 +258,12 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
 
         /// Repair the buffered upstream message, then render it back as SSE.
-        func repairedSSE(_ message: [String: Any], toolNames: Set<String>, gemma: Bool) -> Data {
+        func repairedSSE(_ message: [String: Any], toolNames: Set<String>, gemma: Bool,
+                         includeUsage: Bool = false) -> Data {
             let repaired = repairedMessage(message, toolNames: toolNames, gemma: gemma)
             switch self {
             case .messages: return ToolCallRepair.sse(message: repaired)
-            case .chat: return ToolCallRepair.chatSSE(repaired)
+            case .chat: return ToolCallRepair.chatSSE(repaired, includeUsage: includeUsage)
             case .responses: return ToolCallRepair.responsesSSE(repaired)
             }
         }
@@ -530,7 +531,8 @@ final class InferenceRepairProxy: @unchecked Sendable {
         let served = AskArgsNormalizer.normalizeChatMessage(finalMessage)
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
-                            body: api.repairedSSE(served, toolNames: toolNames, gemma: gemma))
+                            body: api.repairedSSE(served, toolNames: toolNames, gemma: gemma,
+                                                  includeUsage: ToolCallRepair.wantsStreamUsage(payload)))
     }
 
     /// Auto-continue a "stuck preamble": a local model (notably Qwen3-Coder)
@@ -595,7 +597,8 @@ final class InferenceRepairProxy: @unchecked Sendable {
         let wire = api.wire
         let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
         let emitter = LocalStreamEmitter(fd: clientFD, wire: wire,
-                                         model: payload["model"] as? String ?? "")
+                                         model: payload["model"] as? String ?? "",
+                                         includeUsage: ToolCallRepair.wantsStreamUsage(payload))
         let t0 = Date()
         // First-delta timestamp = this turn's TTFT, feeding the per-engine
         // proxy stats (real tok/s for engines with no metrics endpoint).
@@ -644,7 +647,8 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
         let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
         let emitter = LocalStreamEmitter(fd: clientFD, wire: api.wire,
-                                         model: payload["model"] as? String ?? "")
+                                         model: payload["model"] as? String ?? "",
+                                         includeUsage: ToolCallRepair.wantsStreamUsage(payload))
         var ur = URLRequest(url: url)
         ur.httpMethod = "POST"
         ur.timeoutInterval = 600

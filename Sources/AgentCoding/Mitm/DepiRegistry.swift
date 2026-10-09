@@ -97,14 +97,13 @@ enum DepiRegistry {
 
         switch RemoteConsent.route(for: profileID) {
         case .localAlert:
+            // Non-modal: a runModal here froze the main thread (and the
+            // control socket) until someone clicked OK.
             Task { @MainActor in
-                let alert = NSAlert()
-                alert.messageText = title
-                alert.informativeText = body
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-                NSApp.activate(ignoringOtherApps: true)
-                alert.runModal()
+                _ = await ConsentPanelPresenter.shared.present(
+                    profileID: profileID, title: title, message: body,
+                    choices: [NSLocalizedString("OK", comment: "")], denyIndex: 0,
+                    style: .warning, detailText: nil, timeout: 600, isNotice: true)
             }
         case .fatClient:
             // Surface it on the connected fat client's Mac (over the tunnel).

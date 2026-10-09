@@ -15,7 +15,7 @@ case "$TARGET" in
         SDEF_FILE="$SOURCE_DIR/Bromure.sdef"
         RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
         ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
-        ICON_COMPOSER=""
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/Bromure.icon"
         ;;
     bromure-ac)
         PRODUCT_NAME="bromure-ac"
@@ -28,8 +28,20 @@ case "$TARGET" in
         ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
         ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureAC.icon"
         ;;
+    sidecar|native|agent-host)
+        TARGET="sidecar"
+        PRODUCT_NAME="bromure-sidecar"
+        APP_NAME="Bromure Sidecar"
+        SOURCE_DIR="$SCRIPT_DIR/Sources/AgentHost"
+        ENTITLEMENTS="$SOURCE_DIR/AgentHost.entitlements"
+        INFO_PLIST="$SOURCE_DIR/Info.plist"
+        SDEF_FILE=""
+        RESOURCE_BUNDLE_NAME="bromure_bromure-sidecar.bundle"
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureSidecarIcon.icns"
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureSidecar.icon"
+        ;;
     *)
-        echo "Usage: $0 [bromure|bromure-ac]" >&2
+        echo "Usage: $0 [bromure|bromure-ac|sidecar]" >&2
         exit 2
         ;;
 esac
@@ -37,12 +49,12 @@ esac
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
 
 # GhosttyKit is an SPM binaryTarget at vendor/GhosttyKit.xcframework (never
-# committed); build it from the pinned commit when missing. Needed by every
-# target because SPM resolves the whole manifest.
-if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
-    echo "vendor/GhosttyKit.xcframework missing — running tools/build-ghostty.sh…"
-    "$SCRIPT_DIR/tools/build-ghostty.sh"
-fi
+# committed). Needed by every target because SPM resolves the whole manifest.
+# Always ask tools/build-ghostty.sh, never just "is the folder there": its
+# stamp (pinned commit + build flags) is what tells a stale framework from a
+# current one — a warm checkout or a restored cache kept the Sentry/Breakpad
+# build after -Dsentry=false. A no-op (milliseconds) when the stamp matches.
+"$SCRIPT_DIR/tools/build-ghostty.sh"
 
 # Force SwiftPM to regenerate resource bundles from current source.
 # `swift build` recompiles the binary but does NOT reliably re-copy changed
@@ -122,11 +134,16 @@ mkdir -p "$MACOS_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
+"$SCRIPT_DIR/scripts/stamp-build-info.sh" "$CONTENTS/Info.plist"
 
 # SPM only sets @loader_path / /usr/lib/swift / Xcode rpaths on the binary;
 # none resolve to Contents/Frameworks. Add the standard macOS app rpath so
 # dyld finds Sparkle.framework and any other SPM framework we embed.
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$PRODUCT_NAME" 2>/dev/null || true
+# Swift back-deployment shims (libswiftCompatibilitySpan…) into the bundle, and
+# no absolute Xcode-toolchain rpath — else macOS 14/15 can't load the binary
+# and Gatekeeper refuses the app ("Bad Load Command").
+"$SCRIPT_DIR/scripts/embed-swift-backdeploy.sh" "$MACOS_DIR/$PRODUCT_NAME" "$CONTENTS/Frameworks" "$SIGN_ID"
 
 # Embed provisioning profile (required for iCloud and other entitlements)
 PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
@@ -141,7 +158,8 @@ mkdir -p "$RESOURCES_DIR"
 # Fat-client privileged tunnel daemon (SMAppService, macOS 13+). The plist lives
 # in Contents/Library/LaunchDaemons/ and runs `bromure-ac __tunnel-helper` as
 # root once the user approves it in System Settings › Login Items. Only meaningful
-# for the bromure-ac target; harmless elsewhere.
+# for the bromure-ac target.
+if [ "$TARGET" = "bromure-ac" ]; then
 LAUNCHD_DIR="$CONTENTS/Library/LaunchDaemons"
 mkdir -p "$LAUNCHD_DIR"
 BUNDLE_BIN_NAME="$(basename "$BINARY")"
@@ -166,6 +184,7 @@ cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+fi
 
 # Copy the per-target icon as AppIcon.icns (matching CFBundleIconFile in
 # both Info.plists). Fall back to the shared icon if the target-specific
@@ -307,6 +326,24 @@ PLIST
         cp -R "$SCRIPT_DIR/vendor/ghostty-resources/terminfo" "$RESOURCES_DIR/terminfo"
         echo "Bundled ghostty resources (native terminal surfaces)."
     fi
+fi
+
+# Bromure Sidecar: bundle the tmux it runs agents in (tools/build-tmux.sh builds
+# it from the pinned tools/tmux.version when missing). Signed on its own,
+# before the outer bundle.
+if [ "$TARGET" = "sidecar" ]; then
+    if [ ! -x "$SCRIPT_DIR/vendor/tmux/bin/tmux" ]; then
+        echo "vendor/tmux missing — running tools/build-tmux.sh…"
+        "$SCRIPT_DIR/tools/build-tmux.sh"
+    fi
+    cp "$SCRIPT_DIR/vendor/tmux/bin/tmux" "$MACOS_DIR/tmux"
+    codesign --force --sign "$SIGN_ID" --options runtime "$MACOS_DIR/tmux"
+    echo "Bundled tmux $(cat "$SCRIPT_DIR/vendor/tmux/VERSION" 2>/dev/null)."
+fi
+# The browser's sandboxed GPU renderer (a no-op unless built on SDK 27);
+# Sidecar draws no VM and doesn't carry it.
+if [ "$TARGET" != "sidecar" ]; then
+    bash "$SCRIPT_DIR/tools/gpu/embed-renderer-xpc.sh" "$CONTENTS" "$SIGN_ID"
 fi
 
 # Code sign with entitlements.

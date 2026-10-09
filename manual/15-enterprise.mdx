@@ -93,7 +93,7 @@ Enrolled, non-private sessions stream structured [cloud events](18-glossary.mdx)
 | `supply_chain.fetch` | Ecosystem, package, version, request kind, outcome, and reason. |
 | `vm.disk_reset` | The reason and the base-image versions involved. |
 | `prompt_injection.detection` | Detector, method, action, host, source, score, signals, tool-use id, and the whole flagged snippet (up to 20,000 characters). |
-| `egress.firewall` | One event per [egress-firewall](07-settings/guardrails.mdx#outbound-connections-egress-firewall) verdict: host, port, protocol, and the action taken. |
+| `egress.firewall` | One event per [egress-firewall](07-settings/guardrails.mdx#outbound-connections-egress-firewall) verdict: host, port, protocol, the action taken, and the rule that decided it (`rule`, empty when the default action did). `layer` says where it was decided (`l4`/`sni` for direct connections, `proxy` for those made through the proxy settings); `hostnames` lists the destination's other DNS names. An open connection cut because the rules changed carries `closed: true` and the rule that had allowed it (`previous_rule`). Allowed connections are sent only for machines that log them (Firewall › **Log allowed connections**). |
 | `credential.exfiltration` | The compromise detector caught a fake credential leaving the VM for a host outside its scope — credential name, declared and observed hosts, previews only. |
 | `credential.exfiltration_allowed` | You answered **Allow** on a compromise alert: the observed host, allowed for the rest of that session only. |
 | `guardrails.block` | A [guardrail](07-settings/guardrails.mdx) blocked a request: host, method, path, and the reason. |

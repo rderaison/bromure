@@ -54,7 +54,22 @@ struct TranscriptHistoryTests {
         #expect(pq.map { String(decoding: $0.pq, as: UTF8.self) } == "{\"tool_name\":\"AskUserQuestion\"}")
     }
 
-    @Test("A shorter tail snapshot splices into the longer history it came from")
+    private func tempCache() -> (SessionTranscriptCache, URL) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure-tests-\(UUID().uuidString)", isDirectory: true)
+        return (SessionTranscriptCache(directory: dir), dir)
+    }
+
+    private func text(_ d: Data?) -> String { d.map { String(decoding: $0, as: UTF8.self) } ?? "" }
+
+    /// A Claude record with a uuid and a timestamp.
+    private func rec(_ n: Int, _ role: String = "assistant", minute: Int? = nil) -> String {
+        let m = String(format: "%02d", minute ?? n)
+        return #"{"message":{"content":"msg \#(n)","role":"\#(role)"},"timestamp":"2026-10-03T10:\#(m):00.000Z","type":"\#(role)","uuid":"00000000-0000-0000-0000-\#(String(format: "%012d", n))"}"#
+            + "\n"
+    }
+
+    @Test("A shorter tail snapshot merges into the longer history it came from")
     func cacheSplice() {
         let l1 = "{\"n\":1,\"pad\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n"
         let l2 = "{\"n\":2,\"pad\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}\n"
@@ -63,22 +78,95 @@ struct TranscriptHistoryTests {
         let history = Data((l1 + l2 + l3).utf8)
         // A byte-cap cut mid-l2, then l3 and a new l4.
         let tail = Data((String(l2.dropFirst(5)) + l3 + l4).utf8)
-        let merged = SessionTranscriptCache.splice(history: history, tail: tail)
-        #expect(merged.map { String(decoding: $0, as: UTF8.self) } == l1 + l2 + l3 + l4)
-        // Unrelated content: no splice.
-        #expect(SessionTranscriptCache.splice(history: history, tail: Data("x\n{\"z\":9,\"pad\":\"zzzzzzzzzzzzzzzzzzzz\"}\n".utf8)) == nil)
+        let merged = SessionTranscriptCache.merge(history: history, incoming: tail, mode: .related)
+        #expect(text(merged) == l1 + l2 + l3 + l4)
 
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("bromure-tests-\(UUID().uuidString)", isDirectory: true)
-        let cache = SessionTranscriptCache(directory: dir)
+        let (cache, dir) = tempCache()
         defer { try? FileManager.default.removeItem(at: dir) }
         let id = UUID()
         cache.save(id, history)
         cache.save(id, tail)
-        #expect(cache.load(id).map { String(decoding: $0, as: UTF8.self) } == l1 + l2 + l3 + l4)
+        #expect(text(cache.load(id)) == l1 + l2 + l3 + l4)
         // An exact suffix of what's held changes nothing.
         cache.save(id, Data((l3 + l4).utf8))
-        #expect(cache.load(id).map { String(decoding: $0, as: UTF8.self) } == l1 + l2 + l3 + l4)
+        #expect(text(cache.load(id)) == l1 + l2 + l3 + l4)
+    }
+
+    @Test("A read that starts mid-record drops the cut line, and an unfinished last one")
+    func partialEdgesDropped() {
+        let full = rec(1) + rec(2) + rec(3)
+        // B49: a byte window that began inside a record's base64.
+        let cut = "QUFBQUFBQUFBQUFB\"}}]}}\n" + rec(2) + rec(3) + String(rec(4).prefix(30))
+        let rs = SessionTranscriptCache.records(Data(cut.utf8))
+        #expect(rs.count == 2)
+        #expect(text(rs.first) + "\n" == rec(2))
+        // Whole input is left as it is.
+        #expect(SessionTranscriptCache.records(Data(full.utf8)).count == 3)
+    }
+
+    @Test("The copy never shrinks: a later tail with nothing in common is appended, not swapped in")
+    func neverShrinks() {
+        let (cache, dir) = tempCache()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let id = UUID()
+        let history = (1...10).map { rec($0, $0 % 2 == 1 ? "user" : "assistant") }.joined()
+        cache.save(id, Data(history.utf8))
+        // The engine's old 300 KB window, after a screenshot pushed records
+        // 11–12 out of reach: starts mid-line, shares nothing with the copy.
+        let tail = "iVBORw0KGgoAAAANSUhEUgAA\"}}]}}\n" + rec(13) + rec(14)
+        cache.save(id, Data(tail.utf8))
+        let after = text(cache.load(id))
+        #expect(after == history + rec(13) + rec(14))
+        // Another conversation's (older) records with nothing in common: refused.
+        let foreign = #"{"type":"user","timestamp":"2026-10-03T09:00:00.000Z","uuid":"ffffffff-0000-0000-0000-000000000001","message":{"role":"user","content":"other"}}"# + "\n"
+        cache.save(id, Data(foreign.utf8))
+        #expect(text(cache.load(id)) == after)
+        // …and a read that may be another session's is only merged when it overlaps.
+        #expect(SessionTranscriptCache.merge(history: Data(after.utf8), incoming: Data(rec(20).utf8),
+                                             mode: .overlapOnly) == nil)
+        // A known continuation (the engine's incremental read) is appended as is.
+        cache.append(id, Data(rec(15).utf8))
+        #expect(text(cache.load(id)) == after + rec(15))
+        // The beautified view's whole buffer, re-sent grown: only the growth lands.
+        cache.save(id, Data((history + rec(13) + rec(14) + rec(15) + rec(16)).utf8))
+        #expect(text(cache.load(id)) == after + rec(15) + rec(16))
+    }
+
+    @Test("Records are matched by uuid, and earlier ones go in front")
+    func mergeByUUID() {
+        let history = rec(3) + rec(4)
+        // A "load earlier" window: records 1–2 the copy never had, then 3–5.
+        let incoming = rec(1) + rec(2) + rec(3) + rec(4) + rec(5)
+        let merged = SessionTranscriptCache.merge(history: Data(history.utf8), incoming: Data(incoming.utf8),
+                                                  mode: .related)
+        #expect(text(merged) == incoming)
+        // A resume's copy of the same records, serialized differently: same uuids, no duplicates.
+        let reserialized = rec(4).replacingOccurrences(of: "\"timestamp\"", with: "\"sessionId\":\"x\",\"timestamp\"")
+        let again = SessionTranscriptCache.merge(history: Data(incoming.utf8),
+                                                 incoming: Data((reserialized + rec(6)).utf8), mode: .related)
+        #expect(text(again) == incoming + rec(6))
+    }
+
+    @Test("Image payloads are stripped to a placeholder, the record kept")
+    func imagesStripped() throws {
+        let b64 = String(repeating: "iVBORw0KGgoAAAANSUhEUgAAB9AAAAWW", count: 400)   // ~12.8 KB
+        let line = #"{"type":"user","timestamp":"2026-10-03T10:01:00.000Z","uuid":"00000000-0000-0000-0000-000000000042","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"\#(b64)"}}]}]},"toolUseResult":{"type":"image","file":{"base64":"\#(b64)","type":"image/png"}}}"#
+        let use = #"{"type":"assistant","timestamp":"2026-10-03T10:00:00.000Z","uuid":"00000000-0000-0000-0000-000000000041","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"browser_screenshot","input":{}}]}}"#
+        let rs = SessionTranscriptCache.records(Data((use + "\n" + line + "\n").utf8))
+        #expect(rs.count == 2)
+        let stripped = try #require(rs.last)
+        #expect(stripped.count < 1_000)
+        #expect(!text(stripped).contains(b64))
+        // Same record (its uuid still matches), and the chat says what was there.
+        #expect(SessionTranscriptCache.key(stripped) == .uuid("00000000-0000-0000-0000-000000000042"))
+        let items = AgentTranscript.parse(SessionTranscriptCache.merge(history: Data(), incoming: Data((use + "\n" + line + "\n").utf8), mode: .related)!, agent: "claude")
+        let results = items.compactMap { item -> String? in
+            if case .toolResult(_, let content, _) = item.kind { return content }
+            return nil
+        }
+        #expect(results == [SessionTranscriptCache.imagePlaceholder])
+        // A short record goes through byte for byte.
+        #expect(SessionTranscriptCache.records(Data((use + "\n").utf8)).first == Data(use.utf8))
     }
 
     @Test("The chunk command carries the host's cursor and the reader script")

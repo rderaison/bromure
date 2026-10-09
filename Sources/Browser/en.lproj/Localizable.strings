@@ -759,3 +759,48 @@
 "Strict Site Isolation" = "Strict Site Isolation";
 "Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to." = "Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to.";
 "Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly." = "Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly.";
+
+/* Setup window & starting splash (2026 redesign) */
+"Starting the browser engine\U2026" = "Starting the browser engine\U2026";
+"Download" = "Download";
+"Install" = "Install";
+"Personalize" = "Personalize";
+"Launch" = "Launch";
+"Welcome" = "Welcome";
+"Browse without leaving a trace" = "Browse without leaving a trace";
+"Bromure opens every window in its own throwaway Linux VM. Close it, and everything it touched is gone." = "Bromure opens every window in its own throwaway Linux VM. Close it, and everything it touched is gone.";
+"Isolated by design" = "Isolated by design";
+"Sites run in a separate VM, never on your Mac." = "Sites run in a separate VM, never on your Mac.";
+"Fresh every time" = "Fresh every time";
+"Each session starts from a clean image \U2014 or keep a profile when you want one." = "Each session starts from a clean image \U2014 or keep a profile when you want one.";
+"Ready in a second" = "Ready in a second";
+"A VM is always warmed up, so new windows open instantly." = "A VM is always warmed up, so new windows open instantly.";
+"First-time setup" = "First-time setup";
+"Rebuilding" = "Rebuilding";
+"Updating" = "Updating";
+"Almost there" = "Almost there";
+"Setting up Bromure" = "Setting up Bromure";
+"Rebuilding your browser image" = "Rebuilding your browser image";
+"Updating your browser image" = "Updating your browser image";
+"The image is ready. Warming up the first VM so your browser opens instantly." = "The image is ready. Warming up the first VM so your browser opens instantly.";
+"Downloading the Linux + Chromium image and personalizing it for this Mac. This only happens once." = "Downloading the Linux + Chromium image and personalizing it for this Mac. This only happens once.";
+"The old image was removed. A fresh copy is being downloaded and personalized for this Mac." = "The old image was removed. A fresh copy is being downloaded and personalized for this Mac.";
+"Fetching the latest image, with current Linux and browser security updates." = "Fetching the latest image, with current Linux and browser security updates.";
+"Bringing your browser image up to date with this version of Bromure." = "Bringing your browser image up to date with this version of Bromure.";
+"Setup stopped" = "Setup stopped";
+"The browser image couldn't be installed. Check your connection and try again." = "The browser image couldn't be installed. Check your connection and try again.";
+"Every window runs in its own disposable VM." = "Every window runs in its own disposable VM.";
+"One-time download, personalized for this Mac." = "One-time download, personalized for this Mac.";
+"A browser window opens as soon as it's ready." = "A browser window opens as soon as it's ready.";
+"Starting Bromure" = "Starting Bromure";
+"Warming up a fresh VM. The first window after launch takes a few seconds longer." = "Warming up a fresh VM. The first window after launch takes a few seconds longer.";
+"Copy Details" = "Copy Details";
+"Copy the console output" = "Copy the console output";
+"Hide Details" = "Hide Details";
+"Show Details" = "Show Details";
+
+/* Open New Windows With */
+"Open New Windows With" = "Open New Windows With";
+"The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window.";
+"Last Used Profile" = "Last Used Profile";
+"Open New Windows with \U201C%@\U201D" = "Open New Windows with \U201C%@\U201D";

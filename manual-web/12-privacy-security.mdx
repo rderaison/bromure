@@ -1,0 +1,115 @@
+---
+title: "Privacy & Security"
+description: "Bromure's security model end to end: what each VM isolates, what a window can share with your Mac, how network access is limited, how saved data is protected, what leaves your Mac and when, and an overview of VPNs and ad blocking."
+order: 12
+---
+
+# Privacy & Security
+
+This chapter explains how Bromure protects you, in one place: what is isolated, what a browser window is allowed to share with your Mac, where your data is kept, and every case in which information leaves your Mac. It is written for anyone who wants to understand the guarantees before relying on them, and for security teams evaluating Bromure. The individual settings are documented in [Profile Settings](07-profile-settings/index.mdx); this chapter ties them together.
+
+## The isolation model
+
+Every Bromure window is a separate Linux virtual machine, run by macOS's own Virtualization framework on Apple Silicon. The browser, Chromium or Google Chrome, runs inside that VM, not on your Mac.
+
+- **A fresh start every time.** Each window boots from the shared base image through an APFS copy-on-write clone, created in your temporary folder when the window opens and deleted when it closes. Whatever a website does to that VM, it cannot change the base image or reach the next window.
+- **One VM per window.** Two windows, even of the same ephemeral profile, share nothing: separate memory, separate disk, separate network address. A site open in one window cannot see cookies, cache or processes from another.
+- **Your Mac is outside the VM.** The browser has no access to your files, your Keychain, your other apps, or your Mac's network identity except through the specific, per-profile channels described below, each of which you can turn off.
+
+What survives a window depends on the profile:
+
+| Profile | What is kept after the window closes |
+|---|---|
+| **Ephemeral** (**Retain Browsing Data** off, such as **Private Browsing**) | Nothing. The whole VM, with cookies, history, cache and downloads, is discarded. |
+| **Persistent** (**Retain Browsing Data** on) | Only the profile's browsing data (bookmarks, history, cookies, saved passwords, and the open tabs if you restore them), on a separate disk image attached to the VM. The system itself is still discarded. |
+
+See [Concepts](04-concepts.mdx) for how this works and [General](07-profile-settings/general.mdx) for **Retain Browsing Data**.
+
+## What a window can share with your Mac
+
+Host and guest talk over virtual sockets (vsock) between your Mac and the VM, not over the network. Each service is a narrow, single-purpose channel that exists only when its setting is on. **View › VM Services** shows which channels are listening or connected for every open window (see [Troubleshooting](15-troubleshooting.mdx#the-vm-services-window)).
+
+| Channel | Setting | Where | Notes |
+|---|---|---|---|
+| Clipboard | **Shared Clipboard** | [Host Isolation](07-profile-settings/host-isolation.mdx) | When off, the browser's clipboard is completely isolated from your Mac's. |
+| Passkeys | **Use macOS Passkeys** | [Host Isolation](07-profile-settings/host-isolation.mdx) | Each request needs Touch ID or your password. |
+| Passwords | **Use macOS Passwords** | [Host Isolation](07-profile-settings/host-isolation.mdx) | Autofill from your Mac's saved passwords and iCloud Keychain. |
+| Printing | **Allow Printing** | [Host Isolation](07-profile-settings/host-isolation.mdx) | The page is handed to macOS as a PDF kept in memory; nothing is written to disk. |
+| Keyboard layout | **Match Keyboard Layout** | [Host Isolation](07-profile-settings/host-isolation.mdx) | Only the layout name crosses. |
+| Files | **File Upload**, **File Download** | [File Transfer](07-profile-settings/file-transfer.mdx) | Off by default. Downloads stay in a temporary folder until you save them. |
+| Camera, microphone | **Share Webcam**, **Share Microphone** | [Media](07-profile-settings/media.mdx) | Off by default. A red dot marks tabs that use them. |
+| Links | **Send Link to Other Session** | [Privacy & Safety](07-profile-settings/privacy-safety.mdx) | Lets you open a link in another profile's window. |
+| Automation | **Allow Automation** | [Advanced](07-profile-settings/advanced.mdx) | Lets tools on your Mac drive the browser. See [Automation](14-automation.mdx). |
+
+A new profile you create starts with the clipboard, link sending, passkeys and passwords on, and file transfer, camera and microphone off. The built-in **Private Browsing** profile shares the clipboard and allows link sending and automation, but not files, camera, microphone, passkeys or passwords.
+
+### Screen capture
+
+**Block Screen Capture** ([Privacy & Safety](07-profile-settings/privacy-safety.mdx)) hides a profile's windows from screenshots, screen recordings, and screen-sharing apps such as Zoom. The window still appears normally on your own screen.
+
+## Network isolation
+
+The VM's network traffic passes through your Mac, where Bromure can filter it before it reaches anything. Filtering happens outside the VM, so nothing inside it can switch it off.
+
+- **NAT or bridged.** By default (NAT) each VM sits on a private network behind your Mac and is invisible to other devices. Bridged mode puts it directly on your network. Set app-wide in [Network](08-app-settings/network.mdx), overridable per profile.
+- **Isolate from Local Network** blocks the VM from reaching printers, NAS drives, routers and internal servers on your home or office network, while leaving the internet reachable.
+- **Restrict Outgoing Ports** allows only the ports you list (for example `80, 443`). DNS (port 53) is always allowed, and a configured VPN's own endpoint stays reachable.
+
+Both filters work only in NAT mode. See [Network Isolation](07-profile-settings/network-isolation.mdx).
+
+## Protecting data on your Mac
+
+- **Encrypt Browsing Data** ([Advanced](07-profile-settings/advanced.mdx)) encrypts a persistent profile's disk image with LUKS. The key is a random value stored in your macOS Keychain (service `com.bromure.profile-key`); the disk is unlocked inside the VM, so the data never exists unencrypted on your Mac's disk. If the key is lost, the data cannot be recovered.
+- **VPN secrets** — IKEv2 passwords, shared secrets, client certificates and their passphrases, and OpenVPN passwords — are kept in your Keychain, not in the profile file.
+- **Profile settings** are stored in a `profile.json` file per profile. When iCloud Drive is available, Bromure keeps these files in its iCloud container so your profiles follow you to your other Macs; the browsing data itself always stays on this Mac. The profile file includes everything you type into the profile settings other than the Keychain secrets above, such as the HTTP proxy password and the VirusTotal API key.
+- **Downloads** received from a window are held in a per-window temporary folder and deleted when the window closes, unless you save them. See [Files & Downloads](09-files-downloads.mdx).
+- **Session recordings** stay in memory or in a local file you choose to save. See [Session Recording](11-session-recording.mdx).
+
+## What leaves your Mac
+
+Browsing itself goes from the VM to the websites you visit, through your Mac's connection or through the VPN or proxy you configured. Apart from that, Bromure contacts the following services. Most are off until you turn them on.
+
+| Service | When | What is sent | Setting |
+|---|---|---|---|
+| **Browser images** (`dl.bromure.io`) | First setup, rebuilds, and image updates you accept. | Download requests. | Always, when installing an image. |
+| **Google Chrome and Cloudflare WARP packages** (`dl.google.com`, `pkg.cloudflareclient.com`) | When the image's recommended packages are installed. | Package download requests. | You're asked before new packages are installed. |
+| **App updates** (`bromure.io`) | Once a day, and when you choose **Bromure › Check for Updates…**. | An update check. | Standard macOS app update checks (Sparkle). |
+| **AI phishing detection** (the **Phishing Analysis Server**, `https://bromure.io/api` by default) | When a page looks suspicious, in profiles where it is on. | The URL, the page's visible text, its form structure, and the warning signals detected. | Off by default; needs **Retain Browsing Data** and your consent. |
+| **VirusTotal** (`virustotal.com`) | When a file is downloaded, in profiles where scanning is on. | The file's SHA-256 hash; the file itself if VirusTotal doesn't know it and it is 32 MB or smaller. Sent with your own API key. | Off by default. |
+| **Malware-blocking DNS** (Cloudflare `1.1.1.2`, `1.0.0.2`) | Every name lookup, in profiles where it is on. | The host names the browser looks up. | **Block Malware Sites**, off by default. |
+| **Cloudflare WARP** | While connected. | All the window's traffic, through Cloudflare's network. | Per profile, after accepting Cloudflare's terms. |
+| **Chrome Web Store** | When you add an extension. | The extension download request. | [Extensions](07-profile-settings/extensions.mdx). |
+| **Face-swap models** (Hugging Face) | Once, when you first turn on Face Swap and agree to the download. | Model download requests (about 500 MB). | [Camera Effects](10-camera-effects.mdx). |
+| **Your organization's control plane** | Only on an enrolled Mac: at launch, every 15 minutes, when Bromure becomes active, and on **Sync Now**. | Enrollment, profile sync and certificate requests. | [Enterprise](13-enterprise.mdx). |
+| **Your organization's recording service** (`analytics.bromure.io`) | Only in managed profiles your administrator set to record. | The window's recorded HTTP requests. | Set by your administrator; shown by a red **Recording — shared with *org*** banner. |
+| **Google (Chrome Enterprise)** | Only in profiles with an enrollment token. | Chrome's own browser-management traffic. | [Enterprise](07-profile-settings/enterprise.mdx) profile setting. |
+
+### AI phishing detection
+
+**AI Phishing Detection** (Beta, [Privacy & Safety](07-profile-settings/privacy-safety.mdx)) analyzes pages with a large language model to catch scams that look legitimate. It is off in every new profile. Turning it on requires **Retain Browsing Data** and shows the **AI Phishing Detection** consent window, which states what gets sent, where it goes, and that requests "may be logged for abuse prevention and model improvement". Nothing is sent until you click **Accept**. Pages are analyzed only when the browser's own checks find them suspicious, for example a look-alike domain or a password prompt. An organization can run its own analysis server and set its address in [Network](08-app-settings/network.mdx).
+
+### VirusTotal
+
+With **Scan Downloads with VirusTotal** on, each file downloaded in the VM is checked before you can save it to your Mac. Bromure first looks up the file's hash; only files VirusTotal has never seen are uploaded, and files over 32 MB are checked by hash only. **Block Threats** (on by default) deletes files that engines flag; **Block Unscannable Files** (off by default) also deletes files that can't be checked. The API key is your own, and files you upload are handled under VirusTotal's terms of service. See [File Transfer](07-profile-settings/file-transfer.mdx).
+
+## VPNs, proxies and ad blocking
+
+Each profile can send its traffic through a VPN that runs inside its VM, so the tunnel protects only that profile's windows and never your Mac's other traffic:
+
+- **Cloudflare WARP** — free, no account; requires accepting Cloudflare's terms of service and at least 2 GB of VM memory.
+- **WireGuard** — any provider; paste or import a `.conf` file.
+- **IKEv2** — username and password, certificate, or pre-shared key; optionally uses the VPN's DNS servers.
+- **OpenVPN** — paste or import a `.ovpn` file, with optional credentials.
+
+The VPN button in the window's title bar shows the tunnel's state and connects or disconnects it. **Block Ads** filters advertising and tracking domains inside the VM. A profile can instead use an **HTTP Proxy** (in [Enterprise](07-profile-settings/enterprise.mdx)); while a proxy is set, the VPN and ad blocking are turned off for that profile. See [VPN & Ads](07-profile-settings/vpn-ads.mdx).
+
+## Automation and your security
+
+The automation server lets programs on your Mac open and control browser windows. It is off by default, has no authentication, and only exposes profiles with **Allow Automation** on. Keep its bind address at `127.0.0.1` unless you trust every device on your network. See [Automation](08-app-settings/automation.mdx).
+
+## Related chapters
+
+- [Concepts](04-concepts.mdx) — the VM-per-window model and the host-guest services.
+- [Profile Settings](07-profile-settings/index.mdx) — every setting mentioned here.
+- [Enterprise](13-enterprise.mdx) — what an organization controls on an enrolled Mac.
+- [Session Recording](11-session-recording.mdx) — what recording captures and where it goes.

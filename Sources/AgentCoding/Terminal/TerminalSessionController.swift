@@ -110,14 +110,69 @@ final class TerminalSessionController {
     /// shape/blink) to every live surface.
     func applyProfile(_ newProfile: Profile) {
         profile = newProfile
-        for (_, view) in views {
+        for view in Array(views.values) + Array(scratchViews.values) {
             guard let surface = view.surface else { continue }
             GhosttyRuntime.shared.apply(profile: newProfile, to: surface)
         }
     }
 
+    // MARK: Scratch terminals (the chat's /term)
+
+    /// Scratch surfaces by key (one per session): each attached to a guest
+    /// tmux session of its own — see `__attach-window --scratch`.
+    private var scratchViews: [String: TerminalSurfaceView] = [:]
+    /// Per key: what to do when its shell ends (exit, or its session killed).
+    private var scratchExit: [String: () -> Void] = [:]
+
+    /// The guest tmux session behind a scratch key.
+    static func scratchSession(_ key: String) -> String {
+        "scratch-" + String(key.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(40))
+    }
+
+    /// The scratch terminal for `key`, started in `cwd` (a guest path, "~"
+    /// forms allowed) on first use. Unmounting it keeps it running: shown
+    /// again, it's the same shell.
+    func scratchView(key: String, cwd: String, onExit: @escaping () -> Void) -> TerminalSurfaceView? {
+        scratchExit[key] = onExit
+        if let v = scratchViews[key], !v.processExited { return v }
+        guard GhosttyRuntime.shared.start() else { return nil }
+        guard let view = TerminalSurfaceView(command: scratchCommand(key: key, cwd: cwd),
+                                             windowIndex: -1,
+                                             profileID: profile.id,
+                                             remoteHost: remoteHost) else { return nil }
+        if let surface = view.surface {
+            GhosttyRuntime.shared.apply(profile: profile, to: surface)
+        }
+        scratchViews[key] = view
+        return view
+    }
+
+    func retireScratch(_ key: String) {
+        scratchExit[key] = nil
+        guard let view = scratchViews.removeValue(forKey: key) else { return }
+        view.removeFromSuperview()
+        view.retire()
+    }
+
+    private func scratchCommand(key: String, cwd: String) -> String {
+        let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let args = " --scratch '\(Self.scratchSession(key))' --cwd-b64 '\(Data(cwd.utf8).base64EncodedString())'"
+        guard let remoteHost else {
+            return "'\(exe)' __attach-window\(args) '\(vmID)' 0"
+        }
+        var cmd = "'\(exe)' __attach-window --remote '\(remoteHost.uuidString)'" + args
+        if let host = RemoteHostController.liveHosts[remoteHost],
+           let pid = host.peerDeviceID,
+           let ep = P2PBroker.shared.cachedEndpoint(forPeer: pid) {
+            cmd += " --remote-peer '\(pid)' --remote-endpoint '\(ep.host):\(ep.port)'"
+                + " --remote-user '\(host.user)'"
+        }
+        return cmd + " '\(vmID)' 0"
+    }
+
     /// Tear down every surface (VM shutdown / pane close).
     func retireAll() {
+        for key in Array(scratchViews.keys) { retireScratch(key) }
         for (_, view) in views {
             view.removeFromSuperview()
             view.retire()
@@ -146,6 +201,13 @@ final class TerminalSessionController {
     // MARK: Reattach
 
     private func childExited(_ view: TerminalSurfaceView) {
+        if let key = scratchViews.first(where: { $0.value === view })?.key {
+            // The shell was exited, or its session killed: the drawer closes.
+            let onExit = scratchExit.removeValue(forKey: key)
+            retireScratch(key)
+            onExit?()
+            return
+        }
         guard views[view.windowIndex] === view else { return }
         let index = view.windowIndex
 
@@ -300,8 +362,10 @@ final class TerminalSessionController {
                 // flags alone doesn't run tmux's recalculate_sizes, -C does —
                 // so the window snaps to this client without waiting for a
                 // real resize or keystroke.
+                // A size floor left by an idle pass (below) yields first.
                 parts.append(
-                    "set -- $(tmux list-clients -t '\(session)'"
+                    "tmux set-option -wu -t 'bromure:\(index)' window-size 2>/dev/null"
+                    + "; set -- $(tmux list-clients -t '\(session)'"
                     + " -F '#{client_tty} #{client_width} #{client_height}'"
                     + " 2>/dev/null | head -1)"
                     + "; [ -n \"$1\" ] && tmux refresh-client -t \"$1\" -f '!ignore-size'"
@@ -311,9 +375,35 @@ final class TerminalSessionController {
                     "set -- $(tmux list-clients -t '\(session)' -F '#{client_tty}'"
                     + " 2>/dev/null | head -1)"
                     + "; [ -n \"$1\" ] && tmux refresh-client -t \"$1\" -f ignore-size")
+                parts.append(Self.sizeFloorCommand(window: index))
             }
         }
         runInGuest(parts.joined(separator: "; ") + "; true")
+    }
+
+    /// The smallest a shared agent window may get while nobody holds size
+    /// authority. With every client passive, tmux falls back to the latest
+    /// client's size — a tiny inline/offscreen surface or a narrow mirror
+    /// pinned Grok's window at 52x20, where its approval dialog didn't fit
+    /// (the chat showed "Needs you" with no card). The chat reads the screen,
+    /// so the window must stay readable while the chat is what's on show.
+    static let floorColumns = 100
+    static let floorRows = 30
+
+    /// Grow window `window` of the `bromure` session to the floor when no
+    /// size-authoritative client shows it. `resize-window` leaves the window
+    /// on `window-size manual`; the next grant unsets that (above), so an
+    /// active surface takes over again. Identical on every side (local and
+    /// fat client), so two idle sides never fight over it.
+    static func sizeFloorCommand(window: Int) -> String {
+        let t = "'bromure:\(window)'"
+        let (c, r) = (floorColumns, floorRows)
+        return "if ! tmux list-clients -F '#{window_index} #{client_flags}' 2>/dev/null"
+            + " | grep -v ignore-size | grep -q '^\(window) '; then"
+            + " set -- $(tmux display-message -p -t \(t) '#{window_width} #{window_height}' 2>/dev/null)"
+            + "; if [ -n \"$1\" ] && { [ \"$1\" -lt \(c) ] || [ \"$2\" -lt \(r) ]; }; then"
+            + " tmux resize-window -t \(t) -x $(( $1 < \(c) ? \(c) : $1 )) -y $(( $2 < \(r) ? \(r) : $2 ))"
+            + "; fi; fi"
     }
 
     /// Run a shell command in the workspace's guest over this side's own

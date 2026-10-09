@@ -81,14 +81,27 @@ public enum KimiStandIn {
     /// 2.0.x FORCES a refresh whenever its managed-models provisioning call
     /// gets a 401, and a refresh that `auth.kimi.ai` rejects is persisted as a
     /// revoked tombstone (empty access token), which reads as "requires login"
-    /// from then on. The proxy therefore recognizes this exact string on a
-    /// `grant_type=refresh_token` POST and answers it itself (see
+    /// from then on. The proxy therefore recognizes any of these (`isRefresh`
+    /// — an older one too) on a `grant_type=refresh_token` POST and answers
+    /// it itself (see
     /// `KimiRefreshAnswer`), performing the real refresh host-side.
     public static func refresh(realRefresh: String, profileID: UUID) -> String {
         let salt = Data("kimi-bogus-refresh:\(profileID)".utf8)
         return SessionTokenPlan.deriveFake(prefix: "kimirt-brm-", real: realRefresh, salt: salt,
                                            targetLength: max(40, realRefresh.count))
     }
+
+    /// One of Bromure's Kimi access stand-ins (any workspace, any age) —
+    /// recognised by its mark, since the in-memory registry is emptied by an
+    /// app restart while a resumed machine still holds an older stand-in.
+    public static func isAccess(_ token: String) -> Bool {
+        SubscriptionFakeMint.isJWTFake(token) || token.hasPrefix("kimi-brm-")
+    }
+
+    /// One of Bromure's Kimi refresh stand-ins (any workspace, any age): an
+    /// older one (minted before the host rotated the real refresh token)
+    /// must still be answered by the proxy, never sent on to auth.kimi.ai.
+    public static func isRefresh(_ token: String) -> Bool { token.hasPrefix("kimirt-brm-") }
 
     /// `expires_in` / `expires_at` the guest is told. Far future so the CLI's
     /// own threshold (`expiresAt − now < max(300, expiresIn/2)`) never trips a
@@ -138,6 +151,9 @@ public struct KimiSubscriptionRecord: Codable, Sendable, Equatable {
     /// sets it, because the refresh path renews that silently. Optional so
     /// records written before this existed still decode.
     public var reauthRequiredAt: Date?
+    /// When the HOST last refreshed this grant for real (nil: not since
+    /// sign-in). Shown in `/state` and Settings › Models — never a token.
+    public var lastRefreshedAt: Date?
     /// Filename (sans `.json`) under `~/.kimi-code/credentials/` the entry
     /// was captured from — reused when re-seeding the bogus copy.
     public var credentialName: String
@@ -153,12 +169,13 @@ public struct KimiSubscriptionRecord: Codable, Sendable, Equatable {
     public init(accessToken: String, refreshToken: String, expiresAt: Date,
                 savedAt: Date, credentialName: String = kimiManagedCredentialName,
                 templateJSON: Data? = nil, configTOML: String? = nil,
-                reauthRequiredAt: Date? = nil) {
+                reauthRequiredAt: Date? = nil, lastRefreshedAt: Date? = nil) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresAt = expiresAt
         self.savedAt = savedAt
         self.reauthRequiredAt = reauthRequiredAt
+        self.lastRefreshedAt = lastRefreshedAt
         self.credentialName = credentialName
         self.templateJSON = templateJSON
         self.configTOML = configTOML
@@ -175,9 +192,13 @@ private struct KimiSubscriptionFile: Codable {
 }
 
 public final class KimiSubscriptionStore: @unchecked Sendable {
-    private let fileURL: URL
     private let lock = NSLock()
-    private var cache: KimiSubscriptionFile?
+    /// The encrypted file, shared safely with any other process using it
+    /// (see ``SubscriptionStoreFile``).
+    private let backing: SubscriptionStoreFile<KimiSubscriptionFile>
+    /// Bogus access token currently in use by a subscription session → the
+    /// profile it belongs to. In memory only: a stand-in minted before an app
+    /// restart is recognised by its mark instead (see the proxy).
     private var bogusKeys: [String: UUID] = [:]
 
     /// Tests pass their own `fileURL` — never the user's real store.
@@ -185,22 +206,52 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
         let supportDir = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!.appendingPathComponent("BromureAC", isDirectory: true)
-        self.fileURL = fileURL ?? supportDir.appendingPathComponent("kimi-subscription.enc")
+        backing = SubscriptionStoreFile(
+            fileURL: fileURL ?? supportDir.appendingPathComponent("kimi-subscription.enc"),
+            tag: "kimi-sub", empty: { KimiSubscriptionFile(shared: nil, perProfile: [:]) })
     }
 
-    private func loadLocked() -> KimiSubscriptionFile {
-        if let cache { return cache }
-        let empty = KimiSubscriptionFile(shared: nil, perProfile: [:])
-        guard let blob = try? Data(contentsOf: fileURL) else { cache = empty; return empty }
-        guard let plain = try? SecretsVault.decrypt(blob),
-              let file = try? JSONDecoder().decode(KimiSubscriptionFile.self, from: plain)
-        else {
-            // Exists but unreadable (keychain hiccup): don't cache the
-            // emptiness — it would hide the login and let a write clobber it.
-            return empty
-        }
-        cache = file
-        return file
+    // MARK: - Records
+
+    /// The file's current contents (reloaded when another process changed it).
+    private func loadLocked() -> KimiSubscriptionFile { backing.read() }
+
+    /// Read-modify-write against the CURRENT file, under the cross-process
+    /// lock. Throws (changing nothing) when the file is unreadable or the
+    /// write fails.
+    @discardableResult
+    private func mutate(_ body: (inout KimiSubscriptionFile) throws -> Bool) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return try backing.mutate(body)
+    }
+
+    /// The file exists but can't be read: its logins are hidden and nothing
+    /// is written over it.
+    public var isUnreadable: Bool {
+        lock.lock(); defer { lock.unlock() }
+        _ = backing.read()
+        return backing.isUnreadable
+    }
+
+    /// The cross-process lock refreshers hold around read → refresh → write.
+    var refreshLockURL: URL { backing.refreshLockURL }
+
+    /// Test seam: make writes fail (a full / read-only disk).
+    var failWritesForTesting: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return backing.failWritesForTesting }
+        set { lock.lock(); backing.failWritesForTesting = newValue; lock.unlock() }
+    }
+
+    /// Refresh time, expiry and re-auth state of the login `profileID` reads —
+    /// no token data. nil when there's no login (and the store is readable).
+    public func health(for profileID: UUID?) -> SubscriptionLoginHealth? {
+        lock.lock(); defer { lock.unlock() }
+        let file = loadLocked()
+        let unreadable = backing.isUnreadable
+        let r = ownerKeyLocked(file, profileID).flatMap { file.perProfile[$0] } ?? file.shared
+        guard r != nil || unreadable else { return nil }
+        return SubscriptionLoginHealth(lastRefreshedAt: r?.lastRefreshedAt, accessExpiresAt: r?.expiresAt,
+                                       reauthRequiredAt: r?.reauthRequiredAt, storeUnreadable: unreadable)
     }
 
     // MARK: - Re-auth state
@@ -216,39 +267,40 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
     /// shared-vs-override resolution `record(for:)` reads, so a profile using
     /// the shared credential flags the shared one.
     public func setReauthRequired(_ flagged: Bool, for profileID: UUID?) {
-        lock.lock()
-        var file = loadLocked()
-        let stamp: Date? = flagged ? Date() : nil
-        var changed = false
-        if let key = ownerKeyLocked(file, profileID), var r = file.perProfile[key] {
-            if (r.reauthRequiredAt != nil) != flagged {
-                r.reauthRequiredAt = stamp
-                file.perProfile[key] = r
-                changed = true
-            }
-        } else if var shared = file.shared {
-            if (shared.reauthRequiredAt != nil) != flagged {
-                shared.reauthRequiredAt = stamp
-                file.shared = shared
-                changed = true
-            }
-        }
-        if changed { try? persistLocked(file) }
-        lock.unlock()
-        if changed {
-            NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        setReauth(flagged, expected: nil) { file in
+            self.ownerKeyLocked(file, profileID) ?? "shared"
         }
     }
 
-    private func persistLocked(_ file: KimiSubscriptionFile) throws {
-        cache = file
-        let plain = try JSONEncoder().encode(file)
-        let blob = try SecretsVault.encrypt(plain)
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try blob.write(to: fileURL, options: .atomic)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: fileURL.path)
+    /// The refresher's variant: flag the slot it refreshed, and only while it
+    /// still holds the refresh token that was rejected (a sign-in that landed
+    /// meanwhile is a different, good grant).
+    func setReauthRequired(_ flagged: Bool, slotKey: String, ifRefreshTokenIs expected: String) {
+        setReauth(flagged, expected: expected) { _ in slotKey }
+    }
+
+    private func setReauth(_ flagged: Bool, expected: String?,
+                           resolve: @escaping (KimiSubscriptionFile) -> String) {
+        let changed: Bool
+        do {
+            changed = try mutate { file in
+                let key = resolve(file)
+                guard var r = key == "shared" ? file.shared : file.perProfile[key],
+                      expected == nil || r.refreshToken == expected,
+                      (r.reauthRequiredAt != nil) != flagged else { return false }
+                r.reauthRequiredAt = flagged ? Date() : nil
+                if key == "shared" { file.shared = r } else { file.perProfile[key] = r }
+                return true
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[kimi-sub] couldn't \(flagged ? "flag" : "clear") the sign-in state: \(error)\n".utf8))
+            return
+        }
+        // Posted outside the lock (a main-queue observer may be waiting on it).
+        if changed {
+            NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        }
     }
 
     /// True when THIS profile has its own per-profile record (as opposed to
@@ -274,15 +326,22 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
         return ownerKeyLocked(loadLocked(), profileID) ?? "shared"
     }
 
+    /// The record in a slot by key (the refresher re-reads its slot this way).
+    func record(forSlot key: String) -> KimiSubscriptionRecord? {
+        lock.lock(); defer { lock.unlock() }
+        let file = loadLocked()
+        return key == "shared" ? file.shared : file.perProfile[key]
+    }
+
     /// Make `profileID` (an automation clone) use `base`'s own credential
     /// without copying the grant. `forget(for: profileID)` drops the alias.
     public func alias(_ profileID: UUID, to base: UUID) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        var aliases = file.aliases ?? [:]
-        aliases[profileID.uuidString] = file.aliases?[base.uuidString] ?? base.uuidString
-        file.aliases = aliases
-        try persistLocked(file)
+        try mutate { file in
+            var aliases = file.aliases ?? [:]
+            aliases[profileID.uuidString] = file.aliases?[base.uuidString] ?? base.uuidString
+            file.aliases = aliases
+            return true
+        }
     }
 
     public func record(for profileID: UUID?) -> KimiSubscriptionRecord? {
@@ -295,30 +354,67 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
     public func hasCredential(for profileID: UUID?) -> Bool { record(for: profileID) != nil }
 
     public func setShared(_ record: KimiSubscriptionRecord) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked(); file.shared = record; try persistLocked(file)
+        try mutate { $0.shared = record; return true }
     }
+
     public func setOverride(_ record: KimiSubscriptionRecord, for profileID: UUID) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked(); file.perProfile[profileID.uuidString] = record; try persistLocked(file)
+        try mutate { $0.perProfile[profileID.uuidString] = record; return true }
     }
+
     public func update(_ record: KimiSubscriptionRecord, for profileID: UUID?) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        if let key = ownerKeyLocked(file, profileID) {
-            file.perProfile[key] = record
-        } else { file.shared = record }
-        try persistLocked(file)
+        try mutate { file in
+            if let key = self.ownerKeyLocked(file, profileID) {
+                file.perProfile[key] = record
+            } else { file.shared = record }
+            return true
+        }
     }
+
+    /// Persist a refresh's rotated tokens into `slotKey` — only while that
+    /// slot still holds `sentRefresh`, the refresh token the grant was spent
+    /// with (checked against the file as it is NOW, under the lock). Returns
+    /// false when a newer sign-in / another process's refresh replaced it.
+    /// Throws when the write fails: the rotated token is never kept only in
+    /// memory.
+    func commitRefresh(_ record: KimiSubscriptionRecord, slotKey: String,
+                       replacing sentRefresh: String) throws -> Bool {
+        try mutate { file in
+            let current = slotKey == "shared" ? file.shared : file.perProfile[slotKey]
+            guard let held = current, held.refreshToken == sentRefresh else { return false }
+            // Same grant, rotated: it was registered when it was, not now.
+            var record = record
+            record.savedAt = held.savedAt
+            if slotKey == "shared" { file.shared = record } else { file.perProfile[slotKey] = record }
+            return true
+        }
+    }
+
+    /// Fill in the managed `config.toml` of the record `profileID` reads,
+    /// against the CURRENT record (a refresh that rotated its tokens
+    /// meanwhile is kept). No-op when it is already provisioned.
+    func setConfigTOML(_ toml: String, for profileID: UUID?,
+                       unlessProvisioned isProvisioned: (String?) -> Bool) throws {
+        try mutate { file in
+            let key = self.ownerKeyLocked(file, profileID) ?? "shared"
+            guard var r = key == "shared" ? file.shared : file.perProfile[key],
+                  !isProvisioned(r.configTOML) else { return false }
+            r.configTOML = toml
+            if key == "shared" { file.shared = r } else { file.perProfile[key] = r }
+            return true
+        }
+    }
+
     public func forget(for profileID: UUID?) throws {
-        lock.lock(); defer { lock.unlock() }
-        var file = loadLocked()
-        if let pid = profileID {
-            file.perProfile[pid.uuidString] = nil
-            file.aliases?[pid.uuidString] = nil
-        } else { file.shared = nil }
-        try persistLocked(file)
+        try mutate { file in
+            if let pid = profileID {
+                file.perProfile[pid.uuidString] = nil
+                file.aliases?[pid.uuidString] = nil
+            } else { file.shared = nil }
+            return true
+        }
     }
+
+    // MARK: - Bogus-key registry
 
     public func registerBogusKey(_ key: String, for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
@@ -340,11 +436,25 @@ public enum KimiSubscriptionError: Error, CustomStringConvertible {
     case noCredential
     case refreshHTTP(Int)
     case malformedRefreshResponse
+    /// The login is flagged "needs sign-in" (the provider rejected its
+    /// refresh): nothing is injected until the user signs in again.
+    case reauthRequired
     public var description: String {
         switch self {
         case .noCredential: return "no Kimi subscription credential registered"
         case .refreshHTTP(let c): return "Kimi OAuth refresh failed (HTTP \(c))"
         case .malformedRefreshResponse: return "Kimi OAuth refresh returned an unexpected body"
+        case .reauthRequired: return "the Kimi sign-in was rejected; sign in again from Bromure"
+        }
+    }
+
+    /// The provider REJECTED the grant (as opposed to a transient failure):
+    /// only a new sign-in fixes it.
+    public var isRejection: Bool {
+        switch self {
+        case .noCredential, .reauthRequired: return true
+        case .refreshHTTP(let code): return (400...403).contains(code)
+        case .malformedRefreshResponse: return false
         }
     }
 }
@@ -357,19 +467,58 @@ public actor KimiSubscriptionRefresher {
     // rejects non-China accounts. See ``KimiRegion``.
     private static let tokenURL = KimiRegion.tokenURL
     private static let refreshMargin: TimeInterval = 300
+    /// A forced (401- or stand-in-driven) refresh at most this often per
+    /// slot, so an upstream that 401s for some other reason can't turn every
+    /// request into a refresh.
+    static let forcedRefreshFloor: TimeInterval = 60
 
-    public init(store: KimiSubscriptionStore) { self.store = store }
+    private var lastRefreshAt: [String: Date] = [:]
+    /// The HTTP stack the refresh goes out on (tests stub it).
+    private let sessionConfiguration: URLSessionConfiguration
 
-    public func accessToken(for profileID: UUID?) async throws -> String {
-        guard let record = store.record(for: profileID) else { throw KimiSubscriptionError.noCredential }
-        if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
-        return try await singleFlight(profileID)
+    public init(store: KimiSubscriptionStore,
+                sessionConfiguration: URLSessionConfiguration = .ephemeral) {
+        self.store = store
+        self.sessionConfiguration = sessionConfiguration
     }
 
+    /// A currently-valid access token, refreshing proactively near expiry.
+    /// Throws ``KimiSubscriptionError/reauthRequired`` while the login is
+    /// flagged — a dead token is never injected.
+    public func accessToken(for profileID: UUID?) async throws -> String {
+        guard let record = store.record(for: profileID) else { throw KimiSubscriptionError.noCredential }
+        if record.reauthRequiredAt != nil { throw KimiSubscriptionError.reauthRequired }
+        if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
+        return try await singleFlight(profileID, force: false).access
+    }
+
+    /// The agent sent its stand-in refresh token (it only does that after
+    /// the provider turned a request down): refresh the REAL login now,
+    /// unless the slot was refreshed moments ago. Returns true when a real
+    /// refresh happened on this call, false when a recent one (this process
+    /// or another) is reused. Throws when the login is flagged or the refresh
+    /// is rejected — the caller must then tell the agent the truth instead
+    /// of handing out fresh stand-ins.
+    @discardableResult
+    public func refreshForStandIn(for profileID: UUID?) async throws -> Bool {
+        guard let record = store.record(for: profileID) else { throw KimiSubscriptionError.noCredential }
+        if record.reauthRequiredAt != nil { throw KimiSubscriptionError.reauthRequired }
+        let slot = store.slotKey(for: profileID)
+        if let last = lastRefreshAt[slot], Date().timeIntervalSince(last) < Self.forcedRefreshFloor {
+            return false
+        }
+        return try await singleFlight(profileID, force: true, unlessAccessIsNot: record.accessToken).refreshed
+    }
+
+    /// Reactive path for an upstream 401 on `stale`: force a real refresh
+    /// (rate-limited per slot) — an unexpired-looking token the provider
+    /// turned down must not be injected forever.
     public func noteUnauthorized(stale: String, for profileID: UUID?) async {
-        guard let record = store.record(for: profileID) else { return }
-        if record.accessToken != stale { return }
-        _ = try? await singleFlight(profileID)
+        guard let record = store.record(for: profileID),
+              record.accessToken == stale, record.reauthRequiredAt == nil else { return }
+        let slot = store.slotKey(for: profileID)
+        if let last = lastRefreshAt[slot], Date().timeIntervalSince(last) < Self.forcedRefreshFloor { return }
+        _ = try? await singleFlight(profileID, force: true, unlessAccessIsNot: stale)
     }
 
     /// One refresh per storage slot at a time. The actor alone doesn't
@@ -377,40 +526,65 @@ public actor KimiSubscriptionRefresher {
     /// callers would each spend the same rotating refresh token (see
     /// ``ClaudeSubscriptionRefresher``). Unstructured so a caller giving up
     /// can't cancel a refresh whose rotated token must still be stored.
-    private var inflight: [String: Task<String, Error>] = [:]
-    private func singleFlight(_ profileID: UUID?) async throws -> String {
+    private var inflight: [String: Task<(access: String, refreshed: Bool), Error>] = [:]
+    private func singleFlight(_ profileID: UUID?, force: Bool,
+                              unlessAccessIsNot seen: String? = nil) async throws -> (access: String, refreshed: Bool) {
         let slot = store.slotKey(for: profileID)
         if let running = inflight[slot] { return try await running.value }
-        let task = Task { try await self.performRefresh(for: profileID) }
+        let task = Task { try await self.performRefresh(slot: slot, force: force, seen: seen) }
         inflight[slot] = task
         defer { inflight[slot] = nil }
         return try await task.value
     }
 
-    private func performRefresh(for profileID: UUID?) async throws -> String {
-        guard let record = store.record(for: profileID) else { throw KimiSubscriptionError.noCredential }
-        if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
+    /// `seen`: for a forced refresh, the access token the caller saw turned
+    /// down — if the slot no longer holds it once the lock is held, another
+    /// refresh (here or in another process) already replaced it: reuse that.
+    private func performRefresh(slot: String, force: Bool, seen: String?) async throws -> (access: String, refreshed: Bool) {
+        // Hold the store's cross-process refresh lock across read → refresh →
+        // write, and re-read the slot under it: another process (the CLI, a
+        // fat client, a second instance) may have refreshed meanwhile.
+        let held = try await SubscriptionRefreshLock.acquire(store.refreshLockURL)
+        defer { SubscriptionRefreshLock.release(held) }
+        guard let record = store.record(forSlot: slot) else { throw KimiSubscriptionError.noCredential }
+        if record.reauthRequiredAt != nil { throw KimiSubscriptionError.reauthRequired }
+        if !force, record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return (record.accessToken, false) }
+        if force, let seen, record.accessToken != seen {
+            FileHandle.standardError.write(Data(
+                "[kimi-sub] refresh (\(slot)) already done elsewhere; reused\n".utf8))
+            return (record.accessToken, false)
+        }
+        let sent = record.refreshToken
 
+        // Standard token endpoint → application/x-www-form-urlencoded.
         var req = URLRequest(url: Self.tokenURL)
         req.httpMethod = "POST"
+        req.timeoutInterval = 30
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         func enc(_ s: String) -> String {
             s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
         }
-        let form = "grant_type=refresh_token&refresh_token=\(enc(record.refreshToken))&client_id=\(enc(Self.clientID))"
+        let form = "grant_type=refresh_token&refresh_token=\(enc(sent))&client_id=\(enc(Self.clientID))"
         req.httpBody = Data(form.utf8)
 
-        let session = URLSession(configuration: .ephemeral)
+        let session = URLSession(configuration: sessionConfiguration)
+        defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: req)
+        lastRefreshAt[slot] = Date()
         guard let http = response as? HTTPURLResponse else { throw KimiSubscriptionError.malformedRefreshResponse }
         guard http.statusCode == 200 else {
+            let detail = String(decoding: data.prefix(300), as: UTF8.self)
+            FileHandle.standardError.write(Data(
+                "[kimi-sub] refresh (\(slot)) HTTP \(http.statusCode): \(detail)\n".utf8))
             // 400/401/403 = the provider rejected the REFRESH TOKEN itself
-            // (revoked, expired, signed out elsewhere). Nothing retries out of
-            // that — flag the credential so the UI can say "sign-in expired"
-            // instead of every session failing with an opaque auth error. A
-            // 5xx or a rate-limit is transient and must NOT flag.
+            // (revoked, expired, reused, signed out elsewhere). Nothing
+            // retries out of that — flag the credential so the UI can say
+            // "sign-in expired" and the proxy stops injecting. Only if the
+            // slot still holds the token we presented (a re-registration
+            // that landed meanwhile is a different, good grant). A 5xx or a
+            // rate-limit is transient and must NOT flag.
             if (400...403).contains(http.statusCode) {
-                store.setReauthRequired(true, for: profileID)
+                store.setReauthRequired(true, slotKey: slot, ifRefreshTokenIs: sent)
             }
             throw KimiSubscriptionError.refreshHTTP(http.statusCode)
         }
@@ -418,7 +592,7 @@ public actor KimiSubscriptionRefresher {
               let newAccess = json["access_token"] as? String, !newAccess.isEmpty
         else { throw KimiSubscriptionError.malformedRefreshResponse }
 
-        let newRefresh = (json["refresh_token"] as? String) ?? record.refreshToken
+        let newRefresh = (json["refresh_token"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sent
         // Prefer the server's absolute expiry; fall back to expires_in.
         let expiresAt: Date
         if let at = (json["expires_at"] as? Double) ?? (json["expires_at"] as? Int).map(Double.init) {
@@ -428,16 +602,34 @@ public actor KimiSubscriptionRefresher {
                 ?? ((json["expires_in"] as? Int).map(Double.init)) ?? 3600
             expiresAt = Date().addingTimeInterval(expiresIn)
         }
-
         let updated = KimiSubscriptionRecord(
             accessToken: newAccess, refreshToken: newRefresh,
-            expiresAt: expiresAt, savedAt: Date(),
+            expiresAt: expiresAt, savedAt: record.savedAt,
             credentialName: record.credentialName,
             templateJSON: record.templateJSON,
-            configTOML: record.configTOML)
-        try store.update(updated, for: profileID)
-        // Refresh worked — any earlier rejection is stale.
-        store.setReauthRequired(false, for: profileID)
-        return newAccess
+            configTOML: record.configTOML,
+            lastRefreshedAt: Date())
+
+        let committed: Bool
+        do {
+            committed = try store.commitRefresh(updated, slotKey: slot, replacing: sent)
+        } catch {
+            // The grant was spent but the rotated tokens couldn't be written:
+            // never keep them only in memory — say so and fail.
+            FileHandle.standardError.write(Data(
+                "[kimi-sub] refresh (\(slot)) succeeded but the rotated token couldn't be saved: \(error)\n".utf8))
+            throw error
+        }
+        guard committed else {
+            // The slot changed under us (re-registered / signed out): serve
+            // what it holds now rather than resurrect the old grant.
+            FileHandle.standardError.write(Data(
+                "[kimi-sub] refresh (\(slot)) superseded by a newer sign-in; discarded\n".utf8))
+            if let now = store.record(forSlot: slot) { return (now.accessToken, false) }
+            throw KimiSubscriptionError.noCredential
+        }
+        FileHandle.standardError.write(Data(
+            "[kimi-sub] refreshed (\(slot)); next expiry in \(Int(updated.expiresAt.timeIntervalSinceNow))s\n".utf8))
+        return (updated.accessToken, true)
     }
 }

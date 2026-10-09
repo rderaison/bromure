@@ -31,7 +31,18 @@ ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VER
 VENDOR="$REPO_ROOT/vendor"
 STAMP="$VENDOR/GhosttyKit.xcframework/.bromure-ghostty-commit"
 
-if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$COMMIT" ]; then
+# -Dsentry=false: libghostty's Sentry/Breakpad crash handler would otherwise
+# take over the WHOLE app's crashes — it catches the Mach exception on its
+# own thread, writes a minidump under ~/.local/state/ghostty/crash and
+# _exit(1)s, so a crash anywhere in bromure-ac left no .ips, no crash dialog
+# and no exit stamp (seen as the app "quitting" after a Claude sign-in on
+# macOS 15). Without it macOS's crash reporter and our own signal
+# breadcrumbs see crashes again.
+BUILD_FLAGS="-Doptimize=ReleaseFast -Demit-macos-app=false -Dxcframework-target=native -Di18n=false -Dsentry=false"
+# The stamp carries the flags too: a flag change must rebuild, not reuse.
+WANT="$COMMIT $BUILD_FLAGS"
+
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ]; then
     echo "GhosttyKit.xcframework up to date ($COMMIT)"
     exit 0
 fi
@@ -187,17 +198,15 @@ fi
 # deps.files.ghostty.org, and one reset connection otherwise kills a
 # 10-minute build. Fetching is idempotent (global zig cache).
 for attempt in 1 2 3; do
-    (cd "$CACHE/src" && PATH="$BUILD_PATH" "$CACHE/zig/zig" build --fetch \
-        -Doptimize=ReleaseFast -Demit-macos-app=false \
-        -Dxcframework-target=native -Di18n=false) && break
+    # shellcheck disable=SC2086  # BUILD_FLAGS is a word list
+    (cd "$CACHE/src" && PATH="$BUILD_PATH" "$CACHE/zig/zig" build --fetch $BUILD_FLAGS) && break
     echo "dependency fetch failed (attempt $attempt) — retrying…"
     sleep 5
 done
 
 echo "Building GhosttyKit.xcframework (zig, ReleaseFast, native arm64)…"
-(cd "$CACHE/src" && PATH="$BUILD_PATH" "$CACHE/zig/zig" build \
-    -Doptimize=ReleaseFast -Demit-macos-app=false \
-    -Dxcframework-target=native -Di18n=false)
+# shellcheck disable=SC2086
+(cd "$CACHE/src" && PATH="$BUILD_PATH" "$CACHE/zig/zig" build $BUILD_FLAGS)
 
 # --- stage into vendor/ --------------------------------------------------------
 rm -rf "$VENDOR/GhosttyKit.xcframework" "$VENDOR/ghostty-resources"
@@ -226,5 +235,11 @@ if [ "$(nm "$STAGED" 2>/dev/null | grep -c 'T _ghostty_init$')" -eq 0 ]; then
     exit 1
 fi
 
-echo "$COMMIT" > "$STAMP"
+# No crash handler of Ghostty's own in the app (see BUILD_FLAGS).
+if [ "$(nm "$STAGED" 2>/dev/null | grep -c -E 'T _sentry_init$|google_breakpad')" -ne 0 ]; then
+    echo "ERROR: staged $(basename "$STAGED") still links Sentry/Breakpad" >&2
+    exit 1
+fi
+
+echo "$WANT" > "$STAMP"
 echo "Staged vendor/GhosttyKit.xcframework + vendor/ghostty-resources ($COMMIT)"

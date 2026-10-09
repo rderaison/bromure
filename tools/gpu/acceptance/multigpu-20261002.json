@@ -1,0 +1,65 @@
+{
+  "status": "PASS",
+  "date": "2026-10-02",
+  "host": "macOS 27 ARM64",
+  "guestSource": "186db193",
+  "privateImage": "500 with candidate 501 Mesa range/fence fixes and experimental guest scripts",
+  "gpuCount": 2,
+  "vmCount": 1,
+  "guestDevices": [
+    {
+      "screen": 0,
+      "pci": "0000:00:0d.0",
+      "render": "/dev/dri/renderD129"
+    },
+    {
+      "screen": 1,
+      "pci": "0000:00:0e.0",
+      "render": "/dev/dri/renderD130"
+    }
+  ],
+  "checks": [
+    "VirGL in both Chromium GPU processes with selected render nodes",
+    "WebGL2 readPixels matches per-screen colors",
+    "host IOSurface source pixels match corresponding colors",
+    "host-dispatched NSEvent button down/up arrives on both DOMs",
+    "direct VZ view key handlers with focus 0\u21921\u21920 produce ac in screen0 and b in screen1",
+    "direct input bridge wheels produce scrollY240 on both",
+    "both window resizes receive changed surface geometry (exact size/output isolation not asserted)",
+    "first window close retains one running VM and both renderers",
+    "last window close returns to pool teardown"
+  ],
+  "finalDeliveredFrames": [
+    109,
+    29
+  ],
+  "exitCode": 0,
+  "limitations": [
+    "Host input events were dispatched programmatically; not manual operator input.",
+    "IOSurface pixels are source evidence, not captured onscreen pixel acceptance.",
+    "No long stress run or multi-screen performance comparison yet.",
+    "Experimental coarse X wheel scrolling; normal native tab/profile UI not integrated.",
+    "Notarization blocked by missing Bromure keychain credential.",
+    "Manual AppKit hit-testing, scrollWheel event handler and rapid cross-transport focus/key ordering remain untested."
+  ],
+  "fullLog": "/private/tmp/bromure-multigpu-final-boot.log",
+  "fullLogSHA256": "7848b3939ad2905ede1fe50eddde0f61aed5c12367e39b8e2fc70e332b885c5d",
+  "earlierFailures": [
+    "Privileged Xorg rejected absolute config path; fixed by relative /etc/X11 configuration.",
+    "Fixture presentation race; test waits for composition before host pixel check.",
+    "Fixture mousedown focus overridden by default browser action; mouseup focus corrected."
+  ],
+  "signedBundle": {
+    "source": "bac4f660",
+    "buildCommand": "./package.sh bromure",
+    "identity": "Developer ID Application: RENAUD MARIE DERAISON (W3RD8G85BC)",
+    "strictSignatureVerification": "PASS",
+    "actualSignedBundleAcceptance": "PASS",
+    "exitCode": 0,
+    "log": "/private/tmp/bromure-multigpu-signed-boot.log",
+    "logSHA256": "c76c7afe636fdf0b6628d77957355aa8f9343f8ec109fe280185259da00a5b3b",
+    "binarySHA256": "b3313461cae037887177397f6e99ab1bb5dd7a92cd78dd49170bc52c7c8daba8",
+    "notarization": "BLOCKED: No Keychain password item found for profile Bromure",
+    "desktopPreview": "/Users/renaud/Desktop/Bromure Multi-GPU Preview bac4f660"
+  }
+}

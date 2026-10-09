@@ -147,6 +147,31 @@ final class SSHDialer: @unchecked Sendable {
         }
     }
 
+    /// Why the last dial to a host failed, when SSH said so: an auth or
+    /// host-key verdict is an answer (it needs the user), anything else is
+    /// transport (a Wi-Fi drop, the remote restarting) that heals by
+    /// retrying. Cleared by the next successful dial. Lets a mirror that was
+    /// already connected tell "reconnecting…" from "this Mac's key is no
+    /// longer authorized".
+    enum DialVerdict: Equatable { case authFailed, hostKeyChanged, unreachable }
+    private var lastVerdicts: [UUID: DialVerdict] = [:]
+
+    func lastDialVerdict(hostID: UUID) -> DialVerdict? {
+        lock.lock(); defer { lock.unlock() }
+        return lastVerdicts[hostID]
+    }
+
+    private func noteDialFailure(_ hostID: UUID, _ error: SSHDialError?) {
+        let v: DialVerdict?
+        switch error {
+        case nil: v = nil
+        case .authFailed?: v = .authFailed
+        case .hostKeyChanged?: v = .hostKeyChanged
+        case .unreachable?: v = .unreachable
+        }
+        lock.lock(); lastVerdicts[hostID] = v; lock.unlock()
+    }
+
     /// Close and drop every pooled connection (all hosts + lanes).
     func closeAll() {
         lock.lock()
@@ -187,6 +212,10 @@ final class SSHDialer: @unchecked Sendable {
 
     private let lock = NSLock()
     private var connections: [String: SSHConnection] = [:]
+    /// One build at a time per lane: a burst of dials to a lane with no live
+    /// connection (a browser opening 30 sockets) waits for the first build
+    /// and shares it, instead of each running its own SSH handshake.
+    private var buildLocks: [String: NSLock] = [:]
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 
     /// Key by endpoint, not host id: a peer host's resolved loopback endpoint
@@ -201,6 +230,17 @@ final class SSHDialer: @unchecked Sendable {
     /// accept-new semantics: pin on first contact, refuse a changed key.
     func ensureConnection(host: RemoteHost, strict: Bool = false, lane: String = "") throws -> SSHConnection {
         let key = poolKey(host, lane: lane)
+        lock.lock()
+        if let c = connections[key], c.isAlive {
+            lock.unlock()
+            return c
+        }
+        let buildLock = buildLocks[key] ?? NSLock()
+        buildLocks[key] = buildLock
+        lock.unlock()
+        buildLock.lock()
+        defer { buildLock.unlock() }
+        // Another dial may have built it while we waited.
         lock.lock()
         if let c = connections[key], c.isAlive {
             lock.unlock()
@@ -234,12 +274,18 @@ final class SSHDialer: @unchecked Sendable {
     /// request/stream errors out the same way it does when ssh dies).
     func dial(host: RemoteHost, verb: String, lane: String = "") -> Int32? {
         for attempt in 0..<2 {
-            guard let conn = try? ensureConnection(host: host, lane: lane) else { return nil }
-            if let fd = conn.openVerbChannel(verb) { return fd }
+            let conn: SSHConnection
+            do {
+                conn = try ensureConnection(host: host, lane: lane)
+            } catch {
+                noteDialFailure(host.id, (error as? SSHDialError) ?? .unreachable("\(error)"))
+                return nil
+            }
+            if let fd = conn.openVerbChannel(verb) { noteDialFailure(host.id, nil); return fd }
             // Channel open failed on a connection that claimed to be alive —
             // drop it and retry once on a fresh one.
             conn.close()
-            if attempt == 1 { return nil }
+            if attempt == 1 { noteDialFailure(host.id, .unreachable("channel open failed")); return nil }
         }
         return nil
     }
@@ -373,6 +419,119 @@ final class HandshakeStallWatchdog: ChannelInboundHandler, RemovableChannelHandl
     }
 }
 
+/// Last-inbound-byte clock for one SSH connection, shared between the pipeline
+/// handler (event loop) and the dial path (any thread).
+final class InboundActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = Date()
+
+    func touch() { lock.lock(); last = Date(); lock.unlock() }
+
+    func secondsSinceLastInbound() -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        return Date().timeIntervalSince(last)
+    }
+}
+
+/// Pass-through inbound handler that stamps `InboundActivity` on every read.
+final class InboundActivityHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+    private let activity: InboundActivity
+    init(_ activity: InboundActivity) { self.activity = activity }
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        activity.touch()
+        context.fireChannelRead(data)
+    }
+}
+
+/// A one-shot timeout that may re-arm itself; only touched on one event loop.
+final class RescheduledTimeout: @unchecked Sendable {
+    var task: Scheduled<Void>?
+    var done = false
+}
+
+/// Debug/test knob (`LinkSimulation`): sits at the head of an SSH connection's
+/// pipeline and makes the socket behave like a slow WAN — each inbound read
+/// and outbound write is delivered half an RTT (+ jitter) later, in order,
+/// and inbound is paced to a bandwidth cap. Everything above it (KEX, auth,
+/// channel opens, every request) sees the simulated link.
+final class SimulatedLinkHandler: ChannelDuplexHandler, RemovableChannelHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    private let oneWayNanos: Int64
+    private let jitterNanos: Int64
+    private let bytesPerSecond: Int64
+    /// Delivery clocks, so jitter never reorders and pacing queues.
+    private var inboundAt = NIODeadline.uptimeNanoseconds(0)
+    private var outboundAt = NIODeadline.uptimeNanoseconds(0)
+    private var inboundWireFree = NIODeadline.uptimeNanoseconds(0)
+
+    init(_ sim: LinkSimulation) {
+        oneWayNanos = Int64(sim.rttMs) * 1_000_000 / 2
+        jitterNanos = Int64(sim.jitterMs) * 1_000_000
+        bytesPerSecond = Int64(sim.kbps) * 1024
+    }
+
+    private func jitter() -> Int64 { jitterNanos > 0 ? Int64.random(in: 0...jitterNanos) : 0 }
+
+    /// When an inbound chunk of `bytes` that arrives `now` is handed up.
+    func inboundDeadline(now: NIODeadline, bytes: Int) -> NIODeadline {
+        var leaves = now
+        if bytesPerSecond > 0 {
+            let start = max(now, inboundWireFree)
+            inboundWireFree = start + .nanoseconds(Int64(bytes) * 1_000_000_000 / bytesPerSecond)
+            leaves = inboundWireFree
+        }
+        let at = max(leaves + .nanoseconds(oneWayNanos + jitter()), inboundAt + .nanoseconds(1))
+        inboundAt = at
+        return at
+    }
+
+    func outboundDeadline(now: NIODeadline) -> NIODeadline {
+        let at = max(now + .nanoseconds(oneWayNanos + jitter()), outboundAt + .nanoseconds(1))
+        outboundAt = at
+        return at
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let buf = unwrapInboundIn(data)
+        let at = inboundDeadline(now: context.eventLoop.now, bytes: buf.readableBytes)
+        let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
+        context.eventLoop.scheduleTask(deadline: at) {
+            let (ctx, me) = bound.value
+            ctx.fireChannelRead(me.wrapInboundOut(buf))
+            ctx.fireChannelReadComplete()
+        }
+    }
+
+    /// Read-complete is fired per delayed read instead.
+    func channelReadComplete(context: ChannelHandlerContext) {}
+
+    /// EOF follows the data still in flight.
+    func channelInactive(context: ChannelHandlerContext) {
+        let at = max(context.eventLoop.now, inboundAt + .nanoseconds(1))
+        let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+        context.eventLoop.scheduleTask(deadline: at) { bound.value.fireChannelInactive() }
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let buf = unwrapOutboundIn(data)
+        let at = outboundDeadline(now: context.eventLoop.now)
+        let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
+        context.eventLoop.scheduleTask(deadline: at) {
+            let (ctx, me) = bound.value
+            ctx.writeAndFlush(me.wrapOutboundOut(buf), promise: promise)
+        }
+    }
+
+    /// Each delayed write flushes itself when it's delivered.
+    func flush(context: ChannelHandlerContext) {}
+}
+
 // MARK: - One SSH connection
 
 /// A single authenticated SSH connection; `openVerbChannel` multiplexes exec
@@ -391,6 +550,10 @@ final class SSHConnection: @unchecked Sendable {
     let channel: Channel
     private let host: RemoteHost
     var isAlive: Bool { channel.isActive }
+    /// When the connection last received bytes (any channel). A channel open
+    /// that's slow while bytes keep arriving is a busy slow link, not a
+    /// wedged connection — see `openVerbChannel`.
+    let activity: InboundActivity
 
     /// Synchronous connect + handshake + auth. Throws `SSHDialError`.
     init(host: RemoteHost, group: EventLoopGroup, strictHostKey: Bool,
@@ -410,9 +573,20 @@ final class SSHConnection: @unchecked Sendable {
             outcome.flag(.hostKeyChanged)
         }
         let connLabel = host.connectLabel
+        let activity = InboundActivity()
+        self.activity = activity
+        let sim = LinkSimulation.current
+        if sim.isActive {
+            FatClientLog.log("nio-conn: SIMULATED slow link (\(sim.label)) \(connLabel)")
+        }
         let bootstrap = ClientBootstrap(group: group)
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
+                    // Test knob: a simulated WAN between the socket and SSH.
+                    if sim.isActive {
+                        try channel.pipeline.syncOperations.addHandler(SimulatedLinkHandler(sim))
+                    }
+                    try channel.pipeline.syncOperations.addHandler(InboundActivityHandler(activity))
                     // Stall watchdog FIRST (head of the pipeline) so it sees
                     // every inbound packet during KEX/auth and only aborts on a
                     // genuine silence, not a slow link.
@@ -430,6 +604,16 @@ final class SSHConnection: @unchecked Sendable {
             }
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
+            // Keepalive tolerant of a jittery WAN (the OS default waits two
+            // hours idle): first probe after 30 s idle, then every 15 s, drop
+            // after 4 unanswered — ~90 s for a silently dead direct path. The
+            // poll keeps a live mirror from ever being idle that long, so
+            // this only reaps connections nothing is using. (A peer host's
+            // connection is loopback to the P2P shim; its network leg is
+            // tuned in P2PTransport.)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPALIVE), value: 30)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPINTVL), value: 15)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPCNT), value: 4)
             .connectTimeout(.seconds(30))
 
         do {
@@ -477,6 +661,9 @@ final class SSHConnection: @unchecked Sendable {
             _ = ch.pipeline.removeHandler(name: Self.watchdogName)
             FatClientLog.log("nio-conn: handshake+auth OK \(host.connectLabel)")
             child.close(promise: nil)
+            // A dropped connection (peer reset, server exit) never goes
+            // through close(): its spare control channel's fd goes here.
+            ch.closeFuture.whenComplete { [weak self] _ in self?.releaseSpare() }
         } catch {
             let flagged = outcome.get()
             channel.close(promise: nil)
@@ -488,18 +675,97 @@ final class SSHConnection: @unchecked Sendable {
         }
     }
 
+    /// A control channel opened ahead of need, its exec already sent: the
+    /// next control request rides it at once instead of paying the
+    /// channel-open round trip (~170 ms each way across the Pacific). The
+    /// server's control bridge waits for a request without a timeout, so an
+    /// idle spare costs nothing but a parked socket; one per connection
+    /// (= per lane).
+    private let spareLock = NSLock()
+    private var spareControlFD: Int32?
+    /// Set once the connection is gone: a spare opened after that (a refill
+    /// racing the drop) is closed instead of kept.
+    private var spareReleased = false
+
     /// Open an exec child channel for `verb`, bridge it to a socketpair, and
-    /// return the caller's fd immediately (bytes the caller writes sit in the
-    /// socketpair buffer until the exec is accepted — same as writing into a
-    /// still-handshaking `ssh` process's stdin). Nil if the socketpair or the
-    /// child-channel open fails outright.
+    /// return the caller's fd. The control verb is served from the spare when
+    /// there is a live one, and a new spare is opened behind it.
     func openVerbChannel(_ verb: String) -> Int32? {
+        guard verb == FatClient.controlVerb, !Self.noPrewarm else { return openFreshChannel(verb) }
+        spareLock.lock()
+        let spare = spareControlFD
+        spareControlFD = nil
+        spareLock.unlock()
+        let fd: Int32?
+        if let spare, Self.spareIsUsable(spare) {
+            fd = spare
+        } else {
+            if let spare { Darwin.close(spare) }
+            fd = openFreshChannel(verb)
+        }
+        if fd != nil { refillSpare() }
+        return fd
+    }
+
+    private func refillSpare() {
+        guard isAlive, let fd = openFreshChannel(FatClient.controlVerb) else { return }
+        spareLock.lock()
+        let released = spareReleased
+        let old = released ? nil : spareControlFD
+        if !released { spareControlFD = fd }
+        spareLock.unlock()
+        if let old { Darwin.close(old) }
+        if released { Darwin.close(fd) }
+    }
+
+    /// Close the spare control channel's fd, for good: from close(), the
+    /// pool's closeFuture handler (a dropped connection), and deinit.
+    func releaseSpare() {
+        spareLock.lock()
+        let spare = spareControlFD
+        spareControlFD = nil
+        spareReleased = true
+        spareLock.unlock()
+        if let spare { Darwin.close(spare) }
+    }
+
+    /// Spare fds currently held (tests).
+    var heldSpareCount: Int {
+        spareLock.lock()
+        defer { spareLock.unlock() }
+        return spareControlFD == nil ? 0 : 1
+    }
+
+    deinit { releaseSpare() }
+
+    /// Test knobs (A/B on a simulated link): no spare channel / no pipelining.
+    static let noPrewarm = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_NO_PREWARM"] != nil
+    static let noPipeline = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_NO_PIPELINE"] != nil
+
+    /// A spare is usable while nothing is waiting to be read on it: the
+    /// control bridge never speaks first, so readable = EOF (its channel
+    /// failed to open, or the connection went away).
+    static func spareIsUsable(_ fd: Int32) -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let r = poll(&p, 1, 0)
+        return r == 0
+    }
+
+    /// Open an exec child channel for `verb`, bridge it to a socketpair, and
+    /// return the caller's fd immediately (bytes the caller writes are sent
+    /// right behind the exec — the server buffers them until its bridge is
+    /// up). Nil if the socketpair or the child-channel open fails outright.
+    private func openFreshChannel(_ verb: String) -> Int32? {
         var fds: [Int32] = [0, 0]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
             FatClientLog.log("nio-dial: socketpair FAILED errno=\(errno)")
             return nil
         }
         let appFD = fds[0], pumpFD = fds[1]
+        // Never inherited by a spawned child (forkpty, Process): a child
+        // holding either end would keep the bridge — and its channel — open.
+        _ = fcntl(appFD, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(pumpFD, F_SETFD, FD_CLOEXEC)
         // Without NOSIGPIPE a peer-closed write raises SIGPIPE and kills the
         // process (no ssh child process to absorb it in this transport).
         var one: Int32 = 1
@@ -527,11 +793,35 @@ final class SSHConnection: @unchecked Sendable {
         // Bound the channel open: on timeout, EOF the app side (the request fails
         // like any dropped connection) and tear the connection down so the NEXT
         // request re-establishes a fresh one instead of reusing the corpse.
-        let timeout = ch.eventLoop.scheduleTask(in: .seconds(15)) { [weak self] in
-            FatClientLog.log("nio-dial: channel open timed out — dropping wedged connection")
-            closePump()
-            self?.close()
+        //
+        // "Wedged" means SILENT: on a slow link a big transfer on another
+        // channel of this connection (up to a 16 MB window of it) can sit
+        // ahead of the open confirmation for longer than 15 s while bytes
+        // keep flowing. Killing the connection then took that transfer, the
+        // poll and every other channel down with it — on a trans-Pacific link
+        // that WAS the "Reconnecting…" loop. So the stall timer re-arms while
+        // the connection is receiving, up to a hard ceiling.
+        let activity = self.activity
+        let opened = Date()
+        let stall = LinkTimeouts.channelOpenStall
+        let timeout = RescheduledTimeout()
+        func armOpenTimeout(after: TimeInterval) {
+            timeout.task = ch.eventLoop.scheduleTask(in: .milliseconds(Int64(after * 1000))) { [weak self] in
+                guard !timeout.done else { return }
+                let quiet = activity.secondsSinceLastInbound()
+                let waited = Date().timeIntervalSince(opened)
+                if quiet < stall, waited < LinkTimeouts.channelOpenCeiling {
+                    // Busy, not dead: wait until it's been `stall` quiet.
+                    armOpenTimeout(after: max(1, stall - quiet))
+                    return
+                }
+                FatClientLog.log("nio-dial: channel open timed out after \(Int(waited))s "
+                    + "(connection quiet \(Int(quiet))s) — dropping wedged connection")
+                closePump()
+                self?.close()
+            }
         }
+        armOpenTimeout(after: stall)
         // `syncOperations` (handler lookup + child addHandler) MUST run on the
         // event loop, not this caller's background thread — off-loop it trips
         // NIO's preconditionInEventLoop and crashes.
@@ -549,7 +839,8 @@ final class SSHConnection: @unchecked Sendable {
             }
         }
         promise.futureResult.whenComplete { result in
-            timeout.cancel()
+            timeout.done = true
+            timeout.task?.cancel()
             // Channel never opened — close the pump side so the app side EOFs.
             if case .failure = result { closePump() }
         }
@@ -557,6 +848,7 @@ final class SSHConnection: @unchecked Sendable {
     }
 
     func close() {
+        releaseSpare()
         channel.close(promise: nil)
     }
 
@@ -665,8 +957,8 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
     /// reads are re-armed only after the previous buffer landed on the fd.
     private let writeQueue: DispatchQueue
     private var readSource: DispatchSourceRead?
-    private var execAccepted = false
     private var fdClosed = false
+    private var readerStarted = false
     private let stateLock = NSLock()
 
     init(command: String, fd: Int32) {
@@ -680,20 +972,33 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
         // the write queue), so a fast producer can't balloon memory.
         _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
         _ = context.channel.setOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+        // A child channel of a connection that drops doesn't reliably get
+        // channelInactive (see SSHPTYSessionHandler): closeFuture always
+        // fires. Strong capture on purpose, like teardownFD's; it's idempotent.
+        context.channel.closeFuture.whenComplete { [self] _ in teardownFD() }
     }
 
     func channelActive(context: ChannelHandlerContext) {
         let exec = SSHChannelRequestEvent.ExecRequest(command: command, wantReply: true)
         context.triggerUserOutboundEvent(exec, promise: nil)
         context.fireChannelActive()
+        if SSHConnection.noPipeline { return }   // wait for the exec's acceptance
+        // Pipelined: the caller's bytes follow the exec at once rather than
+        // a round trip later, after its acceptance. Every Bromure server
+        // buffers bytes that beat its bridge (RemoteSSHHandlers'
+        // pendingInbound, since the first fat client); a refused exec
+        // closes the channel and they're dropped with it.
+        startFDReader(context: context)
+        context.read()
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
-        case is ChannelSuccessEvent where !execAccepted:
-            execAccepted = true
-            startFDReader(context: context)
-            context.read()
+        case is ChannelSuccessEvent:
+            if SSHConnection.noPipeline, !readerStarted {
+                startFDReader(context: context)
+                context.read()
+            }
         case is ChannelFailureEvent:
             context.close(promise: nil)
         case is ChannelEvent where (event as? ChannelEvent) == .inputClosed:
@@ -741,6 +1046,7 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
     // MARK: fd → channel
 
     private func startFDReader(context: ChannelHandlerContext) {
+        readerStarted = true
         let channel = context.channel
         let loop = context.eventLoop
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: writeQueue)

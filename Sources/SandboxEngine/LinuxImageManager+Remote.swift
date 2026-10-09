@@ -191,7 +191,7 @@ extension LinuxImageManager {
             text(steps.isEmpty
                 ? "Personalizing image (fonts, keyboard, locale)…"
                 : "Installing recommended packages (\(steps.count) step(s)) and personalizing…")
-            try await runPostinstall(
+            let graphicsCapabilities = try await runPostinstall(
                 steps: steps,
                 targetDisk: scratchDisk,
                 copyFonts: true,
@@ -206,6 +206,7 @@ extension LinuxImageManager {
             //    stale to `baseImageExists` (the catalog's exact version,
             //    which may lead or lag the constant around release week,
             //    is recorded in image-state.json instead).
+            try? fm.removeItem(at: graphicsCapabilitiesURL)
             try? fm.removeItem(at: linuxDiskURL)
             try fm.moveItem(at: scratchDisk, to: linuxDiskURL)
             try? fm.removeItem(at: linuxKernelURL)
@@ -213,6 +214,7 @@ extension LinuxImageManager {
             try? fm.removeItem(at: linuxInitrdURL)
             try fm.moveItem(at: scratchInitrd, to: linuxInitrdURL)
             try Self.imageVersion.write(to: imageVersionURL, atomically: true, encoding: .utf8)
+            if let graphicsCapabilities { try graphicsCapabilities.write(to: graphicsCapabilitiesURL, options: .atomic) }
             writeImageState(BaseImageState(
                 imageUUID: image.uuid,
                 version: image.version,
@@ -259,7 +261,7 @@ extension LinuxImageManager {
         do {
             progress(.stepStart("Installing recommended packages"))
             progress(.message("Installing recommended packages (\(steps.count) step(s))…"))
-            try await runPostinstall(
+            let graphicsCapabilities = try await runPostinstall(
                 steps: steps,
                 targetDisk: scratchDisk,
                 copyFonts: false,
@@ -270,6 +272,9 @@ extension LinuxImageManager {
 
             try? fm.removeItem(at: linuxDiskURL)
             try fm.moveItem(at: scratchDisk, to: linuxDiskURL)
+
+            try? fm.removeItem(at: graphicsCapabilitiesURL)
+            if let graphicsCapabilities { try graphicsCapabilities.write(to: graphicsCapabilitiesURL, options: .atomic) }
 
             var state = loadImageState()
                 ?? BaseImageState(imageUUID: nil, version: Self.imageVersion,
@@ -338,6 +343,7 @@ extension LinuxImageManager {
     /// user's macOS fonts and applying their keyboard/locale (both
     /// needed for downloaded images — a published build carries neither).
     @MainActor
+    @discardableResult
     func runPostinstall(
         steps: [PostinstallStep],
         targetDisk: URL,
@@ -345,7 +351,7 @@ extension LinuxImageManager {
         personalize: Personalization?,
         environmentOverride: InstallerEnvironment? = nil,
         progress: @escaping (ProgressEvent) -> Void
-    ) async throws {
+    ) async throws -> Data? {
         // Materialise the steps as NNNN-<uuid8>.sh files in a temp dir the
         // guest mounts as the `postinstall` virtiofs share; lexical order
         // is execution order. Line 1 of each file is the human description
@@ -353,6 +359,8 @@ extension LinuxImageManager {
         let fm = FileManager.default
         let shareDir = fm.temporaryDirectory
             .appendingPathComponent("bromure-postinstall-\(UUID().uuidString)", isDirectory: true)
+        let outputDir = shareDir.appendingPathComponent("output", isDirectory: true)
+        try fm.createDirectory(at: outputDir, withIntermediateDirectories: true)
         let stepsDir = shareDir.appendingPathComponent("steps", isDirectory: true)
         try fm.createDirectory(at: stepsDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: shareDir) }
@@ -402,12 +410,18 @@ extension LinuxImageManager {
             targetDisk: targetDisk,
             command: "sh /tmp/vm-setup/postinstall.sh \(fontsArg) \(personalizeArgs)",
             stepShareDir: shareDir,
+            outShareDir: outputDir,
             shareFonts: copyFonts,
             successMarker: "SANDBOX_POSTINSTALL_DONE",
             failureMarker: "SANDBOX_POSTINSTALL_FAILED",
             markerTimeout: 20 * 60,
             progress: progress
         )
+        let marker = outputDir.appendingPathComponent("graphics-capabilities.json")
+        guard let attributes = try? fm.attributesOfItem(atPath: marker.path),
+              let size = attributes[.size] as? NSNumber, size.intValue <= 8192,
+              let data = try? Data(contentsOf: marker), Self.validGraphicsCapabilities(data) else { return nil }
+        return data
     }
 
     var netbootKernelURL: URL { storageDir.appendingPathComponent("netboot-vmlinuz") }
@@ -539,7 +553,7 @@ extension LinuxImageManager {
         var alpineRepoBase: String?
         if let host = guestProxyHost {
             do {
-                try proxy.start()
+                try proxy.start(guestGateway: host)
                 alpineRepoBase = proxy.guestBase(host: host)?.absoluteString
             } catch {
                 print("[postinstall] Alpine package proxy failed to start (\(error)) — guest fetches go direct")

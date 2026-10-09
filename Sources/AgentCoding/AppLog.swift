@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MachO
 
 // MARK: - Durable trace of the GUI process
 //
@@ -41,19 +42,102 @@ enum AppLog {
         fileFD = fd
         teeStderr()
         stamp("launch pid \(getpid()) \(build()) \(ProcessInfo.processInfo.operatingSystemVersionString)")
-        atexit { AppLog.stamp("exit pid \(getpid())") }
+        atexit { AppLog.exitTrace() }
+        installExitHook()
         installFatalSignalBreadcrumbs()
+    }
+
+    /// The process is exiting through exit(3) — a quit, or anything else
+    /// calling it (a library, a CLI path): stamp it with the backtrace of
+    /// the caller. atexit handlers run inside exit() on the calling thread,
+    /// so the stack names who asked. (_exit and fatal signals skip atexit;
+    /// the signal breadcrumbs cover the latter.) Into the log and, when
+    /// started from a terminal, its stderr too.
+    static func exitTrace() {
+        stamp("exit pid \(getpid()) on \(Thread.isMainThread ? "the main thread" : "a background thread"), called from:",
+              alsoToTerminal: true)
+        writeBacktrace()
+    }
+
+    private static func writeBacktrace() {
+        var frames = [UnsafeMutableRawPointer?](repeating: nil, count: 64)
+        let n = backtrace(&frames, Int32(frames.count))
+        guard n > 0 else { return }
+        if fileFD >= 0 { backtrace_symbols_fd(&frames, n, fileFD) }
+        if originalStderr >= 0 { backtrace_symbols_fd(&frames, n, originalStderr) }
+    }
+
+    // MARK: _exit hook
+    //
+    // _exit / _Exit end the process at once — no atexit, no stamp — and a
+    // macOS 15 user's app vanished that way (status 1) right after a Claude
+    // sign-in. Every call this binary makes to them (our code, and libghostty,
+    // linked in statically) goes through its GOT; pointing those slots at a
+    // hook that logs the caller's backtrace, then calls the real _exit,
+    // names who did it. Apple's frameworks live in the shared cache and are
+    // left alone. A forked child (forkpty → exec failed → _exit) just exits:
+    // it's not the app ending, and it mustn't log from a forked process.
+
+    private typealias ExitFn = @convention(c) (Int32) -> Void
+    private static var realExit: ExitFn?
+    private static var exitTargets: [UInt] = []
+    private static var appPID: pid_t = 0
+
+    private static let exitHook: ExitFn = { code in
+        if getpid() == AppLog.appPID {
+            AppLog.stamp("_exit(\(code)) pid \(getpid()) on \(Thread.isMainThread ? "the main thread" : "a background thread") — ending without exit handlers, called from:",
+                         alsoToTerminal: true)
+            AppLog.writeBacktrace()
+        }
+        AppLog.realExit?(code)
+    }
+
+    private static func installExitHook() {
+        guard let me = dlopen(nil, RTLD_NOW), let real = dlsym(me, "_exit") else { return }
+        appPID = getpid()
+        realExit = unsafeBitCast(real, to: ExitFn.self)
+        let names: [String] = ["_exit", "_Exit"]
+        exitTargets = names.compactMap { name in dlsym(me, name).map { UInt(bitPattern: $0) } }
+        // Called for every image already loaded, then for each new one.
+        _dyld_register_func_for_add_image { header, _ in AppLog.hookExitCalls(in: header) }
+    }
+
+    /// Point `image`'s GOT slots for _exit/_Exit at the hook. Shared-cache
+    /// images (the system) are skipped.
+    private static func hookExitCalls(in image: UnsafePointer<mach_header>?) {
+        guard let image, image.pointee.flags & 0x8000_0000 == 0 else { return }   // MH_DYLIB_IN_CACHE
+        let mh = UnsafeRawPointer(image).assumingMemoryBound(to: mach_header_64.self)
+        let hookAddr = UInt(bitPattern: unsafeBitCast(exitHook, to: UnsafeRawPointer.self))
+        let page = UInt(vm_page_size)
+        for (seg, sect) in [("__DATA_CONST", "__got"), ("__DATA", "__got"), ("__DATA", "__la_symbol_ptr"),
+                            ("__AUTH_CONST", "__auth_got"), ("__DATA_CONST", "__auth_got")] {   // ggignore: Mach-O section names
+            var size: UInt = 0
+            guard let data = getsectiondata(mh, seg, sect, &size), size > 0 else { continue }
+            let slots = UnsafeMutableRawPointer(data).assumingMemoryBound(to: UInt.self)
+            for i in 0..<(Int(size) / MemoryLayout<UInt>.size) where exitTargets.contains(slots[i]) {
+                let start = UInt(bitPattern: slots + i) & ~(page - 1)
+                guard let p = UnsafeMutableRawPointer(bitPattern: start),
+                      mprotect(p, Int(page), PROT_READ | PROT_WRITE) == 0 else { continue }
+                slots[i] = hookAddr
+                mprotect(p, Int(page), PROT_READ)
+            }
+        }
     }
 
     /// One dated line straight into the file (not via stderr, so it lands
     /// even when the tee is gone).
-    static func stamp(_ text: String) {
+    /// `alsoToTerminal`: the original stderr too (the exit traces, whose
+    /// backtrace goes there as well when started from a terminal).
+    static func stamp(_ text: String, alsoToTerminal: Bool = false) {
         guard fileFD >= 0 else { return }
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let line = "=== \(f.string(from: Date())) \(text)\n"
         line.utf8CString.withUnsafeBufferPointer { buf in
             writeAll(fileFD, UnsafeRawPointer(buf.baseAddress!), buf.count - 1)
+            if alsoToTerminal, originalStderr >= 0 {
+                writeAll(originalStderr, UnsafeRawPointer(buf.baseAddress!), buf.count - 1)
+            }
         }
     }
 
@@ -164,3 +248,6 @@ enum AppLog {
         raise(sig)
     }
 }
+
+/// `__exit-hook-test`: a named caller for the hook's backtrace to show.
+@inline(never) func exitHookTestBailOut() -> Never { _exit(3) }

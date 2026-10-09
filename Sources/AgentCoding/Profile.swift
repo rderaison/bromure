@@ -320,7 +320,10 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         if let list = try c.decodeIfPresent([String].self, forKey: .hostFilters) {
             hostFilters = list
         } else if let single = try c.decodeIfPresent(String.self, forKey: .hostFilter), !single.isEmpty {
-            hostFilters = [single]           // migrate legacy single-host profiles
+            // Migrate legacy single-host profiles — a list typed into that
+            // one field ("a.com, b.com") becomes its hosts.
+            hostFilters = single.split(whereSeparator: { $0 == "," || $0 == " " })
+                .map { String($0) }.filter { !$0.isEmpty }
         } else {
             hostFilters = []
         }
@@ -382,10 +385,24 @@ public struct GitHTTPSCredential: Codable, Equatable, Sendable, Identifiable {
     }
 
     /// True if this entry has enough to be written to ~/.git-credentials.
+    /// The username may be blank — forges take any name with a token, and a
+    /// GitHub token saved without one used to be skipped entirely (no
+    /// ~/.git-credentials line, so an in-VM clone of a private repo failed
+    /// with "could not read Username").
     public var isUsable: Bool {
         !host.trimmingCharacters(in: .whitespaces).isEmpty
-            && !username.trimmingCharacters(in: .whitespaces).isEmpty
             && !token.isEmpty
+    }
+
+    /// The name git sends with the token: the one set, else the forge's
+    /// convention for token auth.
+    public var effectiveUsername: String {
+        let u = username.trimmingCharacters(in: .whitespaces)
+        if !u.isEmpty { return u }
+        let h = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if h == "github.com" || h.hasSuffix(".github.com") { return "x-access-token" }
+        if h == "gitlab.com" || h.hasPrefix("gitlab.") { return "oauth2" }
+        return "git"
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -928,6 +945,72 @@ public struct ImportedConfigFile: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// How an approved coding task leaves the board: merged into the branch it
+/// came from (the default), or opened as a pull request on the forge.
+public enum TaskFinish: String, Codable, CaseIterable, Sendable {
+    case merge
+    case pullRequest
+
+    /// UserDefaults key mirroring the Preferences template's choice.
+    public static let appDefaultKey = "codingTasks.finish"
+
+    /// The app-wide default (Preferences). Merge unless set otherwise.
+    public static var appDefault: TaskFinish {
+        get {
+            (UserDefaults.standard.string(forKey: appDefaultKey)).flatMap(TaskFinish.init(rawValue:)) ?? .merge
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: appDefaultKey) }
+    }
+
+    /// The effective choice: the task's own, else its workspace's, else the
+    /// app's.
+    public static func resolve(task: TaskFinish?, workspace: TaskFinish?,
+                               app: TaskFinish) -> TaskFinish {
+        task ?? workspace ?? app
+    }
+
+    public var label: String {
+        switch self {
+        case .merge: return NSLocalizedString("Merge into the branch", comment: "task finish preference")
+        case .pullRequest: return NSLocalizedString("Open a pull request", comment: "task finish preference")
+        }
+    }
+}
+
+/// How much Kimi Code asks before acting in a workspace. The VM is the
+/// sandbox and Bromure's host-side guardrails watch its traffic, so the
+/// default is Kimi's "Never Ask" mode (`--auto`): no tool approvals at all,
+/// Bromure's own MCP tools included, and Kimi answers its own questions and
+/// plan exits. "Ask When Needed" (`--yolo`, Kimi's former YOLO mode) still
+/// runs ordinary commands and edits WITHOUT asking — it only stops before
+/// sensitive files (.env, SSH keys), dangerous commands (rm -rf, shutdown),
+/// leaving Plan mode, and when the agent has a question. The UI labels it by
+/// that behavior ("Ask before sensitive actions"), since "ask when needed"
+/// reads as if routine commands were approved one by one. Kimi has no working per-tool allow list (it ignores
+/// `[[permission.rules]]`), so the mode is the only lever — passed on every
+/// interactive launch and resume (a resume without it falls back to Kimi's
+/// "Always Ask").
+public enum KimiApprovals: String, Codable, CaseIterable, Sendable {
+    case neverAsk
+    case askWhenNeeded
+
+    /// The Kimi Code flag for an interactive launch. Never combined with
+    /// `--prompt` (Kimi refuses it; a one-shot run never asks anyway).
+    public var launchFlag: String {
+        switch self {
+        case .neverAsk: return "--auto"
+        case .askWhenNeeded: return "--yolo"
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .neverAsk: return NSLocalizedString("Never ask", comment: "Kimi approvals setting")
+        case .askWhenNeeded: return NSLocalizedString("Ask before sensitive actions", comment: "Kimi approvals setting: --yolo (Kimi’s Ask When Needed mode); ordinary commands still run without asking")
+        }
+    }
+}
+
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public enum Tool: String, Codable, CaseIterable, Sendable {
         case claude
@@ -1410,6 +1493,55 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var localEngineURL: String?
     /// Optional bearer token `localEngineURL` requires (vLLM `--api-key`).
     public var localEngineAPIKey: String?
+    /// The local model's context window from the Models settings (entered or
+    /// probed) — set on the launch copy by the models overlay, never saved.
+    /// Wins over the server's advertised value and the 128K fallback.
+    public var localModelContextWindow: Int? = nil
+    /// The context window on omp's own Models row: omp switched natively to a
+    /// custom OpenAI-compatible server, or omp's local-route model (wins over
+    /// `localModelContextWindow` for omp's models.yml). Launch copy only.
+    public var ompContextWindow: Int? = nil
+    /// The providers configured in Settings → Models that omp isn't on, so
+    /// its model picker still offers them (the assigned one stays the
+    /// default). Launch copy only.
+    public var ompExtraProviders: [OmpExtraProvider] = []
+
+    /// One provider omp can switch to besides its own.
+    public struct OmpExtraProvider: Equatable, Sendable {
+        public var provider: ModelProvider
+        /// The real key (swapped in on `host` only); empty for a keyless server.
+        public var apiKey: String
+        /// OpenAI-compatible base URL (an entry in omp's models.yml); nil for
+        /// a provider omp reaches natively from its key's env var.
+        public var baseURL: String?
+        /// The model ids offered for an OpenAI-compatible one.
+        public var models: [String]
+
+        public init(provider: ModelProvider, apiKey: String, baseURL: String?, models: [String]) {
+            self.provider = provider
+            self.apiKey = apiKey
+            self.baseURL = baseURL
+            self.models = models
+        }
+
+        /// The env var omp reads its key from.
+        public var envVar: String {
+            if baseURL == nil, let op = provider.ompProvider { return op.apiKeyEnvVar }
+            return "BROMURE_OMP_\(provider.rawValue.uppercased())_API_KEY"
+        }
+        /// Where its key is swapped in.
+        public var host: String? {
+            if let baseURL { return URL(string: baseURL)?.host?.lowercased() }
+            return provider.ompProvider?.apiHost
+        }
+        /// Its provider name in omp's models.yml.
+        public var yamlName: String { "bromure-\(provider.rawValue)" }
+        /// The provider as omp names it (its own slug for a native one).
+        public var ompSlug: String {
+            if baseURL == nil, let op = provider.ompProvider { return op.rawValue }
+            return yamlName
+        }
+    }
 
     /// Per-workspace override of the global model settings. nil ⇒ this workspace
     /// inherits `ModelSettingsStore.shared` (the Preferences → Models config).
@@ -1525,6 +1657,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         !networkPolicy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// "Log allowed connections" (Firewall pane): whether the Security
+    /// Timeline gets a row for connections the firewall lets through, not just
+    /// the blocked ones. nil = automatic — logged while the workspace has
+    /// rules (or denies unmatched traffic), so a workspace with no firewall
+    /// doesn't claim to have "allowed" anything. Rows are deduplicated per
+    /// destination (one a minute) and fold into a counted row.
+    public var logAllowedConnections: Bool? = nil
+
     /// Parsed firewall rules, or allow-all when empty/unparseable (never blocks
     /// on a bad rule — the editor validates before save). An OpenShell policy
     /// that fails to parse is the exception: it fails CLOSED (deny all but the
@@ -1534,12 +1674,19 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // An organization boundary puts every workspace under OpenShell: its
         // own policy (checked against the boundary), or the boundary itself.
         if usesOpenShellPolicy || OpenShellGovernance.shared.boundaryYAML != nil {
-            return resolvedOpenShellEgressPolicy
+            var policy = resolvedOpenShellEgressPolicy
+            policy.logsAllowed = logAllowedConnections ?? policy.isActive
+            return policy
         }
         #endif
-        guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .allowAll }
         #if canImport(SandboxEngine)
-        guard var policy = try? EgressPolicy.parse(egressRules) else { return .allowAll }
+        var none = EgressPolicy.allowAll
+        none.logsAllowed = logAllowedConnections
+        guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              var policy = try? EgressPolicy.parse(egressRules) else { return none }
+        // Automatic: by the user's own rules, before the built-in allowance
+        // below makes every parsed ruleset look "active".
+        policy.logsAllowed = logAllowedConnections ?? policy.isActive
         // The local-inference sentinel (guest → https://bromure.llm → on-host
         // engine) never leaves this Mac, so no egress ruleset may cut agents
         // off from Local Models — without this, `default deny` 403s every
@@ -1554,6 +1701,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         #else
         // Client mirror (iOS/visionOS): the stub EgressPolicy carries no rule
         // model and the client never enforces egress — the server does.
+        guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .allowAll }
         return (try? EgressPolicy.parse(egressRules)) ?? .allowAll
         #endif
     }
@@ -1760,6 +1908,22 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var createdAt: Date
     public var lastUsedAt: Date?
 
+    /// Fields the app maintains itself, never the editor: a save from a
+    /// working copy takes them from the stored profile instead.
+    public mutating func adoptRuntimeFields(from stored: Profile) {
+        createdAt = stored.createdAt
+        // The later of the two: a use recorded while the editor was open
+        // wins; nothing ever moves it backwards.
+        switch (lastUsedAt, stored.lastUsedAt) {
+        case let (a?, b?): lastUsedAt = max(a, b)
+        case (nil, let b): lastUsedAt = b
+        default: break
+        }
+        if stored.baseImageVersionAtClone != nil {
+            baseImageVersionAtClone = stored.baseImageVersionAtClone
+        }
+    }
+
     /// The base-image version stamp captured the moment this profile's
     /// disk was clonefile()'d from base.img. Used to detect when the base
     /// has been rebuilt since the clone (so we can offer to reset).
@@ -1771,8 +1935,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// passed — so the next boot after it, whichever comes last.
     public var baseImageUpgradeRemindAfter: Date?
     /// Which workspaces agents here may reach — delegate work into, ask a
-    /// session of by @nickname. nil = every workspace (the default); a list
-    /// names the only ones (empty = none but this one).
+    /// session of by @nickname. A list names the only ones (empty = none
+    /// but this one) — what a new workspace starts with
+    /// (`newProfileFromTemplate`): reach is opened by the user, workspace
+    /// by workspace, in General › Reach. nil = every workspace (and remote
+    /// hosts): only for workspaces that stored it before, or once the user
+    /// turns "Every workspace" on.
     public var agentReach: [UUID]?
 
     /// Visual color in the picker sidebar. Optional in JSON for forward
@@ -1840,6 +2008,15 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Boot a VM for this profile automatically when the agent starts (at login,
     /// via the LaunchAgent installed while any profile has this on). Default off.
     public var bootAtStartup: Bool
+
+    /// What happens when a coding task done in this workspace is approved
+    /// on the board: merged into its branch, or opened as a pull request.
+    /// nil = the app-wide default (Preferences, i.e. the template's own
+    /// value — see `TaskFinish.appDefault`).
+    public var taskFinish: TaskFinish? = nil
+
+    /// How much Kimi Code asks before acting here (see `KimiApprovals`).
+    public var kimiApprovals: KimiApprovals = .neverAsk
 
     public enum NetworkMode: String, Codable, CaseIterable, Sendable {
         case nat
@@ -1950,6 +2127,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Missing in pre-upgrade JSON → decoder defaults to `.virtiofs`.
     /// New profiles are created `.ext4`.
     public var homeModel: HomeModel
+    /// Size of the ext4 home image, GiB; nil = the app-wide default
+    /// (`SessionDisk.resolvedHomeImageGB`). Grow-only: a larger value takes
+    /// effect at the next cold boot (the host grows home.img, the guest
+    /// agent grows the filesystem) — a running VM can't see its disk grow.
+    public var homeImageGB: Int? = nil
 
     public init(
         id: UUID = UUID(),
@@ -2174,6 +2356,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case openShellProviders
         case openShellAdvisorMode
         case watchdogMode
+        case logAllowedConnections
         case disableTransparentProxy
         case strictCredentials
         case strictSandbox
@@ -2198,8 +2381,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case sshKeyRequiresApproval
         case closeAction
         case bootAtStartup
+        case taskFinish
+        case kimiApprovals
         case mcpServers
         case homeModel
+        case homeImageGB
     }
 
     public init(from decoder: Decoder) throws {
@@ -2307,6 +2493,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                                                    forKey: .openShellProviders) ?? []
         openShellAdvisorMode = try c.decodeIfPresent(String.self, forKey: .openShellAdvisorMode) ?? "off"
         watchdogMode = try c.decodeIfPresent(String.self, forKey: .watchdogMode) ?? "off"
+        logAllowedConnections = try c.decodeIfPresent(Bool.self, forKey: .logAllowedConnections)
         disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
         strictCredentials = try c.decodeIfPresent(Bool.self, forKey: .strictCredentials) ?? false
         strictSandbox = try c.decodeIfPresent(Bool.self, forKey: .strictSandbox) ?? false
@@ -2333,10 +2520,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         sshKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .sshKeyRequiresApproval) ?? false
         closeAction = try c.decodeIfPresent(CloseAction.self, forKey: .closeAction) ?? .ask
         bootAtStartup = try c.decodeIfPresent(Bool.self, forKey: .bootAtStartup) ?? false
+        taskFinish = try c.decodeIfPresent(TaskFinish.self, forKey: .taskFinish)
+        // An unknown value (a newer build's) falls back to the default.
+        kimiApprovals = (try? c.decodeIfPresent(KimiApprovals.self, forKey: .kimiApprovals)) ?? .neverAsk
         mcpServers = try c.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
         // Pre-upgrade profiles have no homeModel key → they stay on the
         // legacy virtiofs home until the user accepts the migration.
         homeModel = try c.decodeIfPresent(HomeModel.self, forKey: .homeModel) ?? .virtiofs
+        homeImageGB = try c.decodeIfPresent(Int.self, forKey: .homeImageGB)
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -2490,6 +2681,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if kernelSentry != .off {
             try c.encode(kernelSentry, forKey: .kernelSentry)
         }
+        try c.encodeIfPresent(logAllowedConnections, forKey: .logAllowedConnections)
         if disableExfiltrationAlerts {
             try c.encode(disableExfiltrationAlerts, forKey: .disableExfiltrationAlerts)
         }
@@ -2540,10 +2732,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if sshKeyRequiresApproval { try c.encode(true, forKey: .sshKeyRequiresApproval) }
         try c.encode(closeAction, forKey: .closeAction)
         if bootAtStartup { try c.encode(bootAtStartup, forKey: .bootAtStartup) }
+        try c.encodeIfPresent(taskFinish, forKey: .taskFinish)
+        if kimiApprovals != .neverAsk { try c.encode(kimiApprovals, forKey: .kimiApprovals) }
         // Encode homeModel unconditionally: its ABSENCE is what marks a
         // pre-upgrade profile (decoder defaults to .virtiofs), so a new
         // ext4 profile must always carry the key explicitly.
         try c.encode(homeModel, forKey: .homeModel)
+        try c.encodeIfPresent(homeImageGB, forKey: .homeImageGB)
         if !mcpServers.isEmpty {
             try c.encode(mcpServers, forKey: .mcpServers)
         }
@@ -3365,6 +3560,9 @@ public final class ProfileStore {
         stripped.id = Self.templateID
         stripped.name = "Defaults"
         let secrets = ProfileSecrets.extract(stripping: &stripped)
+        // The template's finish choice is the app-wide default the board
+        // reads without decrypting the template (see TaskFinish.appDefault).
+        TaskFinish.appDefault = stripped.taskFinish ?? .merge
         let data = try JSONEncoder.iso8601().encode(stripped)
         try fm.createDirectory(at: templateURL.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
@@ -3405,6 +3603,13 @@ public final class ProfileStore {
         p.createdAt = Date()
         p.lastUsedAt = nil
         p.baseImageVersionAtClone = nil
+        // Reach is explicit for new workspaces: agents here reach no other
+        // workspace until the user ticks some (nil = "every workspace" stays
+        // only for workspaces that already stored it).
+        p.agentReach = []
+        // The template's finish choice is the APP default, not a
+        // per-workspace override: a new workspace follows it live.
+        p.taskFinish = nil
         return p
     }
 
@@ -3574,6 +3779,23 @@ public final class ProfileStore {
               let secrets = try? JSONDecoder().decode(ProfileSecrets.self, from: plain)
         else { return }
         secrets.apply(to: &profile)
+    }
+
+    /// The stored copy of a workspace (profile.json only — no secrets), or
+    /// nil when it isn't saved yet.
+    public func storedProfile(id: UUID) -> Profile? {
+        let json = rootDir.appendingPathComponent(id.uuidString, isDirectory: true)
+            .appendingPathComponent("profile.json")
+        guard let data = try? Data(contentsOf: json) else { return nil }
+        return try? JSONDecoder.iso8601().decode(Profile.self, from: data)
+    }
+
+    /// Save an editor's working copy without clobbering what the app kept
+    /// up to date while the editor was open (`lastUsedAt` moves every
+    /// launch; an older copy wrote it backwards).
+    public func saveEdited(_ profile: inout Profile) throws {
+        if let stored = storedProfile(id: profile.id) { profile.adoptRuntimeFields(from: stored) }
+        try save(profile)
     }
 
     public func touch(_ profile: Profile) throws {
@@ -4003,7 +4225,25 @@ public final class ProfileStore {
     /// settings.json (bromure-agentd.py's `_CLAUDE_ALWAYS_ALLOWED` mirrors it
     /// for the guest-side rewrite). The whole `delegation` server: it only
     /// reaches the host, which enforces the per-workspace reach policy.
-    static let claudeAlwaysAllowed = ["mcp__delegation"]
+    /// And `display`: showing the user a picture or a chart touches nothing.
+    static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"]
+
+    /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
+    /// (`StopCancelled`, fired instead of `Stop`) reports the tab done.
+    static let grokStatusHooksJSON = """
+    {
+      "hooks": {
+        "StopCancelled": [
+          {
+            "hooks": [
+              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh done", "timeout": 5 }
+            ]
+          }
+        ]
+      }
+    }
+
+    """
 
     public func prepareHomeDirectory(for profile: Profile,
                                      terminalDefaults: TerminalAppDefaults,
@@ -4034,6 +4274,38 @@ public final class ProfileStore {
     ///   that touches other host dirs (legacy ssh migration) is skipped
     ///   (`seedMode == true`) and handled by the agent from
     ///   `claude-settings.spec.json` instead.
+    /// The generic identity agents commit under when nobody configured one —
+    /// deliberately not a real person (Bromure ships widely; never the
+    /// user's own name or address).
+    static let genericGitName = "Bromure Agent"
+    static let genericGitEmail = "agent@bromure.invalid"
+
+    /// The `[user]` identity written to the guest's ~/.gitconfig. The
+    /// workspace's own identity wins; with none, the template's (the one set
+    /// for all workspaces); a field still missing — and not supplied by an
+    /// imported ~/.gitconfig, which is written above the managed block —
+    /// takes the generic agent identity, so a first commit never dies on
+    /// "Please tell me who you are". Returned empty fields are not written.
+    static func resolvedGitIdentity(name rawName: String, email rawEmail: String,
+                                    template: Profile?,
+                                    importedGitconfig: String?) -> (name: String, email: String) {
+        let ws = CharacterSet.whitespaces
+        var name = rawName.trimmingCharacters(in: ws)
+        var email = rawEmail.trimmingCharacters(in: ws)
+        if name.isEmpty && email.isEmpty, let template {
+            name = template.gitUserName.trimmingCharacters(in: ws)
+            email = template.gitUserEmail.trimmingCharacters(in: ws)
+        }
+        #if os(macOS)
+        let imported = importedGitconfig.flatMap { try? GitConfigParse.parse($0) }?.identity
+        #else
+        let imported: (name: String?, email: String?)? = nil   // the iOS client never seeds a guest home
+        #endif
+        if name.isEmpty && (imported?.name ?? "").isEmpty { name = genericGitName }
+        if email.isEmpty && (imported?.email ?? "").isEmpty { email = genericGitEmail }
+        return (name, email)
+    }
+
     private func populateManagedHome(in home: URL,
                                      profile: Profile,
                                      tokenPlan: SessionTokenPlan?,
@@ -4097,9 +4369,9 @@ public final class ProfileStore {
         let gitCredsURL = home.appendingPathComponent(".git-credentials")
         let usableCreds = profile.gitHTTPSCredentials.filter { $0.isUsable }
         let gitLines = usableCreds.compactMap { c -> String? in
-            guard let fake = tokenPlan?.fakeForGitHTTPS(host: c.host, username: c.username)
+            guard let fake = tokenPlan?.fakeForGitHTTPS(host: c.host, username: c.effectiveUsername)
             else { return nil }
-            let user = Self.percentEncode(c.username)
+            let user = Self.percentEncode(c.effectiveUsername)
             let tok  = Self.percentEncode(fake)
             let host = c.host.trimmingCharacters(in: .whitespaces)
             return "https://\(user):\(tok)@\(host)"
@@ -4123,12 +4395,13 @@ public final class ProfileStore {
         // A workspace with no identity of its own takes the one set for all
         // workspaces (the template) — else agents can't commit, and stall
         // asking whose name to use.
-        let own = (profile.gitUserName.trimmingCharacters(in: .whitespaces),
-                   profile.gitUserEmail.trimmingCharacters(in: .whitespaces))
-        let fallback = own.0.isEmpty && own.1.isEmpty ? loadTemplate() : nil
-        let name = own.0.isEmpty ? (fallback?.gitUserName.trimmingCharacters(in: .whitespaces) ?? "") : own.0
-        let email = own.1.isEmpty && own.0.isEmpty ? (fallback?.gitUserEmail.trimmingCharacters(in: .whitespaces) ?? "") : own.1
         let importedGit = profile.importedConfigFiles.first { $0.path == ".gitconfig" }
+        let (name, email) = Self.resolvedGitIdentity(
+            name: profile.gitUserName, email: profile.gitUserEmail,
+            template: profile.gitUserName.trimmingCharacters(in: .whitespaces).isEmpty
+                && profile.gitUserEmail.trimmingCharacters(in: .whitespaces).isEmpty
+                ? loadTemplate() : nil,
+            importedGitconfig: importedGit?.contents)
         if !name.isEmpty || !email.isEmpty || !usableCreds.isEmpty || importedGit != nil {
             var lines = [Self.managedSentinel]
             // The user's own file goes FIRST: git resolves single-valued keys
@@ -4147,8 +4420,15 @@ public final class ProfileStore {
                 if !email.isEmpty { lines.append("    email = \(email)") }
             }
             if !usableCreds.isEmpty {
+                // Read-only use of the store file: git's `store` helper ERASES
+                // a credential the server rejects, so one rejected request
+                // (e.g. before the proxy swap worked) left ~/.git-credentials
+                // empty for the rest of the VM's life and every later clone
+                // failed with "could not read Username". Only `get` is
+                // forwarded; `store` / `erase` are ignored — the file is
+                // Bromure's, rewritten from the workspace at each boot.
                 lines.append("[credential]")
-                lines.append("    helper = store")
+                lines.append("    helper = \"!f() { [ \\\"$1\\\" = get ] || return 0; exec git credential-store --file \\\"$HOME/.git-credentials\\\" get; }; f\"")
             }
             try lines.joined(separator: "\n")
                 .appending("\n")
@@ -4378,6 +4658,12 @@ public final class ProfileStore {
             }
             perms["allow"] = allow
             settings["permissions"] = perms
+            // Auto mode's classifier: what this VM is (see ClaudeAutoMode) —
+            // Bromure's entries replaced, the user's own kept.
+            var autoMode = settings["autoMode"] as? [String: Any] ?? [:]
+            autoMode["environment"] = ClaudeAutoMode.merged(
+                autoMode["environment"], managed: ClaudeAutoMode.environment(userText: ClaudeAutoMode.userText))
+            settings["autoMode"] = autoMode
             // We used to seed CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 because the
             // framebuffer kitty and Claude Code's fullscreen-TUI mouse capture
             // fought over click-drag selection. tmux now owns the mouse (the
@@ -4432,11 +4718,17 @@ public final class ProfileStore {
                     return !text.contains(hookScript) && !text.contains("/.bromure/pq-")
                 }
             }
+            hooks["SessionStart"] = hookCmd("start") + othersUnder("SessionStart")
             hooks["UserPromptSubmit"] = hookCmd("working") + othersUnder("UserPromptSubmit")
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
             hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
             hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
+            // A turn the API refused (auth, quota, overload) fires StopFailure,
+            // not Stop: without it the tab sat "working" forever. A refused
+            // turn is the user's to fix — needs you. (Grok runs these hooks
+            // too and has the same event.)
+            hooks["StopFailure"] = hookCmd("needsInput") + othersUnder("StopFailure")
             settings["hooks"] = hooks
 
             let data = try JSONSerialization.data(withJSONObject: settings,
@@ -4473,6 +4765,23 @@ public final class ProfileStore {
                     }
                 }
             }
+        }
+        // Claude with its account features: the OAuth stand-in the proxy
+        // turns into the real login (see ClaudeStandIn). Written in both
+        // modes; with the mode off, taken back — only when it's ours.
+        let claudeCredsURL = home.appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent(".credentials.json")
+        if let creds = tokenPlan?.claudeOAuthStandIn {
+            try? fm.createDirectory(at: claudeCredsURL.deletingLastPathComponent(),
+                                    withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
+            try? creds.write(to: claudeCredsURL, options: .atomic)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                  ofItemAtPath: claudeCredsURL.path)
+        } else if !seedMode, let data = try? Data(contentsOf: claudeCredsURL),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["_bromureManaged"] as? Bool == true {
+            try? fm.removeItem(at: claudeCredsURL)
         }
         do {
             // The reporter script the hooks call (idempotent overwrite).
@@ -4517,8 +4826,11 @@ public final class ProfileStore {
             # types over). Only a real prompt is needsInput; idle is done;
             # anything else (auth_success, elicitation bookkeeping, quota
             # notices) says nothing about the turn.
+            # Grok runs these same hooks (it loads ~/.claude/settings.json)
+            # but spells the field notificationType; without it every grok
+            # notification, idle included, read as a dialog.
             if [ "$signal" = "needsInput" ] && [ -n "$hook_json" ]; then
-              ntype=$(printf '%s' "$hook_json" | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+              ntype=$(printf '%s' "$hook_json" | sed -n 's/.*"notification_\{0,1\}[tT]ype"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
               case "$ntype" in
                 "") ;;
                 permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) ;;
@@ -4526,12 +4838,76 @@ public final class ProfileStore {
                 *) exit 0 ;;
               esac
             fi
-            printf '%s' "$signal" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
-              && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
+            # agent-tool-<idx>.jsonl — the call's id, tool, command and the
+            # agent's pid, written BEFORE the tool runs. The host ties the
+            # processes and network flows that follow to the call
+            # (NetworkLineage). Every agent spells it its own way (Grok's
+            # camelCase + a snake alias, Kimi's tool_call_id); python3
+            # normalizes. Only on a PreToolUse — other events skip it cheaply.
+            if [ -n "$hook_json" ] && printf '%s' "$hook_json" | grep -q '"hook_event_name"[[:space:]]*:[[:space:]]*"PreToolUse"'; then
+              printf '%s' "$hook_json" | BROMURE_TOOL_OUT="$d/agent-tool-$idx.jsonl" BROMURE_HOOK_PPID="$PPID" \
+                python3 -c '
+            import json, os, sys, time
+            try:
+                e = json.load(sys.stdin)
+            except Exception:
+                sys.exit(0)
+            def proc(pid, f):
+                try:
+                    return open("/proc/%d/%s" % (pid, f), "rb").read()
+                except Exception:
+                    return b""
+            # The agent: the first ancestor that is not the shell running the hook.
+            pid = int(os.environ.get("BROMURE_HOOK_PPID") or 0)
+            for _ in range(6):
+                comm = proc(pid, "comm").decode(errors="replace").strip()
+                if pid <= 1 or comm not in ("sh", "bash", "dash", "zsh"):
+                    break
+                stat = proc(pid, "stat").decode(errors="replace")
+                pid = int(stat.rsplit(")", 1)[-1].split()[1]) if ")" in stat else 0
+            argv = proc(pid, "cmdline").replace(b"\0", b" ").decode(errors="replace").lower()
+            agent = next((a for a in ("claude", "codex", "kimi", "grok", "omp") if a in argv), "")
+            if not agent:
+                agent = "grok" if os.environ.get("GROK_HOOK_EVENT") else \
+                    ("kimi" if str(e.get("client_type", "")).startswith("kimi") else "")
+            inp = e.get("tool_input") or e.get("toolInput") or {}
+            cmd = inp.get("command") if isinstance(inp, dict) else None
+            if isinstance(cmd, list):
+                cmd = " ".join(str(c) for c in cmd)
+            line = {
+                "agent": agent,
+                "tool_use_id": e.get("tool_use_id") or e.get("toolUseId") or e.get("tool_call_id") or "",
+                "tool": e.get("tool_name") or e.get("toolName") or "",
+                "command": (cmd if isinstance(cmd, str) else json.dumps(inp, sort_keys=True))[:4000],
+                "session_id": e.get("session_id") or e.get("sessionId") or "",
+                "pid": pid,
+                "ts": time.time(),
+            }
+            with open(os.environ["BROMURE_TOOL_OUT"], "a") as f:
+                f.write(json.dumps(line, separators=(",", ":")) + "\n")
+            ' 2>/dev/null || true
+            fi
+            # "start" (SessionStart) says nothing about the turn — it's only
+            # here to record the transcript below before the first prompt.
+            # Line 2: the conversation the hook is about. Codex runs its
+            # hooks in its SHARED background server, which carries the
+            # $TMUX_PANE of the tab that started it — a second Codex tab's
+            # turns were stamped onto the first tab (shown "Working" while
+            # idle). The host re-routes by this id.
+            sid=""
+            if [ -n "$hook_json" ]; then
+              sid=$(printf '%s' "$hook_json" | sed -n 's/.*"session_\{0,1\}[iI]d"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z_-]*\)".*/\1/p' 2>/dev/null | head -1)
+            fi
+            if [ "$signal" != "start" ]; then
+              printf '%s\n%s' "$signal" "$sid" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+                && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            fi
             # Remember the transcript per tab: the host then reads THIS
             # agent's transcript even when another agent in the same folder
-            # (a delegate) writes newer files there. A /clear records the new
-            # file on the next prompt. Line 2 = the pane and boot it was
+            # (a delegate) writes newer files there. SessionStart records it
+            # as the agent starts — before its first prompt, while the file
+            # doesn't exist yet — and again on a /clear or a resume. Line 2 = the pane and boot it was
             # written from: window indices get reused (a closed last tab, a
             # fresh boot), and the next tab at this index must not inherit
             # the record — readers drop it when those don't match.
@@ -4583,9 +4959,26 @@ public final class ProfileStore {
               const env = (typeof process !== "undefined" && process.env) ? process.env : {};
               const tmux = env.TMUX || "";
               const pane = env.TMUX_PANE || "";
-              const report = (state: string): void => {
+              // The session's own file and id, Claude-hook shaped, so
+              // agent-status.sh records which transcript THIS tab writes
+              // (two omp sessions in one folder never read each other's) and
+              // the host learns the id it resumes with `--resume <id>`.
+              const sessionJSON = (ctx: any): string => {
+                try {
+                  const sm = ctx?.sessionManager;
+                  const file = sm?.getSessionFile?.() ?? "";
+                  const id = sm?.getSessionId?.() ?? "";
+                  if (!file && !id) return "";
+                  return JSON.stringify({ hook_event_name: "SessionStart", session_id: id, transcript_path: file });
+                } catch {
+                  return "";
+                }
+              };
+              const report = (state: string, ctx?: any): void => {
                 if (!pane) return;
-                const cmd = "TMUX='" + tmux + "' TMUX_PANE='" + pane +
+                const json = ctx ? sessionJSON(ctx) : "";
+                const feed = json ? "echo " + Buffer.from(json).toString("base64") + " | base64 -d | " : "";
+                const cmd = feed + "TMUX='" + tmux + "' TMUX_PANE='" + pane +
                   "' /home/ubuntu/.bromure/agent-status.sh '" + state + "'";
                 try {
                   Promise.resolve(pi.exec("sh", ["-c", cmd])).catch(() => {});
@@ -4593,9 +4986,33 @@ public final class ProfileStore {
                   /* status reporting must never break a turn */
                 }
               };
-              pi.on("turn_start", () => { report("working"); });
-              pi.on("tool_call", () => { report("working"); });
-              pi.on("turn_end", () => { report("done"); });
+              pi.on("session_start", (_event: any, ctx: any) => { report("start", ctx); });
+              // agent_start / agent_end bracket the whole run of one prompt.
+              // turn_end fires after EVERY model step — including the one
+              // that only asks for a tool — so it read "done" while the tool
+              // ran (verified on omp 18.2.8).
+              pi.on("agent_start", (_event: any, ctx: any) => { report("working", ctx); });
+              // The call itself, Claude-hook shaped, for the tool-call lineage
+              // line agent-status.sh writes (agent-tool-<win>.jsonl).
+              pi.on("tool_call", (event: any) => {
+                if (!pane) return;
+                const payload = JSON.stringify({
+                  hook_event_name: "PreToolUse",
+                  tool_name: event?.toolName ?? event?.name ?? "",
+                  tool_use_id: event?.toolCallId ?? event?.id ?? "",
+                  tool_input: event?.input ?? event?.args ?? event?.arguments ?? {},
+                  session_id: event?.sessionId ?? "",
+                });
+                const b64 = Buffer.from(payload).toString("base64");
+                const cmd = "echo " + b64 + " | base64 -d | TMUX='" + tmux + "' TMUX_PANE='" + pane +
+                  "' /home/ubuntu/.bromure/agent-status.sh working";
+                try {
+                  Promise.resolve(pi.exec("sh", ["-c", cmd])).catch(() => {});
+                } catch {
+                  /* status reporting must never break a turn */
+                }
+              });
+              pi.on("agent_end", () => { report("done"); });
               pi.on("session_shutdown", () => { report("done"); });
             }
             """#
@@ -4603,6 +5020,24 @@ public final class ProfileStore {
             try? ompHook.write(to: ompHookURL, atomically: true, encoding: .utf8)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o644)],
                                   ofItemAtPath: ompHookURL.path)
+        }
+        do {
+            // Grok's turn-end hooks it has and Claude Code doesn't. A turn
+            // the user cancels (Ctrl+C / Esc) fires `StopCancelled` INSTEAD
+            // of `Stop` (Grok ≥ 1.0.46), so the tab read "working" until
+            // Grok's idle_prompt notification a minute or more later — and
+            // the composer held every message that long. These can't live in
+            // ~/.claude/settings.json (where Grok picks up the shared hooks):
+            // Claude Code rejects hook events it doesn't know. Grok's own
+            // global hooks dir is always trusted. Written for every profile,
+            // inert where Grok never runs.
+            let grokHooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+            try? fm.createDirectory(at: grokHooksDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o755)])
+            let grokHooks = Self.grokStatusHooksJSON
+            let url = grokHooksDir.appendingPathComponent("bromure-status.json")
+            try? grokHooks.write(to: url, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o644)], ofItemAtPath: url.path)
         }
 
         // ~/.docker/config.json — Docker stores per-registry HTTP Basic
@@ -4707,7 +5142,7 @@ public final class ProfileStore {
         ".git-credentials", ".kube/config", ".config/doctl/config.yaml",
         ".aws/config", ".docker/config.json", ".config/gh/hosts.yml",
         ".config/glab-cli/config.yml", ".codex/auth.json", ".grok/auth.json",
-        ".kimi-code/credentials/kimi-code.json",
+        ".kimi-code/credentials/kimi-code.json", ".claude/.credentials.json",
     ]
     /// Relpaths chmod 755 (scripts).
     private static let seed755: Set<String> = [".bromure/agent-status.sh"]
@@ -4824,6 +5259,10 @@ public final class ProfileStore {
         if !present.contains(".docker/config.json") {
             cleanupLines.append("j\t-\t.docker/config.json\t_bromureManaged")
         }
+        // Claude's OAuth stand-in, when account features are off again.
+        if !present.contains(".claude/.credentials.json") {
+            cleanupLines.append("j\t-\t.claude/.credentials.json\t_bromureManaged")
+        }
 
         let manifest = (dirLines.sorted() + fileLines.sorted() + cleanupLines)
             .joined(separator: "\n") + "\n"
@@ -4846,6 +5285,9 @@ public final class ProfileStore {
             // Claude Code stores approvals as the key's last 20 characters.
             spec["approvedApiKeySuffix"] = String(key.suffix(20))
         }
+        // What auto mode's classifier should know about this VM (and the
+        // user's own environment): merged into autoMode.environment.
+        spec["autoModeEnvironment"] = ClaudeAutoMode.environment(userText: ClaudeAutoMode.userText)
         if profile.bedrockEnabled {
             var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
             if let bedrockBearerFake { env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearerFake }
@@ -4908,7 +5350,7 @@ public final class ProfileStore {
         var ghBlocks: [(cred: GitHTTPSCredential, token: String)] = []
         for cred in ghHosts {
             guard let fake = tokenPlan?.fakeForGitHTTPS(host: cred.host,
-                                                        username: cred.username) else { continue }
+                                                        username: cred.effectiveUsername) else { continue }
             ghBlocks.append((cred, fake))
         }
         guard !ghBlocks.isEmpty else { return }
@@ -4917,7 +5359,7 @@ public final class ProfileStore {
         var yaml = "# Managed by Bromure Agentic Coding.\n"
         for (cred, token) in ghBlocks {
             yaml += "\(cred.host):\n"
-            yaml += "    user: \(cred.username)\n"
+            yaml += "    user: \(cred.effectiveUsername)\n"
             yaml += "    oauth_token: \(token)\n"
             yaml += "    git_protocol: https\n"
         }
@@ -4939,7 +5381,7 @@ public final class ProfileStore {
         var glBlocks: [(cred: GitHTTPSCredential, token: String)] = []
         for cred in glHosts {
             guard let fake = tokenPlan?.fakeForGitHTTPS(host: cred.host,
-                                                        username: cred.username) else { continue }
+                                                        username: cred.effectiveUsername) else { continue }
             glBlocks.append((cred, fake))
         }
         guard !glBlocks.isEmpty else { return }
@@ -4950,7 +5392,7 @@ public final class ProfileStore {
         for (cred, token) in glBlocks {
             yaml += "    \(cred.host):\n"
             yaml += "        token: \(token)\n"
-            yaml += "        username: \(cred.username)\n"
+            yaml += "        username: \(cred.effectiveUsername)\n"
             yaml += "        api_protocol: https\n"
             yaml += "        api_host: \(cred.host)\n"
             yaml += "        git_protocol: https\n"
@@ -4972,7 +5414,7 @@ public final class ProfileStore {
         return h == "gitlab.com" || h.hasPrefix("gitlab.") || h.contains(".gitlab.")
     }
 
-    private static let bashrcContent = """
+    static let bashrcContent = """
     # ─── Managed by Bromure Agentic Coding — REWRITTEN ON EVERY LAUNCH ───
     # Add your own customizations to ~/.bashrc.local instead. That file is
     # sourced at the end and is never touched.
@@ -5067,8 +5509,9 @@ public final class ProfileStore {
             && mv -f "$HOME/.codex/config.toml.tmp.$$" "$HOME/.codex/config.toml"
     fi
 
-    # Grok: agent-to-agent traffic (our delegation MCP to the host) never
-    # waits on an approval. Marker-guarded strip + append; skipped when the
+    # Grok: agent-to-agent traffic (our delegation MCP to the host) and a
+    # board task's own tools (bromure-board, declared per worktree in
+    # .grok/config.toml by agentd) never wait on an approval. Marker-guarded strip + append; skipped when the
     # user keeps their own [permission] table (a second one breaks the TOML).
     # Runs BEFORE the grok-local block: that one strips from
     # [model.grok-build] to the next table, which would eat our start marker.
@@ -5077,7 +5520,7 @@ public final class ProfileStore {
         touch "$HOME/.grok/config.toml"
         if sed '/# >>> bromure-permission/,/# <<< bromure-permission/d' "$HOME/.grok/config.toml" > "$HOME/.grok/config.toml.tmp.$$" 2>/dev/null \\
            && ! grep -q '^\\[permission\\]' "$HOME/.grok/config.toml.tmp.$$"; then
-            printf '%s\\n' '# >>> bromure-permission' '[permission]' 'allow = ["MCPTool(delegation__*)"]' '# <<< bromure-permission' >> "$HOME/.grok/config.toml.tmp.$$"
+            printf '%s\\n' '# >>> bromure-permission' '[permission]' 'allow = ["MCPTool(delegation__*)", "MCPTool(display__*)", "MCPTool(bromure-board__*)"]' '# <<< bromure-permission' >> "$HOME/.grok/config.toml.tmp.$$"
             mv -f "$HOME/.grok/config.toml.tmp.$$" "$HOME/.grok/config.toml"
         else
             rm -f "$HOME/.grok/config.toml.tmp.$$"
@@ -5210,21 +5653,126 @@ public final class ProfileStore {
         # --hook or the sidebar dot never updates for MITM-blind providers
         # (z.ai/Ollama/custom). The hook reports working/done per tab via
         # agent-status.sh.
+        # The overlay the models.yml merge below composed (the staged one +
+        # the providers the user added in omp), else the staged one.
         if [ -r /mnt/bromure-meta/omp-config.yml ]; then
+            _bromure_omp_config() {
+                if [ -r "$HOME/.omp/agent/bromure-overlay.yml" ]; then
+                    printf '%s' "$HOME/.omp/agent/bromure-overlay.yml"
+                else
+                    printf '%s' /mnt/bromure-meta/omp-config.yml
+                fi
+            }
+            # Provider keys omp isn't configured for (a sibling agent's, an
+            # unused provider's) are unset for omp alone: it would otherwise
+            # poll those catalogs with the real key and could fall back onto
+            # a paid cloud model.
+            _bromure_omp_run() {
+                local _u=() _v
+                if [ -r /mnt/bromure-meta/omp-env-unset ]; then
+                    while IFS= read -r _v; do
+                        [ -n "$_v" ] && _u+=(-u "$_v")
+                    done < /mnt/bromure-meta/omp-env-unset
+                fi
+                command env "${_u[@]}" omp "$@"
+            }
             if [ -r "$HOME/.omp/agent/hooks/agent-status.ts" ]; then
-                omp() { command omp --config /mnt/bromure-meta/omp-config.yml --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
+                omp() { _bromure_omp_run --config "$(_bromure_omp_config)" --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
             else
-                omp() { command omp --config /mnt/bromure-meta/omp-config.yml "$@"; }
+                omp() { _bromure_omp_run --config "$(_bromure_omp_config)" "$@"; }
             fi
         fi
     fi
 
-    # omp custom / local provider: install the staged models.yml so omp knows
-    # the OpenAI-compatible endpoint + model. (The default Anthropic provider
-    # needs none — it uses ANTHROPIC_API_KEY directly.)
-    if [ -r /mnt/bromure-meta/omp-models.yml ]; then
+    # omp's models.yml: swap in Bromure's providers (the block between the
+    # bromure-managed markers in the staged file) and keep every provider
+    # the user added in omp itself. Nothing staged: Bromure's block goes, so
+    # a provider removed from Settings → Models doesn't linger. A file an
+    # older Bromure wrote whole holds nothing of the user's.
+    if [ -r /mnt/bromure-meta/omp-models.yml ] || [ -f "$HOME/.omp/agent/models.yml" ] \\
+       || [ -r /mnt/bromure-meta/omp-config.yml ]; then
         mkdir -p "$HOME/.omp/agent"
-        cp /mnt/bromure-meta/omp-models.yml "$HOME/.omp/agent/models.yml"
+        python3 - "$HOME/.omp/agent/models.yml" /mnt/bromure-meta/omp-models.yml \\
+            /mnt/bromure-meta/omp-config.yml "$HOME/.omp/agent/bromure-overlay.yml" <<'BROMURE_OMP_MODELS' 2>/dev/null || true
+    import os, sys
+    dest, staged = sys.argv[1], sys.argv[2]
+    NL = chr(10)
+    BEGIN, END = "# >>> bromure-managed", "# <<< bromure-managed"
+    def read(path):
+        try:
+            with open(path) as f:
+                return f.read().splitlines()
+        except OSError:
+            return None
+    mine, theirs = read(dest), read(staged)
+    block, inside = [], False
+    for line in theirs or []:
+        if line.strip().startswith(BEGIN):
+            inside = True
+        if inside:
+            block.append(line)
+        if line.strip().startswith(END):
+            inside = False
+    out, skip = [], False
+    for line in mine or []:
+        t = line.strip()
+        if t.startswith(BEGIN):
+            skip = True
+            continue
+        if t.startswith(END):
+            skip = False
+            continue
+        if not skip:
+            out.append(line)
+    if out and out[0].startswith("# Generated by Bromure AC"):
+        out = []
+    if block:
+        at = next((i for i, l in enumerate(out) if l.rstrip() in ("providers:", "providers: {}")), None)
+        if at is None:
+            out.append("providers:")
+            at = len(out) - 1
+        out[at] = "providers:"
+        out[at + 1:at + 1] = block
+    body = NL.join(out).strip(NL)
+    if body.strip() in ("", "providers:"):
+        if mine is not None:
+            os.remove(dest)
+    elif out != mine:
+        tmp = dest + ".bromure-tmp"
+        with open(tmp, "w") as f:
+            f.write(body + NL)
+        os.replace(tmp, dest)
+    # The providers the user defined (outside Bromure's block), enabled in
+    # the overlay next to Bromure's: its enabledModels otherwise hides them.
+    overlay_src, overlay_dest = sys.argv[3], sys.argv[4]
+    users, indent, under = [], None, False
+    for line in out:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        lead = len(line) - len(line.lstrip())
+        if lead == 0:
+            under = line.rstrip() == "providers:"
+            continue
+        if under and line.rstrip().endswith(":"):
+            if indent is None:
+                indent = lead
+            if lead == indent:
+                users.append(line.strip()[:-1].strip(chr(34) + chr(39)))
+    overlay = read(overlay_src)
+    if overlay is None:
+        if os.path.exists(overlay_dest):
+            os.remove(overlay_dest)
+    else:
+        if users and "enabledModels:" in overlay:
+            at = overlay.index("enabledModels:") + 1
+            overlay[at:at] = ["  - " + chr(34) + name + "/*" + chr(34) for name in users]
+        if users and "disabledProviders:" in overlay:
+            gone = set("  - " + chr(34) + name + chr(34) for name in users)
+            overlay = [l for l in overlay if l not in gone]
+        with open(overlay_dest + ".bromure-tmp", "w") as f:
+            f.write(NL.join(overlay) + NL)
+        os.replace(overlay_dest + ".bromure-tmp", overlay_dest)
+    BROMURE_OMP_MODELS
     fi
 
     # Stay in $HOME (~ubuntu) on shell start. Shared folders are
@@ -5338,6 +5886,31 @@ public final class ProfileStore {
             *) command kimi "$@" ;;
         esac
     }
+    #  • grok: keep the approval mode Grok's OWN config names. Grok ≥ 1.0.46
+    #    also obeys Claude Code's ~/.claude/settings.json permissions.defaultMode
+    #    (its "Claude-compatible settings"), which Bromure seeds to "auto" for
+    #    Claude — so in a workspace with both, a Grok whose config.toml says
+    #    [ui] permission_mode = "ask" ran shell commands and writes unasked.
+    #    When Grok's config asks (or names no mode), pin that on the command
+    #    line (`--permission-mode default` = Ask; the CLI wins over every
+    #    config file). Any other mode the user chose, an explicit mode flag,
+    #    a headless -p run and the subcommands pass straight through. Only
+    #    ever stricter, never looser.
+    grok() {
+        case "${1:-}" in
+            agent|clone|completions|cursor-worker|dashboard|doctor|du|disk-usage|export|help|inspect|leader|login|logout|mcp|memory|models|plugin|sessions|setup|trace|update|upgrade|usage|version|v|worktree|wrap)
+                command grok "$@"; return ;;
+        esac
+        case " $* " in
+            *" --always-approve "*|*" --yolo "*|*" --permission-mode "*|*" --permission-mode="*|*" -p "*|*" --single "*|*" -h "*|*" --help "*|*" -v "*|*" --version "*)
+                command grok "$@"; return ;;
+        esac
+        _bg_mode=$(awk '/^\\[/{ui=($0 ~ /^\\[ui\\][[:space:]]*$/)} ui && /^[[:space:]]*(permission_mode|approval_mode)[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*"/,""); sub(/".*/,""); print; exit}' "$HOME/.grok/config.toml" 2>/dev/null)
+        case "${_bg_mode:-ask}" in
+            ask|default) command grok --permission-mode default "$@" ;;
+            *) command grok "$@" ;;
+        esac
+    }
 
     # Auto-launch the agent on the FIRST interactive shell of this VM
     # session only. Subsequent kitty tabs / new windows / nested shells
@@ -5387,9 +5960,67 @@ public final class ProfileStore {
                 _wt_flags=$(printf '%s' " $_wt_flags " | sed 's/ --continue / /')
             fi ;;
         esac
+        # Type $1 into this tab's agent once it is up, with a beat for its
+        # input box to draw — a fallback for a launch that hands Kimi its
+        # opening message here (the host types board messages itself).
+        # "Up" is read from the pane's process list: an agent started from
+        # this file runs in the shell's process group, so tmux's
+        # pane_current_command keeps naming bash while it runs.
+        _bromure_type_when_up() {
+            _tw_pane="${TMUX_PANE:-}"
+            [ -n "$_tw_pane" ] || return 0
+            _tw_tty=$(tmux display-message -p -t "$_tw_pane" '#{pane_tty}' 2>/dev/null)
+            _tw_tty="${_tw_tty#/dev/}"
+            _tw_i=0
+            while [ "$_tw_i" -lt 180 ]; do
+                sleep 1; _tw_i=$((_tw_i + 1))
+                ps -t "$_tw_tty" -o args= 2>/dev/null | grep -v -E '^-?(bash|sh)( |$)' \\
+                    | grep -q -E '(^|[^A-Za-z0-9])kimi([^A-Za-z]|$)' || continue
+                sleep 4
+                tmux send-keys -t "$_tw_pane" -l -- "$1" && sleep 1 \\
+                    && tmux send-keys -t "$_tw_pane" Enter
+                return 0
+            done
+        }
+        _wt_interactive="${BROMURE_AC_WT_INTERACTIVE:-}"; unset BROMURE_AC_WT_INTERACTIVE
+        # Kimi's approval mode for an interactive launch: the workspace's
+        # setting, staged by the host (Never Ask = --auto, the default; Ask
+        # When Needed = --yolo). Without one Kimi starts in "Always Ask" and
+        # prompts for every command and MCP tool. A launch whose flags already
+        # carry a mode (the host's own session launches) keeps it — Kimi
+        # refuses --auto and --yolo together.
+        _kimi_mode=--auto
+        case "$(cat /mnt/bromure-meta/kimi-approvals 2>/dev/null)" in --yolo) _kimi_mode=--yolo ;; esac
+        case " $_wt_flags " in *" --auto "*|*" --yolo "*) _kimi_mode= ;; esac
         if command -v "$_wt_tool" >/dev/null 2>&1; then
-            printf '\\033[2m[bromure-ac] starting %s in worktree…\\033[0m\\n' "$_wt_tool"
-            if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
+            # Say "in worktree" only for a linked git worktree (its git dir
+            # differs from the shared common dir) — a plain session runs in
+            # the folder itself.
+            _wt_where=
+            if [ "$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)" != \\
+                 "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]; then
+                _wt_where=' in worktree'
+            fi
+            printf '\\033[2m[bromure-ac] starting %s%s…\\033[0m\\n' "$_wt_tool" "$_wt_where"
+            if [ "$_wt_tool" = "kimi" ] && [ -n "$_wt_interactive" ]; then
+                # A coding-board task (agentd sets BROMURE_AC_WT_INTERACTIVE):
+                # Kimi must stay in its TUI so review feedback and the
+                # landing brief reach the SAME conversation — the one-shot
+                # --prompt run exits and leaves a bare shell, where typed
+                # feedback ran as bash commands. $_kimi_mode is the
+                # workspace's approval mode (refused with --prompt, fine
+                # here). The host types the
+                # opening message in once the TUI is up; a prompt handed over
+                # here anyway is typed by the fallback above. -c (a
+                # resume) stays in $_wt_flags.
+                if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
+                    _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
+                    unset BROMURE_AC_WT_PROMPT
+                    ( _bromure_type_when_up "$_wt_prompt" </dev/null >/dev/null 2>&1 & )
+                fi
+                "$_wt_tool" $_wt_flags $_kimi_mode
+                _wt_rc=$?
+            elif [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
                 _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
                 unset BROMURE_AC_WT_PROMPT
                 if [ "$_wt_tool" = "kimi" ]; then
@@ -5401,7 +6032,12 @@ public final class ProfileStore {
                     # starts with "-" unambiguously. The process exits when
                     # the turn completes — its own Stop hook reports done,
                     # and so does the clean-exit path below.
-                    "$_wt_tool" --prompt="$_wt_prompt"
+                    # A landing hand-off resumes kimi's own conversation
+                    # (-c, the one flag kept).
+                    case " $_wt_flags " in
+                        *" -c "*) "$_wt_tool" -c --prompt="$_wt_prompt" ;;
+                        *) "$_wt_tool" --prompt="$_wt_prompt" ;;
+                    esac
                     _wt_rc=$?
                     # One-shot mode exits when the turn ends, dropping to this
                     # shell. Point the way back in — the session is still there.
@@ -5432,6 +6068,12 @@ public final class ProfileStore {
                     "$_wt_tool" $_wt_flags -- "$_wt_prompt"
                     _wt_rc=$?
                 fi
+            elif [ "$_wt_tool" = "kimi" ]; then
+                # An interactive Kimi with no opening message on its command
+                # line (a branch session: the host types it once the TUI is
+                # up) — in the workspace's approval mode too.
+                "$_wt_tool" $_wt_flags $_kimi_mode
+                _wt_rc=$?
             else
                 "$_wt_tool" $_wt_flags
                 _wt_rc=$?
@@ -5445,13 +6087,18 @@ public final class ProfileStore {
             # (The automation engine still only ACTS on a done from a
             # hook-driven agent — see Profile.Tool.hasReliableDoneSignal.)
             if [ "$_wt_rc" -ne 0 ]; then
-                printf '\033[31m[bromure-ac] %s exited with status %s\033[0m\n' "$_wt_tool" "$_wt_rc"
+                printf '\\033[31m[bromure-ac] %s exited with status %s\\033[0m\\n' "$_wt_tool" "$_wt_rc"
                 sh "$HOME/.bromure/agent-status.sh" needsInput 2>/dev/null || true
             else
                 sh "$HOME/.bromure/agent-status.sh" done 2>/dev/null || true
             fi
+        else
+            # Not installed (and the install above failed): the same marker
+            # the host's launch watch looks for, so it fails fast.
+            printf '\\033[31m[bromure-ac] %s exited with status 127 (command not found)\\033[0m\\n' "$_wt_tool"
+            sh "$HOME/.bromure/agent-status.sh" needsInput 2>/dev/null || true
         fi
-        unset _wt_tool _wt_prompt _wt_flags _wt_dir
+        unset _wt_tool _wt_prompt _wt_flags _wt_dir _wt_interactive _kimi_mode
     fi
 
     if [ "$BROMURE_AC_REGISTER" = "1" ] \\

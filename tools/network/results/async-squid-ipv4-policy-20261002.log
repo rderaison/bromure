@@ -1,0 +1,14 @@
+async-squid: connection rejected: direct gateway connection or recursion
+async-squid: connection rejected: 
+async-squid: connection rejected: 
+async-squid: connection rejected: 
+async-squid: connection rejected: 
+async-squid: connection rejected: 
+async-squid: connection rejected: 
+async-squid: connection rejected: 
+BROMURE_ASYNC_SQUID_NETNS_PASS {"ipv4": "CLIENT_PASS 1048582", "ipv6": "CLIENT_PASS 262", "loopback": "CLIENT_PASS 262", "healthySeconds": 0.0497871249972377, "pending": "CLIENT_PASS 262", "uidIsolation": true, "directGatewayRejected": true, "afterSaturation": "CLIENT_PASS 262", "boundedConnectionsAndDeadline": true, "routerUnavailableFailsClosed": true, "gatewayUnavailableFailsClosed": true, "afterCleanup": "CLIENT_PASS 262", "cleanup": true, "requests": [["198.18.0.1", 18081], ["198.18.0.1", 18082], ["2001:db8::1", 18082], ["127.0.0.1", 18082], ["198.18.0.1", 18081], ["198.18.0.1", 18081], ["198.18.0.1", 18081], ["198.18.0.1", 18081], ["198.18.0.1", 18081], ["198.18.0.1", 18081], ["198.18.0.1", 18081], ["198.18.0.1", 18081], ["198.18.0.1", 18082]]}
+BROMURE_ROUTING_PARITY_PASS {"direct": 4, "warp": 2, "warpFailureClosed": true, "scope": "unmodified router with synthetic WARP endpoint; no live VPN claim"}
+BROMURE_NATIVE_SQUID_GATEWAY_PASS {"healthyAndDNSSeconds": 0.005330082989530638, "requests": [["198.18.0.1", 18081], ["198.18.0.1", 18082], ["2001:db8::1", 18082]], "dnsSinkholeDenied": true, "gatewayCrash": false, "ipv4Only": false, "ipv6PolicyChangeFailsClosedBeforeMonitor": false, "producerStoppedBeforeCleanup": true, "supervisorExit": 0, "logs": "/tmp/bromure-native-squid-0avpz6xj"}
+BROMURE_NATIVE_SQUID_GATEWAY_PASS {"healthyAndDNSSeconds": 0.0061192499997559935, "requests": [["198.18.0.1", 18081], ["198.18.0.1", 18082], ["2001:db8::1", 18082]], "dnsSinkholeDenied": true, "gatewayCrash": true, "ipv4Only": false, "ipv6PolicyChangeFailsClosedBeforeMonitor": false, "producerStoppedBeforeCleanup": true, "supervisorExit": 1, "logs": "/tmp/bromure-native-squid-bhgj6h6s"}
+BROMURE_NATIVE_SQUID_GATEWAY_PASS {"healthyAndDNSSeconds": 0.003531624999595806, "requests": [["198.18.0.1", 18081], ["198.18.0.1", 18082]], "dnsSinkholeDenied": true, "gatewayCrash": false, "ipv4Only": true, "ipv6PolicyChangeFailsClosedBeforeMonitor": false, "producerStoppedBeforeCleanup": true, "supervisorExit": 0, "logs": "/tmp/bromure-native-squid-twngtjfc"}
+BROMURE_NATIVE_SQUID_GATEWAY_PASS {"healthyAndDNSSeconds": 0.0031094999867491424, "requests": [["198.18.0.1", 18081], ["198.18.0.1", 18082]], "dnsSinkholeDenied": true, "gatewayCrash": false, "ipv4Only": true, "ipv6PolicyChangeFailsClosedBeforeMonitor": true, "producerStoppedBeforeCleanup": true, "supervisorExit": 1, "logs": "/tmp/bromure-native-squid-wsfjwnuj"}

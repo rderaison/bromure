@@ -25,8 +25,8 @@ let package = Package(
         // 3.31.4 raises its swift-syntax floor to 602..<604 (matches the Swift
         // 6.3 toolchain). After bumping, do a clean build — stale macro-plugin
         // artifacts from the previous swift-syntax otherwise fail to load.
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.31.5")),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.31.4" ..< "3.32.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", .upToNextMinor(from: "0.32.3")),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", "3.32.3" ..< "3.33.0"),
         // File-explorer pane: rendered Markdown previews. (Syntax highlighting
         // is vendored — Sources/AgentCoding/Vendor/Highlightr — because the
         // upstream package's Bundle.module accessor breaks in relocated .app
@@ -86,7 +86,8 @@ let package = Package(
                         .copy("Resources/catalog.json"),
                         .copy("Resources/img-catalog.json"),
                         .copy("Resources/highlightr"),
-                        .copy("Resources/mermaid")],
+                        .copy("Resources/mermaid"),
+                        .copy("Resources/vega")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("OpenDirectory"),
@@ -97,6 +98,31 @@ let package = Package(
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("CoreText"),
                 .linkedLibrary("c++"),
+            ]
+        ),
+        // Bromure Sidecar (the agent host): a menu-bar app that runs agents (Claude Code) in
+        // tmux on a plain Mac — no VM — and serves a subset of bromure-ac's
+        // control API over the same embedded SSH server, so a Bromure AC
+        // window mirrors it as a remote machine ("This Mac"). Shares the SSH
+        // server sources with bromure-ac through symlinks in Shared/.
+        .executableTarget(
+            name: "bromure-sidecar",
+            dependencies: [
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            path: "Sources/AgentHost",
+            exclude: ["Info.plist", "AgentHost.entitlements"],
+            // The agents' logos (the same art Bromure AC draws) and the
+            // Sidecar mark for the menu bar.
+            resources: [.copy("Resources/agents"), .copy("Resources/brand")],
+            swiftSettings: [.define("AGENT_HOST")],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("OpenDirectory"),
             ]
         ),
         .binaryTarget(
@@ -164,6 +190,8 @@ let package = Package(
                 "bromure-ac", "GhosttyKit",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ],
             path: "Tests/AgentCodingTests",
             linkerSettings: [
