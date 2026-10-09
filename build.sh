@@ -49,12 +49,12 @@ esac
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
 
 # GhosttyKit is an SPM binaryTarget at vendor/GhosttyKit.xcframework (never
-# committed); build it from the pinned commit when missing. Needed by every
-# target because SPM resolves the whole manifest.
-if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
-    echo "vendor/GhosttyKit.xcframework missing — running tools/build-ghostty.sh…"
-    "$SCRIPT_DIR/tools/build-ghostty.sh"
-fi
+# committed). Needed by every target because SPM resolves the whole manifest.
+# Always ask tools/build-ghostty.sh, never just "is the folder there": its
+# stamp (pinned commit + build flags) is what tells a stale framework from a
+# current one — a warm checkout or a restored cache kept the Sentry/Breakpad
+# build after -Dsentry=false. A no-op (milliseconds) when the stamp matches.
+"$SCRIPT_DIR/tools/build-ghostty.sh"
 
 # Force SwiftPM to regenerate resource bundles from current source.
 # `swift build` recompiles the binary but does NOT reliably re-copy changed

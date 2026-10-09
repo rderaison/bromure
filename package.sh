@@ -113,12 +113,10 @@ notarize_artifact() {
 # --- Build ---
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
 
-# GhosttyKit binaryTarget (never committed) — build from the pinned commit
-# when missing; cached under ~/.cache/bromure-ghostty (mirrors build.sh).
-if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
-    echo "vendor/GhosttyKit.xcframework missing — running tools/build-ghostty.sh…"
-    "$SCRIPT_DIR/tools/build-ghostty.sh"
-fi
+# GhosttyKit binaryTarget (never committed) — always checked against its
+# stamp (pinned commit + build flags), rebuilt when it doesn't match; cached
+# under ~/.cache/bromure-ghostty (mirrors build.sh).
+"$SCRIPT_DIR/tools/build-ghostty.sh"
 
 # Same backend as build.sh: Xcode 26's default `swiftbuild` backend fails in
 # macro packages ("unable to open dependencies file …-primary.d") and tries
