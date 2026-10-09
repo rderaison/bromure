@@ -439,4 +439,30 @@ struct RepoWatchTests {
         #expect(store.finding(f.id)?.status == .dismissed)
         #expect(store.finding(f.id)?.statusNote == "Not an issue")
     }
+
+    @Test("A later hand-over's failure doesn't undo an earlier one that was delivered")
+    func deliveredHandOverIsSettled() async throws {
+        let store = tempStore()
+        let f = store.ingest(report("SQL injection"), watchID: nil, profileID: UUID(),
+                             repo: "o/r", runID: nil, commit: nil).finding
+        let first = UUID(), second = UUID()
+        store.markHandedOver(f.id, note: "Sent to @a", generation: first)
+        store.handOverDelivered(f.id, generation: first)   // @a has it
+        #expect(store.finding(f.id)?.handOver == nil)
+        store.markHandedOver(f.id, note: "Sent to @b", generation: second)
+        store.handOverFailed(f.id, generation: second, note: "Couldn't hand it to @b")
+        // Still triaged: @a is working on it. The note says what failed.
+        #expect(store.finding(f.id)?.status == .triaged)
+        #expect(store.finding(f.id)?.statusNote == "Couldn't hand it to @b")
+
+        // handOver() itself settles the mark once delivery returns.
+        let g = store.ingest(report("Path traversal", file: "x.ts", fingerprint: "pt"), watchID: nil,
+                             profileID: UUID(), repo: "o/r", runID: nil, commit: nil).finding
+        _ = await store.handOver(g.id, to: "@c", stage: { }, deliver: { }, why: { _ in "x" })
+        for _ in 0..<100 where store.finding(g.id)?.handOver != nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(store.finding(g.id)?.handOver == nil)
+        #expect(store.finding(g.id)?.status == .triaged)
+    }
 }

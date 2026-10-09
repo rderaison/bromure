@@ -527,6 +527,7 @@ final class SwitchboardEngine {
     @discardableResult
     func routeFinding(id findingID: UUID, severity: String, repo: String,
                       brief: String, preferredWorkspace: UUID?, room: AgentRoom?,
+                      delivered: @escaping @MainActor () -> Void = {},
                       failed: @escaping @MainActor (String) -> Void = { _ in }) -> UUID? {
         guard let sid = ensureSwitchboard(preferred: preferredWorkspace, room: room) else { return nil }
         let dir = "/home/ubuntu/.bromure/inbox/finding-\(findingID.uuidString.prefix(8).lowercased())"
@@ -569,6 +570,7 @@ final class SwitchboardEngine {
                         return
                     }
                     BACDebug.log("switchboard", "finding \(findingID) routed to Switchboard \(sid)")
+                    delivered()
                     return
                 }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)

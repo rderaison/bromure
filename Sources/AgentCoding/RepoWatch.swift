@@ -1100,6 +1100,13 @@ final class FindingStore {
     /// That hand-over's delivery failed: say so, and undo the status it
     /// moved — only while it's still the current one. A later hand-over, or
     /// the user or a fix changing the finding since, wins.
+    /// That hand-over reached its agent: nothing is pending any more, so a
+    /// later hand-over's failure can't undo what this one already moved.
+    func handOverDelivered(_ id: UUID, generation: UUID) {
+        guard finding(id)?.handOver?.id == generation else { return }
+        mutate(id) { $0.handOver = nil }
+    }
+
     func handOverFailed(_ id: UUID, generation: UUID, note: String) {
         guard finding(id)?.handOver?.id == generation else { return }
         mutate(id) {
@@ -1135,7 +1142,10 @@ final class FindingStore {
         markHandedOver(id, note: String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name),
                        generation: generation)
         Task { @MainActor [weak self] in
-            do { try await deliver(staged) } catch {
+            do {
+                try await deliver(staged)
+                self?.handOverDelivered(id, generation: generation)
+            } catch {
                 self?.handOverFailed(id, generation: generation, note: String(
                     format: NSLocalizedString("Couldn't hand it to %1$@: %2$@", comment: "finding status note"),
                     name, why(error)))

@@ -77,6 +77,7 @@ extension ACAppDelegate {
             id: f.id, severity: f.severity.rawValue, repo: f.repo,
             brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)",
             preferredWorkspace: f.profileID, room: room,
+            delivered: { store.handOverDelivered(findingID, generation: generation) },
             failed: { why in
                 // The note said "Sent to the Switchboard": say it didn't get
                 // there — unless a later hand-over or the user moved it since.
