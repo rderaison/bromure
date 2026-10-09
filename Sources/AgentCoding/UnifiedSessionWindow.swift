@@ -3301,22 +3301,41 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     scanBaseline: { [weak self] id in
                         self?.acDelegate?.repoWatchEngine.scanNow(id, baseline: true)
                     },
-                    fix: { [weak self] id, confirmed in
-                        guard let d = self?.acDelegate,
-                              d.findingStore.finding(id)?.handOverRefusal(confirmed: confirmed) == nil else { return }
-                        d.repoWatchEngine.fix(id)
+                    fix: { [weak self] id, confirmed, done in
+                        guard let d = self?.acDelegate, let f = d.findingStore.finding(id) else {
+                            done(.failed(NSLocalizedString("that finding is gone", comment: "finding hand-over failure")))
+                            return
+                        }
+                        if f.handOverRefusal(confirmed: confirmed) != nil {
+                            done(.flagged(warning: f.screenWarning ?? "")); return
+                        }
+                        done(d.repoWatchEngine.fix(id) == nil
+                             ? .failed(NSLocalizedString("couldn't start the fix", comment: "finding hand-over failure"))
+                             : .done)
                     },
-                    routeToSwitchboard: { [weak self] id, room, confirmed in
-                        self?.acDelegate?.routeFindingToSwitchboard(id, room: room, confirmed: confirmed)
+                    routeToSwitchboard: { [weak self] id, room, confirmed, done in
+                        guard let d = self?.acDelegate, let f = d.findingStore.finding(id) else {
+                            done(.failed(NSLocalizedString("that finding is gone", comment: "finding hand-over failure")))
+                            return
+                        }
+                        if f.handOverRefusal(confirmed: confirmed) != nil {
+                            done(.flagged(warning: f.screenWarning ?? "")); return
+                        }
+                        done(d.routeFindingToSwitchboard(id, room: room, confirmed: confirmed)
+                             ? .done
+                             : .failed(NSLocalizedString("no Switchboard could be started", comment: "finding hand-over failure")))
                     },
                     switchboardRooms: { [weak self] in self?.acDelegate?.switchboardRoomChoices() ?? [] },
                     askSession: { [weak self] id, sid, confirmed, done in
                         Task { @MainActor in
                             guard let d = self?.acDelegate else {
-                                done(NSLocalizedString("that session is gone", comment: "finding → session failure"))
+                                done(.failed(NSLocalizedString("that session is gone", comment: "finding → session failure")))
                                 return
                             }
-                            done(await d.routeFindingToSession(id, session: sid, confirmed: confirmed))
+                            if let f = d.findingStore.finding(id), f.handOverRefusal(confirmed: confirmed) != nil {
+                                done(.flagged(warning: f.screenWarning ?? "")); return
+                            }
+                            done(await d.routeFindingToSession(id, session: sid, confirmed: confirmed).map { .failed($0) } ?? .done)
                         }
                     },
                     sessionChoices: { [weak self] in self?.acDelegate?.findingSessionChoices() ?? [] },

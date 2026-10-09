@@ -212,7 +212,7 @@ extension ACAppDelegate {
             guard let id, let finding = findingStore.finding(id) else { return ["error": "unknown finding"] }
             if method == "POST", ["fix", "switchboard", "session"].contains(action),
                let refusal = finding.handOverRefusal(confirmed: (body["confirmed"] as? Bool) == true) {
-                return ["error": refusal, "flagged": true]
+                return ["error": refusal, "flagged": true, "warning": finding.screenWarning ?? ""]
             }
             switch (method, action) {
             case ("POST", "fix"):

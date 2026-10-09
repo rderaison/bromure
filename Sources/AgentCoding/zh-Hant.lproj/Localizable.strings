@@ -4138,3 +4138,8 @@
 "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "其文字被提示注入檢查標記 (%@) — 交給代理程式前請先確認";
 "Hand It Over Anyway" = "仍然交給它";
 "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "提示注入檢查標記了它 (%@)。它來自讀取儲存庫內容的代理程式，你交給的代理程式也會讀取它。交出前請先檢查。";
+"Couldn't start the fix: %@" = "無法開始修正：%@";
+"Couldn't ask the Switchboard: %@" = "無法詢問總機：%@";
+"that finding is gone" = "該發現項目已不存在";
+"couldn't start the fix" = "無法開始修正";
+"no Switchboard could be started" = "無法啟動總機";

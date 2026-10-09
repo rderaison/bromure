@@ -4135,3 +4135,8 @@
 "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "sein Text wurde von der Prompt-Injection-Prüfung markiert (%@) — bestätigen Sie ihn, bevor Sie ihn einem Agenten übergeben";
 "Hand It Over Anyway" = "Trotzdem übergeben";
 "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "Die Prompt-Injection-Prüfung hat ihn markiert (%@). Er stammt von einem Agenten, der Repository-Inhalte gelesen hat, und der Agent, dem Sie ihn übergeben, würde ihn ebenfalls lesen. Prüfen Sie ihn, bevor Sie ihn übergeben.";
+"Couldn't start the fix: %@" = "Fix konnte nicht gestartet werden: %@";
+"Couldn't ask the Switchboard: %@" = "Die Schaltzentrale konnte nicht gefragt werden: %@";
+"that finding is gone" = "diesen Befund gibt es nicht mehr";
+"couldn't start the fix" = "der Fix konnte nicht gestartet werden";
+"no Switchboard could be started" = "keine Schaltzentrale konnte gestartet werden";

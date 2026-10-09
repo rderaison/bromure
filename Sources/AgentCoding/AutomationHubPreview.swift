@@ -101,7 +101,7 @@ enum AutomationHubPreview {
             automationStore: autoStore, findingStore: findingStore, taskStore: taskStore,
             model: model, hub: hub, workspaces: { choices },
             promptGuardInstalled: { true }, actions: AutomationHubView.Actions(
-                askSession: { _, _, _, done in done(nil) },
+                askSession: { _, _, _, done in done(.done) },
                 sessionChoices: {
                     [PeerMention(sessionID: UUID(), nick: "hotfixes", title: "Checkout hotfixes", workspace: "Platform"),
                      PeerMention(sessionID: UUID(), nick: "refunds", title: "Refund flow", workspace: "Payments")]

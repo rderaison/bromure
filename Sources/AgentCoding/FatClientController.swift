@@ -2120,7 +2120,7 @@ final class RemoteHostController {
 
     /// The server lacks POST /vms/{id}/type (an older build): learned from
     /// its first answer, forgotten on reconnect (it may be updated).
-    nonisolated(unsafe) var serverLacksTypeRoute = false
+    var serverLacksTypeRoute = false
 
     /// A chat message typed by the server itself (`/vms/{id}/type`): the
     /// guard's round trips stay on the server's side of the WAN.
@@ -4163,11 +4163,21 @@ final class RemoteHostWindow: NSWindow {
                     toggleWatch: { c.watchCommand($0, "toggle") },
                     scanNow: { c.watchCommand($0, "scan") },
                     scanBaseline: { c.watchCommand($0, "baseline") },
-                    fix: { c.findingCommand($0, "fix", body: $1 ? ["confirmed": true] : nil) },
-                    routeToSwitchboard: { id, room, confirmed in
+                    fix: { id, confirmed, done in
+                        // Wait for the host: it refuses a flag this mirror
+                        // hasn't shown yet, and the hub then asks.
+                        c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/fix",
+                                  body: confirmed ? ["confirmed": true] : [:]) { status, json in
+                            done(.fromServer(status: status, json: json))
+                        }
+                    },
+                    routeToSwitchboard: { id, room, confirmed, done in
                         var body: [String: Any] = room.map { ["room": $0.uuidString] } ?? [:]
                         if confirmed { body["confirmed"] = true }
-                        c.findingCommand(id, "switchboard", body: body)
+                        c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/switchboard",
+                                  body: body) { status, json in
+                            done(.fromServer(status: status, json: json))
+                        }
                     },
                     askSession: { [weak self] id, sid, confirmed, done in
                         // Wait for the server's answer: an older server
@@ -4175,17 +4185,11 @@ final class RemoteHostWindow: NSWindow {
                         // session then read as sent while nothing was.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
                                   body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
-                            if status == 200 {
-                                self?.selectSession(sid)
-                                done(nil)
-                            } else if status == nil {
-                                done(NSLocalizedString("the server didn't answer", comment: "finding → session failure"))
-                            } else if (json["error"] as? String) == "not found" {
-                                done(NSLocalizedString("the server runs an older Bromure — update it to hand findings to a session",
-                                                       comment: "finding → session failure"))
-                            } else {
-                                done((json["error"] as? String) ?? NSLocalizedString("the server refused it", comment: "finding → session failure"))
-                            }
+                            let reply = HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
+                                "the server runs an older Bromure — update it to hand findings to a session",
+                                comment: "finding → session failure"))
+                            if reply == .done { self?.selectSession(sid) }
+                            done(reply)
                         }
                     },
                     sessionChoices: {

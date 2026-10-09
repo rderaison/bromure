@@ -4137,3 +4137,8 @@
 "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "el filtro de inyección de prompts marcó su texto (%@) — confírmalo antes de pasárselo a un agente";
 "Hand It Over Anyway" = "Pasarlo de todos modos";
 "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "El filtro de inyección de prompts lo marcó (%@). Proviene de un agente que leía el contenido del repositorio, y el agente al que se lo pases también lo leería. Revísalo antes de pasarlo.";
+"Couldn't start the fix: %@" = "No se pudo iniciar la corrección: %@";
+"Couldn't ask the Switchboard: %@" = "No se pudo preguntar a la Centralita: %@";
+"that finding is gone" = "ese hallazgo ya no existe";
+"couldn't start the fix" = "no se pudo iniciar la corrección";
+"no Switchboard could be started" = "no se pudo iniciar ninguna Centralita";

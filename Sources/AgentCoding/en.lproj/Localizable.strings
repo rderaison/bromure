@@ -4169,3 +4169,8 @@
 "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent";
 "Hand It Over Anyway" = "Hand It Over Anyway";
 "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over.";
+"Couldn't start the fix: %@" = "Couldn't start the fix: %@";
+"Couldn't ask the Switchboard: %@" = "Couldn't ask the Switchboard: %@";
+"that finding is gone" = "that finding is gone";
+"couldn't start the fix" = "couldn't start the fix";
+"no Switchboard could be started" = "no Switchboard could be started";

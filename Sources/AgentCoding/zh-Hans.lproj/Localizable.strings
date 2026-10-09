@@ -4135,3 +4135,8 @@
 "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "其文本被提示注入检查标记 (%@) — 交给代理前请先确认";
 "Hand It Over Anyway" = "仍然交给它";
 "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "提示注入检查标记了它 (%@)。它来自读取仓库内容的代理，你交给的代理也会读取它。交出前请先检查。";
+"Couldn't start the fix: %@" = "无法开始修复：%@";
+"Couldn't ask the Switchboard: %@" = "无法询问总机：%@";
+"that finding is gone" = "该发现项已不存在";
+"couldn't start the fix" = "无法开始修复";
+"no Switchboard could be started" = "无法启动总机";

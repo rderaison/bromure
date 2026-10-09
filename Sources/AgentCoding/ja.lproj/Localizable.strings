@@ -4135,3 +4135,8 @@
 "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "本文がプロンプトインジェクション検査でフラグ付けされました (%@) — エージェントに渡す前に確認してください";
 "Hand It Over Anyway" = "それでも渡す";
 "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "プロンプトインジェクション検査でフラグが付けられました (%@)。これはリポジトリの内容を読んだエージェントによるもので、渡す先のエージェントもこれを読むことになります。渡す前に確認してください。";
+"Couldn't start the fix: %@" = "修正を開始できませんでした: %@";
+"Couldn't ask the Switchboard: %@" = "スイッチボードに依頼できませんでした: %@";
+"that finding is gone" = "その検出事項はもうありません";
+"couldn't start the fix" = "修正を開始できませんでした";
+"no Switchboard could be started" = "スイッチボードを起動できませんでした";

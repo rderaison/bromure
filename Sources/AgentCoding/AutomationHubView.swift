@@ -78,6 +78,17 @@ final class AutomationHubModel {
     var pendingFlagged: PendingFlagged?
     private var flashToken = 0
 
+    /// A hand-over's reply: the success flash only once it went; a flag
+    /// the user hadn't OK'd asks them, and their OK runs `retry`.
+    func report(_ reply: HandOverReply, success: String, failure: (String) -> String,
+                retry: @escaping () -> Void) {
+        switch reply {
+        case .done: showFlash(success)
+        case .flagged(let warning): pendingFlagged = .init(warning: warning, go: retry)
+        case .failed(let why): showFlash(failure(why), isError: true)
+        }
+    }
+
     func showFlash(_ text: String, isError: Bool = false) {
         flashToken += 1
         let token = flashToken
@@ -151,15 +162,18 @@ struct AutomationHubView: View {
         /// A one-off full-repository review, whatever the watch's scope.
         var scanBaseline: (UUID) -> Void = { _ in }
         /// The Bool on fix / routeToSwitchboard / askSession: the user OK'd
-        /// handing over a finding the injection screen flagged.
-        var fix: (UUID, _ confirmed: Bool) -> Void = { _, _ in }
+        /// handing over a finding the injection screen flagged. Each reports
+        /// how it came back — a refusal over a flag the user hasn't OK'd
+        /// (one this copy of the finding didn't show) asks, then retries.
+        var fix: (UUID, _ confirmed: Bool, @escaping @MainActor (HandOverReply) -> Void) -> Void = { _, _, _ in }
         /// Ask a Switchboard (room nil = the global one) who should fix it.
-        var routeToSwitchboard: ((UUID, UUID?, _ confirmed: Bool) -> Void)?
+        var routeToSwitchboard: ((UUID, UUID?, _ confirmed: Bool,
+                                  @escaping @MainActor (HandOverReply) -> Void) -> Void)?
         /// Rooms with a Switchboard to ask.
         var switchboardRooms: () -> [FindingRouting.Room] = { [] }
         /// Hand a finding straight to a session ("Ask @foo to fix it");
         /// the callback gets nil once it's sent, else why it wasn't.
-        var askSession: ((UUID, UUID, _ confirmed: Bool, @escaping @MainActor (String?) -> Void) -> Void)?
+        var askSession: ((UUID, UUID, _ confirmed: Bool, @escaping @MainActor (HandOverReply) -> Void) -> Void)?
         /// The sessions it can go to.
         var sessionChoices: () -> [PeerMention] = { [] }
         var openTask: (UUID) -> Void = { _ in }
@@ -210,11 +224,18 @@ struct AutomationHubView: View {
                 ? NSLocalizedString("Now watching %@ — the first review is starting.", comment: "hub flash")
                 : NSLocalizedString("Now watching %@.", comment: "hub flash"), w.repo))
         }
-        a.fix = { id, confirmed in
-            actions.fix(id, confirmed)
-            hub.showFlash(NSLocalizedString(
-                "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.",
-                comment: "hub flash"))
+        a.fix = { id, confirmed, done in
+            func go(_ confirmed: Bool) {
+                actions.fix(id, confirmed) { reply in
+                    hub.report(reply, success: NSLocalizedString(
+                        "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.",
+                        comment: "hub flash"),
+                        failure: { String(format: NSLocalizedString("Couldn't start the fix: %@", comment: "hub flash"), $0) },
+                        retry: { go(true) })
+                    done(reply)
+                }
+            }
+            go(confirmed)
         }
         let run = actions.board.runNow
         let autos = automationStore
@@ -300,27 +321,33 @@ struct AutomationHubView: View {
             rooms: actions.switchboardRooms(),
             route: actions.routeToSwitchboard.map { route in
                 { id, room, confirmed in
-                    route(id, room, confirmed)
-                    hub.showFlash(NSLocalizedString(
-                        "Asked the Switchboard — it will propose a session and wait for your OK.",
-                        comment: "hub flash"))
+                    func go(_ confirmed: Bool) {
+                        route(id, room, confirmed) { reply in
+                            hub.report(reply, success: NSLocalizedString(
+                                "Asked the Switchboard — it will propose a session and wait for your OK.",
+                                comment: "hub flash"),
+                                failure: { String(format: NSLocalizedString("Couldn't ask the Switchboard: %@",
+                                                                            comment: "hub flash"), $0) },
+                                retry: { go(true) })
+                        }
+                    }
+                    go(confirmed)
                 }
             },
             sessions: actions.askSession == nil ? [] : actions.sessionChoices(),
             ask: actions.askSession.map { ask in
                 { id, peer, confirmed in
                     let name = peer.assigned ? "@" + peer.nick : "“\(peer.title)”"
-                    ask(id, peer.sessionID, confirmed) { error in
-                        if let error {
-                            hub.showFlash(String(format: NSLocalizedString(
-                                "Couldn't send it to %1$@: %2$@", comment: "hub flash: session, reason"),
-                                name, error), isError: true)
-                        } else {
-                            hub.showFlash(String(format: NSLocalizedString(
-                                "Sent to %@ — it works on the fix in its own session.", comment: "hub flash"),
-                                name))
+                    func go(_ confirmed: Bool) {
+                        ask(id, peer.sessionID, confirmed) { reply in
+                            hub.report(reply, success: String(format: NSLocalizedString(
+                                "Sent to %@ — it works on the fix in its own session.", comment: "hub flash"), name),
+                                failure: { String(format: NSLocalizedString(
+                                    "Couldn't send it to %1$@: %2$@", comment: "hub flash: session, reason"), name, $0) },
+                                retry: { go(true) })
                         }
                     }
+                    go(confirmed)
                 }
             },
             confirmFlagged: { finding, go in
@@ -700,7 +727,7 @@ struct HubOverviewTab: View {
                     ForEach(open.prefix(8)) { f in
                         HubFindingRow(finding: f, workspace: workspaceName(f.profileID),
                                    onOpen: { hub.showFinding(f.id) },
-                                   onFix: { actions.fix(f.id, $0) },
+                                   onFix: { actions.startFix(f.id, confirmed: $0) },
                                    onStatus: { st, note in actions.setStatus(f.id, st, note) })
                         Divider()
                     }
@@ -1209,6 +1236,37 @@ struct HubFindingRow: View {
     }
 }
 
+/// How a hand-over of a finding to an agent (a fix, a Switchboard, a
+/// session) came back.
+enum HandOverReply: Equatable {
+    case done
+    /// Refused: its text was flagged and the user hadn't OK'd that — ask,
+    /// then retry confirmed.
+    case flagged(warning: String)
+    case failed(String)
+
+    /// A control-route reply (the fat client): 200 = done; the host's
+    /// refusal of a flag the mirror hadn't shown yet; else its error.
+    /// `olderServer` stands in for a host that doesn't know the route.
+    static func fromServer(status: Int?, json: [String: Any], olderServer: String? = nil) -> HandOverReply {
+        if status == 200 { return .done }
+        if (json["flagged"] as? Bool) == true {
+            return .flagged(warning: (json["warning"] as? String) ?? (json["error"] as? String) ?? "")
+        }
+        guard status != nil else {
+            return .failed(NSLocalizedString("the server didn't answer", comment: "finding → session failure"))
+        }
+        let error = json["error"] as? String
+        if let olderServer, error == "not found" { return .failed(olderServer) }
+        return .failed(error ?? NSLocalizedString("the server refused it", comment: "finding → session failure"))
+    }
+}
+
+extension AutomationHubView.Actions {
+    /// Fix from a button: the hub's wrapper reports how it went.
+    func startFix(_ id: UUID, confirmed: Bool) { fix(id, confirmed) { _ in } }
+}
+
 /// Where "Ask the Switchboard" can send a finding: the global Switchboard
 /// and each room's. Put in the environment at the hub's root.
 struct FindingRouting {
@@ -1614,7 +1672,7 @@ struct HubFindingsTab: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             FindingsList(rows: rows, compact: hub.selectedFindingID != nil,
-                         selection: $hub.selectedFindingID, onFix: actions.fix,
+                         selection: $hub.selectedFindingID, onFix: { actions.startFix($0, confirmed: $1) },
                          onStatus: actions.setStatus)
         }
     }
@@ -2000,7 +2058,7 @@ struct FindingDetailPanel: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack {
-                    FixButton(finding: finding, prominent: true) { actions.fix(finding.id, $0) }
+                    FixButton(finding: finding, prominent: true) { actions.startFix(finding.id, confirmed: $0) }
                     Button(NSLocalizedString("Open Task", comment: "fix task")) { actions.openTask(task.id) }
                         .controlSize(.large)
                 }
@@ -2022,7 +2080,7 @@ struct FindingDetailPanel: View {
             .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
         } else if finding.status.isOpen {
             VStack(alignment: .leading, spacing: 6) {
-                FixButton(finding: finding, prominent: true) { actions.fix(finding.id, $0) }
+                FixButton(finding: finding, prominent: true) { actions.startFix(finding.id, confirmed: $0) }
                 if routing.isAvailable {
                     Menu {
                         SwitchboardRouteItems(finding: finding)
