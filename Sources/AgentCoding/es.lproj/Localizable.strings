@@ -4125,3 +4125,8 @@
 "the server didn't answer" = "el servidor no respondió";
 "the server runs an older Bromure — update it to hand findings to a session" = "el servidor ejecuta una versión anterior de Bromure: actualízalo para pasar hallazgos a una sesión";
 "the server refused it" = "el servidor lo rechazó";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "No se pudo pasar a %1$@: %2$@";
+"a menu or dialog stayed open in that session" = "un menú o diálogo quedó abierto en esa sesión";
+"something else was typed in that session's input box" = "había otra cosa escrita en el cuadro de entrada de esa sesión";

@@ -101,6 +101,8 @@ extension ACAppDelegate {
               let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else { return false }
         let brief = RepoWatchPrompts.fixTask(f)
         let engine = switchboardEngine
+        let name = s.nickname.map { "@" + $0 } ?? "“\(s.title)”"
+        let store = findingStore
         Task {
             do {
                 try await engine.handFinding(
@@ -108,9 +110,15 @@ extension ACAppDelegate {
                     brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)", to: s)
             } catch {
                 BACDebug.log("switchboard", "finding \(findingID) → session \(sessionID) failed — \(error)")
+                let why: String
+                if case SwitchboardEngine.ActError.refused(let r) = error { why = r } else { why = error.localizedDescription }
+                // The note said "Sent to …": say it didn't get there.
+                store.mutate(findingID) {
+                    $0.statusNote = String(format: NSLocalizedString("Couldn't hand it to %1$@: %2$@",
+                                                                     comment: "finding status note"), name, why)
+                }
             }
         }
-        let name = s.nickname.map { "@" + $0 } ?? "“\(s.title)”"
         findingStore.mutate(findingID) {
             if $0.status == .new { $0.status = .triaged }
             $0.statusNote = String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name)

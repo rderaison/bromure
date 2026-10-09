@@ -169,4 +169,17 @@ struct SidecarTypingTests {
         let t = try JSONDecoder().decode(PaneTarget.self, from: Data(json.utf8))
         #expect(t.expectDisplay == "x" && t.expectDisplayAlt == nil)
     }
+
+    @Test("a session's typed notices accept its current title too (renamed Sidecar session)")
+    @MainActor func sessionPaneTargetAcceptsRename() {
+        var s = AgentSession(profileID: UUID(), tool: .claude, title: "v5.0.1 hotfixes", cwd: "/tmp/x")
+        s.windowIndex = 1
+        s.launchDisplay = "Create a worktree out of the main branch and call it hotf…"
+        let t = AgentSessionEngine.paneTarget(s)
+        #expect(t?.expectDisplay == s.launchDisplay)
+        #expect(t?.expectDisplayAlt == "v5.0.1 hotfixes")
+        // Not renamed: no second name.
+        s.title = s.launchDisplay!
+        #expect(AgentSessionEngine.paneTarget(s)?.expectDisplayAlt == nil)
+    }
 }

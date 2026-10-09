@@ -4123,3 +4123,8 @@
 "the server didn't answer" = "サーバーが応答しませんでした";
 "the server runs an older Bromure — update it to hand findings to a session" = "サーバーは古い Bromure を実行しています — 検出事項をセッションに渡すにはアップデートしてください";
 "the server refused it" = "サーバーが拒否しました";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "%1$@ に渡せませんでした: %2$@";
+"a menu or dialog stayed open in that session" = "そのセッションでメニューまたはダイアログが開いたままでした";
+"something else was typed in that session's input box" = "そのセッションの入力欄に別の内容が入力されていました";

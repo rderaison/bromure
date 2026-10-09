@@ -4123,3 +4123,8 @@
 "the server didn't answer" = "服务器没有响应";
 "the server runs an older Bromure — update it to hand findings to a session" = "服务器运行的是旧版 Bromure——请更新后再将发现项交给会话";
 "the server refused it" = "服务器拒绝了";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "无法交给 %1$@：%2$@";
+"a menu or dialog stayed open in that session" = "该会话中有菜单或对话框一直打开";
+"something else was typed in that session's input box" = "该会话的输入框中已有其他内容";

@@ -4157,3 +4157,8 @@
 "the server didn't answer" = "the server didn't answer";
 "the server runs an older Bromure — update it to hand findings to a session" = "the server runs an older Bromure — update it to hand findings to a session";
 "the server refused it" = "the server refused it";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "Couldn't hand it to %1$@: %2$@";
+"a menu or dialog stayed open in that session" = "a menu or dialog stayed open in that session";
+"something else was typed in that session's input box" = "something else was typed in that session's input box";

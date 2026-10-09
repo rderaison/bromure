@@ -4126,3 +4126,8 @@
 "the server didn't answer" = "伺服器沒有回應";
 "the server runs an older Bromure — update it to hand findings to a session" = "伺服器執行的是舊版 Bromure——請更新後再將發現項目交給工作階段";
 "the server refused it" = "伺服器拒絕了";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "無法交給 %1$@：%2$@";
+"a menu or dialog stayed open in that session" = "該工作階段中有選單或對話框一直開著";
+"something else was typed in that session's input box" = "該工作階段的輸入框中已有其他內容";

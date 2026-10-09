@@ -532,6 +532,12 @@ final class AgentSessionEngine {
         guard let w = s.windowIndex else { return nil }
         var t = PaneTarget(ref: s.windowID.map { .windowID($0) } ?? .index(w), foreground: foreground)
         t.expectDisplay = s.launchDisplay
+        // A renamed Bromure Sidecar session's tab shows its current title,
+        // not the launch one: without it every typed notice, Switchboard
+        // message and finding hand-over was refused as another's tab.
+        if let d = s.launchDisplay, !d.isEmpty, !s.title.isEmpty, s.title != d {
+            t.expectDisplayAlt = s.title
+        }
         return t
     }
 

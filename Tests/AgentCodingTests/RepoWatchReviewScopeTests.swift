@@ -365,9 +365,10 @@ struct ReviewRunAgentdTests {
         #expect(out.contains("claude FLAGS '--dangerously-skip-permissions'"), Comment(rawValue: out))
         #expect(out.contains("codex FLAGS '--dangerously-bypass-approvals-and-sandbox'"), Comment(rawValue: out))
         #expect(out.contains("omp FLAGS '--auto-approve'"), Comment(rawValue: out))
-        // Kimi's one-shot --prompt refuses --yolo/--auto; Grok has none.
+        // Kimi's one-shot --prompt refuses --yolo/--auto; Grok's would
+        // otherwise ask before every command.
         #expect(out.contains("kimi FLAGS ''"), Comment(rawValue: out))
-        #expect(out.contains("grok FLAGS ''"), Comment(rawValue: out))
+        #expect(out.contains("grok FLAGS '--always-approve'"), Comment(rawValue: out))
         for tool in ["claude", "codex", "grok", "kimi", "omp"] {
             #expect(out.contains("\(tool) TOOL True"), Comment(rawValue: out))
             #expect(out.contains("\(tool) PINNED True"), Comment(rawValue: out))
