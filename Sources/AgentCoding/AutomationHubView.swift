@@ -1581,7 +1581,10 @@ struct HubFindingsTab: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HubFindingsFlow(findings: findingStore.findings)
+            // The chart follows the repository picker (its own columns are
+            // severity and status, so those filters don't narrow it).
+            HubFindingsFlow(findings: hub.repoFilter.map { r in findingStore.findings.filter { $0.repo == r } }
+                                ?? findingStore.findings)
                 .frame(height: 150)
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
