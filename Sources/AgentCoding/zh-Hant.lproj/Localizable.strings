@@ -4119,3 +4119,10 @@
 "Merge & Push" = "合併並推送";
 "Push %1$@ to %2$@" = "將 %1$@ 推送到 %2$@";
 "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ 包含它即完成。如果 %1$@ 已有新提交，%3$@ 會拉取、解決衝突並推送。";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "無法傳送給 %1$@：%2$@";
+"that session is gone" = "該工作階段已不存在";
+"the server didn't answer" = "伺服器沒有回應";
+"the server runs an older Bromure — update it to hand findings to a session" = "伺服器執行的是舊版 Bromure——請更新後再將發現項目交給工作階段";
+"the server refused it" = "伺服器拒絕了";

@@ -4116,3 +4116,10 @@
 "Merge & Push" = "Mesclar e enviar";
 "Push %1$@ to %2$@" = "Enviar %1$@ para %2$@";
 "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Concluído quando %1$@/%2$@ tiver. Se %1$@ avançou, %3$@ faz pull, resolve os conflitos e envia.";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "Não foi possível enviar para %1$@: %2$@";
+"that session is gone" = "essa sessão não existe mais";
+"the server didn't answer" = "o servidor não respondeu";
+"the server runs an older Bromure — update it to hand findings to a session" = "o servidor executa uma versão antiga do Bromure — atualize-o para passar achados a uma sessão";
+"the server refused it" = "o servidor recusou";

@@ -67,12 +67,15 @@ final class AutomationHubModel {
     var pipelineRepo: String?
     /// A short confirmation under the header ("Scan of … started").
     var flash: String?
+    /// The flash reports a failure (orange, not the green check).
+    var flashIsError = false
     private var flashToken = 0
 
-    func showFlash(_ text: String) {
+    func showFlash(_ text: String, isError: Bool = false) {
         flashToken += 1
         let token = flashToken
         flash = text
+        flashIsError = isError
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
             guard let self, self.flashToken == token else { return }
             self.flash = nil
@@ -145,8 +148,9 @@ struct AutomationHubView: View {
         var routeToSwitchboard: ((UUID, UUID?) -> Void)?
         /// Rooms with a Switchboard to ask.
         var switchboardRooms: () -> [FindingRouting.Room] = { [] }
-        /// Hand a finding straight to a session ("Ask @foo to fix it").
-        var askSession: ((UUID, UUID) -> Void)?
+        /// Hand a finding straight to a session ("Ask @foo to fix it");
+        /// the callback gets nil once it's sent, else why it wasn't.
+        var askSession: ((UUID, UUID, @escaping @MainActor (String?) -> Void) -> Void)?
         /// The sessions it can go to.
         var sessionChoices: () -> [PeerMention] = { [] }
         var openTask: (UUID) -> Void = { _ in }
@@ -233,7 +237,8 @@ struct AutomationHubView: View {
             .padding(.bottom, 4)
             if let flash = hub.flash {
                 HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Image(systemName: hub.flashIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(hub.flashIsError ? .orange : .green)
                     Text(flash).font(.system(size: 12))
                     Spacer()
                     Button { hub.flash = nil } label: { Image(systemName: "xmark") }
@@ -241,7 +246,8 @@ struct AutomationHubView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(Color.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background((hub.flashIsError ? Color.orange : Color.green).opacity(0.1),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .padding(.horizontal, 12)
                 .padding(.top, 4)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -294,10 +300,18 @@ struct AutomationHubView: View {
             sessions: actions.askSession == nil ? [] : actions.sessionChoices(),
             ask: actions.askSession.map { ask in
                 { id, peer in
-                    ask(id, peer.sessionID)
-                    hub.showFlash(String(format: NSLocalizedString(
-                        "Sent to %@ — it works on the fix in its own session.", comment: "hub flash"),
-                        peer.assigned ? "@" + peer.nick : "“\(peer.title)”"))
+                    let name = peer.assigned ? "@" + peer.nick : "“\(peer.title)”"
+                    ask(id, peer.sessionID) { error in
+                        if let error {
+                            hub.showFlash(String(format: NSLocalizedString(
+                                "Couldn't send it to %1$@: %2$@", comment: "hub flash: session, reason"),
+                                name, error), isError: true)
+                        } else {
+                            hub.showFlash(String(format: NSLocalizedString(
+                                "Sent to %@ — it works on the fix in its own session.", comment: "hub flash"),
+                                name))
+                        }
+                    }
                 }
             }))
         .sheet(item: $hub.editingWatch) { draft in

@@ -2268,6 +2268,20 @@ final class RemoteHostController {
         send(action.isEmpty ? "DELETE" : "POST",
              "/watches/\(ControlClient.encodeSegment(id.uuidString))" + (action.isEmpty ? "" : "/" + action))
     }
+    /// One request, answered on the main actor: (status, json); status nil
+    /// when the server couldn't be reached. Refreshes the mirror after.
+    func request(_ method: String, _ path: String, body: [String: Any]? = nil,
+                 completion: @escaping @MainActor (Int?, [String: Any]) -> Void) {
+        let host = self.host
+        pollQueue.async { [weak self] in
+            let resp = try? RemoteTransport.client(for: host).request(method, path, body: body)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { completion(resp?.status, resp?.json ?? [:]) }
+                self?.pollOnce()
+            }
+        }
+    }
+
     func findingCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send(action.isEmpty ? "DELETE" : "POST",
              "/findings/\(ControlClient.encodeSegment(id.uuidString))" + (action.isEmpty ? "" : "/" + action),
@@ -4153,9 +4167,24 @@ final class RemoteHostWindow: NSWindow {
                     routeToSwitchboard: { id, room in
                         c.findingCommand(id, "switchboard", body: room.map { ["room": $0.uuidString] } ?? [:])
                     },
-                    askSession: { [weak self] id, sid in
-                        c.findingCommand(id, "session", body: ["session": sid.uuidString])
-                        self?.selectSession(sid)
+                    askSession: { [weak self] id, sid, done in
+                        // Wait for the server's answer: an older server
+                        // doesn't know the route, and switching to the
+                        // session then read as sent while nothing was.
+                        c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
+                                  body: ["session": sid.uuidString]) { status, json in
+                            if status == 200 {
+                                self?.selectSession(sid)
+                                done(nil)
+                            } else if status == nil {
+                                done(NSLocalizedString("the server didn't answer", comment: "finding → session failure"))
+                            } else if (json["error"] as? String) == "not found" {
+                                done(NSLocalizedString("the server runs an older Bromure — update it to hand findings to a session",
+                                                       comment: "finding → session failure"))
+                            } else {
+                                done((json["error"] as? String) ?? NSLocalizedString("the server refused it", comment: "finding → session failure"))
+                            }
+                        }
                     },
                     sessionChoices: {
                         PeerMention.candidates(c.sessionStore.sessions.filter { !$0.isSwitchboard },

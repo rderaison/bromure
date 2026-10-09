@@ -3306,8 +3306,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         self?.acDelegate?.routeFindingToSwitchboard(id, room: room)
                     },
                     switchboardRooms: { [weak self] in self?.acDelegate?.switchboardRoomChoices() ?? [] },
-                    askSession: { [weak self] id, sid in
-                        self?.acDelegate?.routeFindingToSession(id, session: sid)
+                    askSession: { [weak self] id, sid, done in
+                        let ok = self?.acDelegate?.routeFindingToSession(id, session: sid) ?? false
+                        done(ok ? nil : NSLocalizedString("that session is gone", comment: "finding → session failure"))
                     },
                     sessionChoices: { [weak self] in self?.acDelegate?.findingSessionChoices() ?? [] },
                     openTask: { [weak self] id in self?.acDelegate?.openFixTask(id) },

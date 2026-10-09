@@ -4150,3 +4150,10 @@
 "Merge & Push" = "Merge & Push";
 "Push %1$@ to %2$@" = "Push %1$@ to %2$@";
 "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes.";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "Couldn't send it to %1$@: %2$@";
+"that session is gone" = "that session is gone";
+"the server didn't answer" = "the server didn't answer";
+"the server runs an older Bromure — update it to hand findings to a session" = "the server runs an older Bromure — update it to hand findings to a session";
+"the server refused it" = "the server refused it";
