@@ -828,9 +828,11 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
         ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
         ?? ProcessInfo.processInfo.processName
     let L = { (k: String) in NSLocalizedString(k, comment: "") }
-    appMenu.addItem(withTitle: String(format: L("About %@"), appName),
-                    action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-                    keyEquivalent: "")
+    let aboutItem = NSMenuItem(title: String(format: L("About %@"), appName),
+                               action: #selector(ACAppDelegate.showAboutPanelAction(_:)),
+                               keyEquivalent: "")
+    aboutItem.target = delegate
+    appMenu.addItem(aboutItem)
     appMenu.addItem(NSMenuItem.separator())
 
     let prefsItem = NSMenuItem(title: L("Preferences…"),
@@ -8966,6 +8968,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// whose defaults the window edits — preselected to the remote whose
     /// mirror window had focus when the menu fired, else this Mac — so ⌘,
     /// from a fat-client window edits THAT server's settings, not this Mac's.
+    /// About, with the Jenkins build and commit (BuildInfo).
+    @objc func showAboutPanelAction(_ sender: Any?) { BuildInfo.showAboutPanel() }
+
     @objc func openPreferencesAction(_ sender: Any?) {
         if let win = preferencesWindow {
             win.makeKeyAndOrderFront(nil)

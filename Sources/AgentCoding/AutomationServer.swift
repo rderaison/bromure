@@ -2264,6 +2264,7 @@ final class ACAutomationServer {
         var snapshot: [String: Any] = DispatchQueue.main.sync {
             var d: [String: Any] = [
                 "version": FatClient.protocolVersion,
+                "build": BuildInfo.dictionary,
                 "supportsPush": true,
                 "workspaces": self.onListWorkspaces?() ?? [],
                 "vms": self.onListVMs?() ?? [],

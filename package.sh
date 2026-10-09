@@ -162,6 +162,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
+"$SCRIPT_DIR/scripts/stamp-build-info.sh" "$CONTENTS/Info.plist"
 
 # SPM omits the standard app rpath; add it so dyld can resolve
 # @rpath/Sparkle.framework/... to Contents/Frameworks/.

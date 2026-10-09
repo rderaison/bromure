@@ -134,6 +134,7 @@ mkdir -p "$MACOS_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
+"$SCRIPT_DIR/scripts/stamp-build-info.sh" "$CONTENTS/Info.plist"
 
 # SPM only sets @loader_path / /usr/lib/swift / Xcode rpaths on the binary;
 # none resolve to Contents/Frameworks. Add the standard macOS app rpath so
