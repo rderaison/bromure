@@ -110,7 +110,7 @@ enum AppLog {
         let hookAddr = UInt(bitPattern: unsafeBitCast(exitHook, to: UnsafeRawPointer.self))
         let page = UInt(vm_page_size)
         for (seg, sect) in [("__DATA_CONST", "__got"), ("__DATA", "__got"), ("__DATA", "__la_symbol_ptr"),
-                            ("__AUTH_CONST", "__auth_got"), ("__DATA_CONST", "__auth_got")] {
+                            ("__AUTH_CONST", "__auth_got"), ("__DATA_CONST", "__auth_got")] {   // ggignore: Mach-O section names
             var size: UInt = 0
             guard let data = getsectiondata(mh, seg, sect, &size), size > 0 else { continue }
             let slots = UnsafeMutableRawPointer(data).assumingMemoryBound(to: UInt.self)
