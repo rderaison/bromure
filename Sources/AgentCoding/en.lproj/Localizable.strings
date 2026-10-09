@@ -4166,3 +4166,6 @@
 "the Switchboard session is gone" = "the Switchboard session is gone";
 "the message couldn't be typed into the Switchboard" = "the message couldn't be typed into the Switchboard";
 "the Switchboard's agent never started" = "the Switchboard's agent never started";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent";
+"Hand It Over Anyway" = "Hand It Over Anyway";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over.";

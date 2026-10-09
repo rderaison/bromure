@@ -62,9 +62,13 @@ extension ACAppDelegate {
 
     /// "Ask the Switchboard": the global Switchboard (room nil) or a room's
     /// proposes who fixes the finding. Shows that Switchboard when `show`.
+    /// A flagged finding goes only once the user `confirmed` it.
     @discardableResult
-    func routeFindingToSwitchboard(_ findingID: UUID, room roomID: UUID?, show: Bool = true) -> Bool {
-        guard let f = findingStore.finding(findingID) else { return false }
+    func routeFindingToSwitchboard(_ findingID: UUID, room roomID: UUID?, show: Bool = true,
+                                   confirmed: Bool) -> Bool {
+        guard let f = findingStore.finding(findingID), f.handOverRefusal(confirmed: confirmed) == nil else {
+            return false
+        }
         let room = roomID.flatMap { agentRoomStore.room($0) }
         let brief = RepoWatchPrompts.fixTask(f)
         let store = findingStore
@@ -105,12 +109,15 @@ extension ACAppDelegate {
 
     /// "Ask @foo to fix it": hand the finding to that session. Shows it
     /// when `show`. Returns why it didn't get there (nil = staged and on
-    /// its way; a later typing failure rewrites the finding's note).
-    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, show: Bool = true) async -> String? {
+    /// its way; a later typing failure rewrites the finding's note). A
+    /// flagged finding goes only once the user `confirmed` it.
+    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, show: Bool = true,
+                               confirmed: Bool) async -> String? {
         guard let f = findingStore.finding(findingID),
               let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else {
             return NSLocalizedString("that session is gone", comment: "finding → session failure")
         }
+        if let refusal = f.handOverRefusal(confirmed: confirmed) { return refusal }
         let brief = RepoWatchPrompts.fixTask(f)
         let engine = switchboardEngine
         let name = s.nickname.map { "@" + $0 } ?? "“\(s.title)”"
@@ -149,6 +156,8 @@ extension ACAppDelegate {
     ///   POST   /watches/{id}/toggle        pause / resume
     ///   DELETE /watches/{id}               stop watching (findings removed)
     ///   POST   /findings/{id}/fix          start a fix task
+    ///   (fix / switchboard / session refuse a finding the injection screen
+    ///    flagged unless the body has "confirmed": true — the user's OK)
     ///   POST   /findings/{id}/status       {"status": …, "note": …}
     ///   POST   /findings/{id}/duplicate    {"of": id}
     ///   POST   /findings/{id}/switchboard  {"room": id?} — ask a Switchboard
@@ -203,7 +212,11 @@ extension ACAppDelegate {
                         "reopened": out.reopened.map(\.id.uuidString)]
             }
         case ("findings", _, _):
-            guard let id, findingStore.finding(id) != nil else { return ["error": "unknown finding"] }
+            guard let id, let finding = findingStore.finding(id) else { return ["error": "unknown finding"] }
+            if method == "POST", ["fix", "switchboard", "session"].contains(action),
+               let refusal = finding.handOverRefusal(confirmed: (body["confirmed"] as? Bool) == true) {
+                return ["error": refusal, "flagged": true]
+            }
             switch (method, action) {
             case ("POST", "fix"):
                 guard let tid = repoWatchEngine.fix(id) else { return ["error": "couldn't start the fix"] }
@@ -214,14 +227,14 @@ extension ACAppDelegate {
                 findingStore.setStatus(id, status, note: body["note"] as? String)
             case ("POST", "switchboard"):
                 let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
-                guard routeFindingToSwitchboard(id, room: room, show: false) else {
+                guard routeFindingToSwitchboard(id, room: room, show: false, confirmed: true) else {
                     return ["error": "no Switchboard could be started"]
                 }
             case ("POST", "session"):
                 guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)) else {
                     return ["error": "unknown session"]
                 }
-                if let why = await routeFindingToSession(id, session: sid, show: false) {
+                if let why = await routeFindingToSession(id, session: sid, show: false, confirmed: true) {
                     return ["error": why]
                 }
             case ("POST", "duplicate"):

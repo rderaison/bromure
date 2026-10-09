@@ -3301,18 +3301,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     scanBaseline: { [weak self] id in
                         self?.acDelegate?.repoWatchEngine.scanNow(id, baseline: true)
                     },
-                    fix: { [weak self] id in self?.acDelegate?.repoWatchEngine.fix(id) },
-                    routeToSwitchboard: { [weak self] id, room in
-                        self?.acDelegate?.routeFindingToSwitchboard(id, room: room)
+                    fix: { [weak self] id, confirmed in
+                        guard let d = self?.acDelegate,
+                              d.findingStore.finding(id)?.handOverRefusal(confirmed: confirmed) == nil else { return }
+                        d.repoWatchEngine.fix(id)
+                    },
+                    routeToSwitchboard: { [weak self] id, room, confirmed in
+                        self?.acDelegate?.routeFindingToSwitchboard(id, room: room, confirmed: confirmed)
                     },
                     switchboardRooms: { [weak self] in self?.acDelegate?.switchboardRoomChoices() ?? [] },
-                    askSession: { [weak self] id, sid, done in
+                    askSession: { [weak self] id, sid, confirmed, done in
                         Task { @MainActor in
                             guard let d = self?.acDelegate else {
                                 done(NSLocalizedString("that session is gone", comment: "finding → session failure"))
                                 return
                             }
-                            done(await d.routeFindingToSession(id, session: sid))
+                            done(await d.routeFindingToSession(id, session: sid, confirmed: confirmed))
                         }
                     },
                     sessionChoices: { [weak self] in self?.acDelegate?.findingSessionChoices() ?? [] },

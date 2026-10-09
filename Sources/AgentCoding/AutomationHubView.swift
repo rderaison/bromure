@@ -69,6 +69,13 @@ final class AutomationHubModel {
     var flash: String?
     /// The flash reports a failure (orange, not the green check).
     var flashIsError = false
+    /// A flagged finding about to go to a session or a Switchboard, waiting
+    /// for the user's OK.
+    struct PendingFlagged {
+        let warning: String
+        let go: () -> Void
+    }
+    var pendingFlagged: PendingFlagged?
     private var flashToken = 0
 
     func showFlash(_ text: String, isError: Bool = false) {
@@ -143,14 +150,16 @@ struct AutomationHubView: View {
         var scanNow: (UUID) -> Void = { _ in }
         /// A one-off full-repository review, whatever the watch's scope.
         var scanBaseline: (UUID) -> Void = { _ in }
-        var fix: (UUID) -> Void = { _ in }
+        /// The Bool on fix / routeToSwitchboard / askSession: the user OK'd
+        /// handing over a finding the injection screen flagged.
+        var fix: (UUID, _ confirmed: Bool) -> Void = { _, _ in }
         /// Ask a Switchboard (room nil = the global one) who should fix it.
-        var routeToSwitchboard: ((UUID, UUID?) -> Void)?
+        var routeToSwitchboard: ((UUID, UUID?, _ confirmed: Bool) -> Void)?
         /// Rooms with a Switchboard to ask.
         var switchboardRooms: () -> [FindingRouting.Room] = { [] }
         /// Hand a finding straight to a session ("Ask @foo to fix it");
         /// the callback gets nil once it's sent, else why it wasn't.
-        var askSession: ((UUID, UUID, @escaping @MainActor (String?) -> Void) -> Void)?
+        var askSession: ((UUID, UUID, _ confirmed: Bool, @escaping @MainActor (String?) -> Void) -> Void)?
         /// The sessions it can go to.
         var sessionChoices: () -> [PeerMention] = { [] }
         var openTask: (UUID) -> Void = { _ in }
@@ -201,8 +210,8 @@ struct AutomationHubView: View {
                 ? NSLocalizedString("Now watching %@ — the first review is starting.", comment: "hub flash")
                 : NSLocalizedString("Now watching %@.", comment: "hub flash"), w.repo))
         }
-        a.fix = { id in
-            actions.fix(id)
+        a.fix = { id, confirmed in
+            actions.fix(id, confirmed)
             hub.showFlash(NSLocalizedString(
                 "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.",
                 comment: "hub flash"))
@@ -290,8 +299,8 @@ struct AutomationHubView: View {
         .environment(\.findingRouting, FindingRouting(
             rooms: actions.switchboardRooms(),
             route: actions.routeToSwitchboard.map { route in
-                { id, room in
-                    route(id, room)
+                { id, room, confirmed in
+                    route(id, room, confirmed)
                     hub.showFlash(NSLocalizedString(
                         "Asked the Switchboard — it will propose a session and wait for your OK.",
                         comment: "hub flash"))
@@ -299,9 +308,9 @@ struct AutomationHubView: View {
             },
             sessions: actions.askSession == nil ? [] : actions.sessionChoices(),
             ask: actions.askSession.map { ask in
-                { id, peer in
+                { id, peer, confirmed in
                     let name = peer.assigned ? "@" + peer.nick : "“\(peer.title)”"
-                    ask(id, peer.sessionID) { error in
+                    ask(id, peer.sessionID, confirmed) { error in
                         if let error {
                             hub.showFlash(String(format: NSLocalizedString(
                                 "Couldn't send it to %1$@: %2$@", comment: "hub flash: session, reason"),
@@ -313,7 +322,24 @@ struct AutomationHubView: View {
                         }
                     }
                 }
+            },
+            confirmFlagged: { finding, go in
+                hub.pendingFlagged = .init(warning: finding.screenWarning ?? "", go: go)
             }))
+        .alert(NSLocalizedString("This finding's text was flagged", comment: ""),
+               isPresented: Binding(get: { hub.pendingFlagged != nil },
+                                    set: { if !$0 { hub.pendingFlagged = nil } }),
+               presenting: hub.pendingFlagged) { pending in
+            Button(NSLocalizedString("Hand It Over Anyway", comment: "flagged finding"), role: .destructive) {
+                hub.pendingFlagged = nil
+                pending.go()
+            }
+            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) { hub.pendingFlagged = nil }
+        } message: { pending in
+            Text(String(format: NSLocalizedString(
+                "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over.",
+                comment: "flagged finding"), pending.warning))
+        }
         .sheet(item: $hub.editingWatch) { draft in
             WatchEditorSheet(
                 draft: draft, isNew: hub.editingWatchIsNew,
@@ -674,7 +700,7 @@ struct HubOverviewTab: View {
                     ForEach(open.prefix(8)) { f in
                         HubFindingRow(finding: f, workspace: workspaceName(f.profileID),
                                    onOpen: { hub.showFinding(f.id) },
-                                   onFix: { actions.fix(f.id) },
+                                   onFix: { actions.fix(f.id, $0) },
                                    onStatus: { st, note in actions.setStatus(f.id, st, note) })
                         Divider()
                     }
@@ -1150,7 +1176,7 @@ struct HubFindingRow: View {
     let finding: RepoFinding
     var workspace: String = ""
     var onOpen: () -> Void
-    var onFix: () -> Void
+    var onFix: (_ confirmed: Bool) -> Void
     var onStatus: (RepoFinding.Status, String?) -> Void = { _, _ in }
 
     var body: some View {
@@ -1192,11 +1218,15 @@ struct FindingRouting {
         let colorHex: String
     }
     var rooms: [Room] = []
-    /// (finding, room — nil = the global Switchboard). nil = unavailable.
-    var route: ((UUID, UUID?) -> Void)?
+    /// (finding, room — nil = the global Switchboard, confirmed). nil =
+    /// unavailable.
+    var route: ((UUID, UUID?, Bool) -> Void)?
     /// Sessions a finding can be handed to directly.
     var sessions: [PeerMention] = []
-    var ask: ((UUID, PeerMention) -> Void)?
+    var ask: ((UUID, PeerMention, Bool) -> Void)?
+    /// Asks the user before a flagged finding is handed over; runs the
+    /// closure on their OK. nil = flagged findings aren't handed over.
+    var confirmFlagged: ((RepoFinding, @escaping () -> Void) -> Void)?
 
     /// Anything to offer besides a new fix session.
     var isAvailable: Bool { route != nil || (ask != nil && !sessions.isEmpty) }
@@ -1224,7 +1254,7 @@ struct SwitchboardRouteItems: View {
             Menu {
                 ForEach(routing.sessions) { peer in
                     Button {
-                        ask(finding.id, peer)
+                        gate { ask(finding.id, peer, $0) }
                     } label: {
                         Text(Self.label(peer))
                     }
@@ -1236,7 +1266,7 @@ struct SwitchboardRouteItems: View {
         }
         if let route = routing.route {
             Button {
-                route(finding.id, nil)
+                gate { route(finding.id, nil, $0) }
             } label: {
                 Label(NSLocalizedString("Ask the Switchboard Who Should Fix It", comment: "finding menu"),
                       systemImage: "person.2.wave.2")
@@ -1244,7 +1274,7 @@ struct SwitchboardRouteItems: View {
             if !routing.rooms.isEmpty {
                 Menu {
                     ForEach(routing.rooms) { room in
-                        Button(room.name) { route(finding.id, room.id) }
+                        Button(room.name) { gate { route(finding.id, room.id, $0) } }
                     }
                 } label: {
                     Label(NSLocalizedString("Ask a Room's Switchboard", comment: "finding menu"),
@@ -1252,6 +1282,14 @@ struct SwitchboardRouteItems: View {
                 }
             }
         }
+    }
+
+    /// Like Fix: a finding the injection screen flagged goes to an agent
+    /// only once the user OKs it (the menus can't host the alert, so the
+    /// hub's root asks).
+    private func gate(_ go: @escaping (_ confirmed: Bool) -> Void) {
+        guard finding.screenWarning != nil else { return go(false) }
+        routing.confirmFlagged?(finding) { go(true) }
     }
 
     /// "@nick — title · workspace"; a session with no nickname yet goes by
@@ -1320,7 +1358,8 @@ struct FindingRowMenu: View {
 struct FixButton: View {
     let finding: RepoFinding
     var prominent = false
-    var onFix: () -> Void
+    /// true = the user confirmed a flagged finding.
+    var onFix: (_ confirmed: Bool) -> Void
     @State private var confirmFlagged = false
     @Environment(\.findingRouting) private var routing
 
@@ -1330,7 +1369,7 @@ struct FixButton: View {
             Group {
                 if prominent {
                     Button {
-                        if finding.screenWarning != nil { confirmFlagged = true } else { onFix() }
+                        if finding.screenWarning != nil { confirmFlagged = true } else { onFix(false) }
                     } label: {
                         Label(finding.taskID == nil
                               ? NSLocalizedString("Start a Fix", comment: "finding action")
@@ -1345,7 +1384,7 @@ struct FixButton: View {
                     // offers the Switchboards.
                     Menu {
                         Button {
-                            if finding.screenWarning != nil { confirmFlagged = true } else { onFix() }
+                            if finding.screenWarning != nil { confirmFlagged = true } else { onFix(false) }
                         } label: {
                             Label(NSLocalizedString("Start a Fix Session", comment: "finding menu"),
                                   systemImage: "wrench.and.screwdriver")
@@ -1355,14 +1394,14 @@ struct FixButton: View {
                     } label: {
                         Label(NSLocalizedString("Fix", comment: "finding action"), systemImage: "wrench.and.screwdriver")
                     } primaryAction: {
-                        if finding.screenWarning != nil { confirmFlagged = true } else { onFix() }
+                        if finding.screenWarning != nil { confirmFlagged = true } else { onFix(false) }
                     }
                     .menuStyle(.button)
                     .controlSize(.small)
                     .fixedSize()
                 } else {
                     Button {
-                        if finding.screenWarning != nil { confirmFlagged = true } else { onFix() }
+                        if finding.screenWarning != nil { confirmFlagged = true } else { onFix(false) }
                     } label: {
                         Label(finding.taskID == nil
                               ? NSLocalizedString("Fix", comment: "finding action")
@@ -1374,7 +1413,7 @@ struct FixButton: View {
             }
             .alert(NSLocalizedString("This finding's text was flagged", comment: ""),
                    isPresented: $confirmFlagged) {
-                Button(NSLocalizedString("Start Fix Anyway", comment: ""), role: .destructive, action: onFix)
+                Button(NSLocalizedString("Start Fix Anyway", comment: ""), role: .destructive) { onFix(true) }
                 Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
             } message: {
                 Text(String(format: NSLocalizedString(
@@ -1587,7 +1626,7 @@ struct FindingsList: View {
     let rows: [RepoFinding]
     let compact: Bool
     @Binding var selection: UUID?
-    var onFix: (UUID) -> Void
+    var onFix: (UUID, _ confirmed: Bool) -> Void
     var onStatus: (UUID, RepoFinding.Status, String?) -> Void = { _, _, _ in }
     @FocusState private var focused: Bool
 
@@ -1605,7 +1644,7 @@ struct FindingsList: View {
                                                selection = selection == f.id ? nil : f.id
                                                focused = true
                                            },
-                                           onFix: { onFix(f.id) },
+                                           onFix: { onFix(f.id, $0) },
                                            onStatus: { st, note in onStatus(f.id, st, note) })
                                 .id(f.id)
                         }
@@ -1657,7 +1696,7 @@ private struct FindingListRow: View {
     let compact: Bool
     let selected: Bool
     var onSelect: () -> Void
-    var onFix: () -> Void
+    var onFix: (_ confirmed: Bool) -> Void
     var onStatus: (RepoFinding.Status, String?) -> Void
     @State private var hovering = false
 
@@ -1961,7 +2000,7 @@ struct FindingDetailPanel: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack {
-                    FixButton(finding: finding, prominent: true) { actions.fix(finding.id) }
+                    FixButton(finding: finding, prominent: true) { actions.fix(finding.id, $0) }
                     Button(NSLocalizedString("Open Task", comment: "fix task")) { actions.openTask(task.id) }
                         .controlSize(.large)
                 }
@@ -1983,7 +2022,7 @@ struct FindingDetailPanel: View {
             .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
         } else if finding.status.isOpen {
             VStack(alignment: .leading, spacing: 6) {
-                FixButton(finding: finding, prominent: true) { actions.fix(finding.id) }
+                FixButton(finding: finding, prominent: true) { actions.fix(finding.id, $0) }
                 if routing.isAvailable {
                     Menu {
                         SwitchboardRouteItems(finding: finding)

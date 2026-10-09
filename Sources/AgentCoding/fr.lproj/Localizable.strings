@@ -4132,3 +4132,6 @@
 "the Switchboard session is gone" = "la session du Standard n’existe plus";
 "the message couldn't be typed into the Switchboard" = "le message n’a pas pu être saisi dans le Standard";
 "the Switchboard's agent never started" = "l’agent du Standard n’a jamais démarré";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "son texte a été signalé par le filtre d’injection de prompt (%@) — confirmez-le avant de le confier à un agent";
+"Hand It Over Anyway" = "Le confier quand même";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "Le filtre d’injection de prompt l’a signalé (%@). Il provient d’un agent qui lisait le contenu du dépôt, et l’agent à qui vous le confiez le lirait aussi. Vérifiez-le avant de le confier.";

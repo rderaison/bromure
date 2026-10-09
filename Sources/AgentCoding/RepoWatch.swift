@@ -445,6 +445,16 @@ struct RepoFinding: Codable, Identifiable, Equatable, Sendable {
     /// it came from repository content, and a fix agent would read it.
     var screenWarning: String?
 
+    /// Every hand-over of the finding's text to an agent (a fix, a session,
+    /// a Switchboard) needs the user's OK once it's flagged: why it's
+    /// refused without one, nil = go ahead.
+    func handOverRefusal(confirmed: Bool) -> String? {
+        guard let w = screenWarning, !confirmed else { return nil }
+        return String(format: NSLocalizedString(
+            "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent",
+            comment: "finding hand-over refusal"), w)
+    }
+
     init(id: UUID = UUID(), watchID: UUID?, profileID: UUID, repo: String,
          fingerprint: String, title: String, severity: Severity = .medium,
          category: Category = .security, cwe: String? = nil,

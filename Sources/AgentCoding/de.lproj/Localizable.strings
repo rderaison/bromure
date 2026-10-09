@@ -4132,3 +4132,6 @@
 "the Switchboard session is gone" = "die Sitzung der Schaltzentrale gibt es nicht mehr";
 "the message couldn't be typed into the Switchboard" = "die Nachricht konnte nicht in die Schaltzentrale eingegeben werden";
 "the Switchboard's agent never started" = "der Agent der Schaltzentrale ist nie gestartet";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "sein Text wurde von der Prompt-Injection-Prüfung markiert (%@) — bestätigen Sie ihn, bevor Sie ihn einem Agenten übergeben";
+"Hand It Over Anyway" = "Trotzdem übergeben";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "Die Prompt-Injection-Prüfung hat ihn markiert (%@). Er stammt von einem Agenten, der Repository-Inhalte gelesen hat, und der Agent, dem Sie ihn übergeben, würde ihn ebenfalls lesen. Prüfen Sie ihn, bevor Sie ihn übergeben.";

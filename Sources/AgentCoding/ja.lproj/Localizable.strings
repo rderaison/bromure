@@ -4132,3 +4132,6 @@
 "the Switchboard session is gone" = "スイッチボードのセッションはもうありません";
 "the message couldn't be typed into the Switchboard" = "メッセージをスイッチボードに入力できませんでした";
 "the Switchboard's agent never started" = "スイッチボードのエージェントが起動しませんでした";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "本文がプロンプトインジェクション検査でフラグ付けされました (%@) — エージェントに渡す前に確認してください";
+"Hand It Over Anyway" = "それでも渡す";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "プロンプトインジェクション検査でフラグが付けられました (%@)。これはリポジトリの内容を読んだエージェントによるもので、渡す先のエージェントもこれを読むことになります。渡す前に確認してください。";

@@ -399,4 +399,18 @@ struct RepoWatchTests {
         #expect(store.finding(f.id)?.status == .triaged)
         #expect(store.finding(f.id)?.statusNote?.contains("Sent to @fixer") == true)
     }
+
+    @Test("A flagged finding is handed to an agent only with the user's OK")
+    func flaggedHandOverNeedsConfirmation() {
+        let store = tempStore()
+        let clean = store.ingest(report("SQL injection"), watchID: nil, profileID: UUID(),
+                                 repo: "o/r", runID: nil, commit: nil).finding
+        let flagged = store.ingest(report("Path traversal", file: "x.ts", fingerprint: "pt"),
+                                   watchID: nil, profileID: UUID(), repo: "o/r", runID: nil,
+                                   commit: nil, screenWarning: "meta-instruction").finding
+        #expect(clean.handOverRefusal(confirmed: false) == nil)
+        #expect(clean.handOverRefusal(confirmed: true) == nil)
+        #expect(flagged.handOverRefusal(confirmed: false)?.contains("meta-instruction") == true)
+        #expect(flagged.handOverRefusal(confirmed: true) == nil)
+    }
 }

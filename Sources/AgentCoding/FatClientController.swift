@@ -4163,16 +4163,18 @@ final class RemoteHostWindow: NSWindow {
                     toggleWatch: { c.watchCommand($0, "toggle") },
                     scanNow: { c.watchCommand($0, "scan") },
                     scanBaseline: { c.watchCommand($0, "baseline") },
-                    fix: { c.findingCommand($0, "fix") },
-                    routeToSwitchboard: { id, room in
-                        c.findingCommand(id, "switchboard", body: room.map { ["room": $0.uuidString] } ?? [:])
+                    fix: { c.findingCommand($0, "fix", body: $1 ? ["confirmed": true] : nil) },
+                    routeToSwitchboard: { id, room, confirmed in
+                        var body: [String: Any] = room.map { ["room": $0.uuidString] } ?? [:]
+                        if confirmed { body["confirmed"] = true }
+                        c.findingCommand(id, "switchboard", body: body)
                     },
-                    askSession: { [weak self] id, sid, done in
+                    askSession: { [weak self] id, sid, confirmed, done in
                         // Wait for the server's answer: an older server
                         // doesn't know the route, and switching to the
                         // session then read as sent while nothing was.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
-                                  body: ["session": sid.uuidString]) { status, json in
+                                  body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
                             if status == 200 {
                                 self?.selectSession(sid)
                                 done(nil)
