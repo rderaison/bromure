@@ -117,6 +117,12 @@ struct BromureAC: ParsableCommand {
         // Hidden verification hook: run the PII detector over files and print
         // what it finds and how long it took. Standalone, no servers or VMs.
         //   bromure-ac __pii-scan <file>… [--min 0.6] [--quiet] [--plan]
+        // Hidden verification hook: the app log's _exit hook names the caller.
+        //   bromure-ac __exit-hook-test   → logs "_exit(3) … called from:" + a backtrace, exits 3
+        if filtered.first == "__exit-hook-test" {
+            AppLog.install()
+            exitHookTestBailOut()
+        }
         if filtered.first == "__bench-scroll" {
             ScrollBench.run(Array(filtered.dropFirst()))
             return
