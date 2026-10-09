@@ -1293,13 +1293,7 @@ final class BeautifiedSessionModel: ObservableObject {
         queueStore.update(queueKey) { queued in
           var lost: Set<UUID> = []
           queued.removeAll { q in
-            // One marked "Not delivered" that a turn carries after all (the
-            // user pressed Return in the terminal, the agent took it late):
-            // delivered — its stale banner goes.
-            if q.held, q.failure == ChatQueueStore.notDeliveredText || q.failure == Self.notTakenText,
-               turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) || Self.typedBecame(q.text, turn: $0) }) {
-                return true
-            }
+            if Self.arrivedAnyway(q, turns: turns) { return true }
             guard !q.held else { return false }
             // A TUI may merge several queued messages into one turn.
             if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
@@ -1354,6 +1348,18 @@ final class BeautifiedSessionModel: ObservableObject {
            queueStore.isOwner(queueKey, self) {
             deliverHeld()
         }
+    }
+
+    /// A held message marked as failed that a turn since its baseline
+    /// carries after all: delivered, its stale banner goes. "Not
+    /// delivered" (the user pressed Return in the terminal, the agent took
+    /// it late), and "Not sent" too: a fat client's type call can lose its
+    /// answer (the link dropped, an exec timed out) after the server typed
+    /// the text — a failed send whose turn shows up went through.
+    nonisolated static func arrivedAnyway(_ q: QueuedMessage, turns: [String]) -> Bool {
+        let failures = [ChatQueueStore.notDeliveredText, notTakenText, ChatQueueStore.notTypedText]
+        guard q.held, let f = q.failure, failures.contains(f) else { return false }
+        return turns.dropFirst(q.baseline).contains { $0.contains(q.text) || typedBecame(q.text, turn: $0) }
     }
 
     /// Whether a recorded turn is a message Bromure typed, altered on the
@@ -2463,6 +2469,10 @@ final class BeautifiedSessionModel: ObservableObject {
                 self.sending = false
                 return
             }
+            // The turns before this send: a fat client's send can take tens
+            // of seconds, and the turn it makes may be read meanwhile — a
+            // failure marked after counted from then would never see it.
+            let baseline = self.userTurnCount
             let echo: Int? = isCommand ? nil : self.appendOptimistic(.userText(text))
             if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
             let before = isCommand ? await self.provider.captureScreen() : nil
@@ -2478,7 +2488,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // message waits on the strip until it's answered.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: true)
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: true, baseline: baseline)
                 await self.rescanSoon()
                 return
             case .refused(let r):
@@ -2490,7 +2500,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // why, to edit or drop.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: ChatQueueStore.failureText(r))
                 return
             case .unconfirmed:
@@ -2498,7 +2508,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // sent — on the strip, "Not delivered".
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: ChatQueueStore.notDeliveredText)
                 return
             case .dropped:
@@ -2507,7 +2517,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // from it on its own if a turn turns out to carry it.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: Self.notTakenText)
                 return
             case .failed, .unreachable:
@@ -2516,7 +2526,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // "Not sent", to edit or drop.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: ChatQueueStore.notTypedText)
                 return
             case .typed:
@@ -2593,12 +2603,12 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Put `text` on the strip as held by Bromure, for the window it is for
     /// (pinned to its stable id).
     private func enqueueHeld(_ text: String, window: Int?, awaitingAnswer: Bool,
-                             failure: String? = nil) async {
+                             baseline: Int? = nil, failure: String? = nil) async {
         var target: PaneTarget?
         if let w = window { target = await provider.pinnedTarget(window: w) }
         // Keyed by the session once it's known, so the strip shows it now.
         bindSessionQueue()
-        var q = QueuedMessage(text: text, held: true, editable: true, baseline: userTurnCount,
+        var q = QueuedMessage(text: text, held: true, editable: true, baseline: baseline ?? userTurnCount,
                               path: currentPath, offset: currentPath.flatMap { buffers[$0]?.end } ?? 0,
                               target: target, failure: failure, awaitingAnswer: awaitingAnswer ? true : nil)
         q.sessionID = currentSession?()?.id
