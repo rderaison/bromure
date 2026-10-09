@@ -54,7 +54,8 @@ enum AppLog {
     /// the signal breadcrumbs cover the latter.) Into the log and, when
     /// started from a terminal, its stderr too.
     static func exitTrace() {
-        stamp("exit pid \(getpid()) on \(Thread.isMainThread ? "the main thread" : "a background thread"), called from:")
+        stamp("exit pid \(getpid()) on \(Thread.isMainThread ? "the main thread" : "a background thread"), called from:",
+              alsoToTerminal: true)
         writeBacktrace()
     }
 
@@ -84,7 +85,8 @@ enum AppLog {
 
     private static let exitHook: ExitFn = { code in
         if getpid() == AppLog.appPID {
-            AppLog.stamp("_exit(\(code)) pid \(getpid()) on \(Thread.isMainThread ? "the main thread" : "a background thread") — ending without exit handlers, called from:")
+            AppLog.stamp("_exit(\(code)) pid \(getpid()) on \(Thread.isMainThread ? "the main thread" : "a background thread") — ending without exit handlers, called from:",
+                         alsoToTerminal: true)
             AppLog.writeBacktrace()
         }
         AppLog.realExit?(code)
@@ -124,13 +126,18 @@ enum AppLog {
 
     /// One dated line straight into the file (not via stderr, so it lands
     /// even when the tee is gone).
-    static func stamp(_ text: String) {
+    /// `alsoToTerminal`: the original stderr too (the exit traces, whose
+    /// backtrace goes there as well when started from a terminal).
+    static func stamp(_ text: String, alsoToTerminal: Bool = false) {
         guard fileFD >= 0 else { return }
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let line = "=== \(f.string(from: Date())) \(text)\n"
         line.utf8CString.withUnsafeBufferPointer { buf in
             writeAll(fileFD, UnsafeRawPointer(buf.baseAddress!), buf.count - 1)
+            if alsoToTerminal, originalStderr >= 0 {
+                writeAll(originalStderr, UnsafeRawPointer(buf.baseAddress!), buf.count - 1)
+            }
         }
     }
 
