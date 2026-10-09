@@ -771,7 +771,7 @@ public final class UbuntuImageManager {
             : "192.168.64.1"
 
         let proxy = AlpinePackageProxy()
-        do { try proxy.start() } catch {
+        do { try proxy.start(guestGateway: guestGatewayHost) } catch {
             FileHandle.standardError.write(Data(
                 "[bake] Alpine package proxy failed to start (\(error)) — falling back to direct HTTP\n".utf8))
         }
