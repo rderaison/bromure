@@ -207,7 +207,17 @@ final class LoopbackCallbackForwarder {
                 dev.connect(toPort: Self.relayVsockPort) { result in
                     switch result {
                     case .success(let conn):
-                        let vfd = conn.fileDescriptor
+                        // Our own descriptor: `conn` owns fileDescriptor and
+                        // closes it when it's released — right after this
+                        // callback — while the relay below runs on. Using that
+                        // number then (and closing it at the end) closed
+                        // whatever file had reused it, and closing a guarded
+                        // one kills the app (EXC_GUARD) just after sign-in.
+                        let vfd = dup(conn.fileDescriptor)
+                        guard vfd >= 0 else {
+                            Self.log("vsock dup failed (errno \(errno))")
+                            Darwin.close(cfd); return
+                        }
                         let header = "\(target)\n"
                         let sent = header.withCString { Darwin.write(vfd, $0, strlen($0)) }
                         guard sent > 0 else {

@@ -84,7 +84,7 @@ public final class KeyboardBridge {
                         _ = Darwin.write(conn.fileDescriptor, base, buf.count)
                     }
                 }
-                Darwin.close(conn.fileDescriptor)
+                conn.close()   // VZ owns the fd: closing it here closed it twice
             case .failure:
                 // Guest keyboard-agent may not be running yet — ignore silently
                 break

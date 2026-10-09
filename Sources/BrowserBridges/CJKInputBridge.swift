@@ -155,7 +155,7 @@ public final class CJKInputBridge {
                         _ = Darwin.write(conn.fileDescriptor, base, buf.count)
                     }
                 }
-                Darwin.close(conn.fileDescriptor)
+                conn.close()   // VZ owns the fd: closing it here closed it twice
             case .failure(let error):
                 if cjkDebug { print("[CJKInputBridge] vsock send failed: \(error)") }
             }
