@@ -4406,6 +4406,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                          "succeeded": s.succeeded]
                     }
                     return out
+                case "sign-in-sim", "sign-in-sim-state", "loopback-sim":
+                    // E2E hooks exercising the in-session sign-in path: a
+                    // simulated capture on the real proxy route, and the
+                    // OAuth loopback relay into the guest. `profile` = name
+                    // or id of a running workspace.
+                    let key = (params["profile"] as? String ?? "").lowercased()
+                    guard let profile = self.profiles.first(where: {
+                        $0.name.lowercased() == key || $0.id.uuidString.lowercased() == key })
+                    else { return ["error": "profile required"] }
+                    switch action {
+                    case "sign-in-sim":
+                        guard let token = self.beginSimulatedSignIn(profileID: profile.id) else {
+                            return ["error": "a sign-in is already in flight there (or the proxy is down)"]
+                        }
+                        return ["ok": true, "token": token.uuidString,
+                                "host": SignInSimulator.host, "path": SignInSimulator.path]
+                    case "sign-in-sim-state":
+                        let s = self.proxySignIns[profile.id]
+                        return ["ok": true, "inFlight": s.map { !$0.finished } ?? false,
+                                "completed": SignInSimulator.completed]
+                    default:
+                        guard let port = (params["port"] as? Int).flatMap(UInt16.init(exactly:)),
+                              let dev = self.runningSessions[profile.id]?.sandbox.socketDevice else {
+                            return ["error": "port and a running workspace required"]
+                        }
+                        let page = (params["override"] as? Bool) == true
+                            ? LoopbackCallbackForwarder.registrationSuccessResponse(provider: "ace2e") : nil
+                        guard let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev,
+                                                                  browserResponse: page) else {
+                            return ["error": "couldn't bind 127.0.0.1:\(port)"]
+                        }
+                        self.loopbackForwarders.removeAll { !$0.isRunning }
+                        self.loopbackForwarders.append(fwd)
+                        return ["ok": true, "port": Int(port)]
+                    }
                 case "start-session":
                     // E2E/doc hook for the home screen: start an agent session
                     // the way the New Session screen would.

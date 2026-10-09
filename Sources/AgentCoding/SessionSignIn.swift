@@ -20,6 +20,8 @@ final class ProxySignIn {
     /// Names this sign-in to the proxy's capture hook, which holds only
     /// values (see `beginProxySignIn`).
     let token = UUID()
+    /// The sign-in simulator's (e2e): never touches a credential store.
+    var simulated = false
     let provider: SubscriptionProvider
     let profileID: UUID
     let windowIndex: Int
@@ -32,6 +34,15 @@ final class ProxySignIn {
         self.profileID = profileID
         self.windowIndex = windowIndex
     }
+}
+
+/// The sign-in simulator's fixed endpoint and tally (debug / e2e only).
+@MainActor
+enum SignInSimulator {
+    static let host = "signin-sim.bromure.test"
+    static let path = "/oauth/token"
+    /// Simulated sign-ins completed since launch.
+    static var completed = 0
 }
 
 extension ACAppDelegate {
@@ -160,7 +171,49 @@ extension ACAppDelegate {
               let s = app.proxySignIns[profileID], s.token == token, !s.finished,
               let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
               let access = json["access_token"] as? String, !access.isEmpty else { return nil }
+        if s.simulated {
+            app.endProxySignIn(s, success: true, message: nil)
+            SignInSimulator.completed += 1
+            return SignInCapture.response(status: 200, reason: "OK", json: [
+                "bromure_sim": "kept-on-host", "token": token.uuidString,
+            ])
+        }
         return app.proxySignInCaptured(s, json: json, access: access)
+    }
+
+    /// The sign-in simulator (debug `sign-in-sim`, e2e): arm a capture for
+    /// `profileID` exactly as `beginProxySignIn` does — the same values-only
+    /// hook, the same registry — on `SignInSimulator.host`, whose provider
+    /// reply is canned. A guest POST to it then drives the proxy's capture,
+    /// the hook's hop to the main actor, and its release on the proxy's
+    /// thread, with no browser and no credential store touched. Returns the
+    /// sign-in's token, or nil when another sign-in is in flight there.
+    @MainActor
+    func beginSimulatedSignIn(profileID: UUID) -> UUID? {
+        guard let engine = mitmEngine else { return nil }
+        if let existing = proxySignIns[profileID], !existing.finished { return nil }
+        let signIn = ProxySignIn(provider: .claude, profileID: profileID, windowIndex: -1)
+        signIn.simulated = true
+        proxySignIns[profileID] = signIn
+        let token = signIn.token
+        let canned = SignInCapture.response(status: 200, reason: "OK", json: [
+            "access_token": "sim-access-\(token.uuidString)", "refresh_token": "sim-refresh",
+            "token_type": "Bearer", "expires_in": 3600,
+        ])
+        var capture = SignInCapture(
+            profileID: profileID, hosts: [SignInSimulator.host], pathPrefix: SignInSimulator.path,
+            handle: { status, body in
+                guard status == 200 else { return nil }
+                return await ACAppDelegate.proxySignInExchanged(profileID: profileID, token: token, body: body)
+            })
+        capture.simulatedReply = canned
+        engine.signInCaptures.arm(capture)
+        signIn.timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+            guard let self, let live = self.proxySignIns[profileID], live === signIn, !live.finished else { return }
+            self.endProxySignIn(signIn, success: false, message: nil)
+        }
+        return token
     }
 
     /// The exchange came back with tokens: keep them on the host and decide

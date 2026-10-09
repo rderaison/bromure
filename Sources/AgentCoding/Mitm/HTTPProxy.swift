@@ -1012,12 +1012,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
            let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
            capture.matches(host: host, method: reqMethod, path: reqPath,
                            body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
-            let captureSession = upstreamSession(for: host, insecure: insecure)
-            noteUpstreamSession(captureSession)
-            defer { captureSession.finishTasksAndInvalidate() }
-            let upstream = try await relayUpstreamCollecting(
-                rawRequest: swap.modified, host: host, port: port,
-                session: captureSession, scheme: upstreamScheme)
+            let upstream: Data
+            if let sim = capture.simulatedReply {
+                // The sign-in simulator (e2e): the provider's reply is canned,
+                // everything else — the hook, its hop, its release here — is
+                // the real path.
+                upstream = sim
+            } else {
+                let captureSession = upstreamSession(for: host, insecure: insecure)
+                noteUpstreamSession(captureSession)
+                defer { captureSession.finishTasksAndInvalidate() }
+                upstream = try await relayUpstreamCollecting(
+                    rawRequest: swap.modified, host: host, port: port,
+                    session: captureSession, scheme: upstreamScheme)
+            }
             let status = Self.parseStatusCode(upstream)
             let body = upstream.range(of: Data("\r\n\r\n".utf8))
                 .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()

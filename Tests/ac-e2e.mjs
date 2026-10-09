@@ -4444,6 +4444,122 @@ for n, c in enumerate(calls, 1):
   }
 
   // ======================================================================
+  // 33. Sign-in capture + OAuth callback relay (stress)
+  //
+  // The in-session sign-in path, many times over and concurrently, with no
+  // browser and no real provider (debug `sign-in-sim` / `loopback-sim`):
+  //   - the proxy's capture: a guest POST to the simulator's token endpoint
+  //     (through the guest's HTTPS_PROXY, like an agent's login) is matched,
+  //     the values-only hook hops to the main actor and back, the host
+  //     answers, and the connection frees its copy of the hook — the exact
+  //     path that crashed on macOS 15 (use-after-free in the hook's context);
+  //   - the loopback relay: a host-side 127.0.0.1:<port> forwarder spliced
+  //     to a listener in the guest over vsock 5010, both as a plain splice
+  //     and answered by the host (registration) — the dup'd-fd path (a
+  //     closed-twice descriptor quit the app on "Authorize").
+  // The app must still be up at the end.
+  // ======================================================================
+  if (!SKIP_SESSIONS && sectionActive("33.")) {
+    console.log("\n--- 33. Sign-in capture + OAuth callback relay (stress) ---");
+
+    await test("33.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Sign-in stress tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const ROUNDS = Number(process.env.ACE2E_SIGNIN_ROUNDS || 40);
+      const vm = await stubVMUp("ACE2E_SignIn");
+      // The exchange an agent's login makes, through the guest's proxy env.
+      const exchange = (grant) =>
+        `set -a; . /mnt/bromure-meta/proxy.env; set +a; ` +
+        `curl -sS --max-time 20 -X POST https://signin-sim.bromure.test/oauth/token ` +
+        `-H 'Content-Type: application/x-www-form-urlencoded' --data 'grant_type=${grant}&code=ace2e'`;
+      const simState = () => dbg("sign-in-sim-state", { profile: vm.name });
+      const armAndExchange = async (label) => {
+        const a = await dbg("sign-in-sim", { profile: vm.name });
+        assert(a.ok === true && a.token, `${label}: sign-in-sim: ${JSON.stringify(a)}`);
+        const out = await gx(vm.id, exchange("authorization_code"), { timeout: 30 });
+        assert(out.includes('"bromure_sim":"kept-on-host"') && out.includes(a.token),
+               `${label}: the exchange wasn't answered by the host: ${out.slice(0, 300)}`);
+      };
+      const PORT = 41000 + Math.floor(Math.random() * 8000);
+      const relayOnce = async (i, override) => {
+        const r = await dbg("loopback-sim", { profile: vm.name, port: PORT, override });
+        assert(r.ok === true, `loopback-sim ${i}: ${JSON.stringify(r)}`);
+        const res = await fetch(`http://127.0.0.1:${PORT}/callback?code=ace2e-${i}`,
+                                { signal: AbortSignal.timeout(20000) });
+        const body = await res.text();
+        if (override) {
+          assert(body.includes("Signed in to ace2e"), `relay ${i}: host-answered page missing: ${body.slice(0, 200)}`);
+        } else {
+          assertEq(body.trim(), `ace2e-guest-ok /callback?code=ace2e-${i}`, `relay ${i}: guest reply`);
+        }
+      };
+      try {
+        await test("33.1 workspace boots", async () => {
+          if (vm.error) throw new Error(vm.error);
+        });
+        if (!vm.error) {
+          await test(`33.2 a sign-in exchange is captured and answered by the host, ${ROUNDS} times`, async () => {
+            const before = (await simState()).completed;
+            for (let i = 0; i < ROUNDS; i++) await armAndExchange(`round ${i}`);
+            const st = await simState();
+            assertEq(st.completed - before, ROUNDS, "simulated sign-ins completed");
+            assert(st.inFlight === false, "a sign-in is still in flight after its exchange");
+          });
+
+          await test("33.3 a refresh-token exchange is never captured", async () => {
+            const a = await dbg("sign-in-sim", { profile: vm.name });
+            assert(a.ok === true, `sign-in-sim: ${JSON.stringify(a)}`);
+            const out = await gx(vm.id, exchange("refresh_token"), { timeout: 30, ok: false });
+            assert(!out.includes("bromure_sim"), `a refresh was captured: ${out.slice(0, 200)}`);
+            assert((await simState()).inFlight === true, "the refresh ended the sign-in");
+            // The code exchange that follows is still the one captured.
+            const out2 = await gx(vm.id, exchange("authorization_code"), { timeout: 30 });
+            assert(out2.includes('"bromure_sim":"kept-on-host"') && out2.includes(a.token),
+                   `the armed sign-in didn't capture the code exchange: ${out2.slice(0, 200)}`);
+            assert((await simState()).inFlight === false, "the sign-in is still in flight");
+          });
+
+          await test("33.4 the guest listener for the callback relay comes up", async () => {
+            const srv =
+              "import http.server,socketserver\n" +
+              "class H(http.server.BaseHTTPRequestHandler):\n" +
+              "  def do_GET(self):\n" +
+              "    b=('ace2e-guest-ok '+self.path+'\\n').encode()\n" +
+              "    self.send_response(200);self.send_header('Content-Length',str(len(b)));" +
+              "self.send_header('Connection','close');self.end_headers();self.wfile.write(b)\n" +
+              "  def log_message(self,*a): pass\n" +
+              "socketserver.ThreadingTCPServer.allow_reuse_address=True\n" +
+              `socketserver.ThreadingTCPServer(('127.0.0.1',${PORT}),H).serve_forever()\n`;
+            await gx(vm.id, `echo ${toB64(srv)} | base64 -d > /tmp/ace2e-cb.py && ` +
+                            `(setsid python3 /tmp/ace2e-cb.py </dev/null >/dev/null 2>&1 &) && sleep 1 && ` +
+                            `curl -sS --noproxy '*' http://127.0.0.1:${PORT}/ping`);
+          });
+
+          await test(`33.5 the OAuth callback relay (splice and host-answered), ${ROUNDS} times`, async () => {
+            for (let i = 0; i < ROUNDS; i++) await relayOnce(i, i % 2 === 1);
+          });
+
+          await test("33.6 exchanges and callback relays at the same time", async () => {
+            for (let i = 0; i < Math.max(5, ROUNDS / 4); i++) {
+              await Promise.all([armAndExchange(`concurrent ${i}`), relayOnce(1000 + i, i % 2 === 0)]);
+            }
+          });
+
+          await test("33.7 the app is still up", async () => {
+            const h = await api("GET", "/health");
+            assertEq(h.status, "ok", "the app went away during the sign-in stress");
+          });
+        }
+      } finally {
+        await gx(vm.id, "pkill -f /tmp/ace2e-cb.py; true", { ok: false }).catch(() => {});
+        await stubVMDown(vm);
+      }
+    }
+  }
+
+  // ======================================================================
   // Done
   // ======================================================================
   console.log(
