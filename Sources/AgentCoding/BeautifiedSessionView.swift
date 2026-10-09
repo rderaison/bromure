@@ -30,6 +30,10 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     func activeTabIndex() -> Int?
     /// Run a guest command in the workspace, returning stdout (nil on failure).
     func execGuest(_ command: String, timeout: Int) async -> String?
+    /// Have the machine at the other end of a slow link type a message
+    /// itself (`PaneTypeGuard.runType` there): one request instead of one
+    /// per typing step. `.unsupported`: type it step by step from here.
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult
     /// Whether the agent is currently working. Cross-agent: bromure already
     /// computes this per tab — Claude via its per-window hooks, every other
     /// agent via MITM request activity — so it drives the "thinking" cue for
@@ -66,7 +70,16 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     var guestPathNames: [String: String] { get }
 }
 
+/// What a provider's `typeRemotely` came back with.
+enum RemoteTypeResult {
+    /// No such route (local, or an older server): type it from here.
+    case unsupported
+    /// The guard's output there; nil when that machine couldn't be asked.
+    case output(String?)
+}
+
 extension BeautifiedTranscriptProvider {
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult { .unsupported }
     var guestPathNames: [String: String] { [:] }
     var historyCacheKey: String? { nil }
     var historyBytesHint: Int? { nil }
@@ -281,8 +294,14 @@ extension BeautifiedTranscriptProvider {
     @discardableResult
     func send(_ text: String) async -> ChatQueueStore.Outcome {
         guard let idx = activeTabIndex() else { return .refused(.gone) }
-        let out = await PaneTypeGuard.runType(target: paneTarget(window: idx), text: text) {
-            await self.execGuest($0, timeout: 20)
+        let target = paneTarget(window: idx)
+        let out: String?
+        if case .output(let o) = await typeRemotely(target, text) {
+            out = o
+        } else {
+            out = await PaneTypeGuard.runType(target: target, text: text) {
+                await self.execGuest($0, timeout: 20)
+            }
         }
         let outcome = ChatQueueStore.Outcome.of(out)
         switch outcome {

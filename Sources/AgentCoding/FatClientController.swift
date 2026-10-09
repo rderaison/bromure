@@ -646,6 +646,8 @@ final class RemoteHostController {
             FatClientLog.log("link: \(up ? "UP" : "DOWN") (\(health.consecutiveFailures) failed poll(s)) — "
                 + LinkStats.describe(snap, path: linkPathLabel))
             connected = up
+            // A server back from a restart may be a newer build.
+            if up { serverLacksTypeRoute = false }
         }
         if slow != linkSlow {
             FatClientLog.log("link: \(slow ? "slow" : "normal") — " + LinkStats.describe(snap, path: linkPathLabel))
@@ -2116,6 +2118,33 @@ final class RemoteHostController {
         }
     }
 
+    /// The server lacks POST /vms/{id}/type (an older build): learned from
+    /// its first answer, forgotten on reconnect (it may be updated).
+    nonisolated(unsafe) var serverLacksTypeRoute = false
+
+    /// A chat message typed by the server itself (`/vms/{id}/type`): the
+    /// guard's round trips stay on the server's side of the WAN.
+    func typeIntoPane(_ id: Profile.ID, target: PaneTarget, text: String) async -> RemoteTypeResult {
+        guard !serverLacksTypeRoute, (try? checkGuestReachable(id)) != nil,
+              let data = try? JSONEncoder().encode(target),
+              let targetJSON = try? JSONSerialization.jsonObject(with: data) else { return .unsupported }
+        let host = self.host
+        let path = "/vms/\(seg(id))/type"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            // Staging, typing and confirming can take ~20 s on the server.
+            try RemoteTransport.bulkClient(for: host)
+                .request("POST", path, body: ["target": targetJSON, "text": text], recvTimeoutSeconds: 75)
+        }.value
+        guard let resp else { return .output(nil) }
+        guard resp.json["typeRoute"] as? Bool == true else {
+            serverLacksTypeRoute = true
+            FatClientLog.log("type: server has no /type route (HTTP \(resp.status)) — typing step by step")
+            return .unsupported
+        }
+        if resp.status == 501 { serverLacksTypeRoute = true; return .unsupported }
+        return .output(resp.json["output"] as? String)
+    }
+
     func guestExec(_ id: Profile.ID, command: String, timeout: Int) async throws -> String {
         try checkGuestReachable(id)
         let host = self.host
@@ -2483,6 +2512,10 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
 
     func execGuest(_ command: String, timeout: Int) async -> String? {
         try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+    }
+
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult {
+        await controller.typeIntoPane(workspaceID, target: target, text: text)
     }
 
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {

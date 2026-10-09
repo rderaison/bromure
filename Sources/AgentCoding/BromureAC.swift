@@ -4939,6 +4939,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ACShellProxyConnection(fd: conn.fileDescriptor, conn: conn)
         }
 
+        server.onTypeIntoPane = { [weak self] idOrName, target, text in
+            guard let self else { return nil }
+            let id: UUID? = await MainActor.run {
+                UUID(uuidString: idOrName) ?? self.resolveRunningSessionID(idOrName)
+            }
+            guard let id else { return nil }
+            return await PaneTypeGuard.runType(target: target, text: text) { cmd in
+                try? await self.guestExec(profileID: id, command: cmd, timeout: 20)
+            }
+        }
+
         server.onResolveProfileID = { [weak self] idOrName in
             guard let self else { return nil }
             return MainActor.assumeIsolated { self.resolveRunningSessionID(idOrName)?.uuidString }

@@ -71,7 +71,16 @@ final class ACAutomationServer {
     static func isMutating(_ method: String, path: String) -> Bool {
         guard method != "GET", method != "HEAD" else { return false }
         let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
-        return !(bare.hasSuffix("/exec") || bare.hasSuffix("/file"))
+        return !(bare.hasSuffix("/exec") || bare.hasSuffix("/file") || bare.hasSuffix("/type"))
+    }
+
+    /// `/vms/{id}/type` → the id (percent-decoded), else nil.
+    static func typeRouteID(_ path: String) -> String? {
+        let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        guard bare.hasPrefix("/vms/"), bare.hasSuffix("/type") else { return nil }
+        let id = String(bare.dropFirst("/vms/".count).dropLast("/type".count))
+        guard !id.isEmpty, !id.contains("/") else { return nil }
+        return id.removingPercentEncoding ?? id
     }
     let port: UInt16
     let bindAddress: String
@@ -158,6 +167,11 @@ final class ACAutomationServer {
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
+    /// A chat message typed into a pane, guarded and confirmed here, next to
+    /// the agent (`PaneTypeGuard.runType`): the guard's output, nil when the
+    /// machine couldn't be asked. One request for a remote client instead of
+    /// one per typing step.
+    var onTypeIntoPane: ((_ profileID: String, _ target: PaneTarget, _ text: String) async -> String?)?
     /// Resolve an id-or-name to the canonical profile UUID string, so interactive
     /// attach state is keyed the same way the consent broker queries it (by UUID).
     var onResolveProfileID: ((_ idOrName: String) -> String?)?
@@ -616,6 +630,13 @@ final class ACAutomationServer {
                     return
                 }
                 sendResponse(fd: fd, status: 200, body: ["ok": true]); return
+            }
+            // Typed here even for an attached machine's pane: the guard's
+            // round trips then run on this host's link to it, not the
+            // remote client's.
+            if method == "POST", let id = Self.typeRouteID(path) {
+                handleType(fd: fd, profileID: id, bodyJSON: bodyJSON, gzip: acceptGzip)
+                return
             }
             if let machine = MachineLinkHub.shared.target(method: method, path: path, body: bodyJSON) {
                 MachineLinkHub.shared.proxy(clientFD: fd, machine: machine, method: method, path: path,
@@ -1778,6 +1799,33 @@ final class ACAutomationServer {
         default:
             sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
         }
+    }
+
+    /// POST /vms/{id}/type {target, text}: `onTypeIntoPane`. Every reply
+    /// carries "typeRoute" so a client can tell this route from an older
+    /// server's 404/405 and fall back to typing step by step.
+    private func handleType(fd: Int32, profileID: String, bodyJSON: [String: Any], gzip: Bool) {
+        guard let text = bodyJSON["text"] as? String,
+              let raw = bodyJSON["target"],
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let target = try? JSONDecoder().decode(PaneTarget.self, from: data) else {
+            sendResponse(fd: fd, status: 400, body: ["typeRoute": true, "error": "target and text required"], gzip: gzip)
+            return
+        }
+        guard let type = onTypeIntoPane else {
+            sendResponse(fd: fd, status: 501, body: ["typeRoute": true, "error": "not available"], gzip: gzip)
+            return
+        }
+        let done = DispatchSemaphore(value: 0)
+        var out: String?
+        Task {
+            out = await type(profileID, target, text)
+            done.signal()
+        }
+        done.wait()
+        var body: [String: Any] = ["typeRoute": true]
+        if let out { body["output"] = out } else { body["unreachable"] = true }
+        sendResponse(fd: fd, status: 200, body: body, gzip: gzip)
     }
 
     private func handleExec(fd: Int32, profileID: String, bodyJSON: [String: Any]) {
