@@ -41,8 +41,23 @@ enum AppLog {
         fileFD = fd
         teeStderr()
         stamp("launch pid \(getpid()) \(build()) \(ProcessInfo.processInfo.operatingSystemVersionString)")
-        atexit { AppLog.stamp("exit pid \(getpid())") }
+        atexit { AppLog.exitTrace() }
         installFatalSignalBreadcrumbs()
+    }
+
+    /// The process is exiting through exit(3) — a quit, or anything else
+    /// calling it (a library, a CLI path): stamp it with the backtrace of
+    /// the caller. atexit handlers run inside exit() on the calling thread,
+    /// so the stack names who asked. (_exit and fatal signals skip atexit;
+    /// the signal breadcrumbs cover the latter.) Into the log and, when
+    /// started from a terminal, its stderr too.
+    static func exitTrace() {
+        stamp("exit pid \(getpid()) on \(Thread.isMainThread ? "the main thread" : "a background thread"), called from:")
+        var frames = [UnsafeMutableRawPointer?](repeating: nil, count: 64)
+        let n = backtrace(&frames, Int32(frames.count))
+        guard n > 0 else { return }
+        if fileFD >= 0 { backtrace_symbols_fd(&frames, n, fileFD) }
+        if originalStderr >= 0 { backtrace_symbols_fd(&frames, n, originalStderr) }
     }
 
     /// One dated line straight into the file (not via stderr, so it lands
