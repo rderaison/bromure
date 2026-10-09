@@ -72,26 +72,23 @@ extension ACAppDelegate {
         let room = roomID.flatMap { agentRoomStore.room($0) }
         let brief = RepoWatchPrompts.fixTask(f)
         let store = findingStore
-        let before = f.status
+        let generation = UUID()
         guard let sid = switchboardEngine.routeFinding(
             id: f.id, severity: f.severity.rawValue, repo: f.repo,
             brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)",
             preferredWorkspace: f.profileID, room: room,
             failed: { why in
-                // The note said "Sent to the Switchboard": say it didn't get there.
-                store.mutate(findingID) {
-                    if before == .new, $0.status == .triaged { $0.status = .new }
-                    $0.statusNote = String(format: NSLocalizedString("Couldn't hand it to the Switchboard: %@",
-                                                                     comment: "finding status note"), why)
-                }
+                // The note said "Sent to the Switchboard": say it didn't get
+                // there — unless a later hand-over or the user moved it since.
+                store.handOverFailed(findingID, generation: generation, note: String(
+                    format: NSLocalizedString("Couldn't hand it to the Switchboard: %@",
+                                              comment: "finding status note"), why))
             }) else { return false }
-        findingStore.mutate(findingID) {
-            if $0.status == .new { $0.status = .triaged }
-            $0.statusNote = room.map {
-                String(format: NSLocalizedString("Sent to the “%@” room's Switchboard to find who fixes it",
-                                                 comment: "finding status note"), $0.name)
-            } ?? NSLocalizedString("Sent to the Switchboard to find who fixes it", comment: "finding status note")
-        }
+        findingStore.markHandedOver(findingID, note: room.map {
+            String(format: NSLocalizedString("Sent to the “%@” room's Switchboard to find who fixes it",
+                                             comment: "finding status note"), $0.name)
+        } ?? NSLocalizedString("Sent to the Switchboard to find who fixes it", comment: "finding status note"),
+            generation: generation)
         if show {
             let w = ensureUnifiedWindow()
             if let room { w.showRoom(room.id) } else { w.selectSession(sid) }

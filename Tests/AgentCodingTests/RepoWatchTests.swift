@@ -413,4 +413,30 @@ struct RepoWatchTests {
         #expect(flagged.handOverRefusal(confirmed: false)?.contains("meta-instruction") == true)
         #expect(flagged.handOverRefusal(confirmed: true) == nil)
     }
+
+    @Test("A stale hand-over failure doesn't undo a later hand-over or the user's change")
+    func staleHandOverFailureIgnored() {
+        let store = tempStore()
+        let f = store.ingest(report("SQL injection"), watchID: nil, profileID: UUID(),
+                             repo: "o/r", runID: nil, commit: nil).finding
+        let first = UUID(), second = UUID()
+        store.markHandedOver(f.id, note: "Sent to @a", generation: first)
+        store.markHandedOver(f.id, note: "Sent to @b", generation: second)
+        // The first delivery fails after the second hand-over: ignored.
+        store.handOverFailed(f.id, generation: first, note: "Couldn't hand it to @a")
+        #expect(store.finding(f.id)?.status == .triaged)
+        #expect(store.finding(f.id)?.statusNote == "Sent to @b")
+        // The current one fails: it says so, and undoes what the first moved.
+        store.handOverFailed(f.id, generation: second, note: "Couldn't hand it to @b")
+        #expect(store.finding(f.id)?.status == .new)
+        #expect(store.finding(f.id)?.statusNote == "Couldn't hand it to @b")
+
+        // The user acts while a delivery is pending: its failure stays out.
+        let third = UUID()
+        store.markHandedOver(f.id, note: "Sent to @c", generation: third)
+        store.setStatus(f.id, .dismissed, note: "Not an issue")
+        store.handOverFailed(f.id, generation: third, note: "Couldn't hand it to @c")
+        #expect(store.finding(f.id)?.status == .dismissed)
+        #expect(store.finding(f.id)?.statusNote == "Not an issue")
+    }
 }

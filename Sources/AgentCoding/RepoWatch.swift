@@ -444,6 +444,16 @@ struct RepoFinding: Codable, Identifiable, Equatable, Sendable {
     /// Set when the finding's own text tripped the prompt-injection screen —
     /// it came from repository content, and a fix agent would read it.
     var screenWarning: String?
+    /// The hand-over to an agent that last marked it sent, while its
+    /// delivery may still fail. A failure applies only while it's still
+    /// this one: a later hand-over or any other status change replaces it.
+    var handOver: HandOverMark?
+
+    struct HandOverMark: Codable, Equatable, Sendable {
+        let id: UUID
+        /// The hand-over moved the status new → triaged (a failure moves it back).
+        let movedFromNew: Bool
+    }
 
     /// Every hand-over of the finding's text to an agent (a fix, a session,
     /// a Switchboard) needs the user's OK once it's flagged: why it's
@@ -1039,6 +1049,7 @@ final class FindingStore {
                                                  comment: "finding status note")
                 f.statusChangedAt = now
                 f.taskID = nil
+                f.handOver = nil
                 reopened = true
             }
             findings[i] = f
@@ -1063,13 +1074,44 @@ final class FindingStore {
     func mutate(_ id: UUID, _ change: (inout RepoFinding) -> Void) {
         guard let i = findings.firstIndex(where: { $0.id == id }) else { return }
         let before = findings[i].status
+        let mark = findings[i].handOver
         change(&findings[i])
-        if findings[i].status != before { findings[i].statusChangedAt = Date() }
+        if findings[i].status != before {
+            findings[i].statusChangedAt = Date()
+            // Moved by anything but a hand-over: a pending one's failure no
+            // longer speaks for the finding.
+            if findings[i].handOver == mark { findings[i].handOver = nil }
+        }
         save()
+    }
+
+    /// A hand-over to an agent marked it sent: `.new` → `.triaged`, the note
+    /// set. `generation` is what `handOverFailed` must name.
+    func markHandedOver(_ id: UUID, note: String, generation: UUID = UUID()) {
+        mutate(id) {
+            // A hand-over replacing a pending one inherits what to undo.
+            let moved = $0.status == .new || ($0.status == .triaged && $0.handOver?.movedFromNew == true)
+            if $0.status == .new { $0.status = .triaged }
+            $0.statusNote = note
+            $0.handOver = .init(id: generation, movedFromNew: moved)
+        }
+    }
+
+    /// That hand-over's delivery failed: say so, and undo the status it
+    /// moved — only while it's still the current one. A later hand-over, or
+    /// the user or a fix changing the finding since, wins.
+    func handOverFailed(_ id: UUID, generation: UUID, note: String) {
+        guard finding(id)?.handOver?.id == generation else { return }
+        mutate(id) {
+            if $0.handOver?.movedFromNew == true, $0.status == .triaged { $0.status = .new }
+            $0.statusNote = note
+            $0.handOver = nil
+        }
     }
 
     func setStatus(_ id: UUID, _ status: RepoFinding.Status, note: String? = nil) {
         mutate(id) {
+            $0.handOver = nil
             $0.status = status
             if let note { $0.statusNote = note }
             if status != .duplicate { $0.duplicateOf = nil }
@@ -1088,18 +1130,15 @@ final class FindingStore {
                   why: @escaping (Error) -> String) async -> String? {
         let staged: Staged
         do { staged = try await stage() } catch { return why(error) }
-        guard let before = finding(id)?.status else { return nil }
-        mutate(id) {
-            if $0.status == .new { $0.status = .triaged }
-            $0.statusNote = String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name)
-        }
+        guard finding(id) != nil else { return nil }
+        let generation = UUID()
+        markHandedOver(id, note: String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name),
+                       generation: generation)
         Task { @MainActor [weak self] in
             do { try await deliver(staged) } catch {
-                self?.mutate(id) {
-                    if before == .new, $0.status == .triaged { $0.status = .new }
-                    $0.statusNote = String(format: NSLocalizedString("Couldn't hand it to %1$@: %2$@",
-                                                                     comment: "finding status note"), name, why(error))
-                }
+                self?.handOverFailed(id, generation: generation, note: String(
+                    format: NSLocalizedString("Couldn't hand it to %1$@: %2$@", comment: "finding status note"),
+                    name, why(error)))
             }
         }
         return nil
@@ -1137,6 +1176,7 @@ final class FindingStore {
                     findings[i].status = .triaged
                     findings[i].statusChangedAt = Date()
                     findings[i].taskID = nil
+                    findings[i].handOver = nil
                     changed.append(findings[i].id)
                 }
                 continue
@@ -1149,6 +1189,7 @@ final class FindingStore {
                 if findings[i].status.isOpen {
                     findings[i].status = .triaged
                     findings[i].statusChangedAt = Date()
+                    findings[i].handOver = nil
                     findings[i].statusNote = NSLocalizedString(
                         "Fix closed without merging", comment: "finding status note")
                     findings[i].taskID = nil
@@ -1160,6 +1201,7 @@ final class FindingStore {
                findings[i].status != .dismissed, findings[i].status != .duplicate {
                 findings[i].status = target
                 findings[i].statusChangedAt = Date()
+                findings[i].handOver = nil
                 if target == .fixed {
                     findings[i].statusNote = NSLocalizedString(
                         "Fix merged", comment: "finding status note")
