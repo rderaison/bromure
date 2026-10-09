@@ -182,7 +182,7 @@ class IKEv2ShellInjectionTests(unittest.TestCase):
                 "ikev2RemoteID": "vpn.example",
                 "ikev2AuthMethod": "eap",
                 "ikev2Username": "alice",
-                "ikev2Password": "s3cret",
+                "ikev2Password": "s3cret",  # ggignore: test fixture
                 "ikev2UseDNS": True,
                 "ikev2ProxyHost": "proxy.example",
                 "ikev2ProxyPort": 8080,
@@ -261,7 +261,7 @@ class IKEv2ShellInjectionTests(unittest.TestCase):
                 "ikev2Server": "vpn.example",
                 "ikev2AuthMethod": "eap",
                 "ikev2Username": "alice",
-                "ikev2Password": "s3cret",
+                "ikev2Password": "s3cret",  # ggignore: test fixture
                 "ikev2ProxyHost": "proxy.example",
                 "ikev2ProxyPort": 8080,
                 "ikev2ProxyUsername": "user",
