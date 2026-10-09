@@ -17,6 +17,9 @@ import Foundation
 
 /// One sign-in in flight for a workspace.
 final class ProxySignIn {
+    /// Names this sign-in to the proxy's capture hook, which holds only
+    /// values (see `beginProxySignIn`).
+    let token = UUID()
     let provider: SubscriptionProvider
     let profileID: UUID
     let windowIndex: Int
@@ -114,14 +117,18 @@ extension ACAppDelegate {
         proxySignIns[profileID] = signIn
 
         let endpoint = Self.tokenEndpoint(for: provider)
+        // The hook runs on a proxy connection's task and is released there.
+        // It captures values only — no app delegate, no ProxySignIn: a
+        // capture of those objects was over-released on that path (macOS 15:
+        // the connection freeing its copy of the hook hit a freed object, a
+        // crash the instant the browser's "Authorize" came back). The main
+        // actor finds the live sign-in by workspace + token.
+        let token = signIn.token
         engine.signInCaptures.arm(SignInCapture(
             profileID: profileID, hosts: endpoint.hosts, pathPrefix: endpoint.path,
-            handle: { [weak self] status, body in
-                guard status == 200,
-                      let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
-                      let access = json["access_token"] as? String, !access.isEmpty else { return nil }
-                let owner = self   // a constant for the hop — not the captured weak var
-                return await MainActor.run { owner?.proxySignInCaptured(signIn, json: json, access: access) }
+            handle: { status, body in
+                guard status == 200 else { return nil }
+                return await ACAppDelegate.proxySignInExchanged(profileID: profileID, token: token, body: body)
             }))
 
         // Leave whatever the agent shows (Ctrl-C twice exits every supported
@@ -143,6 +150,17 @@ extension ACAppDelegate {
                 "Bromure didn't receive a %@ sign-in in time. You can try again.", comment: ""),
                 provider.displayName))
         }
+    }
+
+    /// The capture hook's way in: the sign-in still live for `profileID`
+    /// under `token`, and the exchange's reply carrying an access token.
+    @MainActor
+    static func proxySignInExchanged(profileID: UUID, token: UUID, body: Data) -> Data? {
+        guard let app = NSApp.delegate as? ACAppDelegate,
+              let s = app.proxySignIns[profileID], s.token == token, !s.finished,
+              let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let access = json["access_token"] as? String, !access.isEmpty else { return nil }
+        return app.proxySignInCaptured(s, json: json, access: access)
     }
 
     /// The exchange came back with tokens: keep them on the host and decide
