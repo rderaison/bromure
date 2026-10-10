@@ -310,16 +310,7 @@ final class RepoWatchEngine {
             }
             return tid
         }
-        let watch = f.watchID.flatMap { store.watch($0) }
-        let brief = RepoWatchPrompts.fixTask(f)
-        let task = CodingTask(
-            title: brief.title,
-            details: brief.details,
-            profileID: watch?.profileID ?? f.profileID,
-            repoPath: watch?.repoPath ?? WatchedRepo.defaultRepoPath(for: f.repo),
-            tool: watch?.tool ?? delegate.profile(for: f.profileID)?.tool ?? .claude,
-            stage: .backlog,
-            cloneURL: "https://github.com/\(f.repo).git")
+        let task = fixTask(f, delegate: delegate)
         delegate.codingTaskStore.upsert(task)
         store.mutate(findingID) {
             $0.taskID = task.id
@@ -328,6 +319,48 @@ final class RepoWatchEngine {
         delegate.codingTaskEngine.start(task.id)
         BACDebug.log("watch", "fix started for “\(f.title)” → task \(task.id)")
         return task.id
+    }
+
+    /// "Ask @foo to fix it": the fix as a backlog task queued for that
+    /// session — on the board like any task (its progress, review and
+    /// landing), picked up as soon as the session has no board task in
+    /// progress. A finding whose task hasn't started yet is re-queued for
+    /// it; one already under way stays where it is. Returns the task id.
+    @discardableResult
+    func fix(_ findingID: UUID, by session: AgentSession) -> UUID? {
+        guard let delegate, let f = store.finding(findingID) else { return nil }
+        let assignee = TaskAssignment(kind: .session, id: session.id,
+                                      label: delegate.delegationEngine.label(session))
+        if let tid = f.taskID, let existing = delegate.codingTaskStore.task(tid), existing.stage != .done {
+            guard existing.stage == .backlog || existing.stage == .planning else { return tid }
+            delegate.taskDispatcher.assign(tid, to: assignee)
+            store.mutate(findingID) { $0.status = .inProgress }
+            return tid
+        }
+        var task = fixTask(f, delegate: delegate)
+        task.assignment = assignee
+        delegate.codingTaskStore.upsert(task)
+        store.mutate(findingID) {
+            $0.taskID = task.id
+            $0.status = .inProgress
+        }
+        delegate.taskDispatcher.assign(task.id, to: assignee)
+        BACDebug.log("watch", "fix of “\(f.title)” queued for \(assignee.label) → task \(task.id)")
+        return task.id
+    }
+
+    /// The coding task that fixes `f`, in Backlog.
+    private func fixTask(_ f: RepoFinding, delegate: ACAppDelegate) -> CodingTask {
+        let watch = f.watchID.flatMap { store.watch($0) }
+        let brief = RepoWatchPrompts.fixTask(f)
+        return CodingTask(
+            title: brief.title,
+            details: brief.details,
+            profileID: watch?.profileID ?? f.profileID,
+            repoPath: watch?.repoPath ?? WatchedRepo.defaultRepoPath(for: f.repo),
+            tool: watch?.tool ?? delegate.profile(for: f.profileID)?.tool ?? .claude,
+            stage: .backlog,
+            cloneURL: "https://github.com/\(f.repo).git")
     }
 
     private func autoFix(_ w: WatchedRepo, candidates: [RepoFinding]) {
