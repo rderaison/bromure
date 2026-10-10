@@ -209,6 +209,9 @@ struct ReviewView: View {
     @State private var data: TaskReviewData?
     @State private var loading = false
     @State private var loadFailed = false
+    /// Which load may still publish: each one takes the next; a later
+    /// click, refresh or re-aim supersedes the ones before it.
+    @State private var loadTicket = 0
     @State private var showAll = false
     @State private var selectedFile: String?
     @State private var draft = ""
@@ -259,6 +262,8 @@ struct ReviewView: View {
     // MARK: Loading
 
     private func load(quiet: Bool = false) async {
+        loadTicket += 1
+        let ticket = loadTicket
         if !quiet { loading = true; loadFailed = false }
         // A turn's files: review the checkout they were edited in. The read
         // changes nothing, so one that fails is tried again before the
@@ -270,10 +275,25 @@ struct ReviewView: View {
             try? await Task.sleep(nanoseconds: 400_000_000)
             if !Task.isCancelled { fetched = await source.fetch(base, focus.files ?? []) }
         }
-        loading = false
-        if let fetched { data = fetched; loadFailed = false }
-        else if !quiet { data = nil; loadFailed = true }
+        guard Self.settle(fetched, quiet: quiet, ticket: ticket, current: loadTicket,
+                          cancelled: Task.isCancelled,
+                          data: &data, loading: &loading, failed: &loadFailed) else { return }
         if let sel = selectedFile, !(visibleFiles.contains { $0.path == sel }) { selectedFile = nil }
+    }
+
+    /// A finished load's result, published only while it is still the
+    /// latest and wasn't cancelled: a second "Changed N files" click
+    /// re-aims the window, cancelling the load under way — whose failure
+    /// (or nothing at all) then painted "Can't reach the machine" over
+    /// the new read, or cleared the diff it had already shown. false =
+    /// superseded, nothing written.
+    static func settle(_ fetched: TaskReviewData?, quiet: Bool, ticket: Int, current: Int, cancelled: Bool,
+                       data: inout TaskReviewData?, loading: inout Bool, failed: inout Bool) -> Bool {
+        guard !cancelled, ticket == current else { return false }
+        loading = false
+        if let fetched { data = fetched; failed = false }
+        else if !quiet { data = nil; failed = true }
+        return true
     }
 
     /// Files in the review, narrowed to the turn's when asked.

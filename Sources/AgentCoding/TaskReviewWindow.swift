@@ -470,10 +470,17 @@ struct TaskReviewBanner: View {
         }
     }
 
+    /// A load the window's `.task` dropped (the task, its target or a
+    /// reload changed) writes nothing: its late answer would land over the
+    /// newer one's.
     private func load(_ t: CodingTask) async {
         await refreshSummary(t)
-        if noCode, report == nil { report = await context.fetchFinalReport(t) }
-        branches = await context.fetchBranches(t)
+        if noCode, report == nil {
+            let r = await context.fetchFinalReport(t)
+            if !Task.isCancelled { report = r }
+        }
+        let b = await context.fetchBranches(t)
+        if !Task.isCancelled { branches = b }
     }
 
     /// Re-read where the branch stands (on open, on ↻, and right before a
@@ -484,7 +491,9 @@ struct TaskReviewBanner: View {
             summaryFailed = summary == nil
             return
         }
-        if let s = await context.fetchSummary(t, target) {
+        let fetched = await context.fetchSummary(t, target)
+        guard !Task.isCancelled else { return }
+        if let s = fetched {
             summary = s; summaryFailed = false
             context.setCodeChanges(t.id, s.files + s.uncommitted)
         } else {

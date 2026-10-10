@@ -183,4 +183,36 @@ struct BranchesPass3Tests {
         #expect(e.first?.session(in: [s], profileID: machine)?.id == s.id)
         #expect(e.first?.session(in: [s], profileID: UUID()) == nil)
     }
+
+    // Finding: a cancelled review retry still showed "Can't reach the machine".
+
+    @Test("a superseded or cancelled review load publishes nothing; the latest one does")
+    func reviewLoadTickets() {
+        var data: TaskReviewData? = nil
+        var loading = true, failed = false
+        var diff = TaskReviewData()
+        diff.statusLines = [" M a.swift"]
+        // Click 1 (ticket 1) fails on a dead link and waits to retry; click 2
+        // (ticket 2) re-aims the window and reads the diff.
+        #expect(ReviewView.settle(diff, quiet: false, ticket: 2, current: 2, cancelled: false,
+                                  data: &data, loading: &loading, failed: &failed))
+        #expect(data == diff && !loading && !failed)
+        // Click 1's cleanup, cancelled by the re-aim and superseded: no error
+        // painted over the diff, the diff not cleared.
+        #expect(!ReviewView.settle(nil, quiet: false, ticket: 1, current: 2, cancelled: true,
+                                   data: &data, loading: &loading, failed: &failed))
+        #expect(!ReviewView.settle(nil, quiet: false, ticket: 1, current: 2, cancelled: false,
+                                   data: &data, loading: &loading, failed: &failed))
+        #expect(data == diff && !failed)
+        // The latest load failing for real still says so.
+        loading = true
+        #expect(ReviewView.settle(nil, quiet: false, ticket: 3, current: 3, cancelled: false,
+                                  data: &data, loading: &loading, failed: &failed))
+        #expect(data == nil && failed && !loading)
+        // A quiet refresh that fails keeps what's shown.
+        data = diff; failed = false
+        #expect(ReviewView.settle(nil, quiet: true, ticket: 4, current: 4, cancelled: false,
+                                  data: &data, loading: &loading, failed: &failed))
+        #expect(data == diff && !failed)
+    }
 }
