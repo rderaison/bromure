@@ -4011,7 +4011,14 @@ public final class ProfileStore {
     /// for the guest-side rewrite). The whole `delegation` server: it only
     /// reaches the host, which enforces the per-workspace reach policy.
     /// And `display`: showing the user a picture or a chart touches nothing.
-    static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"]
+    /// And the delegation inbox, where the files other agents hand over
+    /// land: reading and unpacking them never stops on a prompt (running
+    /// one still goes through the approval mode).
+    static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"] + claudeInboxRules
+    static let claudeInboxRules = ["Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"]
+    /// `permissions.additionalDirectories` merged in too: Claude's built-in
+    /// read-only commands (ls, cat, grep…) then run there unprompted.
+    static let claudeInboxDirectory = "~/.bromure/inbox"
 
     /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
     /// (`StopCancelled`, fired instead of `Stop`) reports the tab done.
@@ -4442,6 +4449,9 @@ public final class ProfileStore {
                 allow.append(rule)
             }
             perms["allow"] = allow
+            var dirs = perms["additionalDirectories"] as? [String] ?? []
+            if !dirs.contains(Self.claudeInboxDirectory) { dirs.append(Self.claudeInboxDirectory) }
+            perms["additionalDirectories"] = dirs
             settings["permissions"] = perms
             // Auto mode's classifier: what this VM is (see ClaudeAutoMode) —
             // Bromure's entries replaced, the user's own kept.

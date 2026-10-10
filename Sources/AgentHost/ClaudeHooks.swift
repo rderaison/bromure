@@ -18,9 +18,14 @@ enum ClaudeHooks {
         var pqPost = pqClear
         pqPost["matcher"] = "AskUserQuestion"
         let settings: [String: Any] = [
-            // Agent-to-agent traffic never waits on a permission prompt (the
-            // rule bromure-ac seeds in its workspaces).
-            "permissions": ["allow": ["mcp__delegation"]],
+            // Agent-to-agent traffic never waits on a permission prompt, nor
+            // do the files other agents hand over (~/.bromure/inbox): read,
+            // listed and unpacked unprompted — running one still goes through
+            // the approval mode. The rules bromure-ac seeds in its workspaces.
+            "permissions": [
+                "allow": ["mcp__delegation", "Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"],
+                "additionalDirectories": ["~/.bromure/inbox"],
+            ],
             "hooks": [
                 "SessionStart": [hook("done")],
                 "UserPromptSubmit": [hook("working")],

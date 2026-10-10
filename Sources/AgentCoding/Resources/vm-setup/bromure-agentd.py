@@ -5209,7 +5209,11 @@ def _approve_claude_api_key(suffix):
 
 # Claude Code permissions.allow rules merged into settings.json (mirrors
 # Profile.swift's claudeAlwaysAllowed).
-_CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation", "mcp__display"]
+_CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation", "mcp__display",
+                          "Read(~/.bromure/inbox/**)", "Edit(~/.bromure/inbox/**)"]
+# Merged into permissions.additionalDirectories (claudeInboxDirectory):
+# the delegation inbox, where other agents' files land.
+_CLAUDE_INBOX_DIR = "~/.bromure/inbox"
 # Ends every autoMode.environment entry Bromure writes (ClaudeAutoMode.tag).
 _AUTOMODE_TAG = "[managed by Bromure]"
 
@@ -5299,6 +5303,11 @@ def _seed_claude_settings():
         if rule not in allow:
             allow.append(rule)
     perms["allow"] = allow
+    dirs = perms.get("additionalDirectories")
+    dirs = dirs if isinstance(dirs, list) else []
+    if _CLAUDE_INBOX_DIR not in dirs:
+        dirs.append(_CLAUDE_INBOX_DIR)
+    perms["additionalDirectories"] = dirs
     settings["permissions"] = perms
     # Auto mode's classifier: what this VM is (the host's ClaudeAutoMode) —
     # Bromure's entries (tagged) replaced, the user's own kept; a list the
