@@ -468,7 +468,7 @@ struct LandingRemoteNameTests {
             #expect(!FileManager.default.fileExists(atPath: r.marker))
             let verify = try sh("cd \(r.root) && " + CodingTaskEngine.landingVerifyCommand(
                 root: r.root, branch: "main", target: "main", sourceDir: nil, remote: bad))
-            #expect(verify.trimmingCharacters(in: .whitespacesAndNewlines) == "UNKNOWN")
+            #expect(verify.trimmingCharacters(in: .whitespacesAndNewlines) == "NOREMOTE")
             #expect(!FileManager.default.fileExists(atPath: r.marker))
         }
         let ok = try sh(CodingTaskEngine.pushTargetCommand(root: r.root, target: "main", remote: "origin"))
@@ -518,5 +518,60 @@ struct BatchLandingPromptTests {
         let bad = CodingTaskEngine.batchLandingPrompt(branches: [("wt/a", "A"), ("wt/b", "B")],
                                                       target: "main", rootRepo: "/r", remote: "--exec=./x")
         #expect(!bad.contains("--exec") && !bad.contains("git push"))
+    }
+}
+
+/// Finding: a push landing accepted the agent's "merged" when the fetch
+/// failed, then deleted the branch.
+@Suite("Landing: an unchecked push is never Done")
+struct LandingRemoteUncheckedTests {
+
+    private func sh(_ cmd: String) throws -> String {
+        let p = Process(), out = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", cmd]
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        try p.run(); p.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    /// main with the task branch fast-forwarded into it; `origin` is a bare
+    /// repo next to it, or an unreachable URL.
+    private func repo(reachable: Bool) throws -> String {
+        let dir = "/tmp/bac-verify-\(UUID().uuidString.prefix(8))"
+        let origin = reachable ? "\(dir)/bare.git" : "file:///nonexistent/\(UUID().uuidString).git"
+        _ = try sh("set -e; mkdir -p \(dir); git init -q --bare \(dir)/bare.git; git init -q -b main \(dir)/w; cd \(dir)/w; "
+                   + "g='git -c user.name=t -c user.email=t@t'; $g commit -q --allow-empty -m init; "
+                   + "git remote add origin \(origin); "
+                   + (reachable ? "git push -q origin main; " : "")
+                   + "git checkout -q -b wt/task; echo x > f; git add f; $g commit -q -m work; "
+                   + "git checkout -q main; git merge -q --ff-only wt/task")
+        return dir + "/w"
+    }
+
+    private func verify(_ root: String, remote: String?) throws -> String {
+        try sh(CodingTaskEngine.landingVerifyCommand(root: root, branch: "wt/task", target: "main",
+                                                     sourceDir: nil, remote: remote))
+    }
+
+    @Test("an unreachable remote is reported as such, with the local merge looked at — never LANDED")
+    func unreachableRemote() throws {
+        let root = try repo(reachable: false)
+        let out = try verify(root, remote: "origin")
+        #expect(out.contains("NOREMOTE") && out.contains("INLOCAL") && !out.contains("LANDED"))
+        #expect(LandingVerification.parse(out) == .remoteUnreachable)
+        #expect(LandingReportOutcome.decide(status: "merged", summary: "", prURL: nil,
+                                            verification: .remoteUnreachable) == .remoteUnchecked)
+    }
+
+    @Test("a reachable remote: pending until pushed, landed once it is; no remote: the local merge")
+    func reachableRemote() throws {
+        let root = try repo(reachable: true)
+        #expect(LandingVerification.parse(try verify(root, remote: "origin")) == .pending)
+        _ = try sh("git -C \(root) push -q origin main")
+        #expect(LandingVerification.parse(try verify(root, remote: "origin")) == .landed)
+        #expect(LandingVerification.parse(try verify(root, remote: nil)) == .landed)
+        #expect(LandingVerification.parse(nil) == .unknown)
     }
 }

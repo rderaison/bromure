@@ -37,7 +37,6 @@ enum LandingCheck: Equatable, Sendable {
     case failed
 }
 
-/// What a `board_report_landing` (or a delegated delivery) leads to.
 /// What a landing leaves for an agent: its branch, target and repository.
 struct LandingHandOff: Sendable {
     let taskID: UUID
@@ -48,6 +47,30 @@ struct LandingHandOff: Sendable {
     let pushedLocally: Bool
 }
 
+/// What a look at the repository found for a landing.
+enum LandingVerification: Equatable, Sendable {
+    /// In the target (and in `<remote>/<target>` for a pushing one).
+    case landed
+    /// Looked: not there (yet), or its checkout still has changes.
+    case pending
+    /// A pushing landing whose remote couldn't be fetched (offline, bad
+    /// credentials, a dead URL): whether it's pushed is unknown, whatever
+    /// the local merge says.
+    case remoteUnreachable
+    /// The machine couldn't be asked.
+    case unknown
+
+    /// The verify command's output.
+    static func parse(_ out: String?) -> LandingVerification {
+        guard let out else { return .unknown }
+        if out.contains("NOREMOTE") { return .remoteUnreachable }
+        if out.contains("LANDED") { return .landed }
+        if out.contains("PENDING") { return .pending }
+        return .unknown
+    }
+}
+
+/// What a `board_report_landing` (or a delegated delivery) leads to.
 enum LandingReportOutcome: Equatable, Sendable {
     /// Bromure saw it in the target: Done, verified.
     case finishVerified
@@ -55,6 +78,10 @@ enum LandingReportOutcome: Equatable, Sendable {
     case finishUnverified
     /// Bromure looked and it isn't there: the agent is told to finish.
     case notYet
+    /// A pushing landing whose remote couldn't be fetched: the push can't
+    /// be checked — the user looks (the branch is kept), never Done on
+    /// the agent's word.
+    case remoteUnchecked
     case prOpened(String?)
     case blocked(String)
     case invalid(String)
@@ -63,12 +90,19 @@ enum LandingReportOutcome: Equatable, Sendable {
     /// nil = couldn't look.
     static func decide(status: String, summary: String, prURL: String?,
                        verified: Bool?) -> LandingReportOutcome {
+        decide(status: status, summary: summary, prURL: prURL,
+               verification: verified.map { $0 ? .landed : .pending } ?? .unknown)
+    }
+
+    static func decide(status: String, summary: String, prURL: String?,
+                       verification: LandingVerification) -> LandingReportOutcome {
         switch status {
         case "merged":
-            switch verified {
-            case true?: return .finishVerified
-            case false?: return .notYet
-            case nil: return .finishUnverified
+            switch verification {
+            case .landed: return .finishVerified
+            case .pending: return .notYet
+            case .remoteUnreachable: return .remoteUnchecked
+            case .unknown: return .finishUnverified
             }
         case "pr_opened":
             return .prOpened(prURL ?? CodingTask.pullRequestURL(in: summary))
@@ -181,17 +215,25 @@ extension CodingTaskEngine {
         if let src = sourceDir, !src.isEmpty {
             cmd += "if [ -d \(q(src)) ] && [ -n \"$(\(TaskLitter.status(q(src))))\" ]; then echo PENDING; exit 0; fi; "
         }
-        var into = [target]
-        if let remote, !remote.isEmpty {
-            guard isSafeRemoteName(remote) else { return "echo UNKNOWN" }
-            cmd += "GIT_TERMINAL_PROMPT=0 git -C \(q(root)) fetch -q -- \(q(remote)) >/dev/null 2>&1 || { echo UNKNOWN; exit 0; }; "
-            into.append("refs/remotes/\(remote)/\(target)")
-        }
-        let tests = into.map { t in
+        func inRef(_ t: String) -> String {
             "{ git -C \(q(root)) merge-base --is-ancestor \(q(branch)) \(q(t)) 2>/dev/null "
                 + "|| git -C \(q(root)) diff --quiet \(q(t)) \(q(branch)) -- 2>/dev/null; }"
         }
-        return cmd + "if " + tests.joined(separator: " && ") + "; then echo LANDED; else echo PENDING; fi"
+        let local = inRef(target)
+        guard let remote, !remote.isEmpty else {
+            return cmd + "if \(local); then echo LANDED; else echo PENDING; fi"
+        }
+        // A remote that isn't a plain name is never fetched — and the push
+        // can't be checked, so it's never LANDED either.
+        guard isSafeRemoteName(remote) else { return "echo NOREMOTE" }
+        // A fetch that fails says so (NOREMOTE) and the local merge is
+        // still looked at — but it is never LANDED: unchecked isn't pushed.
+        // Bailing out as "unknown" here let the agent's "merged" finish the
+        // task, and its cleanup delete the branch.
+        cmd += "if GIT_TERMINAL_PROMPT=0 git -C \(q(root)) fetch -q -- \(q(remote)) >/dev/null 2>&1; then "
+            + "if \(local) && \(inRef("refs/remotes/\(remote)/\(target)")); then echo LANDED; else echo PENDING; fi; "
+            + "else echo NOREMOTE; if \(local); then echo INLOCAL; else echo PENDING; fi; fi"
+        return cmd
     }
 
     /// After a local merge: push `target` to `remote` when that's a plain
@@ -673,17 +715,25 @@ extension CodingTaskEngine {
 
     /// Is the branch in the target? nil when the machine can't be asked.
     func landingVerified(_ task: CodingTask) async -> Bool? {
+        switch await landingVerification(task) {
+        case .landed: return true
+        case .pending, .remoteUnreachable: return false
+        case .unknown: return nil
+        }
+    }
+
+    /// What the repository says about the landing — "couldn't reach the
+    /// remote" kept apart from "couldn't ask the machine".
+    func landingVerification(_ task: CodingTask) async -> LandingVerification {
         guard let delegate, let branch = task.branch, let root = task.rootRepo,
-              let target = task.landingTarget, !target.isEmpty else { return nil }
-        guard let out = try? await delegate.guestExec(
+              let target = task.landingTarget, !target.isEmpty else { return .unknown }
+        let out = try? await delegate.guestExec(
             profileID: task.profileID,
             command: Self.landingVerifyCommand(root: root, branch: branch, target: target,
                                                sourceDir: task.worktreeDir,
                                                remote: task.landing.flatMap { $0.pushes ? $0.remote : nil }),
-            timeout: 30) else { return nil }
-        if out.contains("LANDED") { return true }
-        if out.contains("PENDING") { return false }
-        return nil
+            timeout: 30)
+        return LandingVerification.parse(out)
     }
 
     nonisolated static let landingStallTimeout: TimeInterval = 20 * 60
@@ -865,7 +915,10 @@ extension CodingTaskEngine {
         BACDebug.log("tasks", "“\(task.title)”: landed (\(l.mode.rawValue) → \(target), verified: \(verified))")
         rollUpBrief(afterPhaseDone: taskID)
         pumpQueue()
-        let removeWorktree = l.mode != .pr && !l.keepBranch && task.delegationID == nil
+        // Only a landing seen in git removes the branch: one finished on
+        // the agent's word (Bromure couldn't look) may not be in the
+        // target at all, and the branch would be its only copy.
+        let removeWorktree = l.mode != .pr && !l.keepBranch && task.delegationID == nil && verified
         guard grace > 0 else {
             putSessionAway(task, afterSeconds: 8)
             archiveTranscriptThenCleanup(taskID, removeWorktree: removeWorktree)
@@ -976,14 +1029,21 @@ extension CodingTaskEngine {
             }
         }
         guard let fresh = store.task(taskID), let l = fresh.landing else { return (false, "no landing") }
-        let verified: Bool? = status == "merged" ? await landingVerified(fresh) : nil
-        switch LandingReportOutcome.decide(status: status, summary: summary, prURL: prURL, verified: verified) {
+        let verification: LandingVerification = status == "merged" ? await landingVerification(fresh) : .unknown
+        switch LandingReportOutcome.decide(status: status, summary: summary, prURL: prURL,
+                                           verification: verification) {
         case .finishVerified:
             finishLanding(taskID, verified: true, by: nil)
             return (true, "Recorded: verified in '\(l.target)'. The task is Done.")
         case .finishUnverified:
             finishLanding(taskID, verified: false, by: Self.landingAgentName(fresh))
             return (true, "Recorded as merged into '\(l.target)' (Bromure couldn't verify it). The task is Done.")
+        case .remoteUnchecked:
+            let remote = l.remote ?? "the remote"
+            needsYou(taskID, String(format: NSLocalizedString(
+                "Couldn't reach %@ to check the push — the branch is kept. Check it's pushed, then mark it done or retry.",
+                comment: "task landing: the remote couldn't be fetched to verify a push"), remote))
+            return (true, "Recorded, but Bromure couldn't fetch '\(remote)' to check the push — the user will look. Stop here.")
         case .notYet:
             return (false, "'\(fresh.branch ?? "")' isn't in '\(l.target)' yet (or its checkout still has uncommitted changes) — finish landing it, then report again.")
         case .prOpened(let url):
