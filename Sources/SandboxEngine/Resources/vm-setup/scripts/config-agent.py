@@ -1134,6 +1134,52 @@ OPENVPN_CONFIG_PATH = "/etc/openvpn/bromure.conf"
 OPENVPN_AUTH_PATH = "/etc/openvpn/bromure-auth.txt"
 
 
+# Directives an imported .ovpn may not carry: OpenVPN runs as root, and
+# these run code (script hooks, plugins, the ip binary it calls), open a
+# control socket, pull in other files, or write and chdir anywhere. The
+# config is VPN data the user downloaded or pasted, not a root script.
+OPENVPN_FORBIDDEN = frozenset({
+    "script-security", "up", "down", "route-up", "route-pre-down", "ipchange",
+    "tls-verify", "tls-crypt-v2-verify", "auth-user-pass-verify",
+    "client-connect", "client-disconnect", "learn-address",
+    "plugin", "iproute", "ifconfig-noexec-cmd",
+    "management", "management-client", "management-client-auth",
+    "management-hold", "management-query-passwords", "management-forget-disconnect",
+    "management-external-key", "management-external-cert",
+    "config", "cd", "chroot", "tmp-dir", "daemon", "writepid",
+    "log", "log-append", "status", "auth-user-pass",
+})
+
+
+def sanitize_ovpn(text):
+    """``text`` without the forbidden directives (in either form, `up x`
+    or `--up x`), inline blocks (<ca>…</ca>) kept as they are. Returns
+    (lines, dropped directive names)."""
+    out, dropped, inline = [], [], None
+    for line in text.splitlines():
+        s = line.strip()
+        if inline is not None:
+            out.append(line)
+            if s.lower() == "</%s>" % inline:
+                inline = None
+            continue
+        if s.startswith("<") and s.endswith(">") and not s.startswith("</"):
+            inline = s[1:-1].strip().lower()
+            out.append(line)
+            continue
+        if not s or s[0] in "#;":
+            out.append(line)
+            continue
+        name = s.split(None, 1)[0].lower()
+        if name.startswith("--"):
+            name = name[2:]
+        if name in OPENVPN_FORBIDDEN:
+            dropped.append(name)
+            continue
+        out.append(line)
+    return out, dropped
+
+
 def write_openvpn_config(cfg, ovpn_config):
     """Write the user's .ovpn plus a credentials file when username/password
     auth is configured. openvpn-agent runs the client against this config."""
@@ -1142,14 +1188,15 @@ def write_openvpn_config(cfg, ovpn_config):
     username = (cfg.get("openVPNUsername") or "").strip()
     password = cfg.get("openVPNPassword") or ""
 
-    # Drop any auth-user-pass directive the user pasted (with or without a
-    # file argument) — we re-point it at our own credentials file so the
-    # client never blocks on an interactive prompt. Keep every other line
-    # verbatim, including inline <ca>/<cert>/<key> blocks.
-    cleaned = [
-        line for line in ovpn_config.splitlines()
-        if not line.strip().lower().startswith("auth-user-pass")
-    ]
+    # Drop what may not run as root (OPENVPN_FORBIDDEN), and any
+    # auth-user-pass the user pasted — re-pointed at our own credentials
+    # file so the client never blocks on a prompt. Every other line stays
+    # verbatim, inline <ca>/<cert>/<key> blocks included.
+    cleaned, dropped = sanitize_ovpn(ovpn_config)
+    dropped = sorted(set(dropped) - {"auth-user-pass"})
+    if dropped:
+        print("config-agent: dropped OpenVPN directives that would run as root: %s"
+              % ", ".join(dropped), file=sys.stderr)
     if username:
         cleaned.append(f"auth-user-pass {OPENVPN_AUTH_PATH}")
 

@@ -266,8 +266,11 @@ def do_enable():
     except OSError:
         pass
 
+    # --script-security 1 after --config wins over the file: no user
+    # script runs as root, whatever the config says (config-agent strips
+    # the hooks too); 1 still lets openvpn call ip itself.
     rc, out = run(
-        "openvpn --config %s --daemon openvpn-bromure --writepid %s "
+        "openvpn --config %s --script-security 1 --daemon openvpn-bromure --writepid %s "
         "--log %s --verb 3" % (OVPN_CONFIG, OVPN_PIDFILE, OVPN_LOG)
     )
     if rc != 0:
