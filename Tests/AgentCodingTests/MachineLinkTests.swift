@@ -201,6 +201,28 @@ struct MachineLinkTests {
         #expect(DelegationRelayClient.readLine(fds[0], within: 0.2) == .expired)
     }
 
+    @Test("a link the machine closed while it waited is skipped, not handed a request")
+    func openSkipsClosedLinks() {
+        let hub = MachineLinkHub.shared
+        let id = UUID()
+        let (live, liveFar) = Self.link()
+        let (dead, deadFar) = Self.link()
+        let (half, halfFar) = Self.link()
+        defer { close(liveFar); close(halfFar); hub.detach(id: id, owner: nil) }
+        #expect(hub.park(fd: live, id: id, name: "M", owner: nil))
+        #expect(hub.park(fd: dead, id: id, name: "M", owner: nil))
+        #expect(hub.park(fd: half, id: id, name: "M", owner: nil))
+        close(deadFar)                      // gone
+        shutdown(halfFar, SHUT_WR)          // its EOF sent, the fd still open
+        // Newest first: the half-closed one and the closed one are passed over.
+        let fd = hub.open(id, verb: "control", timeout: 1)
+        #expect(fd == live)
+        var buf = [UInt8](repeating: 0, count: 16)
+        let n = read(liveFar, &buf, buf.count)
+        #expect(String(decoding: buf[0..<max(0, n)], as: UTF8.self) == "control\n")
+        if let fd { close(fd) }
+    }
+
     private static func link() -> (Int32, Int32) {
         var fds: [Int32] = [0, 0]
         socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)

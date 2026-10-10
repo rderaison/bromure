@@ -241,6 +241,12 @@ final class MachineLinkHub: @unchecked Sendable {
             }
             guard names[id] != nil, let fd = parked[id]?.popLast() else { cond.unlock(); return nil }
             cond.unlock()
+            // A parked link says nothing until it's given a verb: one with
+            // something to read was closed (or half-closed) by the machine
+            // while it waited. Its write would still succeed and the call
+            // read an empty reply — the review's "can't reach the machine"
+            // that a second click didn't hit. Next.
+            guard Self.quietWhileParked(fd) else { close(fd); continue }
             // A link the machine dropped while parked fails the write: next.
             var one: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -248,6 +254,13 @@ final class MachineLinkHub: @unchecked Sendable {
             if write(fd, line, line.count) == line.count { return fd }
             close(fd)
         }
+    }
+
+    /// No hangup, no pending EOF and no stray bytes on a parked link.
+    static func quietWhileParked(_ fd: Int32) -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, 0) >= 0 else { return false }
+        return p.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) == 0
     }
 
     // MARK: Requests down a link

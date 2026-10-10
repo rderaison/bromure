@@ -260,8 +260,16 @@ struct ReviewView: View {
 
     private func load(quiet: Bool = false) async {
         if !quiet { loading = true; loadFailed = false }
-        // A turn's files: review the checkout they were edited in.
-        let fetched = await source.fetch(base, focus.files ?? [])
+        // A turn's files: review the checkout they were edited in. The read
+        // changes nothing, so one that fails is tried again before the
+        // window says the machine is out of reach: the first call of a
+        // while can land on a link that just went away (a fresh one is
+        // dialed behind it), and a click again then always worked.
+        var fetched = await source.fetch(base, focus.files ?? [])
+        if fetched == nil, !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if !Task.isCancelled { fetched = await source.fetch(base, focus.files ?? []) }
+        }
         loading = false
         if let fetched { data = fetched; loadFailed = false }
         else if !quiet { data = nil; loadFailed = true }
