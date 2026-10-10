@@ -418,8 +418,11 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
                 self.icloudBridge = await connect()
             }
 
+            // Usernames only, from every source: a password leaves the host
+            // only through password_fill, after the user approves it there.
+            // (Local entries used to come back with their passwords, no
+            // prompt — any page could ask for any domain's.)
             guard let bridge = self.icloudBridge else {
-                // No iCloud bridge — fallback to Bromure's own keychain entries (includes passwords)
                 let entries = Self.searchKeychainPasswords(domain: domain)
                 if entries.isEmpty {
                     sendError(requestId: requestId, type: "password_get_response", error: "no_credentials")
@@ -428,7 +431,7 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
                         "type": "password_get_response",
                         "requestId": requestId,
                         "success": true,
-                        "credentials": entries.map { ["username": $0.0, "password": $0.1] },
+                        "credentials": entries.map { ["username": $0.0, "source": "local"] },
                     ])
                 }
                 return
@@ -445,9 +448,8 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
             var credentials: [[String: String]] = loginEntries.map {
                 ["username": $0.username, "source": "icloud"]
             }
-            // Local entries: already have passwords
             for entry in localEntries {
-                credentials.append(["username": entry.0, "password": entry.1, "source": "local"])
+                credentials.append(["username": entry.0, "source": "local"])
             }
 
             if credentials.isEmpty {
@@ -475,8 +477,34 @@ public final class CredentialBridge: NSObject, @unchecked Sendable {
             return
         }
 
+        guard let window = windowProvider?() ?? window else {
+            sendError(requestId: requestId, type: "password_fill_response", error: "no_window")
+            return
+        }
+
         requestInFlight = true
 
+        // The user approves every password that leaves the host, seeing the
+        // site and the account: the VM — and any page in it — is untrusted.
+        let alert = NSAlert()
+        alert.messageText = "Fill password?"
+        alert.informativeText = "The browser asks for your password for \u{201c}\(domain)\u{201d}.\n\nAccount: \(username)"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Fill")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            guard response == .alertFirstButtonReturn else {
+                self.requestInFlight = false
+                self.handleUserDenial()
+                self.sendError(requestId: requestId, type: "password_fill_response", error: "user_cancelled")
+                return
+            }
+            self.fillApprovedPassword(domain: domain, username: username, requestId: requestId)
+        }
+    }
+
+    private func fillApprovedPassword(domain: String, username: String, requestId: String) {
         Task { @MainActor in
             defer { requestInFlight = false }
 
