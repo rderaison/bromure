@@ -14848,9 +14848,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            if let robot = BromureIcons.image("robot") {
-                let icon = robot.copy() as! NSImage
-                icon.size = NSSize(width: 18, height: 18)
+            // The app icon's mark (Resources/BromureAC.icon), as a template.
+            if let mark = BromureIcons.image("app-mark") {
+                let icon = mark.copy() as! NSImage
+                let h: CGFloat = 16
+                icon.size = NSSize(width: (h * mark.size.width / max(mark.size.height, 1)).rounded(), height: h)
                 icon.isTemplate = true
                 button.image = icon
             } else {
