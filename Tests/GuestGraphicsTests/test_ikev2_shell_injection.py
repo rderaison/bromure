@@ -369,5 +369,84 @@ class IKEv2ShellInjectionTests(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
+
+PROXY_CFG = {
+    "ikev2Server": "vpn.example",
+    "ikev2RemoteID": "vpn.example",
+    "ikev2AuthMethod": "eap",
+    "ikev2Username": "alice",
+    "ikev2Password": "s3cret",  # ggignore: test fixture
+    "ikev2UseDNS": True,
+    "ikev2ProxyHost": "proxy.example",
+    "ikev2ProxyPort": 8080,
+}
+
+
+class IKEv2RootStateTests(unittest.TestCase):
+    """CWE-59: what root's updown trusts never sits in world-writable
+    /tmp/bromure, and a planted symlink is neither followed nor read."""
+
+    def test_state_is_root_only_and_not_in_tmp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            swanctl = Path(directory) / "swanctl"
+            config.write_ikev2_config(dict(PROXY_CFG), swanctl_dir=str(swanctl))
+            state = swanctl / "bromure-state"
+            self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+            snippet = state / "ikev2-squid-peer.conf"
+            self.assertFalse(snippet.is_symlink())
+            self.assertEqual(stat.S_IMODE(snippet.stat().st_mode), 0o600)
+            script = (swanctl / "updown.sh").read_text()
+            self.assertNotIn("/tmp/bromure/", script)
+            self.assertIn("STATE_DIR='%s'" % state, script)
+            subprocess.run(["sh", "-n", str(swanctl / "updown.sh")], check=True)
+
+    def test_planted_symlink_is_replaced_not_followed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            swanctl, state = directory / "swanctl", directory / "state"
+            state.mkdir(mode=0o700)
+            victim = directory / "victim"
+            victim.write_text("root's file\n")
+            (state / "ikev2-squid-peer.conf").symlink_to(victim)
+            (state / "client.p12").symlink_to(victim)
+            config.write_ikev2_config(dict(PROXY_CFG), swanctl_dir=str(swanctl), state_dir=str(state))
+            self.assertEqual(victim.read_text(), "root's file\n")
+            snippet = state / "ikev2-squid-peer.conf"
+            self.assertFalse(snippet.is_symlink())
+            self.assertIn("cache_peer proxy.example", snippet.read_text())
+
+    def test_state_dir_that_is_a_symlink_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            elsewhere = directory / "elsewhere"
+            elsewhere.mkdir()
+            (directory / "state").symlink_to(elsewhere)
+            with self.assertRaises(OSError):
+                config.write_ikev2_config(dict(PROXY_CFG), swanctl_dir=str(directory / "swanctl"),
+                                          state_dir=str(directory / "state"))
+            self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_updown_does_not_read_a_symlinked_snippet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            swanctl, state = directory / "swanctl", directory / "state"
+            config.write_ikev2_config(dict(PROXY_CFG), swanctl_dir=str(swanctl), state_dir=str(state))
+            secret = directory / "client.key"
+            secret.write_text("-----BEGIN PRIVATE KEY-----\nsecret\n")
+            snippet = state / "ikev2-squid-peer.conf"
+            snippet.unlink()
+            snippet.symlink_to(secret)
+            script = (swanctl / "updown.sh").read_text()
+            block = script[script.index("# BEGIN ikev2-proxy-apply\n"):script.index("# END ikev2-proxy-apply")]
+            squid = directory / "squid.conf"
+            squid.write_text("http_port 3128\n")
+            env = os.environ.copy()
+            env["IKEV2_SQUID_CONF"] = str(squid)
+            env.pop("IKEV2_PROXY_SNIPPET", None)
+            result = subprocess.run(["sh", "-c", block], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(squid.read_text(), "http_port 3128\n")
+
+
 if __name__ == "__main__":
     unittest.main()
