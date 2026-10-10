@@ -776,10 +776,16 @@ final class SSHConnection: @unchecked Sendable {
         let ch = channel
         // Close the pump side exactly once — from whichever fires first, the
         // channel-open failure or the timeout below. Both run on `ch.eventLoop`,
-        // so a plain flag is race-free.
+        // so a plain flag is race-free. Once the child's handler holds the fd
+        // (its initializer runs at creation, BEFORE the open is confirmed) it
+        // is the handler's to close, when the channel goes: closing it here
+        // too closed the number twice — the second time someone else's,
+        // reused in between, and two links ended up reading one stream (a
+        // Sidecar slot seeing `POST …` where its verb should be).
         var pumpClosed = false
+        var handlerOwnsPump = false
         func closePump() {
-            guard !pumpClosed else { return }
+            guard !pumpClosed, !handlerOwnsPump else { return }
             pumpClosed = true
             Darwin.shutdown(pumpFD, SHUT_RDWR)
             Darwin.close(pumpFD)
@@ -832,6 +838,7 @@ final class SSHConnection: @unchecked Sendable {
                     child.eventLoop.makeCompletedFuture {
                         try child.pipeline.syncOperations.addHandler(
                             ExecFDPumpHandler(command: verb, fd: pumpFD))
+                        handlerOwnsPump = true
                     }
                 }
             } catch {

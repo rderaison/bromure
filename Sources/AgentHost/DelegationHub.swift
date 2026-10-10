@@ -16,21 +16,37 @@ final class DelegationHub: @unchecked Sendable {
     static var socketPath: String { AgentHostPaths.support.appendingPathComponent("delegation.sock").path }
 
     private let lock = NSLock()
-    /// Parked SSH channels, newest last.
-    private var offers: [(Int32) -> Bool] = []
+    /// Parked SSH channels, newest last. `alive`, when the parker can say,
+    /// lets a park drop the dead ones beneath it: handing out goes newest
+    /// first, so an old dead one would never be reached, and its waiting
+    /// thread and link would stay forever.
+    private var offers: [(take: (Int32) -> Bool, alive: (() -> Bool)?)] = []
     /// Streams answered locally, oldest first.
     private var fallbacks: [Int32] = []
 
     // MARK: Parked channels (the SSH server's resolver)
 
-    func park(_ offer: @escaping @Sendable (Int32) -> Bool) {
+    /// `offer` takes a stream (true) or declines it (false: its channel died
+    /// while parked). Given `alive`, a dead offer is also handed -1 when a
+    /// later park prunes it, and must decline it — that releases its waiter.
+    func park(_ offer: @escaping @Sendable (Int32) -> Bool, alive: (@Sendable () -> Bool)? = nil) {
         lock.lock()
-        offers.append(offer)
+        var dead: [(Int32) -> Bool] = []
+        offers.removeAll { o in
+            guard let alive = o.alive, !alive() else { return false }
+            dead.append(o.take)
+            return true
+        }
+        offers.append((offer, alive))
         let kick = fallbacks.isEmpty ? nil : fallbacks.removeFirst()
         lock.unlock()
+        for d in dead { _ = d(-1) }
         // Its shim reconnects at once — onto the channel just parked.
         if let kick { shutdown(kick, SHUT_RDWR) }
     }
+
+    /// Offers waiting (tests).
+    var parkedCount: Int { lock.lock(); defer { lock.unlock() }; return offers.count }
 
     /// Hand `fd` to a live parked channel; false when there is none.
     private func relay(_ fd: Int32) -> Bool {
@@ -38,7 +54,7 @@ final class DelegationHub: @unchecked Sendable {
             lock.lock()
             guard let offer = offers.popLast() else { lock.unlock(); return false }
             lock.unlock()
-            if offer(fd) { return true }   // else that channel died while parked
+            if offer.take(fd) { return true }   // else that channel died while parked
         }
     }
 

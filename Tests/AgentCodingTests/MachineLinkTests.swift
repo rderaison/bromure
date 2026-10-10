@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 @testable import bromure_ac
 
@@ -113,6 +114,91 @@ struct MachineLinkTests {
         #expect(Date().timeIntervalSince(t0) < 2)
         #expect(r.status == 200)
         #expect(r.json["ok"] as? Bool == true)
+    }
+
+    @Test("a proxied call whose machine never answers gives up at the head deadline")
+    func relayHeadDeadline() throws {
+        // A dead end over a relayed path: the link stays open, nothing comes.
+        var m: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &m)
+        defer { close(m[0]); close(m[1]) }
+        var c: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &c)
+        defer { close(c[0]); close(c[1]) }
+        let t0 = Date()
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { MachineLinkHub.relay(c[0], m[0], headWithin: 0.5); done.signal() }
+        #expect(done.wait(timeout: .now() + 5) == .success)
+        #expect(Date().timeIntervalSince(t0) < 3)
+        // The caller hears the end, not silence.
+        var b: UInt8 = 0
+        #expect(read(c[1], &b, 1) == 0)
+    }
+
+    @Test("once the head is in, a quiet stream outlives the head deadline")
+    func relayStreamAfterHead() throws {
+        var m: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &m)
+        defer { close(m[0]) }
+        let far = m[1]
+        Thread.detachNewThread {
+            // A terminal: the head at once, output after a pause, then the end.
+            _ = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".withCString { write(far, $0, strlen($0)) }
+            Thread.sleep(forTimeInterval: 1.2)
+            _ = "late output".withCString { write(far, $0, strlen($0)) }
+            close(far)
+        }
+        var c: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &c)
+        defer { close(c[1]) }
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { MachineLinkHub.relay(c[0], m[0], headWithin: 0.4); done.signal() }
+        #expect(done.wait(timeout: .now() + 5) == .success)
+        var buf = [UInt8](repeating: 0, count: 4096)
+        var got = Data()
+        while true { let n = read(c[1], &buf, buf.count); if n <= 0 { break }; got.append(contentsOf: buf[0..<n]) }
+        #expect(String(decoding: got, as: UTF8.self).hasSuffix("late output"))
+        close(c[0])
+    }
+
+    @Test("the delegation relay drops a slot nobody takes and dials a fresh one")
+    func relayRedialsSilentSlot() async throws {
+        // Each dial: a link whose far end never writes and never closes —
+        // a Sidecar that restarted behind a relayed path.
+        let farEnds = OSAllocatedUnfairLock(initialState: [Int32]())
+        let relay = DelegationRelayClient(dial: {
+            var fds: [Int32] = [0, 0]
+            guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { return nil }
+            farEnds.withLock { $0.append(fds[1]) }
+            return fds[0]
+        }, label: "test", parkedFor: 0.3, makeServer: { nil })
+        relay.start()
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        relay.stop()
+        let ends = farEnds.withLock { $0 }
+        #expect(ends.count >= 3)
+        // Every slot but the last was given up: its far end sees the close.
+        for fd in ends.dropLast() {
+            var b: UInt8 = 0
+            var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            #expect(poll(&p, 1, 1000) == 1)
+            #expect(read(fd, &b, 1) == 0)
+        }
+        ends.forEach { close($0) }
+    }
+
+    @Test("a hello within the deadline is read, with what followed it")
+    func relayHelloInTime() {
+        var fds: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+        defer { close(fds[0]); close(fds[1]) }
+        _ = "bromure-hello w3\n{\"id\":1}\n".withCString { write(fds[1], $0, strlen($0)) }
+        guard case .line(let hello, let rest) = DelegationRelayClient.readLine(fds[0], within: 1) else {
+            Issue.record("no hello"); return
+        }
+        #expect(hello == "w3")
+        #expect(String(decoding: rest, as: UTF8.self) == "{\"id\":1}\n")
+        #expect(DelegationRelayClient.readLine(fds[0], within: 0.2) == .expired)
     }
 
     private static func link() -> (Int32, Int32) {

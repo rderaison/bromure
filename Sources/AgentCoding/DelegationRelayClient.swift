@@ -13,16 +13,24 @@ import Darwin
 /// so the host's agents and this app's reach each other exactly like two
 /// workspaces do. As soon as one is taken, another waits. Same pump shape as
 /// BrowserMCPRelayClient.
+///
+/// A slot nobody takes within `parkedFor` is dropped and dialed again: over a
+/// relayed P2P path the host's end can die (a Sidecar restart) without this
+/// side ever seeing EOF — the SSH server's peer is a loopback splice — and a
+/// slot waiting on it would keep delegation down until this app restarted.
+/// The host skips a dropped slot when it hands out the next stream.
 final class DelegationRelayClient: @unchecked Sendable {
     private let dial: @Sendable () -> Int32?
     private let label: String
     private let makeServer: @MainActor () -> DelegationMCPServer?
+    private let parkedFor: TimeInterval
     private let state = OSAllocatedUnfairLock(initialState: (running: false, fds: Set<Int32>()))
 
-    init(dial: @escaping @Sendable () -> Int32?, label: String,
+    init(dial: @escaping @Sendable () -> Int32?, label: String, parkedFor: TimeInterval = 180,
          makeServer: @escaping @MainActor () -> DelegationMCPServer?) {
         self.dial = dial
         self.label = label
+        self.parkedFor = parkedFor
         self.makeServer = makeServer
     }
 
@@ -32,7 +40,7 @@ final class DelegationRelayClient: @unchecked Sendable {
             return s.running
         }
         guard !already else { return }
-        let dial = self.dial, label = self.label
+        let dial = self.dial, label = self.label, parkedFor = self.parkedFor
         Thread.detachNewThread { [weak self] in
             while self?.isRunning == true {
                 guard let fd = dial(), fd >= 0 else {
@@ -40,28 +48,32 @@ final class DelegationRelayClient: @unchecked Sendable {
                 }
                 guard let self, self.track(fd) else { Darwin.close(fd); return }
                 // Parked until an agent opens its MCP: its hello comes first.
-                guard let (hello, rest) = Self.readLine(fd) else {
-                    self.untrack(fd); Darwin.close(fd)
+                switch Self.readLine(fd, within: parkedFor) {
+                case .line(let hello, let rest):
+                    FatClientLog.log("delegation-relay: \(label) stream \(hello)")
+                    Thread.detachNewThread { [weak self] in
+                        self?.pump(fd, hello: hello, pending: rest)
+                        self?.release(fd)
+                    }
+                case .expired:
+                    // Maybe a dead end nobody told us about: a fresh one.
+                    self.release(fd)
+                case .closed:
+                    self.release(fd)
                     Thread.sleep(forTimeInterval: 0.5)
-                    continue
-                }
-                FatClientLog.log("delegation-relay: \(label) stream \(hello)")
-                Thread.detachNewThread { [weak self] in
-                    self?.pump(fd, hello: hello, pending: rest)
-                    self?.untrack(fd)
-                    Darwin.close(fd)
                 }
             }
         }
     }
 
     func stop() {
-        let fds = state.withLock { s -> Set<Int32> in
+        // Under the lock: an fd still tracked hasn't been closed, so its
+        // number can't belong to someone else's socket yet.
+        state.withLock { s in
             s.running = false
-            return s.fds
+            // Wakes every read; each thread does its own close.
+            for fd in s.fds { Darwin.shutdown(fd, SHUT_RDWR) }
         }
-        // Wakes every read; each thread does its own close.
-        for fd in fds { Darwin.shutdown(fd, SHUT_RDWR) }
     }
 
     private var isRunning: Bool { state.withLock { $0.running } }
@@ -74,24 +86,48 @@ final class DelegationRelayClient: @unchecked Sendable {
         }
     }
 
-    private func untrack(_ fd: Int32) { state.withLock { _ = $0.fds.remove(fd) } }
+    /// Untrack and close in one step, so `stop()` never shuts down a number
+    /// already reused by another socket.
+    private func release(_ fd: Int32) {
+        state.withLock { s in
+            s.fds.remove(fd)
+            Darwin.close(fd)
+        }
+    }
 
-    /// `bromure-hello <id>`, and whatever followed it in the same reads.
-    private static func readLine(_ fd: Int32) -> (String, Data)? {
+    enum Hello: Equatable {
+        case line(String, Data)
+        /// Nothing came within the deadline.
+        case expired
+        /// The slot closed, or sent something else.
+        case closed
+    }
+
+    /// `bromure-hello <id>`, and whatever followed it in the same reads —
+    /// waiting at most `within` for it to start.
+    static func readLine(_ fd: Int32, within: TimeInterval) -> Hello {
         var buf = [UInt8](repeating: 0, count: 4096)
         var data = Data()
+        let deadline = Date().addingTimeInterval(within)
         while data.count < 4096 {
+            if data.isEmpty {
+                let ms = Int32(max(0, min(deadline.timeIntervalSinceNow * 1000, Double(Int32.max))))
+                var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let r = poll(&p, 1, ms)
+                if r == 0 { return .expired }
+                if r < 0 { if errno == EINTR { continue }; return .closed }
+            }
             let n = Darwin.read(fd, &buf, buf.count)
-            if n <= 0 { return nil }
+            if n <= 0 { return .closed }
             data.append(contentsOf: buf[0..<n])
             if let nl = data.firstIndex(of: 0x0A) {
                 let line = String(decoding: data[data.startIndex..<nl], as: UTF8.self)
                     .trimmingCharacters(in: .whitespaces)
-                guard line.hasPrefix("bromure-hello ") else { return nil }
-                return (String(line.dropFirst("bromure-hello ".count)), Data(data[(nl + 1)...]))
+                guard line.hasPrefix("bromure-hello ") else { return .closed }
+                return .line(String(line.dropFirst("bromure-hello ".count)), Data(data[(nl + 1)...]))
             }
         }
-        return nil
+        return .closed
     }
 
     /// JSON-RPC lines in, the local server's answers out, in order.
