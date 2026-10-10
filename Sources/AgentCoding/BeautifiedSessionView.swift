@@ -1258,6 +1258,24 @@ final class BeautifiedSessionModel: ObservableObject {
         parsedItems.reduce(0) { n, it in if case .userText = it.kind { return n + 1 }; return n }
     }
 
+    nonisolated static func userTurns(_ items: [TranscriptItem]) -> [String] {
+        items.compactMap { if case .userText(let t) = $0.kind { return t }; return nil }
+    }
+
+    /// How many user turns a reparse put in front of those already loaded:
+    /// where the old list now sits in the new one (new turns may follow it
+    /// too). 0 when nothing came in front, or the two don't line up (a
+    /// different file, a fresh read).
+    nonisolated static func turnsPrepended(old: [String], new: [String]) -> Int {
+        guard !old.isEmpty, new.count > old.count, !new.starts(with: old) else { return 0 }
+        var k = new.count - old.count
+        while k > 0 {
+            if new[k ..< k + old.count].elementsEqual(old) { return k }
+            k -= 1
+        }
+        return 0
+    }
+
     /// Drop queued messages the transcript now carries; deliver held ones
     /// once the agent is idle.
     private func reconcileQueued() {
@@ -1355,11 +1373,24 @@ final class BeautifiedSessionModel: ObservableObject {
     /// delivered" (the user pressed Return in the terminal, the agent took
     /// it late), and "Not sent" too: a fat client's type call can lose its
     /// answer (the link dropped, an exec timed out) after the server typed
-    /// the text — a failed send whose turn shows up went through.
+    /// the text — a failed send whose turn shows up went through. "Not
+    /// sent" may as well never have gone in: only a turn that IS the
+    /// message clears it, not one that merely contains or starts like it
+    /// (an older prompt, a longer one about it).
     nonisolated static func arrivedAnyway(_ q: QueuedMessage, turns: [String]) -> Bool {
-        let failures = [ChatQueueStore.notDeliveredText, notTakenText, ChatQueueStore.notTypedText]
-        guard q.held, let f = q.failure, failures.contains(f) else { return false }
-        return turns.dropFirst(q.baseline).contains { $0.contains(q.text) || typedBecame(q.text, turn: $0) }
+        guard q.held, let f = q.failure else { return false }
+        let since = turns.dropFirst(q.baseline)
+        if f == ChatQueueStore.notTypedText {
+            let want = Self.squeezed(q.text)
+            return !want.isEmpty && since.contains { Self.squeezed($0) == want }
+        }
+        guard f == ChatQueueStore.notDeliveredText || f == notTakenText else { return false }
+        return since.contains { $0.contains(q.text) || typedBecame(q.text, turn: $0) }
+    }
+
+    /// Whitespace runs folded, ends trimmed.
+    nonisolated static func squeezed(_ s: String) -> String {
+        s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     /// Whether a recorded turn is a message Bromure typed, altered on the
@@ -1859,6 +1890,14 @@ final class BeautifiedSessionModel: ObservableObject {
     private func applyParsed(_ parsed: [TranscriptItem]) {
         guard parsed != parsedItems else { return }
         TranscriptMarkdownCache.prewarm(parsed)
+        // Older history read in front (Load Earlier, the continuity
+        // backfill): a queued message's baseline counts the turns that
+        // were loaded, so it moves with them — else the turns before a
+        // send read as written after it.
+        let shift = Self.turnsPrepended(old: Self.userTurns(parsedItems), new: Self.userTurns(parsed))
+        if shift > 0, !queued.isEmpty {
+            queueStore.update(queueKey) { l in for i in l.indices { l[i].baseline += shift } }
+        }
         parsedItems = parsed
         noteLiveModel()
         ensureDropImages()
