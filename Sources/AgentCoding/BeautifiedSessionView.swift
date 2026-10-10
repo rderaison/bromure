@@ -1262,18 +1262,16 @@ final class BeautifiedSessionModel: ObservableObject {
         items.compactMap { if case .userText(let t) = $0.kind { return t }; return nil }
     }
 
-    /// How many user turns a reparse put in front of those already loaded:
-    /// where the old list now sits in the new one (new turns may follow it
-    /// too). 0 when nothing came in front, or the two don't line up (a
-    /// different file, a fresh read).
-    nonisolated static func turnsPrepended(old: [String], new: [String]) -> Int {
-        guard !old.isEmpty, new.count > old.count, !new.starts(with: old) else { return 0 }
-        var k = new.count - old.count
-        while k > 0 {
-            if new[k ..< k + old.count].elementsEqual(old) { return k }
-            k -= 1
-        }
-        return 0
+    /// How many user turns `chunk` adds read in front of `held` (the bytes
+    /// already loaded): counted from the bytes themselves — a turn split
+    /// at the old start and made whole by the chunk counts too — never by
+    /// finding the old turns' text in the new list, which a repeated
+    /// prompt ("thanks", "continue") put in the wrong place, both ways.
+    nonisolated static func userTurnsPrepended(_ chunk: Data, before held: Data) -> Int {
+        var joined = chunk
+        joined.append(held)
+        let count = { (d: Data) in userTurns(AgentTranscript.parse(d)).count }
+        return max(0, count(joined) - count(held))
     }
 
     /// Drop queued messages the transcript now carries; deliver held ones
@@ -1890,14 +1888,6 @@ final class BeautifiedSessionModel: ObservableObject {
     private func applyParsed(_ parsed: [TranscriptItem]) {
         guard parsed != parsedItems else { return }
         TranscriptMarkdownCache.prewarm(parsed)
-        // Older history read in front (Load Earlier, the continuity
-        // backfill): a queued message's baseline counts the turns that
-        // were loaded, so it moves with them — else the turns before a
-        // send read as written after it.
-        let shift = Self.turnsPrepended(old: Self.userTurns(parsedItems), new: Self.userTurns(parsed))
-        if shift > 0, !queued.isEmpty {
-            queueStore.update(queueKey) { l in for i in l.indices { l[i].baseline += shift } }
-        }
         parsedItems = parsed
         noteLiveModel()
         ensureDropImages()
@@ -1984,14 +1974,30 @@ final class BeautifiedSessionModel: ObservableObject {
         loadingEarlier = true
         defer { loadingEarlier = false }
         guard let fetch = await provider.fetchTranscript(known: (path, held.base), mode: .earlier, agent: agentKind),
-              fetch.path == path, var buf = buffers[path], fetch.end == buf.base, !fetch.chunk.isEmpty
+              fetch.path == path, let before = buffers[path], fetch.end == before.base, !fetch.chunk.isEmpty
         else { return }
-        var data = fetch.chunk
+        // The user turns this puts in front: a queued message's baseline
+        // counts the turns loaded, so it moves with them — else the turns
+        // before a send read as written after it.
+        let chunk = fetch.chunk, loaded = before.data
+        let prepended = await Task.detached(priority: .userInitiated) {
+            Self.userTurnsPrepended(chunk, before: loaded)
+        }.value
+        // Read again: the tail may have grown meanwhile (only the front
+        // matters here), or the buffer been replaced (then not ours).
+        guard var buf = buffers[path], buf.base == before.base else { return }
+        var data = chunk
         data.append(buf.data)
         buf.data = data
         buf.base = fetch.start
         buf.budget = max(buf.budget, buf.data.count + Self.earlierHistoryBytes * 2)
         buffers[path] = buf
+        // Moved now, with the bytes: until the reparse lands, a baseline
+        // ahead of the loaded list only waits — it never clears a row on a
+        // turn from before the send.
+        if prepended > 0, !queued.isEmpty {
+            queueStore.update(queueKey) { l in for i in l.indices { l[i].baseline += prepended } }
+        }
         canLoadEarlier = buf.base > 0
         sinkDirty = true
         parseDirty = true

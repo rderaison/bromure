@@ -47,27 +47,37 @@ struct FailedSendArrivedTests {
 
     // Finding 82159FB7: older history read in front moved the baseline.
 
-    @Test("older turns read in front shift by their count; turns after don't, nor a fresh read")
-    func prependShift() {
-        let tail = ["A", "B"]
-        #expect(BeautifiedSessionModel.turnsPrepended(old: tail, new: ["W", "X", "Y", "Z", "A", "B"]) == 4)
-        // Prepended while new turns came in at the end.
-        #expect(BeautifiedSessionModel.turnsPrepended(old: tail, new: ["W", "A", "B", "C"]) == 1)
-        #expect(BeautifiedSessionModel.turnsPrepended(old: tail, new: ["A", "B", "C"]) == 0)
-        #expect(BeautifiedSessionModel.turnsPrepended(old: tail, new: ["P", "Q", "R"]) == 0)
-        #expect(BeautifiedSessionModel.turnsPrepended(old: [], new: ["A"]) == 0)
+    /// Claude JSONL user turns, one per line.
+    private func jsonl(_ texts: [String], from second: Int = 0) -> Data {
+        Data(texts.enumerated().map { i, t in
+            #"{"type":"user","message":{"role":"user","content":"\#(t)"},"timestamp":"2026-10-10T10:00:\#(String(format: "%02d", second + i)).000Z"}"#
+        }.joined(separator: "\n").appending("\n").utf8)
+    }
+
+    @Test("the turns Load Earlier puts in front are counted from its bytes, repeated prompts and all")
+    func prependedFromBytes() {
+        // The finding's under-shift: the tail is ["thanks"]; the earlier
+        // chunk starts with "thanks" too. Two turns came in front.
+        #expect(BeautifiedSessionModel.userTurnsPrepended(jsonl(["thanks", "ship the fix"]),
+                                                         before: jsonl(["thanks"], from: 30)) == 2)
+        // Its over-shift: old ["continue"], one older turn in front, while
+        // a new "continue" came in at the end — still 1, not 2.
+        #expect(BeautifiedSessionModel.userTurnsPrepended(jsonl(["older"]),
+                                                         before: jsonl(["continue", "continue"], from: 30)) == 1)
+        #expect(BeautifiedSessionModel.userTurnsPrepended(Data(), before: jsonl(["a"])) == 0)
     }
 
     @Test("a Not sent row stays when Load Earlier brings back an older turn with the same text")
     func olderTurnAfterPrepend() {
-        // Sent "B" again with [A, B] loaded: baseline 2. Backfill reads
-        // [W, X, Y, Z] in front; the baseline moves with them.
-        let before = ["A", "B"], after = ["W", "X", "Y", "Z", "A", "B"]
-        let shifted = 2 + BeautifiedSessionModel.turnsPrepended(old: before, new: after)
-        let q = held("B", baseline: shifted, failure: ChatQueueStore.notTypedText)
+        // Sent "thanks" again with ["thanks"] loaded: baseline 1. Load
+        // Earlier reads ["thanks", "ship the fix"] in front.
+        let shifted = 1 + BeautifiedSessionModel.userTurnsPrepended(jsonl(["thanks", "ship the fix"]),
+                                                                   before: jsonl(["thanks"], from: 30))
+        let after = ["thanks", "ship the fix", "thanks"]
+        let q = held("thanks", baseline: shifted, failure: ChatQueueStore.notTypedText)
         #expect(!BeautifiedSessionModel.arrivedAnyway(q, turns: after))
         // Its own turn, when it does come, still clears it.
-        #expect(BeautifiedSessionModel.arrivedAnyway(q, turns: after + ["B"]))
+        #expect(BeautifiedSessionModel.arrivedAnyway(q, turns: after + ["thanks"]))
     }
 
     @Test("Not sent clears only on a turn that is the message, not one containing or starting like it")
