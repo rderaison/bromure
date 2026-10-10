@@ -2246,7 +2246,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Open the `/login` OAuth URL in the host browser — the user approves there,
     /// then pastes the code back into the card (`submitLoginCode`).
     func openLoginURL() {
-        guard let s = prompt?.authURL, let url = URL(string: s) else { return }
+        guard let s = prompt?.authURL, AgentScreen.isSignInHost(s), let url = URL(string: s) else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -2254,11 +2254,21 @@ final class BeautifiedSessionModel: ObservableObject {
     /// field, completing sign-in without ever touching the terminal.
     func submitLoginCode(_ code: String) {
         let c = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !c.isEmpty else { return }
+        guard !c.isEmpty, prompt?.awaitingCode == true else { return }
         setWorking(true)
         Task { [weak self] in
-            await self?.provider.typeText(c)
-            await self?.rescanSoon()
+            guard let self else { return }
+            // Typed only into the paste prompt still on screen: the code
+            // is a credential, and the pane may have moved on since the
+            // card was drawn (an answer to anything else would get it).
+            guard let screen = await self.provider.captureScreen(),
+                  TerminalPrompt.detect(inScreen: screen, agent: self.agentKind)?.awaitingCode == true else {
+                self.setWorking(false)
+                await self.rescanSoon()
+                return
+            }
+            await self.provider.typeText(c)
+            await self.rescanSoon()
         }
     }
 
@@ -5355,7 +5365,9 @@ private struct PromptCard: View {
             }
             if prompt.authURL != nil {
                 Button(action: onOpenURL) {
-                    Label(NSLocalizedString("Open sign-in page", comment: "login"),
+                    Label(prompt.authURL.flatMap(AgentScreen.signInHost).map {
+                        String(format: NSLocalizedString("Open %@", comment: "login: the sign-in page's host"), $0)
+                    } ?? NSLocalizedString("Open sign-in page", comment: "login"),
                           systemImage: "arrow.up.right.square.fill")
                 }
                 .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)

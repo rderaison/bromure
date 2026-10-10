@@ -477,6 +477,45 @@ struct AgentScreenTests {
         }
     }
 
+    // Finding 2510C61A: a quoted sign-in URL let a later look-alike be opened.
+
+    @Test("a quoted or assigned sign-in URL ends that line's scan, and only known sign-in hosts count")
+    func signInURLUntrustedScreen() {
+        let loop = "https://claude.ai/oauth/authorize?client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"
+        // The finding's two shapes.
+        #expect(AgentScreen.signInURL([
+            "let url = \"\(loop)\"",
+            "https://evil.example/oauth/authorize?code=true&redirect_uri=https://evil.example/cb",
+        ]) == nil)
+        #expect(AgentScreen.signInURL([
+            "\"\(loop) https://claude.ai/oauth/authorize?code=true&client_id=y\"",
+        ]) == nil)
+        // An unquoted URL on an unknown host is no sign-in page.
+        #expect(AgentScreen.signInURL(["https://evil.example/oauth/authorize?code=true"]) == nil)
+        // The agents' own pages still are.
+        #expect(AgentScreen.signInURL(["   https://claude.com/cai/oauth/authorize?code=true&client_id=z"])
+                == "https://claude.com/cai/oauth/authorize?code=true&client_id=z")
+        #expect(AgentScreen.signInURL(["  https://auth.openai.com/codex/device"]) == "https://auth.openai.com/codex/device")
+        #expect(AgentScreen.signInURL(["Open https://accounts.x.ai/oauth2/device?user_code=QZQD-KPB5 to sign in"])
+                == "https://accounts.x.ai/oauth2/device?user_code=QZQD-KPB5")
+    }
+
+    @Test("a sign-in host is the URL's real host, on one of the agents' domains")
+    @MainActor
+    func signInHosts() {
+        #expect(AgentScreen.isSignInHost("https://claude.ai/oauth/authorize"))
+        #expect(AgentScreen.isSignInHost("https://platform.claude.com/oauth/code/callback"))
+        #expect(!AgentScreen.isSignInHost("https://claude.ai.evil.example/oauth/authorize"))
+        #expect(!AgentScreen.isSignInHost("https://evilclaude.ai/oauth/authorize"))
+        #expect(!AgentScreen.isSignInHost("https://claude.ai@evil.example/oauth/authorize"))
+        #expect(!AgentScreen.isSignInHost("http://claude.ai/oauth/authorize"))
+        #expect(AgentScreen.signInHost("https://auth.openai.com/codex/device") == "auth.openai.com")
+        // The onboarding fallback holds to the same hosts.
+        #expect(ACAppDelegate.signInURL(inScreen: "Visit https://evil.example/device to sign in") == nil)
+        #expect(ACAppDelegate.signInURL(inScreen: "Visit https://auth.kimi.ai/device to sign in")
+                == "https://auth.kimi.ai/device")
+    }
+
     // MARK: Wording fallback
 
     @Test("Wording drift the old needles missed: curly apostrophes, per-agent phrasing")

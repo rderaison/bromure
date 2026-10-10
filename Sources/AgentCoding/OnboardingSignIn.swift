@@ -156,7 +156,9 @@ extension ACAppDelegate {
             let low = url.lowercased()
             if low.contains("/oauth") || low.contains("/device") || low.contains("/activate")
                 || low.contains("/login") || low.contains("auth.") {
-                return url.trimmingCharacters(in: CharacterSet(charactersIn: ".,;)"))
+                let trimmed = url.trimmingCharacters(in: CharacterSet(charactersIn: ".,;)"))
+                // Only a known sign-in host is offered to open.
+                if AgentScreen.isSignInHost(trimmed) { return trimmed }
             }
         }
         return nil

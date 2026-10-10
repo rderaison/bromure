@@ -590,25 +590,55 @@ enum AgentScreen {
     /// device-code page (Grok, Kimi, Codex). Not the changelog link or the
     /// percent-encoded redirect_uri buried inside one. tmux `-J` joins the
     /// wrapped URL back into one line.
+    ///
+    /// The screen is the agent's pane — diffs and files it prints too —
+    /// so what it shows is untrusted: only a URL on a known sign-in host
+    /// (`isSignInHost`) is taken, and a line that quotes or assigns one is
+    /// code, the rest of it ignored (finding 2510C61A: skipping just the
+    /// quoted URL let a later look-alike on the line, or on the next, be
+    /// opened and collect the code).
     static func signInURL(_ lines: [String]) -> String? {
         for line in lines {
             var rest = Substring(line)
-            while let r = rest.range(of: "https://") {
+            scan: while let r = rest.range(of: "https://") {
                 let url = String(rest[r.lowerBound...].prefix(while: { !$0.isWhitespace }))
-                // Quoted, or assigned: a URL in code the agent shows, not
-                // one a sign-in is waiting on.
-                let before = rest[..<r.lowerBound].last
-                rest = rest[r.upperBound...]
-                if let before, "\"'`=(<[".contains(before) { continue }
+                let before = rest[..<r.lowerBound]
+                if let c = before.last, "\"'`=(<[".contains(c) { break scan }
+                if before.contains(where: { $0 == "\"" || $0 == "`" }) { break scan }
+                // Past the whole URL: one quoted string can't hide another.
+                rest = rest[rest.index(r.lowerBound, offsetBy: url.count)...]
                 let low = url.lowercased()
-                if low.contains("/oauth/authorize") || low.contains("/oauth2/device")
+                guard low.contains("/oauth/authorize") || low.contains("/oauth2/device")
                     || low.contains("authorize_device") || low.contains("/codex/device")
-                    || low.contains("user_code=") {
-                    return url
-                }
+                    || low.contains("user_code=") else { continue }
+                guard isSignInHost(url) else { continue }
+                return url
             }
         }
         return nil
+    }
+
+    /// The account hosts the agents' own sign-ins use (Claude, Codex,
+    /// Grok, Kimi, and the providers Oh My Pi signs in to). Anything else
+    /// on screen claiming to be a sign-in page is not opened.
+    static let signInDomains = [
+        "claude.ai", "claude.com", "anthropic.com",
+        "openai.com", "chatgpt.com",
+        "x.ai", "grok.com",
+        "kimi.ai", "kimi.com", "moonshot.ai", "moonshot.cn",
+        "google.com", "github.com",
+    ]
+
+    static func isSignInHost(_ url: String) -> Bool {
+        guard let host = signInHost(url) else { return false }
+        return signInDomains.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
+    /// `url`'s host, lowercased — what the card's button names.
+    static func signInHost(_ url: String) -> String? {
+        guard let u = URLComponents(string: url), u.scheme?.lowercased() == "https",
+              let host = u.host?.lowercased(), !host.isEmpty, u.user == nil else { return nil }
+        return host
     }
 
     /// The agent's sign-in shows: a dialog's own wording anywhere (but in
