@@ -15466,43 +15466,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var env = ProcessInfo.processInfo.environment
         env["SSH_AUTH_SOCK"] = agentSocket
 
-        var askpassURL: URL?
-        if let pass = passphrase, !pass.isEmpty {
-            // Script just echoes the passphrase. Single-quote the value
-            // safely; ssh-add doesn't do shell expansion on the result.
-            let escaped = pass.replacingOccurrences(of: "'", with: "'\\''")
-            let script = "#!/bin/sh\nprintf '%s\\n' '\(escaped)'\n"
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("bromure-ac-askpass-\(UUID().uuidString).sh")
-            try? script.write(to: url, atomically: true, encoding: .utf8)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: NSNumber(value: 0o700)],
-                ofItemAtPath: url.path)
-            env["SSH_ASKPASS"] = url.path
-            // Apple's ssh-add only consults SSH_ASKPASS when DISPLAY is
-            // also set, OR when SSH_ASKPASS_REQUIRE=force. Belt-and-
-            // braces both.
-            env["DISPLAY"] = ":0"
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            askpassURL = url
-        }
+        // ssh-add never prompts on a terminal. It reads a passphrase from
+        // /dev/tty, not stdin — and an app started from a shell has one:
+        // ssh-add tried it from the background, the kernel stopped it
+        // (SIGTTOU), and the launch waited on it forever with the main
+        // thread (a 20-minute beachball on a key with no stored
+        // passphrase). So askpass, always (Apple's ssh-add wants DISPLAY
+        // too, or SSH_ASKPASS_REQUIRE=force: both), and it answers once:
+        // the stored passphrase, then nothing — a wrong one would be
+        // offered again on every "Bad passphrase, try again".
+        let askpassURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure-ac-askpass-\(UUID().uuidString).sh")
+        try? Self.askpassScript(passphrase: passphrase)
+            .write(to: askpassURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: askpassURL.path)
+        env["SSH_ASKPASS"] = askpassURL.path
+        env["DISPLAY"] = ":0"
+        env["SSH_ASKPASS_REQUIRE"] = "force"
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
         p.arguments = [path]
         p.environment = env
-        // ssh-add reading from /dev/null prevents it from blocking on
-        // tty even when SSH_ASKPASS is missing or fails.
         p.standardInput = FileHandle(forReadingAtPath: "/dev/null")
         p.standardOutput = Pipe()
         let stderr = Pipe()
         p.standardError = stderr
         defer {
-            if let u = askpassURL { try? FileManager.default.removeItem(at: u) }
+            try? FileManager.default.removeItem(at: askpassURL)
+            try? FileManager.default.removeItem(atPath: askpassURL.path + ".used")
         }
         do {
-            try p.run()
-            p.waitUntilExit()
+            guard try Self.runBounded(p, seconds: 15) else {
+                FileHandle.standardError.write(Data(
+                    "[mitm] ssh-add (imported '\(label)') didn't finish in 15 s — stopped it\n".utf8))
+                return
+            }
             if p.terminationStatus != 0 {
                 let msg = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
                                  encoding: .utf8) ?? ""
@@ -15516,6 +15516,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             FileHandle.standardError.write(Data(
                 "[mitm] ssh-add (imported '\(label)') launch failed: \(error)\n".utf8))
         }
+    }
+
+    /// The askpass ssh-add runs for an imported key: the passphrase (when
+    /// there is one) on its first call, a refusal after — ssh-add asks
+    /// again after a wrong one, for as long as it gets an answer.
+    nonisolated static func askpassScript(passphrase: String?) -> String {
+        guard let pass = passphrase, !pass.isEmpty else { return "#!/bin/sh\nexit 1\n" }
+        let escaped = pass.replacingOccurrences(of: "'", with: "'\\''")
+        return "#!/bin/sh\n[ -e \"$0.used\" ] && exit 1\n: > \"$0.used\"\nprintf '%s\\n' '\(escaped)'\n"
+    }
+
+    /// Run `p` and wait at most `seconds` for it; past that it is killed
+    /// (SIGKILL: a stopped process ignores the rest until continued).
+    /// false = it had to be killed.
+    nonisolated static func runBounded(_ p: Process, seconds: TimeInterval) throws -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
+        try p.run()
+        if done.wait(timeout: .now() + seconds) == .success { return true }
+        kill(p.processIdentifier, SIGKILL)
+        _ = done.wait(timeout: .now() + 2)
+        return false
     }
 
     /// Add the per-profile key to bromure's private ssh-agent so the
