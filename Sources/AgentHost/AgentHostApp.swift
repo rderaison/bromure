@@ -203,6 +203,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(settingsItem(account: account))
         menu.addItem(.separator())
 
+        menu.addItem(aboutItem())
         if let updater {
             let title = updateReminders.pendingVersion.map { "Install Update (\($0))…" } ?? "Check for Updates…"
             let check = action(title, #selector(checkForUpdates(_:)),
@@ -214,6 +215,30 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quit.action = #selector(NSApplication.terminate(_:))
         quit.keyEquivalent = "q"
         menu.addItem(quit)
+    }
+
+    /// About: the version and which build this is — the Jenkins build
+    /// number, commit and date package.sh stamps into Info.plist
+    /// (scripts/stamp-build-info.sh).
+    private func aboutItem() -> NSMenuItem {
+        let info = { (key: String) in
+            (Bundle.main.object(forInfoDictionaryKey: key) as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        let item = NSMenuItem(title: "About Bromure Sidecar", action: nil, keyEquivalent: "")
+        item.image = symbol("info.circle")
+        let sub = NSMenu()
+        var lines: [String] = []
+        if let v = info("CFBundleShortVersionString") { lines.append("Version \(v)") }
+        lines.append(info("BromureBuild") ?? "Unstamped build")
+        if let c = info("BromureCommit") { lines.append("Commit \(c)") }
+        if let d = info("BromureBuildDate") { lines.append("Built \(d)") }
+        for line in lines { sub.addItem(disabled(line)) }
+        sub.addItem(.separator())
+        let copy = action("Copy Build Info", #selector(copyFingerprint(_:)), symbol: "doc.on.doc")
+        copy.representedObject = "Bromure Sidecar " + lines.joined(separator: " · ")
+        sub.addItem(copy)
+        item.submenu = sub
+        return item
     }
 
     /// The header's one line: where this Mac's agents can be reached from.
