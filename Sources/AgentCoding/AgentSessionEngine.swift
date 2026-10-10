@@ -528,15 +528,28 @@ final class AgentSessionEngine {
     /// Where text typed for session `s` may go: its window (by the id the
     /// probe stamped, else its index), still carrying the name we launched
     /// it under, with — by default — an agent in the foreground.
-    static func paneTarget(_ s: AgentSession, foreground: PaneTarget.Foreground = .agent) -> PaneTarget? {
+    /// `onMachine`: the session runs on an attached Bromure Sidecar (nil:
+    /// ask the machine hub).
+    static func paneTarget(_ s: AgentSession, foreground: PaneTarget.Foreground = .agent,
+                           onMachine: Bool? = nil) -> PaneTarget? {
         guard let w = s.windowIndex else { return nil }
         var t = PaneTarget(ref: s.windowID.map { .windowID($0) } ?? .index(w), foreground: foreground)
         t.expectDisplay = s.launchDisplay
         // A renamed Bromure Sidecar session's tab shows its current title,
         // not the launch one: without it every typed notice, Switchboard
         // message and finding hand-over was refused as another's tab.
-        if let d = s.launchDisplay, !d.isEmpty, !s.title.isEmpty, s.title != d {
+        // Only there, and only pinned to the window the probe stamped: on a
+        // VM the tab keeps its launch name, and the title is whatever the
+        // agent's terminal title says — not unique, the agent's to choose.
+        // Accepted by index (a rebind clears the id), it let another tab
+        // wearing that title take the notice, the resume text or the
+        // relaunch line (finding: typing guard accepts the session title
+        // as tab identity on VMs).
+        let machine = onMachine ?? (MachineLinkHub.shared.name(s.profileID) != nil)
+        if machine, let id = s.windowID, PaneTypeGuard.isWindowID(id),
+           let d = s.launchDisplay, !d.isEmpty, !s.title.isEmpty, s.title != d {
             t.expectDisplayAlt = s.title
+            t.expectWindowID = id
         }
         return t
     }
