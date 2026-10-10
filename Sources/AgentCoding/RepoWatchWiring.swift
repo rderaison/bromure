@@ -107,9 +107,11 @@ extension ACAppDelegate {
 
     /// "Ask @foo to fix it": a backlog task on the board, queued for that
     /// session (RepoWatchEngine.fix(_:by:)) — not a message typed into it.
-    /// Shows the board when `show`. Returns why it didn't get there (nil =
-    /// queued). A flagged finding goes only once the user `confirmed` it.
-    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, show: Bool = true,
+    /// The user stays where they are, in the code review: the finding's
+    /// row says it's in progress and opens the task. Returns why it didn't
+    /// get there (nil = queued). A flagged finding goes only once the user
+    /// `confirmed` it.
+    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID,
                                confirmed: Bool) async -> String? {
         guard let f = findingStore.finding(findingID),
               let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else {
@@ -119,7 +121,7 @@ extension ACAppDelegate {
         guard let tid = repoWatchEngine.fix(findingID, by: s) else {
             return NSLocalizedString("couldn't put it on the board", comment: "finding → session failure")
         }
-        if show { openFixTask(tid) }
+        BACDebug.log("watch", "finding \(findingID) → task \(tid) for session \(sessionID)")
         return nil
     }
 
@@ -221,7 +223,7 @@ extension ACAppDelegate {
                 guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)) else {
                     return ["error": "unknown session"]
                 }
-                if let why = await routeFindingToSession(id, session: sid, show: false, confirmed: true) {
+                if let why = await routeFindingToSession(id, session: sid, confirmed: true) {
                     return ["error": why]
                 }
             case ("POST", "duplicate"):
