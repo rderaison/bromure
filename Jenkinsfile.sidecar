@@ -116,7 +116,7 @@ pipeline {
         stage('Archive') {
             steps {
                 sh '''
-                    BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+                    BUILD_DIR=$(swift build --build-system "${SWIFT_BUILD_SYSTEM:-native}" -c release --arch arm64 --show-bin-path 2>/dev/null)
                     cp "$BUILD_DIR/BromureSidecar.dmg" "${WORKSPACE}/BromureSidecar-${SIDECAR_VERSION}.dmg"
                 '''
                 archiveArtifacts artifacts: "BromureSidecar-${SIDECAR_VERSION}.dmg", fingerprint: true
