@@ -151,14 +151,19 @@ extension ACAppDelegate {
     static func signInURL(inScreen screen: String) -> String? {
         for line in screen.split(whereSeparator: \.isNewline) {
             guard let r = line.range(of: "https://") else { continue }
+            // Quoted or assigned: code on screen, not the CLI's sign-in.
+            let before = line[..<r.lowerBound]
+            if before.contains(where: { "\"'`".contains($0) }) || before.last.map({ "=(<[".contains($0) }) == true {
+                continue
+            }
             let url = String(line[r.lowerBound...])
                 .split(whereSeparator: { $0 == " " }).first.map(String.init) ?? ""
             let low = url.lowercased()
             if low.contains("/oauth") || low.contains("/device") || low.contains("/activate")
                 || low.contains("/login") || low.contains("auth.") {
                 let trimmed = url.trimmingCharacters(in: CharacterSet(charactersIn: ".,;)"))
-                // Only a known sign-in host is offered to open.
-                if AgentScreen.isSignInHost(trimmed) { return trimmed }
+                // Only an agent's own sign-in page is offered to open.
+                if AgentScreen.isSignInURL(trimmed, agent: nil) { return trimmed }
             }
         }
         return nil

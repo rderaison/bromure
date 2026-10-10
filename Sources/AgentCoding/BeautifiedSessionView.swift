@@ -2246,7 +2246,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Open the `/login` OAuth URL in the host browser — the user approves there,
     /// then pastes the code back into the card (`submitLoginCode`).
     func openLoginURL() {
-        guard let s = prompt?.authURL, AgentScreen.isSignInHost(s), let url = URL(string: s) else { return }
+        guard let s = prompt?.authURL, AgentScreen.isSignInURL(s, agent: agentKind), let url = URL(string: s) else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -4613,7 +4613,7 @@ struct TerminalPrompt: Equatable {
         // Sign-in: a sign-in URL or a device code on screen (any agent, any
         // wording), or the agent's own login wording — Claude's `/login`
         // method menu, Codex's first-run picker, the logged-out banners.
-        let url = AgentScreen.signInURL(lines)
+        let url = AgentScreen.signInURL(lines, agent: agent)
         let loginWords = AgentScreen.loginShown(lines, agent: agent)
         if url != nil || loginWords {
             return TerminalPrompt(

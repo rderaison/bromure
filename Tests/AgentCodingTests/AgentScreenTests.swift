@@ -428,9 +428,10 @@ struct AgentScreenTests {
         #expect(p.kind == .login)
         #expect(p.authURL == "https://auth.openai.com/codex/device")
         #expect(p.deviceCode == "ABCD-12345")
-        // Claude's code=true flow wants the code pasted back; a loopback
+        // Claude's code-page flow wants the code pasted back; a loopback
         // redirect doesn't.
-        #expect(AgentScreen.wantsPastedCode("https://claude.com/cai/oauth/authorize?code=true&client_id=x"))
+        #expect(AgentScreen.wantsPastedCode("https://claude.com/cai/oauth/authorize?code=true&client_id="
+            + AgentScreen.claudeClientID + "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"))
         #expect(!AgentScreen.wantsPastedCode(
             "https://claude.ai/oauth/authorize?client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"))
     }
@@ -493,27 +494,73 @@ struct AgentScreenTests {
         // An unquoted URL on an unknown host is no sign-in page.
         #expect(AgentScreen.signInURL(["https://evil.example/oauth/authorize?code=true"]) == nil)
         // The agents' own pages still are.
-        #expect(AgentScreen.signInURL(["   https://claude.com/cai/oauth/authorize?code=true&client_id=z"])
-                == "https://claude.com/cai/oauth/authorize?code=true&client_id=z")
+        let claude = "https://claude.com/cai/oauth/authorize?code=true&client_id=\(AgentScreen.claudeClientID)"
+            + "&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s"
+        #expect(AgentScreen.signInURL(["   " + claude]) == claude)
         #expect(AgentScreen.signInURL(["  https://auth.openai.com/codex/device"]) == "https://auth.openai.com/codex/device")
         #expect(AgentScreen.signInURL(["Open https://accounts.x.ai/oauth2/device?user_code=QZQD-KPB5 to sign in"])
                 == "https://accounts.x.ai/oauth2/device?user_code=QZQD-KPB5")
     }
 
-    @Test("a sign-in host is the URL's real host, on one of the agents' domains")
+    @Test("a sign-in page is the exact page an agent prints: host, path, client and code redirect")
     @MainActor
-    func signInHosts() {
-        #expect(AgentScreen.isSignInHost("https://claude.ai/oauth/authorize"))
-        #expect(AgentScreen.isSignInHost("https://platform.claude.com/oauth/code/callback"))
-        #expect(!AgentScreen.isSignInHost("https://claude.ai.evil.example/oauth/authorize"))
-        #expect(!AgentScreen.isSignInHost("https://evilclaude.ai/oauth/authorize"))
-        #expect(!AgentScreen.isSignInHost("https://claude.ai@evil.example/oauth/authorize"))
-        #expect(!AgentScreen.isSignInHost("http://claude.ai/oauth/authorize"))
+    func signInPages() {
+        let cb = "redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+        let claude = "https://claude.ai/oauth/authorize?client_id=\(AgentScreen.claudeClientID)&\(cb)"
+        #expect(AgentScreen.isSignInURL(claude, agent: "claude"))
+        #expect(AgentScreen.wantsPastedCode(claude))
+        // Loopback: a sign-in, but no code to paste.
+        let loop = "https://claude.ai/oauth/authorize?client_id=\(AgentScreen.claudeClientID)"
+            + "&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"
+        #expect(AgentScreen.isSignInURL(loop, agent: "claude") && !AgentScreen.wantsPastedCode(loop))
+        // Look-alike hosts, credentials in the URL, plain http.
+        for bad in ["https://claude.ai.evil.example/oauth/authorize?client_id=\(AgentScreen.claudeClientID)&\(cb)",
+                    "https://evilclaude.ai/oauth/authorize?client_id=\(AgentScreen.claudeClientID)&\(cb)",
+                    "https://claude.ai@evil.example/oauth/authorize?client_id=\(AgentScreen.claudeClientID)&\(cb)",
+                    "http://claude.ai/oauth/authorize?client_id=\(AgentScreen.claudeClientID)&\(cb)"] {
+            #expect(!AgentScreen.isSignInURL(bad, agent: nil), "\(bad)")
+        }
+        // Another app's client, or the code sent elsewhere.
+        #expect(!AgentScreen.isSignInURL("https://claude.ai/oauth/authorize?client_id=attacker&\(cb)", agent: nil))
+        #expect(!AgentScreen.isSignInURL("https://claude.ai/oauth/authorize?client_id=\(AgentScreen.claudeClientID)"
+                                         + "&redirect_uri=https%3A%2F%2Fattacker.example%2Fcb", agent: nil))
+        #expect(!AgentScreen.wantsPastedCode("https://claude.com/cai/oauth/authorize?code=true&client_id=x"))
+        // Each agent its own pages only.
+        #expect(AgentScreen.isSignInURL("https://auth.openai.com/codex/device", agent: "codex"))
+        #expect(!AgentScreen.isSignInURL("https://auth.openai.com/codex/device", agent: "claude"))
         #expect(AgentScreen.signInHost("https://auth.openai.com/codex/device") == "auth.openai.com")
-        // The onboarding fallback holds to the same hosts.
+        // The onboarding fallback holds to the same pages, and skips code.
         #expect(ACAppDelegate.signInURL(inScreen: "Visit https://evil.example/device to sign in") == nil)
         #expect(ACAppDelegate.signInURL(inScreen: "Visit https://auth.kimi.ai/device to sign in")
                 == "https://auth.kimi.ai/device")
+        #expect(ACAppDelegate.signInURL(inScreen: "print('see https://auth.kimi.ai/device')") == nil)
+    }
+
+    // Finding 30BA541B: any Google or GitHub page passed the domain check.
+
+    @Test("Google and GitHub pages from the pane are no sign-in: Apps Script, an attacker's consent or device code")
+    func providerPagesFromThePane() {
+        let payloads = [
+            "https://script.google.com/macros/s/AKfy/exec?user_code=1",
+            "https://script.google.com/macros/s/AKfy/exec?user_code=1&code=true&x=/oauth/authorize",
+            "https://sites.google.com/view/x/oauth/authorize?user_code=1",
+            "https://github.com/login/oauth/authorize?client_id=attacker&redirect_uri=https://attacker.example/cb&scope=repo",
+            "https://github.com/login/device?user_code=WDJB-MJHT",
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=attacker&redirect_uri=https://attacker.example/cb&user_code=1",
+            "https://www.google.com/device?user_code=WDJB-MJHT",
+        ]
+        for url in payloads {
+            #expect(AgentScreen.signInURL([url]) == nil, "\(url)")
+            #expect(AgentScreen.signInURL([url], agent: "omp") == nil, "\(url)")
+            #expect(!AgentScreen.wantsPastedCode(url), "\(url)")
+        }
+        // Behind a quoted provider URL on the line before, too.
+        #expect(AgentScreen.signInURL(["let u = \"https://claude.ai/oauth/authorize\"", payloads[3]]) == nil)
+        // A single quote earlier on the line marks it as code.
+        #expect(AgentScreen.signInURL(["print('docs') https://auth.openai.com/codex/device"]) == nil)
+        // Oh My Pi's Google sign-in, sent back to the CLI on loopback, is one.
+        #expect(AgentScreen.signInURL(["https://accounts.google.com/o/oauth2/v2/auth?client_id=x"
+                                       + "&redirect_uri=http%3A%2F%2Flocalhost%3A8085%2Fcb"], agent: "omp") != nil)
     }
 
     // MARK: Wording fallback
