@@ -185,8 +185,10 @@ struct TaskReviewSummary: Equatable, Sendable {
         cmd += "d=$(git -C \"$r\" worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
             + "'/^worktree /{w=substr($0,10)} $0==want{print w; exit}'); echo \"TD $d\"; "
             + "[ -n \"$d\" ] && echo \"TC $(git -C \"$d\" status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
-            + "rm=$(git -C \"$r\" remote 2>/dev/null | head -1); echo \"RM $rm\"; "
-            + "[ -n \"$rm\" ] && echo \"RU $(git -C \"$r\" remote get-url \"$rm\" 2>/dev/null)\"; true"
+            // The remote a push would go to — the landing's own pick, so a
+            // name that's really an option is never shown, nor used.
+            + "rm=$(\(CodingTaskEngine.pickRemoteShell(repo: "\"$r\""))); echo \"RM $rm\"; "
+            + "[ -n \"$rm\" ] && echo \"RU $(git -C \"$r\" remote get-url -- \"$rm\" 2>/dev/null)\"; true"
         return cmd
     }
 
@@ -213,7 +215,7 @@ struct TaskReviewSummary: Equatable, Sendable {
             case "UC": s.uncommitted = Int(rest) ?? 0
             case "TD": s.targetDir = rest
             case "TC": s.targetDirty = Int(rest)
-            case "RM": s.remote = rest.isEmpty ? nil : rest
+            case "RM": s.remote = CodingTaskEngine.safeRemote(rest.isEmpty ? nil : rest)
             case "RU": s.remoteURL = rest.isEmpty ? nil : rest
             default: break
             }
