@@ -581,7 +581,7 @@ struct DelegationTests {
         let p = CodingTaskEngine.landingPrompt(mode: .merge, branch: "wt/fix", target: "main",
                                                rootRepo: "/r", title: "Fix", remote: nil, viaBoard: false)
         #expect(p.contains("land it in 'main'"))
-        #expect(p.contains("git merge --ff-only wt/fix"))
+        #expect(p.contains("git merge --ff-only 'wt/fix'"))
         #expect(p.contains("`deliver`") && p.contains("`ask`"))
         #expect(!p.contains("board_report_landing"))
     }
