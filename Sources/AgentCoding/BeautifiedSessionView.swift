@@ -4565,7 +4565,7 @@ struct TerminalPrompt: Equatable {
         // wording), or the agent's own login wording — Claude's `/login`
         // method menu, Codex's first-run picker, the logged-out banners.
         let url = AgentScreen.signInURL(lines)
-        let loginWords = AgentPhrases.matches(screen, .login, agent: agent)
+        let loginWords = AgentScreen.loginShown(lines, agent: agent)
         if url != nil || loginWords {
             return TerminalPrompt(
                 kind: .login,

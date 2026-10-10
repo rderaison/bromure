@@ -435,6 +435,48 @@ struct AgentScreenTests {
             "https://claude.ai/oauth/authorize?client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"))
     }
 
+    @Test("Sign-in wording in what the agent printed — a diff, code, a chat answer — is no login card")
+    func loginWordsInContent() {
+        // The openshell false positive: a diff whose comment quotes Claude's banner.
+        let diff = """
+        ● Update(bromure-agentd.py)
+          ⎿  Added 2 lines
+             412 +        # tmux launcher's env. Without it the SDK's claude sits at
+             413 +        # "Not logged in". Then exec the driver; argv passes via "$@".
+        ❯
+          ? for shortcuts
+        """
+        #expect(TerminalPrompt.detect(inScreen: diff, agent: "claude")?.kind != .login)
+        // Code that names the dialog's wording, and a URL in a string.
+        let code = """
+            .login: ["select login method", "browser didn't open", "paste code here",
+            let url = "https://claude.ai/oauth/authorize?client_id=x"
+        """
+        #expect(TerminalPrompt.detect(inScreen: code, agent: "claude")?.kind != .login)
+        // A test string the TUI wrapped: its tail starts a line, unquoted.
+        let wrapped = """
+        ● Write(Tests/SessionFailureTests.swift)
+             46 #expect(SessionFailure.detect(inScreen: "Not logged in — please
+                run /login")?.kind == .auth)
+        """
+        #expect(TerminalPrompt.detect(inScreen: wrapped, agent: "claude")?.kind != .login)
+        // Prose about someone else's login.
+        let prose = "● You're not logged in to the registry yet; run /login there first."
+        #expect(TerminalPrompt.detect(inScreen: prose, agent: "claude")?.kind != .login)
+    }
+
+    @Test("The agents' own logged-out lines still raise the login card")
+    func loginStatusLines() {
+        for (agent, line) in [("claude", "  ⎿  Not logged in · Please run /login"),
+                              ("claude", "  ⎿  Invalid API key · Please run /login"),
+                              ("claude", "API Error: 401 · Please run /login"),
+                              ("grok", "Not signed in. Run grok login."),
+                              ("kimi", "LLM not set, send \"/login\" to login"),
+                              ("omp", "No API key found for anthropic. Set ANTHROPIC_API_KEY.")] {
+            #expect(TerminalPrompt.detect(inScreen: line, agent: agent)?.kind == .login, "\(agent): \(line)")
+        }
+    }
+
     // MARK: Wording fallback
 
     @Test("Wording drift the old needles missed: curly apostrophes, per-agent phrasing")

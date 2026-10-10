@@ -595,7 +595,11 @@ enum AgentScreen {
             var rest = Substring(line)
             while let r = rest.range(of: "https://") {
                 let url = String(rest[r.lowerBound...].prefix(while: { !$0.isWhitespace }))
+                // Quoted, or assigned: a URL in code the agent shows, not
+                // one a sign-in is waiting on.
+                let before = rest[..<r.lowerBound].last
                 rest = rest[r.upperBound...]
+                if let before, "\"'`=(<[".contains(before) { continue }
                 let low = url.lowercased()
                 if low.contains("/oauth/authorize") || low.contains("/oauth2/device")
                     || low.contains("authorize_device") || low.contains("/codex/device")
@@ -605,6 +609,55 @@ enum AgentScreen {
             }
         }
         return nil
+    }
+
+    /// The agent's sign-in shows: a dialog's own wording anywhere (but in
+    /// quotes), or
+    /// everyday wording ("not logged in", "run /login") as a status line
+    /// says it — leading the line, or after its " · " / "error:" — never
+    /// inside quotes or a code or diff line the agent printed (the card
+    /// came up over a diff with `# "Not logged in". Then exec …` in it).
+    static func loginShown(_ lines: [String], agent: String?) -> Bool {
+        let phrases = AgentPhrases.phrases(.login, agent: agent)
+        for raw in lines {
+            let line = AgentPhrases.normalize(raw)
+            for phrase in phrases {
+                guard let r = line.range(of: phrase) else { continue }
+                if Self.quoted(line, at: r) { continue }
+                if !AgentPhrases.everydayLogin.contains(phrase) { return true }
+                if Self.isStatusMention(line, at: r) { return true }
+            }
+        }
+        return false
+    }
+
+    /// `phrase` at `r` sits in a string: a quote opened before it on the
+    /// line, or one left open after it — the tail of a string the TUI
+    /// wrapped onto this line (`please run /login")`).
+    static func quoted(_ line: String, at r: Range<String.Index>) -> Bool {
+        let before = line[..<r.lowerBound], after = line[r.upperBound...]
+        if before.contains(where: { $0 == "\"" || $0 == "`" }) || before.last == "'" { return true }
+        return after.filter { $0 == "\"" }.count % 2 == 1 || after.filter { $0 == "`" }.count % 2 == 1
+    }
+
+    /// `phrase` at `r` reads as the agent's own message, not quoted text.
+    static func isStatusMention(_ line: String, at r: Range<String.Index>) -> Bool {
+        // The line's content: past the frame, the agent's markers and a
+        // list number ("⎿ ", "● ", "│ ", "1. ").
+        var body = Substring(line).drop { c in
+            c.isWhitespace || "│┃|>❯›▶●⎿✗✘⚠•*■".contains(c)
+                || (c.unicodeScalars.first.map { (0x2500...0x257F).contains($0.value) } ?? false)
+        }
+        if let dot = body.firstIndex(where: { !$0.isNumber }), dot > body.startIndex,
+           ".)".contains(body[dot]) {
+            body = body[body.index(after: dot)...].drop(while: \.isWhitespace)
+        }
+        // Code or a diff line: a comment, or "123 +"/"-" gutter.
+        if body.hasPrefix("#") || body.hasPrefix("//") || body.hasPrefix("+") || body.hasPrefix("-") { return false }
+        if body.range(of: #"^\d+\s*[+-]"#, options: .regularExpression) != nil { return false }
+        if body.startIndex == r.lowerBound { return true }
+        let lead = line[body.startIndex..<r.lowerBound]
+        return lead.hasSuffix("· ") || lead.hasSuffix("error: ") || lead.hasSuffix("error:")
     }
 
     /// A device code standing on its own line ("QZQD-KPB5"), or after a
@@ -764,6 +817,17 @@ enum AgentPhrases {
         let t = normalize(text)
         return phrases(topic, agent: agent).contains { t.contains($0) }
     }
+
+    /// Sign-in wording that also turns up in ordinary text — code the agent
+    /// prints, a diff, a chat answer about logins. It counts only as the
+    /// agent's own status line says it (see `AgentScreen.loginShown`); the
+    /// rest of `.login` names a sign-in dialog and counts anywhere.
+    static let everydayLogin: Set<String> = [
+        "not logged in", "please run /login", "run /login", "please log in", "not signed in",
+        "login required", "llm not set", "run /login or /provider", "kimi login", "grok login",
+        "oauth login expired", "no models available", "no api key", "api key is not set",
+        "missing api key", "anthropic_api_key", "no model selected",
+    ]
 
     /// The first phrase of `topic` in `text`, for callers that need which.
     static func firstMatch(_ text: String, _ topic: Topic, agent: String?) -> String? {
