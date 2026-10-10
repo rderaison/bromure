@@ -488,3 +488,35 @@ struct LandingRemoteNameTests {
         #expect(land.contains("`git merge --ff-only 'wt/x'`"))
     }
 }
+
+/// Several Review cards merged in one go by one agent.
+@Suite("Landing: a batch merge")
+struct BatchLandingPromptTests {
+    @Test("the batch brief merges every branch, in order, checks once and reports once")
+    func brief() {
+        let p = CodingTaskEngine.batchLandingPrompt(
+            branches: [("wt/a", "Fix the parser"), ("wt/b", "Add a flag\nsecond line"), ("wt/c", "Docs")],
+            target: "main", rootRepo: "/r", remote: nil)
+        #expect(p.contains("The user approved 3 tasks — merge them all into 'main'"))
+        let a = p.range(of: "`'wt/a'`")!.lowerBound, b = p.range(of: "`'wt/b'`")!.lowerBound,
+            c = p.range(of: "`'wt/c'`")!.lowerBound
+        #expect(a < b && b < c)
+        #expect(p.contains("Add a flag second line"))
+        #expect(p.contains("git merge --no-edit <branch>"))
+        #expect(p.contains("run the project's quick checks (tests, a build, a linter) once"))
+        #expect(p.components(separatedBy: "board_report_landing").count - 1 == 2)   // merged, or blocked
+        #expect(!p.contains("git push") && !p.contains("git fetch"))
+        #expect(!p.contains("--ff-only"))
+    }
+
+    @Test("pushing: fetch and pull first, push once; an unsafe remote is never named")
+    func briefPush() {
+        let p = CodingTaskEngine.batchLandingPrompt(branches: [("wt/a", "A"), ("wt/b", "B")],
+                                                    target: "main", rootRepo: "/r", remote: "origin")
+        #expect(p.contains("`git fetch 'origin'`") && p.contains("`git pull --rebase 'origin' 'main'`"))
+        #expect(p.contains("`git push 'origin' 'main'`"))
+        let bad = CodingTaskEngine.batchLandingPrompt(branches: [("wt/a", "A"), ("wt/b", "B")],
+                                                      target: "main", rootRepo: "/r", remote: "--exec=./x")
+        #expect(!bad.contains("--exec") && !bad.contains("git push"))
+    }
+}

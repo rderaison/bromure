@@ -5632,6 +5632,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
                     self.codingTaskEngine.land(id, mode: mode, target: body["target"] as? String,
                                                keepBranch: keep, push: body["push"] as? Bool ?? false)
+                case "merge-batch":
+                    // {with: [ids], push?, keepBranch?}: this task and those,
+                    // one batch (CodingTaskEngine.landBatch).
+                    let others = ((body["with"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+                    self.codingTaskEngine.landBatch([id] + others, keepBranch: body["keepBranch"] as? Bool ?? false,
+                                                    push: body["push"] as? Bool ?? false)
                 case "open-pr":
                     self.codingTaskEngine.land(id, mode: .pr, target: body["target"] as? String)
                 case "retry-landing":

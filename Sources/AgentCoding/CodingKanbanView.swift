@@ -380,6 +380,10 @@ struct CodingKanbanView: View {
         /// (where a review window exists), else lands it — after the
         /// board's own confirm when `mergeNeedsConfirm`.
         var merge: (UUID) -> Void = { _ in }
+        /// Merge several Review cards at once (`push`: and push the
+        /// target): one agent for what Bromure can't merge itself. nil:
+        /// not offered.
+        var mergeBatch: (([UUID], _ push: Bool) -> Void)? = nil
         /// Discard: Done without merging, the branch and its checkout deleted.
         var closeNoMerge: (UUID) -> Void = { _ in }
         /// Review / In Progress → Done as it stands (no merge, branch kept).
@@ -440,6 +444,9 @@ struct CodingKanbanView: View {
     @State private var finishWithPR = TaskAssignment.finishWithPullRequest
     /// Plan-column multi-selection (batch start).
     @State private var selectedPhases: Set<UUID> = []
+    /// Review cards picked for one batch merge.
+    @State private var selectedReview: Set<UUID> = []
+    @State private var confirmingBatchMerge = false
     @State private var confirmingBatchDelete = false
     /// Card actions that ask first: Mark Done on a task with code (its
     /// branch is kept), Discard, and Merge where no review window confirms.
@@ -1020,14 +1027,63 @@ struct CodingKanbanView: View {
         }
     }
 
+    /// A Review card that can go in a batch merge: something to merge, not
+    /// landing already.
+    private func batchable(_ t: CodingTask) -> Bool {
+        !t.isNoCode && t.branch != nil && (t.landing == nil || t.landing?.phase == .needsYou)
+    }
+
+    private func toggleReview(_ id: UUID) {
+        if selectedReview.contains(id) { selectedReview.remove(id) } else { selectedReview.insert(id) }
+    }
+
     private var testingColumn: some View {
         let tasks = store.tasks(in: .testing)
+        let selected = tasks.filter { selectedReview.contains($0.id) && batchable($0) }
         return KanbanColumn(title: NSLocalizedString("Review", comment: "kanban column"),
                             systemImage: "eye",
                             count: tasks.count,
                             tint: .purple,
                             emptyText: NSLocalizedString("Nothing to review", comment: "kanban"),
                             subtitle: NSLocalizedString("Waiting for your review", comment: "kanban column")) {
+            if let mergeBatch = actions.mergeBatch, !selected.isEmpty {
+                HStack(spacing: 8) {
+                    Button { confirmingBatchMerge = true } label: {
+                        Label(String(format: NSLocalizedString("Merge %d Selected…", comment: "review column"),
+                                     selected.count),
+                              systemImage: "arrow.triangle.merge")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .help(NSLocalizedString(
+                        "Merges every selected task into its target in one go: Bromure merges the clean ones itself; the rest go to one agent, which merges them all, fixes conflicts and runs the checks once.",
+                        comment: "review column"))
+                    .confirmationDialog(
+                        String(format: NSLocalizedString("Merge %d tasks?", comment: "review column"), selected.count),
+                        isPresented: $confirmingBatchMerge, titleVisibility: .visible
+                    ) {
+                        Button(NSLocalizedString("Merge", comment: "landing confirm")) {
+                            mergeBatch(selected.map(\.id), false)
+                            selectedReview.removeAll()
+                        }
+                        Button(NSLocalizedString("Merge & Push", comment: "landing confirm")) {
+                            mergeBatch(selected.map(\.id), true)
+                            selectedReview.removeAll()
+                        }
+                        Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {}
+                    } message: {
+                        Text(String(format: NSLocalizedString(
+                            "Into %1$@. Bromure merges each one directly when it can; the others go to one agent — %2$@ — which merges them all, fixes conflicts and runs the tests once. Afterwards the branches are removed and the sessions archived.",
+                            comment: "review column: batch merge"),
+                            Set(selected.compactMap(\.landingTarget)).sorted().joined(separator: ", "),
+                            selected.first?.workerName ?? ""))
+                    }
+                    Button(NSLocalizedString("Clear", comment: "plan column")) { selectedReview.removeAll() }
+                        .controlSize(.small)
+                    Spacer(minLength: 0)
+                }
+                .padding(.bottom, 2)
+            }
             ForEach(tasks) { task in
                 TestingTaskCard(
                     task: task,
@@ -1037,6 +1093,8 @@ struct CodingKanbanView: View {
                     onOpenSession: { task.delegationID != nil ? actions.openAssignee(task) : actions.jumpToRun(task) },
                     onMarkDone: { requestMarkDone(task) },
                     onRetry: actions.retryLanding.map { retry in { retry(task.id) } },
+                    isSelected: actions.mergeBatch != nil && batchable(task) ? selectedReview.contains(task.id) : nil,
+                    onToggleSelect: { toggleReview(task.id) },
                     menu: testingMenu(task))
                     .draggable(task.id.uuidString)
                     .modifier(RemovableCard(title: task.title, stage: task.stage,
@@ -1065,6 +1123,13 @@ struct CodingKanbanView: View {
         }
         if landable {
             d.append(.init(title: NSLocalizedString("Mark Done", comment: "review")) { requestMarkDone(task) })
+        }
+        if actions.mergeBatch != nil, batchable(task) {
+            d.append(.init(title: selectedReview.contains(task.id)
+                           ? NSLocalizedString("Deselect", comment: "plan card menu")
+                           : NSLocalizedString("Select for a Batch Merge", comment: "review card menu")) {
+                toggleReview(task.id)
+            })
         }
         if !task.isNoCode, landable {
             d.append(.init(title: String(format: NSLocalizedString("Merge into %@…", comment: "kanban menu"),
@@ -2337,6 +2402,9 @@ private struct TestingTaskCard: View {
     var onMarkDone: () -> Void = {}
     /// Retry a landing that needs the user (nil: not offered here).
     var onRetry: (() -> Void)? = nil
+    /// Picked for a batch merge (nil: it can't be).
+    var isSelected: Bool? = nil
+    var onToggleSelect: () -> Void = {}
     /// The card's menu (built by the column).
     var menu: [CardMenuItem] = []
     @State private var hovering = false
@@ -2352,6 +2420,17 @@ private struct TestingTaskCard: View {
                         CardStatusPill(text: TaskPlurals.comments(unsent),
                                        tint: .purple, systemImage: "text.bubble.fill")
                             .help(NSLocalizedString("Draft review comments", comment: ""))
+                    }
+                    if let isSelected, isSelected || hovering {
+                        Button(action: onToggleSelect) {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 14))
+                                .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor)
+                                                            : AnyShapeStyle(.tertiary))
+                        }
+                        .buttonStyle(.plain)
+                        .help(isSelected ? NSLocalizedString("Deselect", comment: "plan card menu")
+                                         : NSLocalizedString("Select for a batch merge", comment: "review card"))
                     }
                 }
                 Text(task.title)
@@ -2391,7 +2470,7 @@ private struct TestingTaskCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .modifier(CardChrome(borderTint: needsYou ? .red : .purple))
+        .modifier(CardChrome(borderTint: needsYou ? .red : isSelected == true ? .accentColor : .purple))
         .onHover { hovering = $0 }
         .modifier(CardAccessibility(
             label: [task.title, workspaceName.isEmpty ? nil : workspaceName,

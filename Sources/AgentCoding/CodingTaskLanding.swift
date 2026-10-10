@@ -38,6 +38,16 @@ enum LandingCheck: Equatable, Sendable {
 }
 
 /// What a `board_report_landing` (or a delegated delivery) leads to.
+/// What a landing leaves for an agent: its branch, target and repository.
+struct LandingHandOff: Sendable {
+    let taskID: UUID
+    let branch: String
+    let target: String
+    let root: String
+    /// Merged here already; only the push is left.
+    let pushedLocally: Bool
+}
+
 enum LandingReportOutcome: Equatable, Sendable {
     /// Bromure saw it in the target: Done, verified.
     case finishVerified
@@ -312,6 +322,147 @@ extension CodingTaskEngine {
         Task { [weak self] in await self?.runLanding(taskID, branch: branch, targetOverride: targetOverride) }
     }
 
+    /// Land several approved tasks into their targets at once — merges
+    /// only (a squash or a pull request stays one at a time). Each clean
+    /// one Bromure merges itself, one after the other; what's left — the
+    /// ones whose branches conflict or moved on — goes to ONE agent (the
+    /// first such card's), with one brief: merge them all, fix conflicts,
+    /// run the checks once, push once. A delegated task lands its own.
+    func landBatch(_ ids: [UUID], keepBranch: Bool = false, push: Bool = false) {
+        let tasks = ids.compactMap { store.task($0) }.filter {
+            $0.stage == .testing && ($0.landing == nil || $0.landing?.phase == .needsYou)
+        }
+        var grouped: [String: [UUID]] = [:]
+        var order: [String] = []
+        for t in tasks {
+            guard t.delegationID == nil, t.branch != nil else {
+                land(t.id, mode: .merge, keepBranch: keepBranch, push: push)
+                continue
+            }
+            let key = t.profileID.uuidString + "\u{0}" + (t.rootRepo ?? t.repoPath)
+            if grouped[key] == nil { order.append(key) }
+            grouped[key, default: []].append(t.id)
+        }
+        for key in order {
+            let group = grouped[key] ?? []
+            if group.count == 1 {
+                land(group[0], mode: .merge, keepBranch: keepBranch, push: push)
+                continue
+            }
+            for id in group {
+                store.mutate(id) {
+                    $0.landing = TaskLanding(mode: .merge, target: $0.parentBranch ?? "", phase: .checking,
+                                             startedAt: Date(), keepBranch: keepBranch,
+                                             push: push ? true : nil)
+                    $0.lastError = nil
+                }
+            }
+            BACDebug.log("tasks", "batch landing of \(group.count) tasks")
+            Task { [weak self] in await self?.runBatch(group) }
+        }
+    }
+
+    /// One after the other through the fast path, then the rest to one agent.
+    private func runBatch(_ ids: [UUID]) async {
+        var left: [LandingHandOff] = []
+        for id in ids {
+            guard let branch = store.task(id)?.branch else { continue }
+            if let h = await runLanding(id, branch: branch, targetOverride: nil, batched: true) { left.append(h) }
+        }
+        // One agent per target (cards of one batch may start from different branches).
+        var byTarget: [String: [LandingHandOff]] = [:]
+        var targets: [String] = []
+        for h in left {
+            if byTarget[h.target] == nil { targets.append(h.target) }
+            byTarget[h.target, default: []].append(h)
+        }
+        for target in targets {
+            let hs = byTarget[target] ?? []
+            guard let lead = hs.first else { continue }
+            guard hs.count > 1, let leadTask = store.task(lead.taskID) else {
+                await handLandingToAgent(lead.taskID, branch: lead.branch, target: lead.target,
+                                         root: lead.root, pushedLocally: lead.pushedLocally)
+                continue
+            }
+            let followers = hs.dropFirst().map(\.taskID)
+            for f in followers {
+                store.mutate(f) {
+                    $0.landing?.phase = .agentLanding
+                    $0.landing?.batchLead = lead.taskID
+                    $0.landing?.startedAt = Date()
+                    $0.landing?.handingOver = nil
+                    $0.landing?.detail = String(format: NSLocalizedString(
+                        "Merged with others by %@", comment: "task landing: a card landed in a batch"),
+                        leadTask.workerName)
+                }
+                watchLanding(f)
+            }
+            store.mutate(lead.taskID) { $0.landing?.batch = Array(followers) }
+            let pushes = leadTask.landing?.pushes == true
+            let prompt = Self.batchLandingPrompt(
+                branches: hs.map { ($0.branch, store.task($0.taskID)?.title ?? "") },
+                target: target, rootRepo: lead.root,
+                remote: pushes ? leadTask.landing?.remote : nil)
+            await handLandingToAgent(lead.taskID, branch: lead.branch, target: target, root: lead.root,
+                                     promptOverride: prompt)
+        }
+    }
+
+    /// The batch brief: merge each branch into `target` in order, in its
+    /// checkout; conflicts resolved keeping both sides; checks once; push
+    /// once (`remote`); one report for all.
+    nonisolated static func batchLandingPrompt(branches: [(branch: String, title: String)], target: String,
+                                               rootRepo: String, remote: String?) -> String {
+        let rm = safeRemote(remote)
+        let (qt, list) = (q(target), branches.enumerated().map { i, b in
+            "   \(i + 1). `\(q(b.branch))` — \(b.title.replacingOccurrences(of: "\n", with: " "))"
+        }.joined(separator: "\n"))
+        var steps: [String] = [
+            "For each branch below, commit anything still uncommitted in its checkout (`git worktree list` "
+                + "shows them) with clear messages (leave out build artifacts and scratch files).",
+        ]
+        if let r = rm {
+            steps.append("In the checkout where '\(target)' is checked out, bring in what '\(r)/\(target)' has "
+                + "first: `git fetch \(q(r))` then `git pull --rebase \(q(r)) \(qt)`.")
+        }
+        steps.append("In the checkout where '\(target)' is checked out (`git worktree list` shows it; if it isn't "
+            + "checked out anywhere, check it out in a scratch worktree of \(q(rootRepo))), merge the branches one "
+            + "after the other, in this order — `git merge --no-edit <branch>` for each, committing each merge "
+            + "before the next. Resolve every conflict keeping both sides' intent — never drop the other side's "
+            + "changes. Never touch, stash or discard uncommitted changes in that checkout — if git refuses "
+            + "because of them, stop and report blocked.\n" + list)
+        steps.append("Once they're all in, run the project's quick checks (tests, a build, a linter) once and fix "
+            + "what the merges broke. Don't go fixing unrelated failures.")
+        if let r = rm {
+            steps.append("Push it: `git push \(q(r)) \(qt)`. Never force-push '\(target)'. If it's rejected "
+                + "because '\(r)' moved on, pull --rebase again, re-run the checks and push again.")
+        }
+        steps.append("Call the board_report_landing tool once, with status \"merged\" and a one-line summary, when "
+            + "every branch is in '\(target)'\(rm.map { " and '\($0)/\(target)'" } ?? "") — Bromure checks each. "
+            + "If some can't be merged, merge the others, then call board_report_landing with status \"blocked\" "
+            + "naming the ones that aren't in and why. Don't force anything.")
+        let numbered = steps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+        return "The user approved \(branches.count) tasks — merge them all into '\(target)', in one go. "
+            + "Do it yourself, in this session:\n" + numbered + "\n"
+            + "If git has no identity configured, commit with "
+            + "`git -c user.name=Bromure -c user.email=bromure@localhost commit …` rather than stopping to ask."
+    }
+
+    /// Where a batch's other cards stand once its agent reports or stops:
+    /// each one Bromure sees in its target goes Done; the rest need you.
+    private func settleBatchFollowers(of leadID: UUID, why: @escaping (CodingTask) -> String) async {
+        guard let ids = store.task(leadID)?.landing?.batch else { return }
+        for id in ids {
+            guard let t = store.task(id), t.stage == .testing, t.landing?.phase == .agentLanding,
+                  t.landing?.batchLead == leadID else { continue }
+            if await landingVerified(t) == true {
+                finishLanding(id, verified: true, by: nil)
+            } else {
+                needsYou(id, why(t))
+            }
+        }
+    }
+
     private func needsYou(_ taskID: UUID, _ why: String) {
         store.mutate(taskID) {
             guard $0.landing != nil else { return }
@@ -322,14 +473,18 @@ extension CodingTaskEngine {
         BACDebug.log("tasks", "landing needs you: \(why)")
     }
 
-    private func runLanding(_ taskID: UUID, branch: String, targetOverride: String?) async {
-        guard let delegate, var task = store.task(taskID), let mode = task.landing?.mode else { return }
+    /// `batched`: part of a batch landing — what needs an agent comes back
+    /// (to go, with the others, to one agent) instead of being handed over.
+    @discardableResult
+    private func runLanding(_ taskID: UUID, branch: String, targetOverride: String?,
+                            batched: Bool = false) async -> LandingHandOff? {
+        guard let delegate, var task = store.task(taskID), let mode = task.landing?.mode else { return nil }
         let delegated = task.delegationID != nil
         // A workspace that's off is booted (a delegated assignee may sit on
         // a machine this host can't exec into — it lands its own work).
         if !delegated, let why = await ensureWorkspaceUp(task.profileID, delegate: delegate) {
             needsYou(taskID, why)
-            return
+            return nil
         }
         // Metadata a detached finish never captured.
         if task.rootRepo == nil || task.parentBranch == nil || task.worktreeDir == nil {
@@ -345,13 +500,13 @@ extension CodingTaskEngine {
         let target = targetOverride ?? task.parentBranch
         guard let target, !target.isEmpty, let root = task.rootRepo, !root.isEmpty else {
             if delegated {
-                await handLandingToAgent(taskID, branch: branch, target: target ?? "", root: fallbackRoot(task))
-                return
+                return await handOff(.init(taskID: taskID, branch: branch, target: target ?? "",
+                                           root: fallbackRoot(task), pushedLocally: false), batched: batched)
             }
             needsYou(taskID, NSLocalizedString(
                 "Couldn't read the branch's repository or where it started — is the workspace running?",
                 comment: "task landing"))
-            return
+            return nil
         }
         store.mutate(taskID) { $0.landing?.target = target }
         if task.landing?.pushes == true, task.landing?.remote == nil {
@@ -359,7 +514,7 @@ extension CodingTaskEngine {
                 needsYou(taskID, NSLocalizedString(
                     "The repository has no remote to push to — merge it without pushing.",
                     comment: "task landing"))
-                return
+                return nil
             }
             store.mutate(taskID) { $0.landing?.remote = r }
         }
@@ -373,42 +528,43 @@ extension CodingTaskEngine {
             switch Self.parseLandingCheck(out) {
             case .merged, .mergedNow:
                 if let remote = store.task(taskID)?.landing.flatMap({ $0.pushes ? $0.remote : nil }) {
-                    await pushAfterMerge(taskID, branch: branch, target: target, root: root, remote: remote)
-                    return
+                    return await pushAfterMerge(taskID, branch: branch, target: target, root: root,
+                                                remote: remote, batched: batched)
                 }
                 finishLanding(taskID, verified: true, by: nil)
-                return
+                return nil
             case .noTarget:
                 needsYou(taskID, String(format: NSLocalizedString(
                     "The branch %@ doesn't exist in the repository any more — merge into another branch.",
                     comment: "task landing"), target))
-                return
+                return nil
             case .noBranch:
                 needsYou(taskID, String(format: NSLocalizedString(
                     "The task's branch %@ is gone from the repository.", comment: "task landing"), branch))
-                return
+                return nil
             case .dirtyTarget:
                 needsYou(taskID, String(format: NSLocalizedString(
                     "The %@ checkout has uncommitted changes in files this task touches — commit or stash them there, then retry.",
                     comment: "task landing"), target))
-                return
+                return nil
             case .failed where out == nil && !delegated:
                 needsYou(taskID, NSLocalizedString("Couldn't reach the workspace — is it running?",
                                                    comment: "task landing"))
-                return
+                return nil
             case .dirtySource, .diverged, .failed:
                 break
             }
         }
-        await handLandingToAgent(taskID, branch: branch, target: target, root: root)
+        return await handOff(.init(taskID: taskID, branch: branch, target: target, root: root,
+                                   pushedLocally: false), batched: batched)
     }
 
     /// Merged locally on the fast path: push the target when that's a clean
     /// fast-forward of the remote; anything else (the remote moved on, git
     /// refused) goes to the agent — pull, fix conflicts, push.
     private func pushAfterMerge(_ taskID: UUID, branch: String, target: String, root: String,
-                                remote: String) async {
-        guard let delegate, let task = store.task(taskID) else { return }
+                                remote: String, batched: Bool = false) async -> LandingHandOff? {
+        guard let delegate, let task = store.task(taskID) else { return nil }
         let out = try? await delegate.guestExec(
             profileID: task.profileID,
             command: Self.pushTargetCommand(root: root, target: target, remote: remote), timeout: 90)
@@ -417,15 +573,24 @@ extension CodingTaskEngine {
         BACDebug.log("tasks", "“\(task.title)”: push \(target) → \(remote): \(word.isEmpty ? "no answer" : word)")
         if word == "pushed" {
             finishLanding(taskID, verified: true, by: nil)
-            return
+            return nil
         }
         if out == nil && task.delegationID == nil {
             needsYou(taskID, String(format: NSLocalizedString(
                 "Merged into %@, but couldn't reach the workspace to push it — is it running?",
                 comment: "task landing"), target))
-            return
+            return nil
         }
-        await handLandingToAgent(taskID, branch: branch, target: target, root: root, pushedLocally: true)
+        return await handOff(.init(taskID: taskID, branch: branch, target: target, root: root,
+                                   pushedLocally: true), batched: batched)
+    }
+
+    /// Where a landing's agent part would start (a batch collects these).
+    private func handOff(_ h: LandingHandOff, batched: Bool) async -> LandingHandOff? {
+        if batched { return h }
+        await handLandingToAgent(h.taskID, branch: h.branch, target: h.target, root: h.root,
+                                 pushedLocally: h.pushedLocally)
+        return nil
     }
 
     private func fallbackRoot(_ t: CodingTask) -> String { t.rootRepo ?? ScheduledAutomationEngine.guestPath(t.repoPath) }
@@ -435,7 +600,7 @@ extension CodingTaskEngine {
     /// `pushedLocally`: merged here already — the agent only syncs with the
     /// remote and pushes.
     private func handLandingToAgent(_ taskID: UUID, branch: String, target: String, root: String,
-                                    pushedLocally: Bool = false) async {
+                                    pushedLocally: Bool = false, promptOverride: String? = nil) async {
         guard let delegate, let task = store.task(taskID), let mode = task.landing?.mode else { return }
         var remote: String?
         if mode == .pr {
@@ -449,12 +614,12 @@ extension CodingTaskEngine {
         }
         let pushes = task.landing?.pushes == true
         if pushes { remote = task.landing?.remote }
-        let prompt = pushedLocally
+        let prompt = promptOverride ?? (pushedLocally
             ? Self.pushPrompt(branch: branch, target: target, remote: remote ?? "origin",
                               viaBoard: task.delegationID == nil)
             : Self.landingPrompt(mode: mode, branch: branch, target: target, rootRepo: root,
                                  title: task.title, remote: remote,
-                                 viaBoard: task.delegationID == nil, push: pushes)
+                                 viaBoard: task.delegationID == nil, push: pushes))
         store.mutate(taskID) {
             $0.landing?.phase = .agentLanding
             $0.landing?.startedAt = Date()
@@ -615,14 +780,22 @@ extension CodingTaskEngine {
     /// The landing agent ended its turn (Stop hook): look now; when it's not
     /// in and nothing was reported, the user is asked to look.
     func landingAgentStopped(_ taskID: UUID) {
+        // A batch's other card: the agent that merges them all settles it.
+        if store.task(taskID)?.landing?.batchLead != nil { return }
+        let stoppedWhy: (CodingTask) -> String = { t in String(format: NSLocalizedString(
+            "%@ stopped before it merged this one — open its session to see why, then retry.",
+            comment: "task landing: batch"), t.landing?.batchLead.flatMap { self.store.task($0)?.workerName } ?? "") }
         // Its turn is over: nothing more will be reported — end the grace.
         if landingGrace.contains(taskID) {
             landingGraceEnded.insert(taskID)
+            Task { [weak self] in await self?.settleBatchFollowers(of: taskID, why: stoppedWhy) }
             return
         }
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard let self, let task = self.store.task(taskID), task.stage == .testing,
+            guard let self else { return }
+            defer { Task { await self.settleBatchFollowers(of: taskID, why: stoppedWhy) } }
+            guard let task = self.store.task(taskID), task.stage == .testing,
                   let l = task.landing, l.phase == .agentLanding,
                   l.handingOver != true else { return }   // the stop of a turn before the brief
             if l.mode == .pr {
@@ -762,6 +935,25 @@ extension CodingTaskEngine {
     /// delivery while it lands). Returns what the agent is told.
     func reportLanding(_ taskID: UUID, status: String, summary: String,
                        prURL: String?) async -> (ok: Bool, message: String) {
+        let batch = store.task(taskID)?.landing?.batch ?? []
+        let own = await reportLandingOne(taskID, status: status, summary: summary, prURL: prURL)
+        guard !batch.isEmpty, status == "merged" || status == "blocked" else { return own }
+        // One report for the whole batch: each card Bromure sees in its
+        // target goes Done; the others need the user, with the agent's word.
+        await settleBatchFollowers(of: taskID) { _ in
+            let why = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            return status == "blocked" && !why.isEmpty ? why : NSLocalizedString(
+                "The batch's agent reported it done, but this branch isn't in the target — retry, or merge it on its own.",
+                comment: "task landing: batch")
+        }
+        let left = batch.filter { self.store.task($0)?.stage == .testing }.count
+        return (own.ok, own.message + (left == 0
+            ? " Every other task of the batch is Done too."
+            : " \(left) other task(s) of the batch aren't in yet — the user will look at them."))
+    }
+
+    private func reportLandingOne(_ taskID: UUID, status: String, summary: String,
+                                  prURL: String?) async -> (ok: Bool, message: String) {
         // Bromure already saw it land (verified in git) a moment ago: the
         // agent's own report is a no-op success, and its session can go.
         if let task = store.task(taskID), task.stage == .done, landingGrace.contains(taskID) {

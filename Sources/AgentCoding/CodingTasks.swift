@@ -357,6 +357,11 @@ struct TaskLanding: Codable, Equatable, Sendable {
     /// The landing brief is on its way to the agent (typed in, or its
     /// conversation being resumed): not landing yet. nil once delivered.
     var handingOver: Bool?
+    /// A batch landing — several Review cards merged into one target by
+    /// one agent: on the card whose agent does it, the other cards; on
+    /// each of those, that card. Its report and its turn's end settle all.
+    var batch: [UUID]?
+    var batchLead: UUID?
 }
 
 /// How a Done card got there — what its card says.

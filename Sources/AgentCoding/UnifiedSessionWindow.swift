@@ -3432,6 +3432,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         // The review window, on its Merge confirmation.
                         self?.acDelegate?.taskReviewWindows.open(taskID: id, confirm: .merge)
                     },
+                    mergeBatch: { [weak self] ids, push in
+                        self?.acDelegate?.codingTaskEngine.landBatch(ids, push: push)
+                    },
                     closeNoMerge: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.closeWithoutMerge(id)
                     },

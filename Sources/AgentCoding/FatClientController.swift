@@ -4544,6 +4544,11 @@ final class RemoteHostWindow: NSWindow {
                     moveToTesting: { c.taskCommand($0, "to-testing") },
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
                     merge: { [weak self] id in self?.taskReviewWindows.open(taskID: id, confirm: .merge) },
+                    mergeBatch: { ids, push in
+                        guard let first = ids.first else { return }
+                        c.taskCommand(first, "merge-batch",
+                                      body: ["with": ids.dropFirst().map(\.uuidString), "push": push])
+                    },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
                     markDone: { c.taskCommand($0, "mark-done") },
                     stop: { c.taskCommand($0, "stop") },
