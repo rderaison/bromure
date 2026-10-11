@@ -135,6 +135,15 @@ public final class UbuntuImageManager {
     /// are recommended" consent prompt.
     public var imageStateURL: URL { storageDir.appendingPathComponent("image-state.json") }
 
+    /// The downloaded image with the catalog's steps applied and *without*
+    /// the user's customize script — the checkpoint a download re-derives
+    /// base.img from while upstream hasn't changed, so iterating on a
+    /// customize script doesn't re-download the image and reinstall the
+    /// agents each time. base.img is an APFS clone of it, so the two
+    /// share blocks. `stockStateURL` records which image + steps it holds.
+    public var stockDiskURL: URL { storageDir.appendingPathComponent("stock.img") }
+    public var stockStateURL: URL { storageDir.appendingPathComponent("stock-state.json") }
+
     private var alpineKernelURL: URL { storageDir.appendingPathComponent("alpine-vmlinuz") }
     private var alpineInitrdURL: URL { storageDir.appendingPathComponent("alpine-initramfs") }
     /// Original Alpine initrd with a small `init.bromure` shim cpio
@@ -448,6 +457,24 @@ public final class UbuntuImageManager {
         if let data = try? encoder.encode(state) {
             try? data.write(to: imageStateURL, options: .atomic)
         }
+    }
+
+    func loadStockState() -> BaseImageState? {
+        guard FileManager.default.fileExists(atPath: stockDiskURL.path),
+              let data = try? Data(contentsOf: stockStateURL) else { return nil }
+        return try? JSONDecoder().decode(BaseImageState.self, from: data)
+    }
+
+    /// The catalog steps a download still has to apply on top of the saved
+    /// stock image, or nil when the stock image can't be reused: none saved,
+    /// a different published image, or a step the catalog has since
+    /// withdrawn (the image must not keep it).
+    static func stockMissingSteps(stock: BaseImageState?, imageUUID: String,
+                                  steps: [PostinstallStep]) -> [PostinstallStep]? {
+        guard let stock, stock.imageUUID == imageUUID else { return nil }
+        let applied = Set(stock.appliedStepUUIDs)
+        guard applied.isSubset(of: steps.map(\.uuid)) else { return nil }
+        return steps.filter { !applied.contains($0.uuid) }
     }
 
     /// One-time migration for images that predate image-state.json: those

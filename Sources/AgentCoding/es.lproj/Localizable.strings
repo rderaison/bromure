@@ -3567,6 +3567,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "La última imagen publicada y luego los paquetes recomendados. Unos minutos.";
 "Recommended" = "Recomendado";
 "Rebuild locally" = "Reconstruir localmente";
+"Re-download and reinstall the agents" = "Volver a descargar y reinstalar los agentes";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "Si no, mientras la imagen publicada no cambie, se reutiliza la copia guardada: solo se ejecutan los paquetes nuevos y tu script de personalización.";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "Creada desde cero en este Mac con el instalador completo. Unos 10 minutos.";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Tus espacios de trabajo no se modifican: cada uno ofrece restablecerse a la nueva imagen la próxima vez que se inicie.";
 "Download & Update" = "Descargar y actualizar";

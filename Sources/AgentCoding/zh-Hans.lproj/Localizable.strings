@@ -3565,6 +3565,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "获取最新发布的镜像，然后安装推荐的软件包。需要几分钟。";
 "Recommended" = "推荐";
 "Rebuild locally" = "在本地重建";
+"Re-download and reinstall the agents" = "重新下载并重新安装智能体";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "否则，只要发布的镜像没有变化，就会复用已保存的副本：只运行新的软件包和你的自定义脚本。";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "在这台 Mac 上用完整安装程序从头构建。大约 10 分钟。";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "你的工作区不会被改动——每个工作区下次启动时都会提示重置到新镜像。";
 "Download & Update" = "下载并更新";
