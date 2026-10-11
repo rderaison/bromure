@@ -520,49 +520,35 @@ public final class KubeconfigMaterializer {
               let secCert = SecCertificateCreateWithData(nil, certData as CFData) else {
             return nil
         }
-        // Try the key as PKCS#8 first (modern), then RSA (legacy).
-        let keyDataCandidates: [(Data, [CFString: Any])] = {
-            var out: [(Data, [CFString: Any])] = []
-            if let pkcs8 = pemDecode(keyPEM, marker: "PRIVATE KEY") {
-                // PKCS#8 wraps multiple key types; SecKey handles RSA + EC.
-                out.append((pkcs8, [
-                    kSecAttrKeyType: kSecAttrKeyTypeRSA,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-                out.append((pkcs8, [
-                    kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-            }
-            if let rsa = pemDecode(keyPEM, marker: "RSA PRIVATE KEY") {
-                out.append((rsa, [
-                    kSecAttrKeyType: kSecAttrKeyTypeRSA,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-            }
-            if let ec = pemDecode(keyPEM, marker: "EC PRIVATE KEY") {
-                out.append((ec, [
-                    kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-            }
-            return out
-        }()
-
-        var secKey: SecKey?
-        for (data, attrs) in keyDataCandidates {
-            var err: Unmanaged<CFError>?
-            if let k = SecKeyCreateWithData(data as CFData, attrs as CFDictionary, &err) {
-                secKey = k
-                break
-            }
-        }
-        guard let key = secKey else { return nil }
+        guard let key = makeSecKey(keyPEM: keyPEM) else { return nil }
 
         guard let identity = bromure_SecIdentityCreate(nil, secCert, key) else {
             return nil
         }
         return identity.takeRetainedValue()
+    }
+
+    /// SecKeyCreateWithData only takes PKCS#1 DER for RSA and raw X9.63
+    /// bytes for EC — not the SEC1 (`EC PRIVATE KEY`, what k3s writes) or
+    /// PKCS#8 (`PRIVATE KEY`) PEMs kubeconfigs carry. swift-crypto parses
+    /// every one of those; re-export in the shape Security wants. Without
+    /// this the identity silently failed to build and the proxy dialed
+    /// the API server with no client cert (401 in the guest).
+    private func makeSecKey(keyPEM: String) -> SecKey? {
+        let ecAttrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+                                        kSecAttrKeyClass: kSecAttrKeyClassPrivate]
+        let rsaAttrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeRSA,
+                                         kSecAttrKeyClass: kSecAttrKeyClassPrivate]
+        let candidates: [(Data, [CFString: Any])] = [
+            ((try? P256.Signing.PrivateKey(pemRepresentation: keyPEM))?.x963Representation, ecAttrs),
+            ((try? P384.Signing.PrivateKey(pemRepresentation: keyPEM))?.x963Representation, ecAttrs),
+            ((try? P521.Signing.PrivateKey(pemRepresentation: keyPEM))?.x963Representation, ecAttrs),
+            ((try? _RSA.Signing.PrivateKey(unsafePEMRepresentation: keyPEM))?.derRepresentation, rsaAttrs),
+        ].compactMap { data, attrs in data.map { ($0, attrs) } }
+        for (data, attrs) in candidates {
+            if let k = SecKeyCreateWithData(data as CFData, attrs as CFDictionary, nil) { return k }
+        }
+        return nil
     }
 
     /// Strip `-----BEGIN X-----` / `-----END X-----` and base64-decode
