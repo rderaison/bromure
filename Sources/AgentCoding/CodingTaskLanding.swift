@@ -738,6 +738,10 @@ extension CodingTaskEngine {
 
     nonisolated static let landingStallTimeout: TimeInterval = 20 * 60
     private static let landingPollInterval: UInt64 = 10_000_000_000
+    /// A landing flagged "Needs you" is still looked at, less often, for
+    /// this long after it started.
+    private static let stalledPollInterval: UInt64 = 60_000_000_000
+    nonisolated static let landingWatchLimit: TimeInterval = 24 * 3600
 
     /// Follow an agent landing until it's in (verified in git), reported,
     /// or stalled. PR landings finish on the agent's report (or a PR link
@@ -747,10 +751,18 @@ extension CodingTaskEngine {
         landingWatches.insert(taskID)
         Task { [weak self] in
             defer { self?.landingWatches.remove(taskID); self?.landingBaselineLine[taskID] = nil }
+            // "Needs you" (stalled, or the agent's word not seen in git yet)
+            // keeps git looked at, less often: an agent that lands it late,
+            // or whose report never reaches the board, still makes it Done.
+            var slow = false
             while true {
-                try? await Task.sleep(nanoseconds: Self.landingPollInterval)
+                try? await Task.sleep(nanoseconds: slow ? Self.stalledPollInterval : Self.landingPollInterval)
                 guard let self, let task = self.store.task(taskID), task.stage == .testing,
-                      let l = task.landing, l.phase == .agentLanding else { return }
+                      let l = task.landing,
+                      l.phase == .agentLanding || (l.phase == .needsYou && l.mode != .pr
+                                                   && Date().timeIntervalSince(l.startedAt) < Self.landingWatchLimit)
+                else { return }
+                slow = l.phase == .needsYou
                 if l.mode != .pr, await self.landingVerified(task) == true {
                     // Seen in git while the agent may still be wrapping up
                     // (its report is seconds away): keep its session bound.
@@ -765,11 +777,10 @@ extension CodingTaskEngine {
                     self.landingBaselineLine[taskID] = nil
                     self.store.mutate(taskID) { if $0.landing?.agentLine != line { $0.landing?.agentLine = line } }
                 }
-                if Date().timeIntervalSince(l.startedAt) > Self.landingStallTimeout {
+                if l.phase == .agentLanding, Date().timeIntervalSince(l.startedAt) > Self.landingStallTimeout {
                     self.needsYou(taskID, NSLocalizedString(
                         "Landing stalled — the agent hasn't finished after 20 minutes. Open its session to see where it is, then retry or cancel.",
                         comment: "task landing"))
-                    return
                 }
             }
         }
@@ -1094,6 +1105,14 @@ extension CodingTaskEngine {
 
     func sweepIdleReview() {
         let now = Date()
+        // A landing nothing is watching any more (its watch ended, a report
+        // that never came): look at git again — in, it goes Done.
+        for t in store.tasks where t.stage == .testing && !landingWatches.contains(t.id) {
+            guard let l = t.landing, l.mode != .pr, l.handingOver != true,
+                  l.phase == .agentLanding || l.phase == .needsYou,
+                  now.timeIntervalSince(l.startedAt) < Self.landingWatchLimit else { continue }
+            watchLanding(t.id)
+        }
         for t in Self.idleReviewTasks(store.tasks, now: now) {
             BACDebug.log("tasks", "“\(t.title)”: idle in Review — putting its session away")
             putSessionAway(t, afterSeconds: 0)

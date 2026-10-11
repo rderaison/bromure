@@ -321,6 +321,34 @@ final class TaskDispatcher {
                             comment: "task landing"),
                             task.assignment?.label ?? "", target, m.text)
                     }
+                    // Git is still looked at: once it's in, the card goes Done.
+                    delegate.codingTaskEngine.watchLanding(task.id)
+                }
+                self.pump()
+            }
+        case .deliver where task.stage == .testing && task.branch != nil && task.rootRepo != nil:
+            // Already in Review, with no landing under way (cancelled, or
+            // dropped while the brief waited): a reply to the landing brief
+            // still lands the card when git shows it in — else it's a fresh
+            // hand-in, as below.
+            Task {
+                let engine = delegate.codingTaskEngine
+                if let now = store.task(task.id), now.stage == .testing, now.landing == nil,
+                   await engine.landingVerified(now) == true {
+                    store.mutate(task.id) {
+                        $0.mergeReport = m.text
+                        $0.pendingQuestion = nil
+                        $0.pendingAskID = nil
+                    }
+                    _ = await engine.reportLanding(task.id, status: "merged", summary: m.text, prURL: nil)
+                } else {
+                    store.mutate(task.id) {
+                        $0.deliverySummary = m.text
+                        $0.pullRequestURL = CodingTask.pullRequestURL(in: m.text) ?? $0.pullRequestURL
+                        $0.pendingQuestion = nil
+                        $0.pendingAskID = nil
+                    }
+                    await self.toReview(task.id, delegation: d)
                 }
                 self.pump()
             }
