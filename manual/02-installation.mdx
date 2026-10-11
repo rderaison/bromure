@@ -304,6 +304,8 @@ Nothing runs without this consent — setup steps run as root inside the base im
 
 To reinstall the image at any time, choose **Rebuild Base Image…** in the app menu. It asks **Update the base image?** and offers **Download Prebuilt**, **Rebuild Locally**, and **Cancel**. Existing machines' disks aren't touched. The old image stays in use until the new one is complete, so you can keep starting machines during the rebuild. The command-line equivalents are `bromure-cli init` (download first) and `bromure-cli init --build-local`.
 
+A download keeps a copy of the published image with the recommended packages installed (`stock.img`, sharing its disk blocks with the base image). As long as the catalog still names the same image, **Download Prebuilt** starts from that copy: it skips the download and the agent installs, applies only packages published since, and runs your customize script. That makes it quick to retry or revise a customize script. To start over anyway — for example to pick up newer agent releases — turn on **Re-download and reinstall the agents**, or run `bromure-cli init --fresh`.
+
 ## Keeping the app up to date
 
 The app updates itself with Sparkle. It checks `https://bromure.io/api/v1/release-agentic-coding` once a day, and updates are verified against the same public key that signs the image catalogs. To check now, choose **Check for Updates…** in the app menu, under **About**. (Development builds don't have this item.)

@@ -3565,6 +3565,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "最新の公開イメージを取得し、推奨パッケージを適用します。数分かかります。";
 "Recommended" = "推奨";
 "Rebuild locally" = "ローカルで再構築";
+"Re-download and reinstall the agents" = "再ダウンロードしてエージェントを再インストール";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "オフの場合、公開イメージが変わっていなければ保存済みのコピーを再利用し、新しいパッケージとカスタマイズスクリプトだけを実行します。";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "この Mac 上でフルインストーラーを使って一から作成します。約 10 分かかります。";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "ワークスペースは変更されません。次回起動時に、それぞれ新しいイメージへのリセットを提案します。";
 "Download & Update" = "ダウンロードして更新";

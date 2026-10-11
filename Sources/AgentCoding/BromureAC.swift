@@ -476,6 +476,10 @@ struct Init: ParsableCommand {
                              visibility: .hidden))
     var downloadOnly = false
 
+    @Flag(name: .long,
+          help: "Re-download the image and reinstall the agents even when the saved copy of the published image is current.")
+    var fresh = false
+
     @Option(name: .long,
             help: ArgumentHelp("Install into this directory instead of Application Support (pipeline tests).",
                                visibility: .hidden))
@@ -516,6 +520,7 @@ struct Init: ParsableCommand {
         var result: Result<Void, Error>?
         let buildLocal = self.buildLocal
         let downloadOnly = self.downloadOnly
+        let fresh = self.fresh
         Task {
             let progress: (String) -> Void = { msg in
                 FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
@@ -539,7 +544,7 @@ struct Init: ParsableCommand {
                 } else {
                     do {
                         try await imageManager.downloadBaseImage(
-                            catalogStore: catalogStore, progress: progress)
+                            catalogStore: catalogStore, fresh: fresh, progress: progress)
                     } catch let error where !downloadOnly
                         && UbuntuImageManager.isDownloadSideFailure(error) {
                         // Only download-side failures (catalog, transfer,
@@ -7767,7 +7772,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func startInit(force: Bool = false, buildLocal: Bool = false,
-                           fromWizard: Bool = false) {
+                           freshDownload: Bool = false, fromWizard: Bool = false) {
         // Note: we do NOT delete the version stamp here even when
         // force == true. The stamp gates whether existing sessions
         // can launch from the old image — wiping it would brick the
@@ -7828,7 +7833,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else {
                     do {
                         try await self.imageManager.downloadBaseImage(
-                            progress: progressCB, output: outputCB)
+                            fresh: freshDownload, progress: progressCB, output: outputCB)
                     } catch let error where UbuntuImageManager.isDownloadSideFailure(error) {
                         // No prebuilt image reachable (offline, CDN
                         // outage, bad artifact) — the one class of
@@ -9291,9 +9296,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc func rebuildBaseImageAction(_ sender: Any?) {
         switch RebuildBaseImageWindow.run() {
-        case .download: startInit(force: true)
-        case .local:    startInit(force: true, buildLocal: true)
-        case nil:       break
+        case (.download, let fresh)?: startInit(force: true, freshDownload: fresh)
+        case (.local, _)?:            startInit(force: true, buildLocal: true)
+        case nil:                     break
         }
     }
 
@@ -15980,7 +15985,8 @@ struct Reset: ParsableCommand {
         }
         let fm = FileManager.default
         for url in [imageManager.baseDiskURL, imageManager.efiVarsURL,
-                    imageManager.versionStampURL, imageManager.imageStateURL] {
+                    imageManager.versionStampURL, imageManager.imageStateURL,
+                    imageManager.stockDiskURL, imageManager.stockStateURL] {
             try? fm.removeItem(at: url)
         }
         print("Base image cleared.")
@@ -16055,9 +16061,11 @@ enum BaseImageCustomize {
 enum RebuildBaseImageWindow {
     enum Method { case download, local }
 
+    /// The method, and for a download whether to discard the saved stock
+    /// image (re-download, reinstall the agents) even if it's current.
     @MainActor
-    static func run() -> Method? {
-        var chosen: Method?
+    static func run() -> (method: Method, fresh: Bool)? {
+        var chosen: (method: Method, fresh: Bool)?
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 480),
                            styleMask: [.titled, .closable, .fullSizeContentView],
                            backing: .buffered, defer: false)
@@ -16066,7 +16074,7 @@ enum RebuildBaseImageWindow {
         win.isMovableByWindowBackground = true
         win.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: RebuildBaseImageView(
-            onStart: { m in chosen = m; NSApp.stopModal() },
+            onStart: { m, fresh in chosen = (m, fresh); NSApp.stopModal() },
             onCancel: { NSApp.stopModal() }))
         win.contentView = host
         win.setContentSize(host.fittingSize)
@@ -16082,10 +16090,11 @@ enum RebuildBaseImageWindow {
 }
 
 struct RebuildBaseImageView: View {
-    let onStart: (RebuildBaseImageWindow.Method) -> Void
+    let onStart: (RebuildBaseImageWindow.Method, Bool) -> Void
     let onCancel: () -> Void
 
     @State private var method: RebuildBaseImageWindow.Method = .download
+    @State private var fresh = false
     @AppStorage(BaseImageCustomize.enabledKey) private var customize = false
     @AppStorage(BaseImageCustomize.pathKey) private var path = ""
     @State private var showCustomize = UserDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
@@ -16109,6 +16118,20 @@ struct RebuildBaseImageView: View {
                            badge: nil)
             }
             .padding(.horizontal, 24)
+            if method == .download {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(NSLocalizedString("Re-download and reinstall the agents", comment: "rebuild base image"),
+                           isOn: $fresh)
+                        .font(.system(size: 12))
+                    Text(NSLocalizedString("Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run.", comment: "rebuild base image"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 20)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 10)
+            }
             Label(NSLocalizedString("Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts.", comment: "rebuild base image"),
                   systemImage: "checkmark.shield")
                 .font(.system(size: 11.5))
@@ -16128,7 +16151,7 @@ struct RebuildBaseImageView: View {
                     .controlSize(.large)
                 Button(method == .download
                        ? NSLocalizedString("Download & Update", comment: "rebuild base image")
-                       : NSLocalizedString("Rebuild", comment: "rebuild base image")) { onStart(method) }
+                       : NSLocalizedString("Rebuild", comment: "rebuild base image")) { onStart(method, fresh) }
                     .keyboardShortcut(.defaultAction)
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)

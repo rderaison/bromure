@@ -3568,6 +3568,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "取得最新發布的映像檔，然後安裝建議的套件。需要幾分鐘。";
 "Recommended" = "建議";
 "Rebuild locally" = "在本機重建";
+"Re-download and reinstall the agents" = "重新下載並重新安裝代理程式";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "否則，只要發布的映像檔沒有變更，就會重複使用已儲存的副本：只會執行新的套件和你的自訂指令碼。";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "在這台 Mac 上用完整安裝程式從頭建立。大約 10 分鐘。";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "你的工作區不會被更動——每個工作區下次啟動時都會提示重設到新映像檔。";
 "Download & Update" = "下載並更新";

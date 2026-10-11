@@ -117,9 +117,9 @@ The MTU already defaults to `1280`; lower it further only if a corporate PMTU pa
 
 ### The base image is left in a partial state
 
-**Cause.** Cancelling mid-install, or a failed build, leaves transient files behind: `base.img.partial`, `base.img.gz.partial`, and `efivars.partial` in the support directory. Their presence means an install is either running or was interrupted. The real image is only ever replaced atomically, so an existing working image stays usable throughout.
+**Cause.** Cancelling mid-install, or a failed build, leaves transient files behind: `base.img.partial`, `base.img.gz.partial`, `stock.img.partial`, and `efivars.partial` in the support directory. Their presence means an install is either running or was interrupted. The real image is only ever replaced atomically, so an existing working image stays usable throughout.
 
-**Fix.** Re-run the install to completion (**Rebuild Base Image…** or `bromure-ac init`). To start over from scratch, `bromure-ac reset` deletes the base-image files (`base.img`, `efivars.bin`, `base.version`, `image-state.json`) after a confirmation — it does **not** touch your machines. Confirm what is installed at any time with `bromure-ac info`.
+**Fix.** Re-run the install to completion (**Rebuild Base Image…** or `bromure-ac init`). To start over from scratch, `bromure-ac reset` deletes the base-image files (`base.img`, `efivars.bin`, `base.version`, `image-state.json`, and the saved download `stock.img` / `stock-state.json`) after a confirmation — it does **not** touch your machines. Confirm what is installed at any time with `bromure-ac info`.
 
 ### A newer base image is available
 
