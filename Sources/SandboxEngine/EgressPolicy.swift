@@ -408,10 +408,12 @@ extension EgressPolicy {
     // MARK: parse helpers
 
     private static func parseTarget(_ token: String, line: Int) throws -> (Target, PortSet) {
-        // Split host-part from an optional :ports suffix (IPv4/CIDR carry no ':').
+        // Split host-part from an optional :ports suffix (IPv4/CIDR carry no
+        // ':', so `10.0.0.0/8:636` is a CIDR with ports — the form
+        // `targetString` serializes).
         var hostPart = token
         var ports = PortSet()
-        if let colon = token.lastIndex(of: ":"), !token.contains("/") {
+        if let colon = token.lastIndex(of: ":") {
             hostPart = String(token[..<colon])
             ports = try parsePorts(String(token[token.index(after: colon)...]), line: line)
         }
