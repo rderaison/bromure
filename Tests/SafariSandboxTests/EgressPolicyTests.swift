@@ -53,6 +53,16 @@ struct EgressPolicyTests {
         #expect(p.verdict(ip: ip("1.2.3.5"), hostnames: [], proto: .udp, port: 5000) == .allow)
     }
 
+    @Test("CIDR with ports parses, matches both, and round-trips")
+    func cidrWithPorts() throws {
+        let p = try EgressPolicy.parse("allow tcp 10.1.0.0/16:636,3268-3269\ndefault deny")
+        #expect(p.verdict(ip: ip("10.1.2.3"), hostnames: [], proto: .tcp, port: 636) == .allow)
+        #expect(p.verdict(ip: ip("10.1.2.3"), hostnames: [], proto: .tcp, port: 3269) == .allow)
+        #expect(p.verdict(ip: ip("10.1.2.3"), hostnames: [], proto: .tcp, port: 443) == .deny)
+        #expect(p.verdict(ip: ip("10.2.0.1"), hostnames: [], proto: .tcp, port: 636) == .deny)
+        #expect(try EgressPolicy.parse(p.serialize()) == p)
+    }
+
     @Test("Protocol and port ranges gate matches")
     func protoPort() throws {
         let p = try EgressPolicy.parse("deny udp any:53\nallow tcp any:8000-8100\ndefault deny")
