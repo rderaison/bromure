@@ -492,4 +492,84 @@ struct KubeClusterTests {
         #expect(m.yaml.contains("current-context: cloud"))
         #expect(m.yaml.contains("- name: dev\n"))
     }
+
+    // Test-only keys (generated for this fixture, authenticate nothing).
+    // k3s writes SEC1 `EC PRIVATE KEY`; many tools write PKCS#8. Neither is a
+    // shape SecKeyCreateWithData takes, so the proxy's upstream identity used
+    // to silently vanish and kubectl got a 401.
+    nonisolated static let ecKeySEC1 = """
+        -----BEGIN EC PRIVATE KEY-----
+        MHcCAQEEILXPc4fHgmp0Yal+xK24nC7J9xL98WxlKCxCs665XtC1oAoGCCqGSM49
+        AwEHoUQDQgAEFh3uJhQbb0YVpvUCDC8nPC/8rZ96QIgm3NZbrNy1lY7wTQF83ORk
+        zt+rzxa4mhGkR98qmA/cq7qt1qo3wE/e1g==
+        -----END EC PRIVATE KEY-----
+        """
+    nonisolated static let ecCert = """
+        -----BEGIN CERTIFICATE-----
+        MIIBDTCBtAIJAKs7HNbcy3B4MAoGCCqGSM49BAMCMA8xDTALBgNVBAMMBHRlc3Qw
+        HhcNMjYxMDExMDExNjUyWhcNMzYxMDA4MDExNjUyWjAPMQ0wCwYDVQQDDAR0ZXN0
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFh3uJhQbb0YVpvUCDC8nPC/8rZ96
+        QIgm3NZbrNy1lY7wTQF83ORkzt+rzxa4mhGkR98qmA/cq7qt1qo3wE/e1jAKBggq
+        hkjOPQQDAgNIADBFAiA4NOnT/7KeQxe9Nkxzp/4VVg5EJp586yGu/X6xr9/nvwIh
+        AKjPbDBhgvG0cGDifoqPdx9FPk7WTJwadO1nM/UkzDWN
+        -----END CERTIFICATE-----
+        """
+    nonisolated static let rsaKeyPKCS8 = """
+        -----BEGIN PRIVATE KEY-----
+        MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCdHcwNc4W79jyd
+        BXdKsZa82E8/r7nGNEYY0sjGoO4RITclbLVv2SP+TnwJnppfDHK/eYcdrgRifc8b
+        rlhLFeTBsTTcfPG7y0haZ3ZTS30wO48r3cD2HM0b7ANzxtXtqAC3Ki7UKUZHtxh7
+        d/l0/04WrNt4+yZXkUI5uZRFiZ8KGSAOcVfX/vncsKN5H2qfEQFPhvTh3oOcOL8b
+        JKxBP7oFinykuGXMhf9Y55L+gI9ks5VzyXPcyKkXgerVDONq2PV3vo4vwcDGs+DB
+        XBZEQ99KyV8bm6iUdLhY/MZACEOPd/hFzZQbuy8Ct956RnEN9bC8aqKOhxlV5MfS
+        VZrT3+nDAgMBAAECggEAYgTS5plpl2f5TKS6VXkRZ2MznbHNnl/CU349D94aZ8ln
+        FAwL7Wl0URU5wO6XtDCZ7eatatDDn4aJjOVp4/4Wptgc+Glijhw2WWAuq6xuv4aI
+        vX8tAN3bAE5voO0tTYUAXUUNzgKp+9e4iF7C3EDiwLa6fXGB7CONQ2IJpJBFDhDA
+        XgNuvKC5LKgYhdwcB1cipg28myfSaRlXKTaQALeCugqHEHj8T09EFm6xyZOsP/0t
+        LlgzpkMzNbPamFhlEtXNx08+LAIo2sO7VLacgGfMcxTgGPsPBlZmS1rT8RKQBGCk
+        5LmD2UIXlNS7dFLWnDWKaMJJmx48DBOrTcFnPGBF8QKBgQDOUjRPNbgVteKAZMbZ
+        e1QhosOzSeFv014ArmZzp4G6f2dYHz+vt0xSzV7UKBozsx1VB+FI2LpHnCcK7sl8
+        4P6yPfYr8wu+8whIhoXxTzkj9Cplh6+d7YEJqpPsy73ZPbCfAz3j8NYbok+uAOSO
+        3IJ3/NWtfggecPw8YiIQBW8V7wKBgQDC8pNI7Lb7gpnCkWFiMhtBvp4Y88Ojg3Sl
+        MC90oEHKKvosms9M4OVZtbSZKvGF70Ox95aO4YA9YtEGETJ5PVV4BtJhSkVZJCyw
+        lWNRGwifZRa/FeZOZAwPWE87iDYFi0QUHTDzbyslpC1ucSc1j+6tqF+CKRqdz8Jq
+        y5/k7uCdbQKBgGF1KSplWKBAu04kzF08yV/eD40oD+oPsK6nstNcw4XB2qIgmKe6
+        8L2ILwwOKVpUeD2LLFqJrWxYEYUziE+JxCWT6S2Xb+vxxu7jRG/ZGUendUNiVY1G
+        /BYB0kAfeX0di8mA8YIzaB/DitnJqCzncmWVM6XxC4q9mhg3zpk8x91XAoGBAJc2
+        9/4B93Gh/UjJ4gL8IN5fUFzEgIVOC2Wyuay6Pi3mJkYBEzlr3Rs38c05XTzpudXK
+        2dMcoY98HeyZ3E/kvm4qxHdI1//sKmoShoY79PVGwV0ZTJqTyjMA6fygjF7Cht0f
+        Q4AgRBSfg8n+JU7LxXSYfPUGkynEJOcX6X/3tu0FAoGANkGlmMbShdwyKYScF59x
+        lEiXsc/J5CQIKWW+ofqz+XioSZWRsmlm919rMGxGL61BfH7dzht+Kyddce35h6I2
+        0B1XrsFCUwVkwHaonC2t3gLTrDnzH5Ks+/l0pJKT7qhOfC442cQuC9NZUtS0TJqZ
+        Z/MVk5Sw0ISi6kK0NyN7iNU=
+        -----END PRIVATE KEY-----
+        """
+    nonisolated static let rsaCert = """
+        -----BEGIN CERTIFICATE-----
+        MIICmjCCAYICCQCJ0CaSytpBSzANBgkqhkiG9w0BAQsFADAPMQ0wCwYDVQQDDAR0
+        ZXN0MB4XDTI2MTAxMTAxMTY1MloXDTM2MTAwODAxMTY1MlowDzENMAsGA1UEAwwE
+        dGVzdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJ0dzA1zhbv2PJ0F
+        d0qxlrzYTz+vucY0RhjSyMag7hEhNyVstW/ZI/5OfAmeml8Mcr95hx2uBGJ9zxuu
+        WEsV5MGxNNx88bvLSFpndlNLfTA7jyvdwPYczRvsA3PG1e2oALcqLtQpRke3GHt3
+        +XT/Thas23j7JleRQjm5lEWJnwoZIA5xV9f++dywo3kfap8RAU+G9OHeg5w4vxsk
+        rEE/ugWKfKS4ZcyF/1jnkv6Aj2SzlXPJc9zIqReB6tUM42rY9Xe+ji/BwMaz4MFc
+        FkRD30rJXxubqJR0uFj8xkAIQ493+EXNlBu7LwK33npGcQ31sLxqoo6HGVXkx9JV
+        mtPf6cMCAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAFioow7Bap5DfSD7hIoHls/5d
+        GWFJWOi/Hi/zJSr0ka5DShjxNUcVd47lVO8cMWtPQIt2YBF2vw9dlkoWsdjskndS
+        lEVqqCinIMsD2vPOy/4ezERJQwMyI7l8wQ8JlJG950q+kwzKY1hTsw1edXbvdlMW
+        fv2qKlL/Un3fxnOITXwJV+30bQQLkPjn1hIC9VnDGJxTBcUstlB0lqrYQQwd1ThA
+        urOKG9W3feT2g4VU4OGW6upP/0OIedao/kdwgZE7wLEj0mSZRoO5lgccrGkdDvEz
+        TRMWaUhoaGm0BFXcwMvSxdsHABxZtNxQ93WMu/Y0HpCO1a96ErqW85pl9/ENfw==
+        -----END CERTIFICATE-----
+        """
+
+    @Test("client-cert contexts register an upstream identity for SEC1 EC and PKCS#8 RSA keys",
+          arguments: [(ecCert, ecKeySEC1), (rsaCert, rsaKeyPKCS8)])
+    func clientCertIdentity(cert: String, key: String) {
+        var profile = Profile(name: "ws", tool: .claude, authMode: .token)
+        profile.kubeconfigs = [KubeconfigEntry(name: "dev", serverURL: "https://k8s.example.com:6443",
+                                               auth: .clientCert(certPEM: cert, keyPEM: key))]
+        let m = KubeconfigMaterializer().materialize(profile: profile, bromureCAPEM: "PEM", directClusters: [])
+        #expect(m.clientIdentities.map(\.host) == ["k8s.example.com:6443"])
+    }
 }
