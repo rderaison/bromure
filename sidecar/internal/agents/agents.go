@@ -39,10 +39,34 @@ type Spec struct {
 // NotOnWindows is the tray's label for an agent not verified on Windows.
 const NotOnWindows = "Not available on Windows yet"
 
-// All is every agent, in menu order. Install commands checked against
-// each maker's docs; on Windows Claude Code's PowerShell installer
-// (per-user, %USERPROFILE%\.local\bin\claude.exe) and Codex through npm —
-// always wrapped by Socket's CLI, never a bare `npm install`.
+// windowsInstallers are the makers' own PowerShell installers (checked
+// 2026-10-24), each per-user, no admin, adding its folder to the user PATH:
+//
+//	claude  %USERPROFILE%\.local\bin\claude.exe
+//	codex   %LOCALAPPDATA%\Programs\OpenAI\Codex\bin (CODEX_NON_INTERACTIVE)
+//	grok    %USERPROFILE%\.grok\bin\grok.exe
+//	kimi    %USERPROFILE%\.kimi-code\bin\kimi.exe (kimi.ai: the global region)
+//	omp     %LOCALAPPDATA%\omp\omp.exe (through bun when bun is installed)
+var windowsInstallers = map[string]string{
+	"claude": "https://claude.ai/install.ps1",
+	"codex":  "https://chatgpt.com/codex/install.ps1",
+	"grok":   "https://x.ai/cli/install.ps1",
+	"kimi":   "https://code.kimi.ai/kimi-code/install.ps1",
+	"omp":    "https://omp.sh/install.ps1",
+}
+
+// InstallScript is the PowerShell an agent's Windows install runs.
+func InstallScript(id string) string {
+	u, ok := windowsInstallers[id]
+	if !ok {
+		return ""
+	}
+	return "irm " + u + " | iex"
+}
+
+// All is every agent, in menu order. Install commands are each maker's
+// own (the same ones the macOS Sidecar runs; their PowerShell twins on
+// Windows).
 func All() []Spec {
 	win := runtime.GOOS == "windows"
 	specs := []Spec{
@@ -65,14 +89,8 @@ func All() []Spec {
 	}
 	if win {
 		for i := range specs {
-			switch specs[i].ID {
-			case "claude":
-				specs[i].Install = `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"`
-			case "codex":
-				specs[i].Install = "npx --yes @socketsecurity/cli npm install -g @openai/codex"
-			default:
-				// Not verified on Windows: greyed out, never blocking v1.
-				specs[i].Install = ""
+			specs[i].Install = InstallScript(specs[i].ID)
+			if specs[i].Install == "" {
 				specs[i].Unavailable = NotOnWindows
 			}
 		}
@@ -98,11 +116,15 @@ var Tools = []string{"claude", "codex", "grok", "kimi", "omp"}
 func ExtraDirs() []string {
 	home := paths.Home()
 	if runtime.GOOS == "windows" {
+		local := os.Getenv("LOCALAPPDATA")
 		return []string{
 			filepath.Join(home, ".local", "bin"),
-			filepath.Join(os.Getenv("APPDATA"), "npm"),
+			filepath.Join(local, "Programs", "OpenAI", "Codex", "bin"),
+			filepath.Join(home, ".grok", "bin"),
+			filepath.Join(home, ".kimi-code", "bin"),
+			filepath.Join(local, "omp"),
 			filepath.Join(home, ".bun", "bin"),
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "claude"),
+			filepath.Join(os.Getenv("APPDATA"), "npm"),
 			filepath.Join(home, ".codex", "bin"),
 		}
 	}
@@ -227,6 +249,7 @@ func detect(tool string) Phase {
 
 // Scan looks for every agent (in the background when async).
 func Scan() map[string]Phase {
+	hostexec.RefreshPath()
 	out := map[string]Phase{}
 	var wg sync.WaitGroup
 	var omu sync.Mutex

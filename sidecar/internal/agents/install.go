@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -57,6 +59,9 @@ func Install(ids []string) error {
 				mu.Unlock()
 			})
 			logx.Printf("agents: %s installer %s", s.ID, map[bool]string{true: "finished", false: "failed"}[ok])
+			// Installers add their folder to the user PATH: sessions started
+			// from now on get it.
+			hostexec.RefreshPath()
 			p := detect(s.ID)
 			if p.State != "installed" {
 				tail := lastLine(Log(s.ID))
@@ -98,13 +103,13 @@ func runInstaller(s Spec, onLine func(string)) bool {
 	env = hostexec.EnvSet(env, "CI", "1")
 	env = hostexec.EnvSet(env, "TERM", "dumb")
 	if runtime.GOOS == "windows" {
-		// powershell / npx are native: cmd runs the line as written.
-		comspec := hostexec.EnvGet(env, "ComSpec")
-		if comspec == "" {
-			comspec = `C:\Windows\System32\cmd.exe`
-		}
-		cmd = exec.Command(comspec, "/d", "/s", "/c", s.Install)
-		setCmdline(cmd, `"`+comspec+`" /d /s /c "`+s.Install+`"`)
+		// The maker's PowerShell installer, as its docs say (`irm … | iex`),
+		// with nothing to answer: Codex asks before replacing an older
+		// install unless told it's non-interactive.
+		env = hostexec.EnvSet(env, "CODEX_NON_INTERACTIVE", "1")
+		cmd = exec.Command(powershell(), "-NoLogo", "-NoProfile", "-NonInteractive",
+			"-ExecutionPolicy", "Bypass", "-Command",
+			"$ProgressPreference = 'SilentlyContinue'; "+s.Install)
 	} else {
 		cmd = exec.Command("/bin/bash", "-c", "set -o pipefail; "+s.Install)
 		env = hostexec.EnvSet(env, "PATH", "/usr/bin:/bin:/usr/sbin:/sbin:"+hostexec.EnvGet(env, "PATH"))
@@ -152,4 +157,17 @@ func scanLinesCR(data []byte, atEOF bool) (int, []byte, error) {
 		return len(data), data, nil
 	}
 	return 0, nil, nil
+}
+
+// powershell is Windows PowerShell (always there), by full path.
+func powershell() string {
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		root = `C:\Windows`
+	}
+	p := filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return "powershell.exe"
 }

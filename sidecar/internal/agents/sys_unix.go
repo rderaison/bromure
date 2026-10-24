@@ -4,5 +4,4 @@ package agents
 
 import "os/exec"
 
-func hideWindow(cmd *exec.Cmd)              {}
-func setCmdline(cmd *exec.Cmd, line string) {}
+func hideWindow(cmd *exec.Cmd) {}
