@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"github.com/rderaison/bromure/sidecar/internal/updater"
 	"os"
 	"strings"
@@ -335,12 +334,19 @@ func (s *sidecarAPI) Handle(verb string, b map[string]any) (int, map[string]any)
 		}
 		return 200, map[string]any{"ok": true}
 	case "update-check":
-		rel, err := updater.Check(context.Background(), version)
-		if errors.Is(err, updater.ErrNoFeed) {
-			// A state, not a failure: normal on Linux and macOS until their
-			// feeds are published.
-			return 200, map[string]any{"available": false, "version": version, "noFeed": true}
+		// Linux does not self-update: it comes from the Bromure package repo.
+		// So report HOW this binary was installed and the command that
+		// updates it, and never fetch a feed. Windows keeps the feed exactly
+		// as it was.
+		if m := updater.Method(); m.Kind != "" {
+			return 200, map[string]any{
+				"version": version, "packageManaged": m.Kind != "tarball",
+				"installKind": m.Kind, "package": m.Package,
+				"command": strings.Join(m.Command, " "), "commandArgv": m.Command,
+				"hint": m.Hint,
+			}
 		}
+		rel, err := updater.Check(context.Background(), version)
 		if err != nil {
 			return 502, errBody(err.Error())
 		}

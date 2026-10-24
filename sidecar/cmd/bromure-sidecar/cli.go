@@ -60,6 +60,17 @@ func obj(m map[string]any, k string) map[string]any {
 	return o
 }
 
+func sliceOf(m map[string]any, k string) []string {
+	raw, _ := m[k].([]any)
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func yesNo(b bool) string {
 	if b {
 		return "yes"
@@ -93,7 +104,15 @@ func cliStatus() int {
 		fmt.Printf("  (awaiting approval in Bromure AC's fleet dialog)")
 	}
 	fmt.Println()
-	if p, ok := ssh["port"].(float64); ok {
+	// The real listener state, not the configured port. `status()` already
+	// reports `ssh.error` when the bind failed; printing the port regardless
+	// claimed a listener that wasn't there. Measured with two daemons on one
+	// box: the second logs `couldn't bind 127.0.0.1:2223: address already in
+	// use`, keeps running, and this line used to say `ssh 127.0.0.1:2223`
+	// anyway -- for the port AC connects through.
+	if e := str(ssh, "error"); e != "" {
+		fmt.Printf("ssh          NOT LISTENING - %s\n", e)
+	} else if p, ok := ssh["port"].(float64); ok {
 		fmt.Printf("ssh          127.0.0.1:%d\n", int(p))
 	}
 	if n, ok := s["agentsRunning"].(float64); ok {
@@ -437,12 +456,68 @@ func cliUpdate(args []string) int {
 	if err != nil {
 		return cliFail(err)
 	}
-	if bul(out, "noFeed") {
-		fmt.Printf("running %s. No release feed is published for %s yet, so there\n",
-			str(out, "version"), runtime.GOOS)
-		fmt.Println("is nothing to check against; update from the release tarball.")
+
+	// Linux does not self-update: releases come from the Bromure package
+	// repo. The daemon reports how this binary was installed, and this
+	// prints -- or runs -- the command that updates it. Run from HERE and
+	// not from the daemon, because sudo needs a terminal to prompt on and
+	// the daemon has none.
+	if kind := str(out, "installKind"); kind != "" {
+		fmt.Printf("running %s, %s\n", str(out, "version"), str(out, "hint"))
+		argv := []string{}
+		for _, a := range sliceOf(out, "commandArgv") {
+			argv = append(argv, a)
+		}
+		if kind == "tarball" || len(argv) == 0 {
+			fmt.Println()
+			fmt.Println("To update, reinstall: unpack the newest release tarball and run")
+			fmt.Println("  ./install.sh ./bromure-sidecar")
+			fmt.Println("Or install the .deb/.rpm from the Bromure repo to get updates")
+			fmt.Println("with the rest of the system (see packaging/REPO.md).")
+			return 0
+		}
+		// The package metadata has to be current or apt reports the
+		// installed version as newest; dnf refreshes on its own.
+		refresh := []string{}
+		if kind == "deb" {
+			refresh = []string{"apt-get", "update"}
+			if argv[0] == "apt" {
+				refresh = []string{"apt", "update"}
+			}
+		}
+		if !install {
+			fmt.Println()
+			fmt.Println("Update with:")
+			if len(refresh) > 0 {
+				fmt.Printf("  sudo %s\n", strings.Join(refresh, " "))
+			}
+			fmt.Printf("  sudo %s\n", strings.Join(argv, " "))
+			fmt.Println()
+			fmt.Println("or `bromure-sidecar update --install` to run that now.")
+			fmt.Println("The running daemon keeps its old binary until")
+			fmt.Println("`systemctl --user restart bromure-sidecar`; agents survive that.")
+			return 0
+		}
+		for _, c := range [][]string{refresh, argv} {
+			if len(c) == 0 {
+				continue
+			}
+			fmt.Printf("+ sudo %s\n", strings.Join(c, " "))
+			cmd := exec.Command("sudo", c...)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "update: %s failed: %v\n", c[0], err)
+				return 1
+			}
+		}
+		fmt.Println()
+		fmt.Println("installed. The running daemon still has the old binary; pick up the")
+		fmt.Println("new one with: systemctl --user restart bromure-sidecar")
+		fmt.Println("(agents survive the restart -- see KillMode=process in the unit).")
 		return 0
 	}
+
+	// Windows: the release feed, unchanged.
 	if !bul(out, "available") {
 		fmt.Printf("up to date (%s)\n", str(out, "version"))
 		return 0
@@ -451,16 +526,6 @@ func cliUpdate(args []string) int {
 	if !install {
 		fmt.Println("install it with: bromure-sidecar update --install")
 		return 0
-	}
-	if runtime.GOOS != "windows" {
-		// Deliberate: Install() refuses off Windows rather than fetching an
-		// Inno setup .exe it cannot run. Replacing a running daemon's own
-		// binary also needs the service restarted, which install.sh does.
-		fmt.Fprintln(os.Stderr, "update: in-place update is Windows-only.")
-		fmt.Fprintln(os.Stderr, "  Unpack the release tarball and run:")
-		fmt.Fprintln(os.Stderr, "    ./install.sh ./bromure-sidecar")
-		fmt.Fprintln(os.Stderr, "  It replaces the binary and restarts the user service.")
-		return 1
 	}
 	if _, err := req("POST", "/sidecar/update-install", map[string]any{}); err != nil {
 		return cliFail(err)
