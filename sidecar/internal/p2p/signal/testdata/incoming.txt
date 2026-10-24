@@ -1,0 +1,12 @@
+# Server -> client frames as the gateway (device-channel.js) sends them, in
+# the shapes IncomingServerFrame.decode (P2PSignaling.swift) accepts.
+# Format: name<TAB>json
+signal	{"type":"signal","connectionId":"conn-1","seq":3,"kind":"candidate","from":"c2lnbmFsLWlkLTE2Ynl0","payload":{"v":1,"candidate":{"kind":"relay","proto":"tcp","ip":"203.0.113.50","port":49152,"prio":256,"ttl":600}}}
+signal_bad_payload	{"type":"signal","connectionId":"conn-1","seq":4,"kind":"answer","from":"x","payload":"oops"}
+signal_bad_kind	{"type":"signal","connectionId":"conn-1","seq":4,"kind":"bye","from":"x","payload":{}}
+connection	{"type":"connection","connection":{"id":"conn-1","expiresAt":"2026-10-24T12:00:45.000Z","self":{"deviceId":"dev-server","signalId":"c2VydmVy","role":"server"},"peer":{"deviceId":"dev-client","signalId":"Y2xpZW50","role":"client"}}}
+connection_incomplete	{"type":"connection","connection":{"id":"conn-1","self":{"deviceId":"a","signalId":"b","role":"server"}}}
+error	{"type":"error","error":"stale_seq","connectionId":"conn-1"}
+error_nocode	{"type":"error"}
+keys_changed	{"type":"keys-changed"}
+future	{"type":"presence","online":true}

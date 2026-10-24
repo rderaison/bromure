@@ -1,0 +1,12 @@
+# Enroll phase 2 signature (DeviceSigningKey.signBase64 in DeviceIdentity.swift):
+# Ed25519 over the UTF-8 bytes of the server's signPayload, verbatim, standard
+# base64. Seed = RFC 8032 §7.1 TEST 1 secret key; its public key is the RFC's.
+# Signature derived with OpenSSL, independently of Go:
+#   printf '302e020100300506032b657004220420<seed>' | xxd -r -p > k.der
+#   openssl pkey -inform DER -in k.der -out k.pem
+#   printf '%s' "<signPayload>" > m.txt
+#   openssl pkeyutl -sign -inkey k.pem -rawin -in m.txt | base64 -w0
+seed	9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+pubkey	d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+signPayload	bromure-p2p-enroll:v1:chal-0001:q83vEjRWeJA-x_yz
+signature	8VujHEUBq3UZaOC4+R6ZkkvbARNen17erdAsWQWRnfPqoo9t3AlcoyUuC22uBzNqF+dEYTV38ykbSp5zZPrGAw==

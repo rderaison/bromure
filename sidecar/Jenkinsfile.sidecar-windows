@@ -1,0 +1,56 @@
+// Bromure Sidecar for Windows (Go) — skeleton.
+// Cross-compiles on the existing Mac agent; the Inno Setup installer needs a
+// Windows agent (manual for now). Uploads go through the existing
+// `release-upload` job: no credentials live in this repository.
+pipeline {
+    agent { label 'mac' }
+    options { timestamps(); disableConcurrentBuilds() }
+    parameters {
+        string(name: 'VERSION', defaultValue: '', description: 'Version (default: git describe)')
+        booleanParam(name: 'UPLOAD', defaultValue: false, description: 'Hand the build to release-upload')
+    }
+    environment { CGO_ENABLED = '0' }
+    stages {
+        stage('Test') {
+            steps {
+                dir('sidecar') {
+                    sh 'go version'
+                    sh 'go vet ./...'
+                    sh 'GOOS=windows go vet ./...'
+                    // Includes the tmux contract test (internal/shims), which
+                    // reads ../Sources/AgentCoding.
+                    sh 'go test ./...'
+                    sh 'go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...'
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                dir('sidecar') {
+                    sh "scripts/build.sh ${params.VERSION}"
+                    archiveArtifacts artifacts: 'dist/**', fingerprint: true
+                }
+            }
+        }
+        stage('Installer (Windows agent)') {
+            when { expression { false } } // enable once a Windows agent exists
+            agent { label 'windows' }
+            steps {
+                dir('sidecar') {
+                    bat 'ISCC.exe /DAppVersion=%VERSION% /DArch=x64 installer\\BromureSidecar.iss'
+                    bat 'ISCC.exe /DAppVersion=%VERSION% /DArch=arm64 installer\\BromureSidecar.iss'
+                }
+            }
+        }
+        stage('Upload') {
+            when { expression { params.UPLOAD } }
+            steps {
+                // Product bromure-sidecar-windows: the feed path is an infra change.
+                build job: 'release-upload', parameters: [
+                    string(name: 'PRODUCT', value: 'bromure-sidecar-windows'),
+                    string(name: 'UPSTREAM_BUILD', value: env.BUILD_NUMBER),
+                ]
+            }
+        }
+    }
+}
