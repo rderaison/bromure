@@ -1,0 +1,43 @@
+[Unit]
+Description=Bromure Sidecar (agent host)
+Documentation=https://bromure.io
+# The daemon dials out (bromure.io, TURN relays) as soon as it starts and
+# retries on its own, so this is a preference rather than a requirement.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/bromure-sidecar serve
+Restart=on-failure
+RestartSec=2
+
+# KillMode=process, and this is the whole reason this unit needs writing by
+# hand.
+#
+# `serve` starts the pane host as a DETACHED process (setsid), deliberately:
+# the agents live in the pane host, so a daemon update or crash must not take
+# them down. That works when the daemon is started from a shell -- measured:
+# SIGTERM the daemon, start it again, and the same pane host pid is still
+# there with the live Claude session attached.
+#
+# setsid does not leave the service's CGROUP, though, and systemd kills by
+# cgroup. With the default KillMode=control-group, `systemctl --user restart`
+# would kill the pane host and every agent running in it. KillMode=process
+# signals only the main process, which is what preserves the design.
+#
+# The cost is the honest one: `systemctl --user stop` leaves the pane host
+# running. That matches the product (quitting the macOS/Windows tray does not
+# kill agents either). To stop everything, use
+#   bromure-sidecar shutdown
+# which stops the pane host first and then the daemon.
+KillMode=process
+
+# A user service gets a minimal PATH, and the agents' own installers put
+# binaries in the user's home. The daemon adds the installers' directories
+# itself (agents.ExtraDirs), so this only needs to be sane rather than
+# complete.
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin
+
+[Install]
+WantedBy=default.target

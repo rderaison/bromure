@@ -11,7 +11,7 @@ out=dist
 rm -rf "$out"
 mkdir -p "$out"
 export CGO_ENABLED=0
-for target in windows/amd64 windows/arm64 darwin/arm64 linux/amd64; do
+for target in windows/amd64 windows/arm64 darwin/arm64 linux/amd64 linux/arm64; do
   os="${target%/*}"; arch="${target#*/}"
   dir="$out/$os-$arch"
   mkdir -p "$dir"
@@ -31,5 +31,19 @@ if [ -n "${SIGN_CERT:-}" ] && command -v signtool >/dev/null 2>&1; then
 else
   echo "(signing skipped: no SIGN_CERT)"
 fi
+# Linux ships as a tarball with its installer, because there is no tray to
+# put in a .exe and the whole install is one binary plus a systemd user unit.
+# No .deb: a system package installing a per-USER service would have to guess
+# which user, and the Sidecar runs the agents as a person with that person's
+# credentials.
+for arch in amd64 arm64; do
+  d="$out/linux-$arch"
+  [ -d "$d" ] || continue
+  cp installer/linux/install.sh installer/linux/uninstall.sh \
+     installer/linux/bromure-sidecar.service installer/linux/README.md "$d/"
+  chmod 0755 "$d/install.sh" "$d/uninstall.sh"
+  ( cd "$out" && tar czf "bromure-sidecar-linux-$arch.tar.gz" \
+      --transform "s,^linux-$arch,bromure-sidecar-linux-$arch," "linux-$arch" )
+done
 ( cd "$out" && find . -type f -name 'bromure-sidecar*' -o -type f -name 'BromureSidecar.exe' | sort | xargs sha256sum > SHA256SUMS )
 echo "built $version into $out/"

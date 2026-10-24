@@ -128,10 +128,17 @@ func ExtraDirs() []string {
 			filepath.Join(home, ".codex", "bin"),
 		}
 	}
+	// `.npm-global/bin` and `.npm/bin` for parity with the Windows list's
+	// `%APPDATA%\npm`: an agent installed with `npm install -g` under a user
+	// prefix lands there, and a user service has a minimal PATH that will not
+	// include it. NOT reproduced on the Bromure VM image, which ships the
+	// agents in /usr/bin -- it matters on a plain server where the only copy
+	// is the npm one.
 	return []string{filepath.Join(home, ".local", "bin"), filepath.Join(home, ".grok", "bin"),
 		filepath.Join(home, ".bun", "bin"), filepath.Join(home, ".omp", "bin"),
 		filepath.Join(home, ".kimi-code", "bin"), filepath.Join(home, ".kimi", "bin"),
-		filepath.Join(home, ".codex", "bin"), "/opt/homebrew/bin", "/usr/local/bin"}
+		filepath.Join(home, ".codex", "bin"), filepath.Join(home, ".npm-global", "bin"),
+		filepath.Join(home, ".npm", "bin"), "/opt/homebrew/bin", "/usr/local/bin"}
 }
 
 // searchPath is the agent environment's PATH plus the installers' folders.
