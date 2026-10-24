@@ -35,7 +35,8 @@ func (x acct) Stop()                        { x.a.Close() }
 func (x acct) Complete(raw string) error {
 	err := x.a.Complete(raw)
 	if errors.Is(err, account.ErrNotOurs) {
-		return errors.New("that sign-in link wasn't started here — sign in again from the menu")
+		return errors.New("that sign-in link wasn't started here — start the sign-in " +
+			"again on this machine (the Sidecar menu, or `bromure-sidecar enroll`)")
 	}
 	return err
 }

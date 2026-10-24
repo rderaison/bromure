@@ -108,6 +108,25 @@ func Set(key string, v any) error {
 // Remove deletes key.
 func Remove(key string) error { return Set(key, nil) }
 
+// All is every stored setting, as raw JSON values. A copy: the caller must
+// not be able to mutate the live map, and callers outside this package have
+// no lock to hold.
+//
+// Added for the Linux CLI's `settings` command, which has no tray to read
+// them from. Secrets do not live here (keys are files in the data dir), but
+// `pending-enroll-state` is a one-shot handoff nonce, so the caller decides
+// what to print.
+func All() map[string]json.RawMessage {
+	mu.Lock()
+	defer mu.Unlock()
+	loadLocked()
+	out := make(map[string]json.RawMessage, len(values))
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
+}
+
 // Has reports whether key is set.
 func Has(key string) bool {
 	mu.Lock()

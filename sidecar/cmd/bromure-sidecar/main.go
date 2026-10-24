@@ -67,6 +67,38 @@ func run(args []string) int {
 		return panes.RunAttach(idx, passive)
 	case "ctl":
 		return ctl(args[2:])
+
+	// The command line that replaces the tray. Linux ships no GUI, so every
+	// menu action has to be reachable over SSH; these wrap the same
+	// control.sock routes the tray uses (see cli.go).
+	case "status":
+		return cliStatus()
+	case "enroll", "pair":
+		return cliEnroll(args[2:])
+	case "signout":
+		return cliSignout()
+	case "servers":
+		return cliServers()
+	case "link":
+		return cliLink(args[2:])
+	case "unlink":
+		return cliUnlink()
+	case "sessions":
+		return cliSessions()
+	case "start":
+		return cliStart(args[2:])
+	case "stop":
+		return cliStop(args[2:])
+	case "agents":
+		return cliAgents(args[2:])
+	case "settings":
+		return cliSettings(args[2:])
+	case "logs":
+		return cliLogs(args[2:])
+	case "update":
+		return cliUpdate(args[2:])
+	case "shutdown":
+		return cliShutdown()
 	case "claude":
 		return runClaude(args[2:])
 	case "__hook":
@@ -99,12 +131,34 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: bromure-sidecar <command>
+
+this machine
+  status              sign-in, serving, attach, agents, pane host
+  sessions            the agent sessions running here
+  start <tool> [dir]  start an agent session
+  stop <window>       close one window
+  attach <window>     a terminal on a window (C-b d detaches)
+  claude [args…]      start Claude here as a hosted session and attach
+
+the account
+  enroll [link]       print the enroll URL, or finish it with the link
+  signout             forget the account and detach
+  servers             the account's Bromure AC servers
+  link <server-id>    attach this machine to one
+  unlink              detach
+
+housekeeping
+  agents [install T]  what is installed, and install one
+  settings [k [v]]    read settings, or write one (v of - unsets)
+  logs [-f] [-n N]    the daemon log
+  update [--install]  check the release feed
+  shutdown            stop the pane host and the daemon
+  version
+
+for scripts and the daemon
   serve               run the daemon
   panehost            run the pane host
-  attach <window>     a terminal on a window (C-b d detaches)
-  ctl <verb> [json]   one control request (status, signin, servers, …)
-  claude [args…]      start Claude here as a hosted session and attach
-  version
+  ctl <verb> [json]   one raw control request
 `)
 }
 

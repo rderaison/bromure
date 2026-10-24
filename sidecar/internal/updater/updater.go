@@ -30,8 +30,28 @@ import (
 	"github.com/rderaison/bromure/sidecar/internal/settings"
 )
 
-// DefaultFeed is where release-upload publishes the feed.
+// DefaultFeed is where release-upload publishes the Windows feed.
 const DefaultFeed = "https://bromure.io/downloads/bromure-sidecar-windows/latest.json"
+
+// feedForOS is the feed for the running platform. The product name carries
+// the OS, because the assets are not interchangeable: a Windows release is an
+// Inno setup .exe and a Linux one is a tarball. Without this split a Linux
+// daemon reads the WINDOWS feed, compares against Windows versions and offers
+// to download a setup.exe.
+//
+// The Linux and macOS paths follow the Windows naming, but nothing publishes
+// them yet -- that is an infra choice, flagged for the user, exactly as the
+// Windows path was.
+func feedForOS() string {
+	switch runtime.GOOS {
+	case "windows":
+		return DefaultFeed
+	case "darwin":
+		return "https://bromure.io/downloads/bromure-sidecar-macos/latest.json"
+	default:
+		return "https://bromure.io/downloads/bromure-sidecar-linux/latest.json"
+	}
+}
 
 // FeedKey overrides the feed URL (an empty string disables updates).
 const FeedKey = "updateFeed"
@@ -50,7 +70,7 @@ type feed struct {
 
 // Check reads the feed; nil when nothing newer than current.
 func Check(ctx context.Context, current string) (*Release, error) {
-	url := settings.String(FeedKey, DefaultFeed)
+	url := settings.String(FeedKey, feedForOS())
 	if url == "" {
 		return nil, nil
 	}
@@ -60,6 +80,13 @@ func Check(ctx context.Context, current string) (*Release, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 404 {
+		// Nothing is published for this platform. Distinguished from a real
+		// failure because it is the normal state on Linux and macOS until
+		// the release job publishes their feeds, and "update feed: HTTP 404"
+		// reads to a user as something being broken.
+		return nil, ErrNoFeed
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("update feed: HTTP %d", resp.StatusCode)
 	}
@@ -117,7 +144,25 @@ func parts(v string) []int {
 
 // Install downloads the release, checks its SHA-256 and runs the
 // installer silently (it stops the tray and daemon and starts them again).
+// ErrNoFeed: no release feed is published for this platform yet.
+var ErrNoFeed = errors.New("no release feed is published for this platform yet")
+
+// ErrInstallUnsupported: this platform has no in-place updater.
+//
+// The Windows path downloads an Inno setup .exe and runs it silently. On
+// Linux that asset does not exist and could not be executed, so Install
+// REFUSES rather than downloading something it cannot run -- a daemon that
+// fetches and launches the wrong artifact is worse than one that says it
+// cannot. Linux updates go through the release tarball and
+// installer/linux/install.sh, which also restarts the user service; the
+// binary of a running daemon cannot simply be overwritten in place.
+var ErrInstallUnsupported = errors.New("in-place update is Windows-only: " +
+	"on Linux, unpack the release tarball and run installer/linux/install.sh")
+
 func Install(ctx context.Context, r *Release) error {
+	if runtime.GOOS != "windows" {
+		return ErrInstallUnsupported
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", r.URL, nil)

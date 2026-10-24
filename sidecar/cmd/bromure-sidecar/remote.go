@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"github.com/rderaison/bromure/sidecar/internal/updater"
 	"os"
 	"strings"
@@ -296,6 +298,36 @@ func (s *sidecarAPI) Handle(verb string, b map[string]any) (int, map[string]any)
 			return 500, errBody(err.Error())
 		}
 		return 200, map[string]any{"ok": true, "id": id, "window": w}
+	case "settings":
+		// Read every setting, or write one. The daemon owns settings.json --
+		// it caches it and several components read through that cache, so a
+		// CLI that edited the file behind the daemon's back would be acted
+		// on at an unpredictable moment, or not at all.
+		if k, ok := b["key"].(string); ok && k != "" {
+			if _, clear := b["unset"]; clear {
+				if err := settings.Remove(k); err != nil {
+					return 500, errBody(err.Error())
+				}
+			} else if err := settings.Set(k, b["value"]); err != nil {
+				return 500, errBody(err.Error())
+			}
+		}
+		out := map[string]any{}
+		for k, v := range settings.All() {
+			// The enroll nonce is a live handoff secret, not a setting
+			// anybody should see in a listing.
+			if k == settings.PendingEnroll {
+				out[k] = "(hidden)"
+				continue
+			}
+			var any_ any
+			if json.Unmarshal(v, &any_) == nil {
+				out[k] = any_
+			} else {
+				out[k] = string(v)
+			}
+		}
+		return 200, map[string]any{"settings": out}
 	case "panehost-stop":
 		force, _ := b["force"].(bool)
 		if err := panes.StopHost(force); err != nil {
@@ -304,6 +336,11 @@ func (s *sidecarAPI) Handle(verb string, b map[string]any) (int, map[string]any)
 		return 200, map[string]any{"ok": true}
 	case "update-check":
 		rel, err := updater.Check(context.Background(), version)
+		if errors.Is(err, updater.ErrNoFeed) {
+			// A state, not a failure: normal on Linux and macOS until their
+			// feeds are published.
+			return 200, map[string]any{"available": false, "version": version, "noFeed": true}
+		}
 		if err != nil {
 			return 502, errBody(err.Error())
 		}
