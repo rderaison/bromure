@@ -96,7 +96,15 @@ bromure-sidecar status
 | `ctl <verb> [json]` | the raw control request, for scripts |
 
 `systemctl --user {start,stop,restart,status} bromure-sidecar` manages the
-daemon. Note that `stop` leaves the pane host and the agents running, by
+daemon. After a package **upgrade**, reload before restarting — the package
+replaces the unit, and a manager that has not reloaded restarts from the old
+definition:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user restart bromure-sidecar   # agents survive this
+```
+ Note that `stop` leaves the pane host and the agents running, by
 design — see below. `bromure-sidecar shutdown` stops everything.
 
 ## Why the Go pane host, and not tmux
@@ -149,6 +157,21 @@ and authorized_keys), `client_ed25519`, `device-record.json`,
 tests stay out of the way.
 
 ## Uninstall
+
+**Disable before removing a package**, or the unit file disappears while your
+enable symlink still points at it, and `systemctl --user disable` then fails
+with *Unit file bromure-sidecar.service does not exist*:
+
+```sh
+systemctl --user disable --now bromure-sidecar
+sudo apt remove bromure-sidecar      # or dnf/zypper remove
+```
+
+Removing the package never deletes `~/.local/share/BromureSidecar`, not even
+on `dpkg --purge` — your host key and this machine's identity in the account
+stay, so reinstalling comes back as the same machine.
+
+### The tarball install
 
 ```sh
 sidecar/installer/linux/uninstall.sh            # keep the keys and sessions

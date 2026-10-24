@@ -1,0 +1,70 @@
+# One nfpm config for both .deb and .rpm, all architectures.
+#
+#   scripts/package-linux.sh [version]
+#
+# ${…} are environment variables nfpm expands; the script sets them per
+# target. STAGE holds the per-arch binary and the generated unit, so nothing
+# here reaches into dist/ by guesswork.
+name: bromure-sidecar
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: devel
+priority: optional
+maintainer: ${PKG_MAINTAINER}
+vendor: Bromure
+homepage: https://bromure.io
+license: MIT
+description: |
+  Bromure Sidecar — run coding agents on this machine.
+  Hosts Claude Code, Codex, Grok, Kimi and omp on a plain Linux box and
+  makes them appear in Bromure AC as a native machine: sessions, chat,
+  terminals, files, branches and delegation between agents.
+  Command line only. Runs as a systemd USER service, per person:
+    systemctl --user enable --now bromure-sidecar
+  On a headless server also enable lingering, or the service stops at
+  logout and never starts at boot:
+    sudo loginctl enable-linger <user>
+
+contents:
+  - src: ${PKG_STAGE}/bromure-sidecar
+    dst: /usr/bin/bromure-sidecar
+    file_info:
+      mode: 0755
+
+  # A systemd USER unit, in the vendor directory. The package deliberately
+  # does not pick a user: the Sidecar runs a person's coding agents with
+  # that person's credentials and git identity, so each user enables it for
+  # themselves. See packaging/postinstall.sh for why there is no
+  # `systemctl --global enable`.
+  - src: ${PKG_STAGE}/bromure-sidecar.service
+    dst: /usr/lib/systemd/user/bromure-sidecar.service
+    file_info:
+      mode: 0644
+
+  - src: installer/linux/README.md
+    dst: /usr/share/doc/bromure-sidecar/README.md
+    file_info:
+      mode: 0644
+  - src: ../LICENSE
+    dst: /usr/share/doc/bromure-sidecar/LICENSE
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  postremove: packaging/postremove.sh
+
+# Recommended, not required: the daemon itself is a static Go binary with no
+# runtime dependencies. git is for the worktrees it manages, curl for the
+# agents' own installers. tmux is deliberately absent -- the Sidecar carries
+# its own pane host and shims the tmux surface Bromure AC uses.
+recommends:
+  - git
+  - curl
+
+deb:
+  fields:
+    Bugs: https://bromure.io
+rpm:
+  group: Development/Tools
