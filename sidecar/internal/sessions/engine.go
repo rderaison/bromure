@@ -495,8 +495,12 @@ func DefaultTitle(tool, cwd string) string {
 	if name != "" {
 		name = strings.ToUpper(name[:1]) + name[1:]
 	}
+	// The folder's real name: the home is "renaud", not the guest's "ubuntu".
 	folder := path.Base(cwd)
-	if folder == "." || folder == "/" || folder == "" {
+	if real, err := vpath.Default().ToReal(cwd); err == nil {
+		folder = filepath.Base(real)
+	}
+	if folder == "." || folder == "/" || folder == `\` || folder == "" {
 		return name
 	}
 	return name + " in " + folder

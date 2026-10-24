@@ -121,7 +121,8 @@ func installBinaries() {
 	self := paths.Executable()
 	dst := []string{hostexec.StableExecutable(),
 		filepath.Join(paths.BinDir(), paths.ExeName("tmux")),
-		filepath.Join(paths.BinDir(), paths.ExeName("ps"))}
+		filepath.Join(paths.BinDir(), paths.ExeName("ps")),
+		filepath.Join(paths.BinDir(), paths.ExeName("python3"))}
 	for _, d := range dst {
 		if runtime.GOOS != "windows" {
 			if cur, err := os.Readlink(d); err == nil && cur == self {

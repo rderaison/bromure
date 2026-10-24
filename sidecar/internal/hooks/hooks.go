@@ -147,7 +147,10 @@ func windowIndex() (int, bool) {
 func PinTranscript(win int, pane, transcript string) {
 	dir := paths.BromureHome()
 	_ = os.MkdirAll(dir, 0o755)
-	record := transcript + "\n" + pane + " \n"
+	// Line 1 as bash here opens it (/c/Users/me/… — Git Bash has no
+	// /home/ubuntu): the client reads it with `sed` and tests it with
+	// `[ -f ]` inside an exec, whose output maps it back to /home/ubuntu.
+	record := vpath.Default().MapForBash(transcript) + "\n" + pane + " \n"
 	p := filepath.Join(dir, "transcript-"+strconv.Itoa(win)+".path")
 	_ = os.WriteFile(p+".tmp", []byte(record), 0o644)
 	_ = os.Rename(p+".tmp", p)

@@ -251,6 +251,9 @@ func (s *sidecarAPI) Handle(verb string, b map[string]any) (int, map[string]any)
 			return 400, errBody(err.Error())
 		}
 		return 200, st
+	case "agents/log":
+		tool, _ := b["tool"].(string)
+		return 200, map[string]any{"tool": tool, "log": agents.Log(tool)}
 	case "approvals":
 		tool, _ := b["tool"].(string)
 		level, _ := b["level"].(string)

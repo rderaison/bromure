@@ -38,6 +38,9 @@ func run(args []string) int {
 		return runTmux(args[1:])
 	case "ps":
 		return runPs(args[1:])
+	case "python3", "python":
+		logx.Quiet()
+		return shims.RunPython(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	case "bromure-claude":
 		return runClaude(args[1:])
 	}

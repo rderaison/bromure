@@ -73,6 +73,13 @@ func ctl(args []string) int {
 		if body != nil {
 			method = "POST"
 		}
+	} else if strings.Contains(verb, "/") && !strings.Contains(verb, " ") && !strings.Contains(verb, ":") {
+		// A path without its leading slash (MSYS rewrites a leading one).
+		path = "/" + verb
+		method = "GET"
+		if body != nil {
+			method = "POST"
+		}
 	} else if i := strings.IndexByte(verb, ' '); i > 0 && strings.HasPrefix(verb[i+1:], "/") {
 		method, path = verb[:i], verb[i+1:]
 	} else {
