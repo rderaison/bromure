@@ -70,7 +70,7 @@ account server:
 
 ```sh
 bromure-sidecar servers            # what this account offers
-bromure-sidecar attach <server>
+bromure-sidecar link <server-id>
 bromure-sidecar status
 ```
 
@@ -81,7 +81,8 @@ bromure-sidecar status
 | `status` | sign-in, serving, attach, agents, windows |
 | `enroll [link]` | print the enroll URL, or complete it with the link |
 | `signout` | forget the account and detach |
-| `servers`, `attach <id>`, `detach` | the account's servers, and this machine's link |
+| `servers` | the account's Bromure AC servers |
+| `link <server-id>`, `unlink` | attach this machine to one, or detach |
 | `sessions` | the agent sessions on this machine |
 | `start <tool> [dir]` | start an agent session |
 | `stop <window>` | close one window |
@@ -89,7 +90,8 @@ bromure-sidecar status
 | `settings`, `settings <key> [value]` | read and write settings |
 | `logs [-f] [-n N]` | the daemon log |
 | `update [--install]` | check the release feed, and update the binary |
-| `attach-window <n>` / `attach <n>` | a terminal on a window (`C-b d` detaches) |
+| `attach <window>` | a terminal on a window (`C-b d` detaches) |
+| `claude [args…]` | start Claude here and attach in one step |
 | `shutdown` | stop the pane host *and* the daemon |
 | `ctl <verb> [json]` | the raw control request, for scripts |
 
