@@ -13,6 +13,5 @@ var version = "dev"
 // directly (`bromure-sidecar serve`) and drive it with `bromure-sidecar ctl`.
 func main() {
 	fmt.Fprintln(os.Stderr, "BromureSidecar (tray) is Windows-only; run `bromure-sidecar serve` and use `bromure-sidecar ctl`.")
-	_ = trayIcon
 	os.Exit(2)
 }

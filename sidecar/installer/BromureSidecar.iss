@@ -33,6 +33,7 @@ OutputBaseFilename=BromureSidecar-{#AppVersion}-{#Arch}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\cmd\BromureSidecar\assets\app.ico
 UninstallDisplayIcon={app}\BromureSidecar.exe
 CloseApplications=no
 MinVersion=10.0.17763

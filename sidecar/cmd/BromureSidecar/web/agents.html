@@ -1,0 +1,169 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Coding Agents — Bromure Sidecar</title>
+<!--STYLE-->
+<style>
+  body { display: flex; flex-direction: column; }
+  .head { display: flex; gap: 16px; align-items: center; padding: 26px 30px 18px; }
+  main { flex: 1; padding: 4px 30px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .agent { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .agent .top { display: flex; gap: 14px; align-items: center; }
+  .agent .blurb { color: var(--ink-2); font-size: 12.5px; }
+  .agent .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .agent.disabled { opacity: 0.55; }
+  .signin { padding: 12px; border-radius: 12px; background: var(--accent-soft); display: flex; flex-direction: column; gap: 10px; }
+  .codebig { font: 650 22px/1 var(--mono); letter-spacing: 0.08em; user-select: text; }
+  .foot { padding: 12px 30px 20px; color: var(--ink-3); font-size: 12px; text-align: center; }
+  .approvals { display: flex; align-items: center; gap: 10px; }
+</style>
+</head>
+<body class="agents">
+  <div class="head">
+    <span id="mark"></span>
+    <div class="col grow">
+      <div class="title-xl">Coding Agents</div>
+      <div class="sub" style="max-width:560px">Choose the agents this PC runs. Each one is downloaded from its maker with their own installer, into your account. Bromure doesn't bundle or host any of them.</div>
+    </div>
+    <button class="btn sm" id="btnRescan">Check again</button>
+  </div>
+  <main class="scroll" id="list"></main>
+  <div class="foot">Installers run as you, with no administrator rights. Most agents update themselves after that.</div>
+<!--SCRIPT-->
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+$("mark").outerHTML = markTile("lg");
+
+const APPROVAL_HELP = {
+  ask: "Asks before acting (the agent's default).",
+  auto: { codex: "Never asks, keeps Codex's sandbox.", kimi: "Asks only when needed.", _: "Auto mode: asks only when risky." },
+  full: "Never asks, no limits.",
+};
+let model = { agents: [], busy: false }, approvals = {}, signins = {};
+
+async function load(rescan) {
+  try {
+    model = rescan ? await api("POST", "/sidecar/install-state", { rescan: true }) : await api("GET", "/sidecar/install-state");
+    approvals = (await api("POST", "/sidecar/approvals", {})).approvals || {};
+  } catch (e) { $("list").innerHTML = `<div class="card agent"><div class="sub">${esc(e.message)}</div></div>`; return; }
+  render();
+}
+
+function statusPill(ph) {
+  switch (ph.state) {
+    case "installed": return `<span class="pill good"><span class="dot"></span>Installed${ph.version ? " · " + esc(ph.version) : ""}</span>`;
+    case "installing": return `<span class="pill working"><span class="dot"></span>Installing</span>`;
+    case "queued": return `<span class="pill working"><span class="dot"></span>Queued</span>`;
+    case "failed": return `<span class="pill bad">Failed</span>`;
+    case "unavailable": return `<span class="pill">Not on Windows yet</span>`;
+    case "missing": return `<span class="pill">Not installed</span>`;
+  }
+  return `<span class="pill">Checking</span>`;
+}
+
+function render() {
+  const list = $("list");
+  list.innerHTML = "";
+  for (const row of model.agents || []) {
+    const spec = row.spec, ph = row.phase || {};
+    const meta = agentById[spec.id] || {};
+    const installed = ph.state === "installed";
+    const busy = ph.state === "installing" || ph.state === "queued";
+    const levels = spec.id === "omp" ? ["ask", "full"] : ["ask", "auto", "full"];
+    const level = approvals[spec.id] || "ask";
+    const help = level === "auto" ? (APPROVAL_HELP.auto[spec.id] || APPROVAL_HELP.auto._) : APPROVAL_HELP[level];
+    const card = h(`<section class="card agent appear ${ph.state === "unavailable" ? "disabled" : ""}">
+      <div class="top">
+        ${logoTile(spec.id, "lg")}
+        <div class="col grow"><div class="title" style="font-size:15px">${esc(spec.name)}</div><div class="sub small">${esc(spec.maker)}${spec.fullyIntegrated ? " · live status, chat and delegation" : ""}</div></div>
+        ${statusPill(ph)}
+      </div>
+      <div class="blurb">${esc(spec.blurb)}</div>
+      ${busy ? `<div class="col" style="gap:6px"><div class="bar"><i></i></div><div class="mono faint ellipsis">${esc(ph.line || "Starting…")}</div></div>`
+        : ph.state === "failed" ? `<div class="small" style="color:var(--bad)">${esc(ph.line || "The installer failed.")}</div>`
+        : spec.install ? `<div class="code"><span class="ellipsis grow">${esc(spec.install)}</span><button class="iconbtn" data-copy title="Copy" style="width:24px;height:24px">${ICON.copy}</button></div>` : ""}
+      <div class="actions">
+        ${spec.install && !busy ? `<button class="btn ${installed ? "" : "primary"} sm" data-install ${model.busy ? "disabled" : ""}>${installed ? "Update" : "Install"}</button>` : ""}
+        ${installed && spec.id !== "omp" ? `<button class="btn sm" data-signin>Sign in…</button>` : ""}
+        <span class="grow"></span>
+        ${installed ? `<div class="approvals"><span class="sub tiny" title="${esc(help)}">${esc(help)}</span>
+          <div class="seg">${levels.map(l => `<button data-level="${l}" class="${l === level ? "on" : ""}">${{ ask: "Ask", auto: "Auto", full: "Full" }[l]}</button>`).join("")}</div></div>` : ""}
+      </div>
+      <div data-signinbox hidden></div>
+    </section>`);
+    const copy = card.querySelector("[data-copy]");
+    if (copy) copy.onclick = () => copyText(spec.install, "Installer command copied");
+    const inst = card.querySelector("[data-install]");
+    if (inst) inst.onclick = async () => {
+      try { await api("POST", "/sidecar/agents/install", { ids: [spec.id] }); toast("Installing " + spec.name); load(); } catch (e) { toast(e.message, 3000); }
+    };
+    card.querySelectorAll("[data-level]").forEach(b => b.onclick = async () => {
+      try { await api("POST", "/sidecar/approvals", { tool: spec.id, level: b.dataset.level }); approvals[spec.id] = b.dataset.level; render(); toast("Applies to new and resumed sessions"); }
+      catch (e) { toast(e.message); }
+    });
+    const si = card.querySelector("[data-signin]");
+    if (si) si.onclick = () => startSignIn(spec, card.querySelector("[data-signinbox]"));
+    if (signins[spec.id]) drawSignIn(spec, card.querySelector("[data-signinbox]"), signins[spec.id]);
+    list.appendChild(card);
+  }
+}
+
+async function startSignIn(spec, box) {
+  try {
+    signins[spec.id] = await api("POST", "/sidecar/agents/signin", { tool: spec.id });
+    drawSignIn(spec, box, signins[spec.id]);
+    pollSignIn(spec);
+  } catch (e) { toast(e.message, 3000); }
+}
+
+async function pollSignIn(spec) {
+  for (let i = 0; i < 900; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const st = await api("POST", "/sidecar/agents/signin-state", { tool: spec.id }).catch(() => null);
+    if (!st) continue;
+    // Redraw only on a change: a code being typed must survive the poll.
+    const changed = JSON.stringify(signins[spec.id]) !== JSON.stringify(st);
+    signins[spec.id] = st;
+    if (changed) render();
+    if (st.phase === "done" || st.phase === "failed" || st.phase === "idle") {
+      if (st.phase === "done") { toast(spec.name + ": signed in"); delete signins[spec.id]; render(); }
+      return;
+    }
+  }
+}
+
+function drawSignIn(spec, box, st) {
+  box.hidden = false;
+  if (st.phase === "failed") {
+    box.innerHTML = `<div class="signin"><div class="small" style="color:var(--bad)">${esc(st.message || "The sign-in didn't complete.")}</div></div>`;
+    return;
+  }
+  if (!st.url) {
+    box.innerHTML = `<div class="signin"><div class="row"><div class="grow sub small">Starting ${esc(spec.name)}'s sign-in…</div></div><div class="bar"><i></i></div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="signin">
+    ${st.code ? `<div class="row"><div class="col grow"><div class="sub tiny">Your one-time code</div><div class="codebig">${esc(st.code)}</div></div>
+       <button class="btn sm" data-c>${ICON.copy}Copy</button></div>` : ""}
+    <div class="row"><span class="mono ellipsis grow faint">${esc(st.url)}</span><button class="btn primary sm" data-open>Open sign-in page</button></div>
+    ${st.needsPaste ? `<div class="row"><input class="field grow" data-codein placeholder="Paste the code the page shows"><button class="btn sm" data-submit>Submit</button></div>` : ""}
+  </div>`;
+  const c = box.querySelector("[data-c]");
+  if (c) c.onclick = () => copyText(st.code, "Code copied");
+  box.querySelector("[data-open]").onclick = () => { if (st.code) window.sidecarCopy(st.code); window.sidecarOpenURL(st.url); };
+  const sub = box.querySelector("[data-submit]");
+  if (sub) sub.onclick = async () => {
+    const code = box.querySelector("[data-codein]").value.trim();
+    if (!code) return;
+    try { signins[spec.id] = await api("POST", "/sidecar/agents/signin-code", { tool: spec.id, code }); toast("Code sent"); } catch (e) { toast(e.message); }
+  };
+}
+
+$("btnRescan").onclick = () => { toast("Checking…"); load(true); };
+load();
+setInterval(() => { if ((model.agents || []).some(a => ["installing", "queued"].includes((a.phase || {}).state)) || model.busy) load(); }, 1500);
+</script>
+</body>
+</html>

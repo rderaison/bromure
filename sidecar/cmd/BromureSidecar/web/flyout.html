@@ -1,0 +1,382 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bromure Sidecar</title>
+<!--STYLE-->
+<style>
+  body { padding: 14px; }
+  #app { height: 100%; display: flex; flex-direction: column; gap: 12px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 4px 2px 2px; }
+  header .status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-2); }
+  .view { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px; }
+  .section-head h3 { margin: 0; font-size: 12px; font-weight: 650; letter-spacing: 0.02em; color: var(--ink-2); text-transform: uppercase; }
+  .conn { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .list { padding: 4px; display: flex; flex-direction: column; }
+  .item {
+    display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: 12px;
+    transition: background 0.12s;
+  }
+  .item:hover { background: var(--glass-hover); }
+  /* The pill and the End button share one slot: End shows on hover. */
+  .slot { display: grid; justify-items: end; min-width: 30px; }
+  .slot > * { grid-area: 1 / 1; }
+  .item .end { opacity: 0; pointer-events: none; transition: opacity 0.12s; }
+  .item:hover .slot.can-end .pill { opacity: 0; }
+  .item:hover .end { opacity: 1; pointer-events: auto; }
+  .empty { padding: 18px 14px; text-align: center; color: var(--ink-3); font-size: 12px; }
+  .term-tile { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--hairline); color: var(--ink-2); flex: none; }
+  .term-tile svg { width: 17px; height: 17px; }
+  footer { display: flex; align-items: center; gap: 6px; padding-top: 2px; }
+  .banner { padding: 12px 14px; display: flex; gap: 10px; align-items: flex-start; border-color: color-mix(in srgb, var(--busy) 35%, transparent); }
+  .banner .ic { color: var(--busy); width: 18px; height: 18px; flex: none; margin-top: 1px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px 4px 4px; border-radius: 999px;
+    border: 1px solid var(--hairline-2); background: var(--glass-strong); font-weight: 600; font-size: 12px;
+  }
+  .chip .logo { width: 22px; height: 22px; border-radius: 999px; }
+  .chip .logo svg { width: 13px; height: 13px; }
+  .chip.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .crumbs { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--hairline); }
+  .folders { max-height: 210px; }
+  .setting { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+  .setting + .setting { border-top: 1px solid var(--hairline); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span id="mark"></span>
+    <div class="col grow">
+      <div class="title">Bromure Sidecar</div>
+      <div class="status"><span id="statusDot" class="dot"></span><span id="statusText" class="ellipsis">Starting…</span></div>
+    </div>
+    <button class="iconbtn" id="btnAgents" title="Coding agents"></button>
+    <button class="iconbtn" id="btnMore" title="Settings"></button>
+  </header>
+
+  <!-- main -->
+  <div class="view" id="viewMain">
+    <div id="gitBanner" class="card banner" hidden>
+      <span class="ic" id="warnIc"></span>
+      <div class="col grow">
+        <div class="title" style="font-size:13px">Git for Windows is needed</div>
+        <div class="sub small">Agents and Bromure AC's commands run under Git Bash.</div>
+      </div>
+      <button class="btn sm" id="btnGit">Install</button>
+    </div>
+
+    <div id="conn" class="card conn"></div>
+
+    <div class="section-head">
+      <h3>Sessions <span id="count" class="faint"></span></h3>
+      <button class="btn sm ghost" id="btnNew"></button>
+    </div>
+    <div class="card list scroll" id="sessions" style="flex:0 1 auto; min-height:0"></div>
+    <div class="grow"></div>
+  </div>
+
+  <!-- new session -->
+  <div class="view" id="viewNew" hidden>
+    <div class="row">
+      <button class="iconbtn" data-back></button>
+      <div class="title grow">New session</div>
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div class="sub small" style="margin-bottom:8px">Agent</div>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="card" style="overflow:hidden; display:flex; flex-direction:column; min-height:0">
+      <div class="crumbs"><button class="iconbtn" id="btnUp" title="Up"></button><span class="mono ellipsis grow" id="where"></span></div>
+      <div class="list scroll folders" id="folders"></div>
+    </div>
+    <div id="newErr" class="small" style="color:var(--bad)" hidden></div>
+    <button class="btn primary block" id="btnStart">Start in this folder</button>
+  </div>
+
+  <!-- settings -->
+  <div class="view" id="viewSettings" hidden>
+    <div class="row">
+      <button class="iconbtn" data-back></button>
+      <div class="title grow">Settings</div>
+    </div>
+    <div class="card">
+      <div class="setting">
+        <div class="col grow"><div class="title" style="font-size:13px">Start at login</div><div class="sub small">Agents stay reachable after a restart.</div></div>
+        <label class="toggle"><input type="checkbox" id="optLogin"><span></span></label>
+      </div>
+      <div class="setting">
+        <div class="col grow">
+          <div class="title" style="font-size:13px">Machine name</div>
+          <div class="sub small">How Bromure AC lists this PC.</div>
+        </div>
+        <input class="field" id="optName" style="width:150px">
+      </div>
+      <div class="setting">
+        <div class="col grow"><div class="title" style="font-size:13px">SSH host key</div><div class="mono faint ellipsis" id="fp"></div></div>
+        <button class="iconbtn" id="btnFp" title="Copy"></button>
+      </div>
+      <div class="setting" id="rowSignOut" hidden>
+        <div class="col grow"><div class="title" style="font-size:13px">bromure.io account</div><div class="sub small" id="acctLine"></div></div>
+        <button class="btn sm danger" id="btnSignOut">Sign out</button>
+      </div>
+    </div>
+    <div class="faint tiny" style="text-align:center" id="about"></div>
+  </div>
+
+  <footer>
+    <button class="btn ghost sm" id="btnAgents2"></button>
+    <span class="grow"></span>
+    <button class="btn ghost sm" id="btnQuit" title="Quit Bromure Sidecar"></button>
+  </footer>
+</div>
+<!--SCRIPT-->
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let S = { status: null, state: null, servers: [], installed: [] };
+let newTool = "claude", newPath = "~";
+
+$("mark").outerHTML = markTile();
+$("btnAgents").innerHTML = ICON.grid;
+$("btnMore").innerHTML = ICON.more;
+$("warnIc").innerHTML = ICON.warn;
+$("btnNew").innerHTML = ICON.plus + "New";
+$("btnUp").innerHTML = ICON.up;
+$("btnFp").innerHTML = ICON.copy;
+$("btnAgents2").innerHTML = ICON.grid + "Coding Agents";
+$("btnQuit").innerHTML = ICON.power + "Quit";
+document.querySelectorAll("[data-back]").forEach(b => { b.innerHTML = ICON.back; b.onclick = () => show("viewMain"); });
+
+function show(view) {
+  for (const v of ["viewMain", "viewNew", "viewSettings"]) $(v).hidden = v !== view;
+  $(view).classList.remove("appear"); void $(view).offsetWidth; $(view).classList.add("appear");
+}
+
+// --- data ---------------------------------------------------------------------
+async function refresh() {
+  try {
+    const [status, state] = await Promise.all([api("GET", "/sidecar/status"), api("GET", "/state")]);
+    S.status = status; S.state = state;
+    // The attach target is stored the Swift way: {"device":{id,name,user}}.
+    const att = status.attach || {};
+    if (att.target && att.target.device) att.target = att.target.device;
+    if (status.account && status.account.signedIn) {
+      try { S.servers = (await api("GET", "/sidecar/servers")).servers || []; } catch (e) {}
+    }
+    render();
+  } catch (e) {
+    $("statusDot").className = "dot bad";
+    $("statusText").textContent = e.message;
+  }
+}
+
+function tone() {
+  const st = S.status || {}, att = st.attach || {}, acct = st.account || {};
+  const t = att.target && att.target.name;
+  if (att.awaitingApproval) return ["busy", "Waiting for approval on " + t];
+  if (att.linked) return ["good", "Attached to " + t + " as " + st.machineName];
+  if (t) return [att.error ? "bad" : "busy", att.error ? t + ": " + att.error : "Connecting to " + t + "…"];
+  if (acct.enrolling) return ["busy", "Signing in…"];
+  if (acct.signedIn) return ["", "Signed in as " + st.machineName];
+  return ["", "Not signed in to bromure.io"];
+}
+
+function render() {
+  const [cls, text] = tone();
+  $("statusDot").className = "dot " + cls;
+  $("statusText").textContent = text;
+  $("gitBanner").hidden = !(S.state && S.state.shell === "missing");
+  renderConn();
+  renderSessions();
+}
+
+function renderConn() {
+  const st = S.status || {}, acct = st.account || {}, att = st.attach || {};
+  const c = $("conn");
+  const t = att.target;
+  if (!acct.signedIn) {
+    c.innerHTML = `
+      <div class="row"><div class="term-tile">${ICON.globe}</div>
+        <div class="col grow"><div class="title" style="font-size:13px">Reach this PC from Bromure AC</div>
+        <div class="sub small">Sign in to the bromure.io account your Mac uses.</div></div></div>
+      ${acct.enrolling ? '<div class="bar"><i></i></div>' : ""}
+      ${acct.lastError ? `<div class="small" style="color:var(--bad)">${esc(acct.lastError)}</div>` : ""}
+      <div class="row"><button class="btn primary grow" id="btnSignIn">Sign in to bromure.io</button>
+        <button class="btn ghost sm" id="btnPaste" title="Use a bromure-agent-host:// link you copied">${ICON.link}Paste link</button></div>`;
+    $("btnSignIn").onclick = async () => { try { await api("POST", "/sidecar/signin", {}); toast("Finish signing in in your browser"); } catch (e) { toast(e.message, 3000); } };
+    $("btnPaste").onclick = async () => {
+      const link = await window.sidecarPaste();
+      if (!link) return toast("Copy the sign-in link first");
+      try { await api("POST", "/sidecar/enroll", { link }); toast("Signed in"); refresh(); } catch (e) { toast(e.message, 3000); }
+    };
+    return;
+  }
+  if (t) {
+    let pill = `<span class="pill"><span class="dot busy"></span>Connecting</span>`, note = "";
+    if (att.linked && !att.awaitingApproval) pill = `<span class="pill good"><span class="dot"></span>Attached</span>`;
+    if (att.awaitingApproval) { pill = `<span class="pill needs"><span class="dot"></span>Waiting for approval</span>`; note = "Allow this PC in Bromure AC's fleet dialog on " + esc(t.name) + "."; }
+    if (att.error) note = esc(att.error);
+    c.innerHTML = `
+      <div class="row">${markTile()}<div class="col grow"><div class="title ellipsis" style="font-size:13px">${esc(t.name)}</div>
+        <div class="sub small ellipsis">as ${esc(st.machineName)}</div></div>${pill}</div>
+      ${!att.linked && !att.error ? '<div class="bar"><i></i></div>' : ""}
+      ${note ? `<div class="sub small">${note}</div>` : ""}
+      <div class="row"><span class="grow"></span><button class="btn sm ghost" id="btnDetach">Detach</button></div>`;
+    $("btnDetach").onclick = async () => { await api("POST", "/sidecar/detach", { forget: true }).catch(e => toast(e.message)); refresh(); };
+    return;
+  }
+  const servers = (S.servers || []);
+  c.innerHTML = `
+    <div class="row"><div class="col grow"><div class="title" style="font-size:13px">Attach to a Bromure AC</div>
+      <div class="sub small">Your account's servers. Its sessions show up there, beside its VMs.</div></div></div>
+    <div class="col" style="gap:4px" id="srv"></div>`;
+  const list = $("srv");
+  if (!servers.length) list.innerHTML = `<div class="faint small">No Bromure AC server is online in your account.</div>`;
+  for (const s of servers) {
+    const row = h(`<div class="item" style="padding:6px 6px 6px 8px">${markTile()}<div class="col grow">
+        <div class="title ellipsis" style="font-size:13px">${esc(s.name)}</div>
+        <div class="sub tiny">${s.online ? "Online" : "Offline"}</div></div>
+        <button class="btn sm primary">Attach</button></div>`);
+    row.querySelector(".mark-tile").style.cssText = "width:28px;height:28px;border-radius:9px";
+    row.querySelector("button").onclick = async () => {
+      try { await api("POST", "/sidecar/attach", { id: s.id, name: s.name, user: s.user || s.sshUsername || "" }); refresh(); } catch (e) { toast(e.message, 3000); }
+    };
+    list.appendChild(row);
+  }
+}
+
+function renderSessions() {
+  const vm = (S.state && S.state.vms && S.state.vms[0]) || { tabs: [] };
+  const tabs = vm.tabs || [];
+  const byWindow = {};
+  for (const s of (S.state && S.state.agentSessions) || []) if (s.windowIndex != null) byWindow[s.windowIndex] = s;
+  $("count").textContent = tabs.length ? "· " + tabs.length : "";
+  const box = $("sessions");
+  box.innerHTML = "";
+  if (!tabs.length) {
+    box.innerHTML = `<div class="empty">No agents running.<br>Start one here, or from Bromure AC on your Mac.</div>`;
+    return;
+  }
+  for (const t of tabs) {
+    const tool = t.agent && t.agent.tool;
+    const sess = byWindow[t.index];
+    let pill = "";
+    if (tool) {
+      const s = t.agentStatus;
+      pill = s === "working" ? `<span class="pill working"><span class="dot"></span>Working</span>`
+        : s === "needsInput" ? `<span class="pill needs"><span class="dot"></span>Needs you</span>`
+        : `<span class="pill">Idle</span>`;
+    }
+    const where = (t.cwd || "").replace(/^\/home\/ubuntu/, "~");
+    const name = tool ? (agentById[tool] || {}).name || tool : "Shell";
+    const row = h(`<div class="item" title="Open in a terminal">
+        ${tool ? logoTile(tool) : `<div class="term-tile">${ICON.terminal}</div>`}
+        <div class="col grow"><div class="ellipsis" style="font-weight:600">${esc(t.title)}</div>
+          <div class="sub tiny ellipsis">${esc(name)} · ${esc(where)}</div></div>
+        <div class="slot ${sess ? "can-end" : ""}">${pill}${sess ? `<button class="iconbtn end" title="End this session">${ICON.power}</button>` : ""}</div>
+      </div>`);
+    row.onclick = () => window.sidecarOpenTerminal(t.index, t.title);
+    const end = row.querySelector(".end");
+    if (end) end.onclick = async ev => {
+      ev.stopPropagation();
+      await api("POST", "/agent-sessions/" + sess.id + "/close", {}).catch(e => toast(e.message));
+      refresh();
+    };
+    box.appendChild(row);
+  }
+}
+
+// --- new session ----------------------------------------------------------------
+$("btnNew").onclick = async () => {
+  show("viewNew");
+  $("newErr").hidden = true;
+  try {
+    const st = await api("GET", "/sidecar/install-state");
+    S.installed = (st.agents || []).filter(a => a.phase && a.phase.state === "installed").map(a => a.spec.id);
+  } catch (e) { S.installed = ["claude"]; }
+  if (!S.installed.includes(newTool)) newTool = S.installed[0] || "claude";
+  renderChips();
+  browse("~");
+};
+
+function renderChips() {
+  const c = $("chips");
+  c.innerHTML = "";
+  if (!S.installed.length) { c.innerHTML = `<span class="sub small">No agent installed yet — open Coding Agents.</span>`; return; }
+  for (const id of S.installed) {
+    const a = agentById[id];
+    const chip = h(`<button class="chip ${id === newTool ? "on" : ""}">${logoTile(id)}${esc(a.name)}</button>`);
+    chip.onclick = () => { newTool = id; renderChips(); };
+    c.appendChild(chip);
+  }
+}
+
+async function browse(path) {
+  newPath = path;
+  $("where").textContent = path === "~" ? "~" : path.replace(/^\/home\/ubuntu/, "~");
+  const box = $("folders");
+  box.innerHTML = `<div class="empty">Loading…</div>`;
+  try {
+    const r = await api("POST", "/agent-sessions/folders", { path });
+    box.innerHTML = "";
+    if (!(r.folders || []).length) box.innerHTML = `<div class="empty">No sub-folders.</div>`;
+    for (const f of r.folders || []) {
+      const row = h(`<div class="item" style="padding:6px 10px"><span class="term-tile" style="width:26px;height:26px;border-radius:8px">${ICON.folder}</span><span class="ellipsis grow">${esc(f)}</span></div>`);
+      row.onclick = () => browse((path === "~" ? "/home/ubuntu" : path) + "/" + f);
+      box.appendChild(row);
+    }
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+$("btnUp").onclick = () => {
+  const p = newPath === "~" ? "/home/ubuntu" : newPath;
+  const up = p.replace(/\/[^/]+$/, "") || "/";
+  browse(up === "/home" || up === "" ? "/home/ubuntu" : up);
+};
+
+$("btnStart").onclick = async () => {
+  $("btnStart").disabled = true;
+  try {
+    const r = await api("POST", "/sidecar/new-session", { tool: newTool, cwd: newPath });
+    show("viewMain");
+    await refresh();
+    if (r.window != null) window.sidecarOpenTerminal(r.window, (agentById[newTool] || {}).name || newTool);
+  } catch (e) {
+    $("newErr").textContent = e.message; $("newErr").hidden = false;
+  } finally { $("btnStart").disabled = false; }
+};
+
+// --- settings ---------------------------------------------------------------------
+$("btnMore").onclick = async () => {
+  show("viewSettings");
+  $("optLogin").checked = await window.sidecarStartAtLogin();
+  const st = S.status || {};
+  $("optName").value = st.machineName || "";
+  const fp = ((st.ssh || {}).fingerprint || "").split(" ")[1] || (st.ssh && st.ssh.error) || "";
+  $("fp").textContent = fp;
+  $("btnFp").onclick = () => copyText(fp, "Fingerprint copied");
+  $("rowSignOut").hidden = !(st.account && st.account.signedIn);
+  $("acctLine").textContent = st.account && st.account.signedIn ? "Signed in as " + st.machineName : "";
+  $("about").textContent = "Bromure Sidecar " + (window.ENV.version || "") + " · SSH 127.0.0.1:" + ((st.ssh || {}).port || "");
+};
+$("optLogin").onchange = e => window.sidecarSetStartAtLogin(e.target.checked).catch(err => toast(String(err)));
+$("optName").onchange = async e => {
+  try { const r = await api("POST", "/sidecar/machine-name", { name: e.target.value }); e.target.value = r.name; toast("Renamed"); refresh(); } catch (err) { toast(err.message); }
+};
+$("btnSignOut").onclick = async () => { await api("POST", "/sidecar/signout", {}).catch(e => toast(e.message)); show("viewMain"); refresh(); };
+
+// --- footer -------------------------------------------------------------------------
+$("btnAgents").onclick = $("btnAgents2").onclick = () => window.sidecarOpenAgents();
+$("btnGit").onclick = () => window.sidecarInstallGit();
+$("btnQuit").onclick = () => window.sidecarQuit((S.status && S.status.agentsRunning) || 0);
+document.addEventListener("keydown", e => { if (e.key === "Escape") window.sidecarHide(); });
+
+window.sidecarShown = () => { show("viewMain"); refresh(); };
+refresh();
+setInterval(refresh, 2500);
+</script>
+</body>
+</html>
