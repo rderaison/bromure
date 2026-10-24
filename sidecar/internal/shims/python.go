@@ -37,11 +37,24 @@ func RunPython(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return realPython(args, stdin, stdout, stderr)
 }
 
+// transcriptReaderMarkers identify the client's reader by its own
+// functions. One list, because the contract test reports which marker
+// drifted out of Sources/AgentCoding and must not keep its own copy to
+// drift from.
+var transcriptReaderMarkers = []string{
+	"def line_start(",
+	"def whole_end(",
+	"sys.stdout.write('%d\\n%d\\n%d\\n'",
+}
+
 // isTranscriptReader recognises the client's reader by its own functions.
 func isTranscriptReader(script []byte) bool {
-	return bytes.Contains(script, []byte("def line_start(")) &&
-		bytes.Contains(script, []byte("def whole_end(")) &&
-		bytes.Contains(script, []byte("sys.stdout.write('%d\\n%d\\n%d\\n'"))
+	for _, m := range transcriptReaderMarkers {
+		if !bytes.Contains(script, []byte(m)) {
+			return false
+		}
+	}
+	return true
 }
 
 // transcriptReader is the reader's argv: file, known path, offset, window,

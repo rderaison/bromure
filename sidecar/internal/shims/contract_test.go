@@ -294,3 +294,46 @@ func TestContractPs(t *testing.T) {
 		}
 	}
 }
+
+// TestContractTranscriptReaderMarkers: the python3 shim recognises Bromure
+// AC's transcript reader by three markers (transcriptReaderMarkers). Those
+// strings live in AC's Swift, so they can drift away from the shim without
+// either side failing to compile, and the reader's own unit test uses a STUB
+// script carrying exactly those markers -- so it cannot notice.
+//
+// Drift costs asymmetrically, which is why this is worth a test. On Linux a
+// miss is harmless: RunPython falls through to the real python3, which runs
+// AC's own script against real paths. On Windows there is no python3 and the
+// paths are virtual, so the chat view goes empty with nothing failing loudly.
+//
+// Asserted through `isTranscriptReader` itself rather than by grepping, so
+// the thing under test is the predicate the shim actually dispatches on.
+func TestContractTranscriptReaderMarkers(t *testing.T) {
+	root := findAgentCoding(t)
+	path := filepath.Join(root, "CodingTasks.swift")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the client's reader: %v", err)
+	}
+	for _, lit := range lexSwift(string(src)) {
+		if isTranscriptReader([]byte(lit.text)) {
+			t.Logf("the reader is recognised, in a literal at CodingTasks.swift:%d", lit.line)
+			return
+		}
+	}
+	var missing []string
+	for _, m := range transcriptReaderMarkers {
+		if !strings.Contains(string(src), m) {
+			missing = append(missing, m)
+		}
+	}
+	if len(missing) == 0 {
+		t.Fatalf("every marker appears in CodingTasks.swift, but no single string "+
+			"literal holds all %d: the reader was split up, so the shim no longer "+
+			"recognises it", len(transcriptReaderMarkers))
+	}
+	t.Fatalf("the client's transcript reader no longer carries %d of the shim's "+
+		"markers: %q.\nUpdate transcriptReaderMarkers in internal/shims/python.go "+
+		"to match CodingTasks.swift, or the Windows chat view goes empty.",
+		len(missing), missing)
+}
