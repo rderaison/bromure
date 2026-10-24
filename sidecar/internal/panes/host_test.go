@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -102,6 +103,26 @@ func waitCapture(t *testing.T, c Client, idx int, s string) string {
 	}
 	t.Fatalf("window %d never showed %q; capture:\n%s", idx, s, last)
 	return ""
+}
+
+// acSkipsAsShell reports whether Bromure AC's floor probe would classify
+// these args as a shell and skip them. It mirrors `agentFilter` in
+// Sources/AgentCoding/CodingTasks.swift:
+//
+//	$3 !~ /(^|\/)-?(bash|sh|zsh|dash|fish|login)$/
+//
+// Asserted instead of a `strings.HasPrefix(args, "bash ")`, which was the
+// Windows shape and the only one that check accepted. argv[0] differs by
+// platform and by how the shell was started: `bash` under ConPTY, the
+// absolute path on Linux because this test passes `exec.LookPath("bash")`,
+// and `-bash` for a login shell (measured on a real Linux guest: `ps -t
+// pts/0 -o args=` prints `-bash`). All three must read as a shell, and what
+// matters is that AC's own regex says so -- not the string's shape.
+var acShellArgs = regexp.MustCompile(`(^|/)-?(bash|sh|zsh|dash|fish|login)$`)
+
+func acSkipsAsShell(args string) bool {
+	f := strings.Fields(args)
+	return len(f) > 0 && acShellArgs.MatchString(f[0])
 }
 
 func gitBash(t *testing.T) string {
@@ -445,7 +466,7 @@ func TestGitBashBracketedPaste(t *testing.T) {
 		}
 		switch p.Exe {
 		case "bash": // the root, and MSYS fork stubs
-			if p.Foreground || !strings.HasPrefix(p.Args, "bash ") {
+			if p.Foreground || !acSkipsAsShell(p.Args) {
 				t.Errorf("bash row %+v", p)
 			}
 		case "sleep":
