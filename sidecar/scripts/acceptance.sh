@@ -114,13 +114,47 @@ if [ "${ACCEPT_CLAUDE:-0}" = 1 ]; then
   sleep 8
   r=$(req GET /state); expect "session listed" "$r" '"agentSessions":[{'
   expect "agent{} on the tab" "$r" '"agent":{'
+  # Clear the folder-trust gate, because on a FRESH machine there always is
+  # one. Claude opens it before its hooks exist, so the session sits at
+  # needsInput and neither of the two checks below can ever pass. The engine
+  # sees the gate (`waitsOnUser`) and deliberately does not answer it --
+  # trusting a folder is the user's call, and in Bromure AC the user clicks
+  # it. Here the script IS the user, so it presses the same keys a person
+  # would. Measured on a fresh Linux box: without this, "agentStatus from
+  # hooks" and "transcript-chunk" fail every run, which is exactly the
+  # machine a Linux Sidecar is installed on.
+  for _ in $(seq 1 20); do
+    s=$(req POST /vms/x/screen "{\"window\":$cw}")
+    case "$s" in
+      *"trust this folder"*|*"Enter to confirm"*)
+        req POST /vms/x/exec "{\"command\":\"tmux send-keys -t bromure:$cw Down\"}" >/dev/null
+        sleep 1
+        req POST /vms/x/exec "{\"command\":\"tmux send-keys -t bromure:$cw Enter\"}" >/dev/null
+        sleep 3
+        ;;
+      *) break;;
+    esac
+  done
   if [ "${ACCEPT_CLAUDE_PROMPT:-0}" = 1 ]; then
     id=$(printf '%s' "$r" | sed -n 's/.*"agentSessions":\[{[^]]*"id":"\([0-9A-F-]*\)".*/\1/p')
     req POST "/agent-sessions/$id/send" '{"text":"Reply with the single word: pong"}' >/dev/null
-    sleep 20
-    r=$(req GET /state); expect "agentStatus from hooks" "$r" '"agentStatus":"done"'
-    r=$(req POST /vms/x/transcript-chunk "{\"window\":$cw,\"bytes\":100000,\"mode\":\"tail\"}")
-    expect "transcript-chunk" "$r" '/home/ubuntu/.claude/projects/'
+    # Wait for the condition, not a fixed 20s: a cold model start or a slow
+    # link blows through any sleep, and the failure then reads as a broken
+    # hook rather than a short wait.
+    st=""
+    for _ in $(seq 1 40); do
+      st=$(req GET /state)
+      case "$st" in *'"agentStatus":"done"'*) break;; esac
+      sleep 3
+    done
+    expect "agentStatus from hooks" "$st" '"agentStatus":"done"'
+    tc=""
+    for _ in $(seq 1 20); do
+      tc=$(req POST /vms/x/transcript-chunk "{\"window\":$cw,\"bytes\":100000,\"mode\":\"tail\"}")
+      [ -n "$tc" ] && break
+      sleep 3
+    done
+    expect "transcript-chunk" "$tc" '/home/ubuntu/.claude/projects/'
   fi
   req POST /sessions/x/tab "{\"action\":\"close\",\"index\":$cw}" >/dev/null
 fi
