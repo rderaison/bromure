@@ -316,6 +316,20 @@ struct SessionUnreadTests {
         shown = try #require(m.sessionStore.session(s.id))
         #expect(shown.readReplies == 1)
         #expect(shown.roomID == room && shown.reviewComments == [draft])
+        // A session the machine never marked read (no cursor at all) shows
+        // unread again too, and its read can go again.
+        var fresh = AgentSession(profileID: m.id, tool: .claude, title: "u", cwd: "~")
+        fresh.replies = 2
+        m.machineSessions = [s, fresh]
+        m.sessionStore.applyMirror([shown, fresh])
+        m.markRead(fresh.id, upTo: 2)
+        #expect(m.sessionStore.session(fresh.id)?.isUnread == false)
+        for _ in 0..<60 where m.sessionStore.session(fresh.id)?.isUnread != true {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(m.sessionStore.session(fresh.id)?.readReplies == nil)
+        m.markRead(fresh.id, upTo: 2)
+        #expect(m.sessionStore.session(fresh.id)?.isUnread == false)
     }
 
     /// Finding (CWE-670): "Opening a room in the focused window never marks
