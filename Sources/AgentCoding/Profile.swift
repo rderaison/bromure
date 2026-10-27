@@ -1949,6 +1949,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     /// Fields the app maintains itself, never the editor: a save from a
     /// working copy takes them from the stored profile instead.
+    /// What the app saves outside the editor while it's open -- the VM
+    /// dashboard's notes, the sidebar's Squelch switch: a field the editor
+    /// left as it `opened` it takes `stored`'s; one edited keeps the edit.
+    mutating func adoptAppEdits(from stored: Profile, opened: Profile) {
+        if comments == opened.comments { comments = stored.comments }
+        if squelch.enabled == opened.squelch.enabled { squelch.enabled = stored.squelch.enabled }
+    }
+
     public mutating func adoptRuntimeFields(from stored: Profile) {
         createdAt = stored.createdAt
         // The later of the two: a use recorded while the editor was open

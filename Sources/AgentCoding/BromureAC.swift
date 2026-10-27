@@ -11242,6 +11242,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // copy -- secrets included -- is the current one.
         if let current = profiles.first(where: { $0.id == profile.id }) {
             profile.mintedCredentials = current.mintedCredentials
+            // Fields the app saves while settings is open -- the dashboard's
+            // notes, the sidebar's Squelch switch: left as the editor opened
+            // them, they're the stored ones (Finding CWE-362, "Saving
+            // workspace settings overwrites notes edited on the VM
+            // dashboard"). Edited here, the editor's win.
+            if let opened = editing { profile.adoptAppEdits(from: current, opened: opened) }
         }
         // The editor's copy is as old as the window: keep what the app
         // updated meanwhile (lastUsedAt went backwards on a save).

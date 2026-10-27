@@ -4230,6 +4230,20 @@ final class RemoteHostWindow: NSWindow {
         controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID)
     }
 
+    /// A settings document without what the window left as it opened it and
+    /// the app saves meanwhile: no notes (the host keeps its own), and the
+    /// Squelch switch as the host last listed it.
+    static func dropUnedited(_ doc: inout [String: Any], edited: Profile, opened: Profile, now: Profile?) {
+        if edited.comments == opened.comments { doc.removeValue(forKey: "comments") }
+        // The policy is left out of the document while it's the default:
+        // sent whole, with the host's switch.
+        if edited.squelch.enabled == opened.squelch.enabled, let now {
+            var sq = edited.squelch
+            sq.enabled = now.squelch.enabled
+            if let d = ACAppDelegate.codableToDict(sq) { doc["squelch"] = d }
+        }
+    }
+
     private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
         guard var doc = ACAppDelegate.codableToDict(edited) else { return }
         // The Profile encoder omits an empty kubeconfigs array; send it explicitly
@@ -4238,6 +4252,10 @@ final class RemoteHostWindow: NSWindow {
         if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
         if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
+        // Notes and the Squelch switch left as the window opened them aren't
+        // this save's: the host keeps what it has (a dashboard save, the
+        // sidebar's switch meanwhile).
+        if let original { Self.dropUnedited(&doc, edited: edited, opened: original, now: controller.profile(for: id)) }
         let c = controller
         // The firewall's live commits and this document are one ordered
         // stream: nothing more goes live, the ones sent land first, then the
