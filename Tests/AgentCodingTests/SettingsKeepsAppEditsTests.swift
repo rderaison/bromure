@@ -47,23 +47,40 @@ struct SettingsKeepsAppEditsTests {
     }
 
     @MainActor
-    @Test("a fat client's settings document leaves out notes it didn't edit and sends the host's Squelch switch")
+    @Test("a fat client's settings document leaves out notes and a Squelch policy it didn't edit")
     func remoteDoc() throws {
-        let opened = Self.profile(notes: "A", squelch: false)
-        var now = opened
-        now.comments = "B"; now.squelch.enabled = true    // the host's, as last listed
+        var opened = Self.profile(notes: "A", squelch: false)
+        opened.squelch.enabled = false
         var edited = opened
         edited.memoryGB = 8
         var doc = try #require(ACAppDelegate.codableToDict(edited))
-        #expect(doc["comments"] as? String == "A")
-        RemoteHostWindow.dropUnedited(&doc, edited: edited, opened: opened, now: now)
-        #expect(doc["comments"] == nil)
-        #expect((doc["squelch"] as? [String: Any])?["enabled"] as? Bool == true)
+        doc["comments"] = "A"; doc["squelch"] = ["enabled": false]
+        RemoteHostController.dropUnedited(&doc, edited: edited, opened: opened)
+        #expect(doc["comments"] == nil)          // the host keeps the dashboard's
+        #expect(doc["squelch"] == nil)           // and the sidebar's switch
+        #expect(doc["memoryGB"] as? Int == 8)
 
-        edited.comments = "C"; edited.squelch.enabled = true
+        edited.comments = "C"
+        edited.squelch.enabled = true
         var mine = try #require(ACAppDelegate.codableToDict(edited))
-        RemoteHostWindow.dropUnedited(&mine, edited: edited, opened: opened, now: now)
+        RemoteHostController.dropUnedited(&mine, edited: edited, opened: opened)
         #expect(mine["comments"] as? String == "C")
+        #expect((mine["squelch"] as? [String: Any])?["enabled"] as? Bool == true)
+
+        // Back to the default policy: sent whole, not left out ("unchanged").
+        var on = opened; on.squelch.enabled = true
+        var off = on; off.squelch.enabled = false
+        var back = try #require(ACAppDelegate.codableToDict(off))
+        #expect(back["squelch"] == nil)          // the encoder omits it
+        RemoteHostController.dropUnedited(&back, edited: off, opened: on)
+        #expect((back["squelch"] as? [String: Any]) != nil)
+    }
+
+    @Test("the iOS sheet applies the same rule")
+    func iosWired() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/WorkspaceEditor.swift"), encoding: .utf8)
+        #expect(ios.contains("if editing != nil, let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }"))
     }
 
     /// The other way round: a dashboard draft left open while settings saved
