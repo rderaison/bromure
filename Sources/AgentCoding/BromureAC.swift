@@ -3515,6 +3515,52 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return host
     }
 
+    /// What a browser makes of a host under the URL standard's IPv4 parser.
+    enum URLIPv4 { case notIPv4, invalid, address(UInt32) }
+
+    /// The URL standard's IPv4 host parser -- the one Safari and Chrome run,
+    /// not inet_aton, which refuses a part that is a bare `0x` (0 to a
+    /// browser: `0x`, `0x.0` and `0x.0.0.0` are all 0.0.0.0). A host whose
+    /// last part is a number is an IPv4 address or an invalid URL, never a
+    /// name to look up.
+    nonisolated static func urlIPv4(_ host: String) -> URLIPv4 {
+        var parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        if parts.count > 1, parts.last?.isEmpty == true { parts.removeLast() }
+        func number(_ part: Substring) -> UInt64? {
+            var digits = part, radix = 10
+            if digits.hasPrefix("0x") || digits.hasPrefix("0X") { digits = digits.dropFirst(2); radix = 16 }
+            else if digits.count > 1, digits.hasPrefix("0") { digits = digits.dropFirst(); radix = 8 }
+            if digits.isEmpty { return 0 }
+            guard digits.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+            return UInt64(digits, radix: radix)   // nil: not this radix's digits, or too big
+        }
+        guard let last = parts.last, !last.isEmpty,
+              last.allSatisfy({ $0.isASCII && $0.isNumber }) || number(last) != nil else { return .notIPv4 }
+        guard parts.count <= 4 else { return .invalid }
+        var numbers: [UInt64] = []
+        for part in parts {
+            guard !part.isEmpty, let n = number(part) else { return .invalid }
+            numbers.append(n)
+        }
+        guard numbers.dropLast().allSatisfy({ $0 <= 255 }),
+              numbers[numbers.count - 1] < (UInt64(1) << (8 * UInt64(5 - numbers.count))) else { return .invalid }
+        var address = numbers[numbers.count - 1]
+        for (i, n) in numbers.dropLast().enumerated() { address += n << (8 * UInt64(3 - i)) }
+        return .address(UInt32(address))
+    }
+
+    /// 0/8, 127/8, RFC 1918, link-local 169.254/16 and CGNAT 100.64/10.
+    nonisolated static func ipv4IsLocalOrPrivate(_ a: UInt32) -> Bool {
+        switch (a >> 24, (a >> 16) & 0xFF) {
+        case (0, _), (127, _), (10, _): return true            // unspecified / loopback / RFC1918
+        case (172, 16...31): return true                       // 172.16/12
+        case (192, 168): return true                           // 192.168/16
+        case (169, 254): return true                           // link-local
+        case (100, 64...127): return true                      // CGNAT 100.64/10
+        default: return false
+        }
+    }
+
     /// Whether a browser handed this URL host connects to this Mac's
     /// loopback: `localhost` and `*.localhost` (browsers resolve those
     /// themselves), any IPv4 spelling of 127/8 or 0.0.0.0 (`127.1`,
@@ -3524,12 +3570,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     nonisolated static func reachesLoopback(_ rawHost: String) -> Bool {
         let host = bareHost(rawHost)
         if host == "localhost" || host.hasSuffix(".localhost") { return true }
-        // IPv4, every form a URL parser accepts (inet_aton's: shorthand,
-        // octal, hex, a single number).
-        var v4 = in_addr()
-        if !host.contains(":"), inet_aton(host, &v4) != 0 {
-            let first = UInt32(bigEndian: v4.s_addr) >> 24
-            return first == 127 || v4.s_addr == 0
+        // IPv4, every form a URL parser accepts (shorthand, octal, hex, a
+        // single number, a bare `0x`).
+        if !host.contains(":") {
+            switch urlIPv4(host) {
+            case .address(let a): return a >> 24 == 127 || a == 0
+            case .invalid: return false   // a browser refuses the URL
+            case .notIPv4: break
+            }
         }
         var v6 = in6_addr()
         if inet_pton(AF_INET6, host, &v6) == 1 {
@@ -3579,17 +3627,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Named loopback / mDNS.
         if host == "localhost" || host.hasSuffix(".localhost") { return true }
         if host == "local" || host.hasSuffix(".local") { return true }
-        // IPv4 literal, in any spelling a URL parser accepts (inet_aton's).
-        var v4 = in_addr()
-        if !host.contains(":"), inet_aton(host, &v4) != 0 {
-            let o = withUnsafeBytes(of: v4.s_addr) { Array($0) }   // network order
-            switch (o[0], o[1]) {
-            case (0, _), (127, _), (10, _): return true            // unspecified / loopback / RFC1918
-            case (172, 16...31): return true                       // 172.16/12
-            case (192, 168): return true                           // 192.168/16
-            case (169, 254): return true                           // link-local
-            case (100, 64...127): return true                      // CGNAT 100.64/10
-            default: return false
+        // IPv4 literal, in any spelling a URL parser accepts. One it can't
+        // parse is no URL a browser opens: refused too.
+        if !host.contains(":") {
+            switch urlIPv4(host) {
+            case .address(let a): return ipv4IsLocalOrPrivate(a)
+            case .invalid: return true
+            case .notIPv4: break
             }
         }
         // IPv6 literal.
@@ -3600,6 +3644,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if b.prefix(15).allSatisfy({ $0 == 0 }), b[15] == 1 { return true }// ::1
             if b[0] == 0xFE, (b[1] & 0xC0) == 0x80 { return true }             // fe80::/10 link-local
             if (b[0] & 0xFE) == 0xFC { return true }                           // fc00::/7 ULA
+            if b.prefix(10).allSatisfy({ $0 == 0 }), b[10] == 0xFF, b[11] == 0xFF {   // ::ffff:a.b.c.d
+                return ipv4IsLocalOrPrivate(b[12...15].reduce(0) { $0 << 8 | UInt32($1) })
+            }
             return false
         }
         return false   // a normal public DNS name
