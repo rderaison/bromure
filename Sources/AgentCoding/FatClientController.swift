@@ -1786,6 +1786,21 @@ final class RemoteHostController {
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
 
+    /// A settings document without what the editor left as it opened it and
+    /// the app saves meanwhile (the dashboard's notes, the sidebar's Squelch
+    /// switch): the host's merge keeps a key left out (Finding CWE-362,
+    /// "Saving workspace settings overwrites notes edited on the VM
+    /// dashboard"). An edited Squelch policy goes whole: its encoder omits
+    /// the default one, which would read as "unchanged".
+    static func dropUnedited(_ doc: inout [String: Any], edited: Profile, opened: Profile) {
+        if edited.comments == opened.comments { doc.removeValue(forKey: "comments") }
+        if edited.squelch == opened.squelch {
+            doc.removeValue(forKey: "squelch")
+        } else if let sq = ACAppDelegate.codableToDict(edited.squelch) {
+            doc["squelch"] = sq
+        }
+    }
+
     /// The host deleted this workspace (DELETE /profiles answered 200): its
     /// row goes now, not at the next snapshot.
     func workspaceDeleted(_ id: Profile.ID) {
@@ -4238,6 +4253,10 @@ final class RemoteHostWindow: NSWindow {
         if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
         if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
+        // Notes and the Squelch switch left as the window opened them aren't
+        // this save's: the host keeps what it has (a dashboard save, the
+        // sidebar's switch meanwhile).
+        if let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }
         let c = controller
         // The firewall's live commits and this document are one ordered
         // stream: nothing more goes live, the ones sent land first, then the

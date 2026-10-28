@@ -33,7 +33,7 @@ struct VMDashboardNotesTests {
         let v = try Self.src("Sources/AgentCoding/VMDashboard.swift")
         let card = try #require(v.range(of: "private var notesCard: some View {"))
         let editor = try #require(v.range(of: "@ViewBuilder private var notesEditor: some View {"))
-        #expect(v[card.upperBound..<editor.lowerBound].contains(".onDisappear { commitNotes() }"))
+        #expect(v[card.upperBound..<editor.lowerBound].contains(".onDisappear { commitNotes(implicit: true) }"))
     }
 
     /// A save that fails (the store, the remote) must not leave the

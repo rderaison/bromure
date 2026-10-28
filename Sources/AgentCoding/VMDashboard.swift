@@ -56,7 +56,15 @@ struct VMDashboardView: View {
             .padding(18)
         }
         .background(.background)
-        .onChange(of: profile.comments) { notesSaved = nil }
+        .onChange(of: profile.comments) {
+            notesSaved = nil
+            // Saved elsewhere (settings) while the editor is open and
+            // untouched: it shows the new notes.
+            if notesDraft != nil, notesDraft == notesDraftBase {
+                notesDraft = profile.comments
+                notesDraftBase = profile.comments
+            }
+        }
         .onAppear { if startsEditingNotes, onSaveNotes != nil, !editingNotes { beginEditingNotes() } }
         .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in
             now = Date()
@@ -262,6 +270,9 @@ struct VMDashboardView: View {
 
     /// The raw markdown while the notes are edited in place; nil otherwise.
     @State private var notesDraft: String?
+    /// The notes the edit began from: newer ones saved elsewhere since
+    /// aren't overwritten by a save the user didn't ask for.
+    @State private var notesDraftBase: String?
     /// What the editor last saved, shown until `profile` carries it.
     @State private var notesSaved: String?
 #if os(macOS)
@@ -275,14 +286,18 @@ struct VMDashboardView: View {
     }
     private var editingNotes: Bool { notesDraft != nil }
 
-    private func beginEditingNotes() { notesDraft = notesText }
+    private func beginEditingNotes() { notesDraft = notesText; notesDraftBase = notesText }
     private func cancelNotesEdit() { notesDraft = nil }
 
     /// Return, "Save", or the focus leaving: the draft becomes the notes
     /// (trailing blank lines dropped; all blank clears them).
-    private func commitNotes() {
+    /// `implicit`: the focus or the dashboard went away. That save is
+    /// dropped when other notes were saved since the edit began (settings);
+    /// Return and Save still write the draft.
+    private func commitNotes(implicit: Bool = false) {
         guard var text = notesDraft else { return }
         notesDraft = nil
+        if implicit, notesDraftBase != notesText { return }
         while text.last?.isWhitespace == true { text.removeLast() }
         guard text != notesText, let save = onSaveNotes else { return }
         notesSaved = text
@@ -290,7 +305,7 @@ struct VMDashboardView: View {
             // A failed save shows the notes as they are, and the edit again.
             guard !(await save(text)), notesSaved == text else { return }
             notesSaved = nil
-            if notesDraft == nil { notesDraft = text }
+            if notesDraft == nil { notesDraft = text; notesDraftBase = notesText }
         }
     }
 
@@ -331,7 +346,7 @@ struct VMDashboardView: View {
         // Leaving the dashboard (another workspace, a session, the board)
         // tears it down before the editor's blur reaches `onChange`: the
         // draft is saved here, like any other focus leaving.
-        .onDisappear { commitNotes() }
+        .onDisappear { commitNotes(implicit: true) }
     }
 
     /// The notes as editable markdown. Return saves, Shift-Return (and
@@ -352,7 +367,7 @@ struct VMDashboardView: View {
                          },
                          onSubmit: { commitNotes() })
             .frame(height: max(notesEditorHeight, 20))
-            .onChange(of: notesEditorFocused) { if !notesEditorFocused { commitNotes() } }
+            .onChange(of: notesEditorFocused) { if !notesEditorFocused { commitNotes(implicit: true) } }
         Text("Return saves · Shift-Return adds a line · Esc cancels")
             .font(.system(size: 10)).foregroundStyle(.tertiary)
 #else
