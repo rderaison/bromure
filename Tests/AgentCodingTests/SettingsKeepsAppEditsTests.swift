@@ -123,7 +123,7 @@ struct SettingsKeepsAppEditsTests {
         let ac = try src("Sources/AgentCoding/BromureAC.swift")
         let set = try #require(ac.range(of: "func setNotes(_ id: Profile.ID, _ text: String, ifStill base: String? = nil)"))
         let write = try #require(ac[set.upperBound...].range(of: "try store.update(p)"))
-        #expect(ac[set.upperBound..<write.lowerBound].contains("if let base, !Self.notesStill(p.comments, base) { return .superseded }"))
+        #expect(ac[set.upperBound..<write.lowerBound].contains("if let base, !Self.notesStill(p.comments, base) { return .superseded(p.comments) }"))
         let upsert = try #require(ac.range(of: "func automationUpsertProfile(idOrName: String?, doc rawDoc: [String: Any])"))
         let merge = try #require(ac[upsert.upperBound...].range(of: "switch ProfileDocument.merge(doc, over: existing)"))
         #expect(ac[upsert.upperBound..<merge.lowerBound].contains(
@@ -136,5 +136,37 @@ struct SettingsKeepsAppEditsTests {
         #expect(v.contains("let outcome = await save(text, base)"))
         let w = try src("Sources/AgentCoding/UnifiedSessionWindow.swift")
         #expect(w.contains("setNotes(id, text, ifStill: base)"))
+    }
+
+    // Finding (CWE-362): "A superseded notes save leaves the old card up, and
+    // the next Save overwrites the notes that won". The card went back to the
+    // profile it held (a fat client's snapshot until its next poll, or one no
+    // writer refreshed), and Return / Save -- unconditional -- wrote the old
+    // notes over the winners.
+    @MainActor
+    @Test("the host's answer carries the notes that won, even when the rest of the save failed")
+    func supersededCarriesWinner() {
+        #expect(RemoteHostController.notesOutcome(status: 200, json: ["ok": true, "commentsSuperseded": true, "comments": "won"])
+                == .superseded("won"))
+        #expect(RemoteHostController.notesOutcome(status: 200, json: ["ok": false, "error": "x", "commentsSuperseded": true, "comments": "won"])
+                == .superseded("won"))
+        #expect(RemoteHostController.notesOutcome(status: 200, json: ["ok": true, "comments": "mine"]) == .saved)
+        #expect(RemoteHostController.notesOutcome(status: 200, json: ["ok": false, "error": "x"]) == .failed)
+        #expect(RemoteHostController.notesOutcome(status: 500, json: [:]) == .failed)
+    }
+
+    @Test("the card shows the winners at once, and every store write refreshes an open dashboard")
+    func cardShowsWinner() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
+        let v = try src("Sources/AgentCoding/VMDashboard.swift")
+        let won = try #require(v.range(of: "if case .superseded(let won) = outcome {"))
+        #expect(v[won.upperBound...].prefix(120).contains("notesSaved = won"))
+        let ac = try src("Sources/AgentCoding/BromureAC.swift")
+        let setter = try #require(ac.range(of: "    var profiles: [Profile] = [] {"))
+        #expect(ac[setter.upperBound...].prefix(1600).contains("unifiedWindow?.refreshVMDashboard()"))
+        let upsert = try #require(ac.range(of: "try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH, policySource: \"api\")"))
+        #expect(ac[upsert.upperBound...].prefix(600).contains(
+            "if commentsSuperseded, let editing { r[\"commentsSuperseded\"] = true; r[\"comments\"] = editing.comments }"))
     }
 }

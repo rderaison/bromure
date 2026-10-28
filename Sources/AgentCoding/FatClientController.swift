@@ -2220,8 +2220,27 @@ final class RemoteHostController {
                           ifStill base: String?) async -> VMDashboardView.NotesSave {
         var doc: [String: Any] = ["comments": text]
         if let base { doc["_commentsIfStill"] = base }
-        guard let r = try? await c.saveProfileDoc(id, doc) else { return .failed }
-        return (r["commentsSuperseded"] as? Bool) == true ? .superseded : .saved
+        guard let r = try? await c.putProfileDoc(id, doc) else { return .failed }
+        return notesOutcome(status: r.status, json: r.json)
+    }
+
+    /// What the host's answer to a notes save means. Superseded (even when
+    /// the rest of the save then failed): the notes that won are in the
+    /// answer, and the card shows them.
+    nonisolated static func notesOutcome(status: Int, json: [String: Any]) -> VMDashboardView.NotesSave {
+        if (json["commentsSuperseded"] as? Bool) == true { return .superseded(json["comments"] as? String) }
+        return status == 200 && (json["ok"] as? Bool) == true ? .saved : .failed
+    }
+
+    /// PUT a workspace document; the host's answer whatever it says.
+    func putProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> (status: Int, json: [String: Any]) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("PUT", path, body: doc)
+        }.value
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        return (resp.status, resp.json)
     }
 
     func saveProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> [String: Any] {

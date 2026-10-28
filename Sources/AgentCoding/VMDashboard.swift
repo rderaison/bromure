@@ -34,7 +34,9 @@ struct VMDashboardView: View {
     /// from when the save is implicit (written only while they're still the
     /// stored ones), nil for Return / Save.
     var onSaveNotes: (@MainActor (String, String?) async -> NotesSave)? = nil
-    enum NotesSave: Equatable { case saved, failed, superseded }
+    /// `superseded`: other notes were stored first, and won -- they're what
+    /// the card shows next (nil: not known, the profile's are shown).
+    enum NotesSave: Equatable { case saved, failed, superseded(String?) }
     /// Open with the notes already in their editor (the `vm-notes:` shot).
     var startsEditingNotes = false
 
@@ -311,10 +313,16 @@ struct VMDashboardView: View {
         Task { @MainActor in
             let outcome = await save(text, base)
             guard outcome != .saved, notesSaved == text else { return }
+            // A superseded one shows the notes that won, at once: a card left
+            // on older ones (a fat client's snapshot until its next poll)
+            // made the next Save write them back over the winners. A failed
+            // one shows the notes as they are, and the edit again.
+            if case .superseded(let won) = outcome {
+                notesSaved = won
+                return
+            }
             notesSaved = nil
-            // A failed save shows the notes as they are, and the edit again;
-            // a superseded one, the notes that won.
-            if outcome == .failed, notesDraft == nil { notesDraft = text; notesDraftBase = notesText }
+            if notesDraft == nil { notesDraft = text; notesDraftBase = notesText }
         }
     }
 
