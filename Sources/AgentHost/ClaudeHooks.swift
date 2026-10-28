@@ -85,9 +85,10 @@ enum ClaudeHooks {
         // The turn ended or the agent asks: when it last did something (what
         // the session cards count from). Only on a change of status, so a
         // repeat (an idle_prompt read as done) leaves the time where it was.
-        let current = Tmux.run(["display-message", "-p", "-t", pane, "#{@bromure_status}"], timeout: 5)
-            .out.trimmingCharacters(in: .whitespacesAndNewlines)
-        if Self.marksActivity(from: current, to: state) {
+        // (Read only then: working hooks fire on every tool call.)
+        if state == "done" || state == "needsInput",
+           Self.marksActivity(from: Tmux.run(["display-message", "-p", "-t", pane, "#{@bromure_status}"], timeout: 5)
+                                .out.trimmingCharacters(in: .whitespacesAndNewlines), to: state) {
             args += [";", "set-option", "-w", "-t", pane, "@bromure_active_at",
                      String(Int(Date().timeIntervalSince1970))]
         }
