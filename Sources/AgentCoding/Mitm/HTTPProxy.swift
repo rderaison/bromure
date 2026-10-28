@@ -2469,6 +2469,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
            pi.onDetection != .log,
            let conv = ConversationParser.parse(host: host, requestBody: toForward,
                                                responseBody: nil) {
+            // A detector model still loading: "try again" now, not a
+            // request held for the whole load.
+            let warming = Self.warmingDetectors(
+                injection: pi,
+                source: pi.detectSourceInjection ? await PromptInjectionClassifier.shared.readiness() : .absent,
+                rules: pi.detectRulesInjection ? await PromptInjectionClassifier.claudeMd.readiness() : .absent)
+            if !warming.isEmpty {
+                await answerWarming(warming, tls: tls, request: request, host: host, port: port, t0: t0, leaks: leaks)
+                return
+            }
             if let f = await Self.detectPromptInjection(in: conv, policy: pi) {
                 let pid = profileID
                 // Record + forward the *resolved outcome* (not just the mode):
@@ -2569,6 +2579,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                            inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
             if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body,
                                                 localEngineOffMac: offMacEngine != nil) {
+                if await PIIDetector.shared.readiness() == .loading {
+                    await answerWarming(["PII protection"], tls: tls, request: request, host: host, port: port, t0: t0, leaks: leaks)
+                    return
+                }
                 let vault = PIIVault.forProfile(profileID)
                 let t = Date()
                 let outcome = await PIIRewriter.rewriteRequest(body, policy: pii, vault: vault)
@@ -3285,6 +3299,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// here so the proxy hot path doesn't pay the cost when traces
     /// are off. Runs on the connection's Task — no main-actor hop
     /// for the body files (TraceStore.queue handles them off-thread).
+    /// Answer a request whose detector model is still loading (see
+    /// `detectorWarmingResponse`), and trace it like any other.
+    private func answerWarming(_ detectors: [String], tls: MitmServerStream, request: Data,
+                               host: String, port: Int, t0: Date, leaks: [LeakEntry]) async {
+        FileHandle.standardError.write(Data(
+            "[mitm] \(host): \(detectors.joined(separator: " + ")) model still loading — answered 503\n".utf8))
+        let response = Self.detectorWarmingResponse(detectors)
+        try? tls.write(response)
+        await emitTrace(host: host, port: port, preSwapRequest: request, upstreamResponse: response,
+                        upstreamWireBytes: response.count, responseTruncated: false, swaps: [],
+                        leaks: leaks, latencyMs: Date().timeIntervalSince(t0) * 1000)
+    }
+
     private func emitTrace(host: String, port: Int,
                            preSwapRequest: Data,
                            upstreamResponse: Data,
@@ -3649,6 +3676,34 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// forwarded (it would leave unscanned). 415 is the status RFC 9110
     /// §15.5.16 assigns to an unsupported content coding; the plain-text body
     /// tells the user why their agent's call failed and what to change.
+    /// The detectors an enforcing prompt-injection policy waits on whose
+    /// model is still loading.
+    static func warmingDetectors(injection pi: PromptInjectionPolicy,
+                                 source: ModelReadiness, rules: ModelReadiness) -> [String] {
+        guard pi.isActive, pi.onDetection != .log else { return [] }
+        var out: [String] = []
+        if pi.detectSourceInjection, source == .loading { out.append("prompt-injection detection") }
+        if pi.detectRulesInjection, rules == .loading { out.append("instruction-file detection") }
+        return out
+    }
+
+    /// 503 while a detector's model loads (seconds, at first use or after an
+    /// idle release). Every agent retries a 503 on its own, by then against
+    /// a loaded model; nothing was sent.
+    static func detectorWarmingResponse(_ detectors: [String]) -> Data {
+        let body = "Bromure is loading its \(detectors.joined(separator: " and ")) model. "
+            + "This request was not sent; retry in a few seconds.\n"
+        var r = "HTTP/1.1 503 Service Unavailable\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "Retry-After: \(detectorWarmingRetryAfter)\r\n"
+        r += "X-Bromure-Blocked: detector-model-loading\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
+    }
+    static let detectorWarmingRetryAfter = 2
+
     static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
         let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
             .joined(separator: " and ")

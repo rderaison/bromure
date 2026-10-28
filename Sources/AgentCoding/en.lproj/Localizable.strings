@@ -2912,6 +2912,13 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model.";
 "%d sessions whose machine or folder is gone" = "%d sessions whose machine or folder is gone";
 "(empty)" = "(empty)";
+"Restore these workspaces and their sessions at next start" = "Restore these workspaces and their sessions at next start";
+"Restoring your workspaces" = "Restoring your workspaces";
+"Restoring Workspaces" = "Restoring Workspaces";
+"Stop Restoring" = "Stop Restoring";
+"Starting “%@”…" = "Starting “%@”…";
+"%1$d of %2$d" = "%1$d of %2$d";
+"did not start in time" = "did not start in time";
 /* VM dashboard: workspace notes */
 "Notes" = "Notes";
 "Return saves · Shift-Return adds a line · Esc cancels" = "Return saves · Shift-Return adds a line · Esc cancels";
