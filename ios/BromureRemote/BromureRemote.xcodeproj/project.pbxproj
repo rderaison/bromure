@@ -60,6 +60,7 @@
 		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
+		867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
 		FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */; };
 		F3188ED7F3EED8B10F60EB70 /* Inference__ModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */; };
@@ -213,6 +214,7 @@
 		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
+		3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "GuestURLGate.swift"; path = "Sources/BromureRemote/_shared/GuestURLGate.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
 		C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelCatalog.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelCatalog.swift"; sourceTree = "<group>"; };
 		0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelSettings.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelSettings.swift"; sourceTree = "<group>"; };
@@ -390,6 +392,7 @@
 				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
+				3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
 				C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */,
 				0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */,
@@ -621,6 +624,7 @@
 				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
+				867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
 				FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */,
 				F3188ED7F3EED8B10F60EB70 /* Inference__ModelSettings.swift in Sources */,
