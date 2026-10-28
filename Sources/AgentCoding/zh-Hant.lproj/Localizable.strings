@@ -2881,6 +2881,13 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ 無法使用 %2$@ 的模型，因此改用它自己的供應商。請選擇其他模型。";
 "%d sessions whose machine or folder is gone" = "%d 個工作階段的機器或檔案夾已不存在";
 "(empty)" = "（空白）";
+"Restore these workspaces and their sessions at next start" = "下次啟動時還原這些工作區及其工作階段";
+"Restoring your workspaces" = "正在還原你的工作區";
+"Restoring Workspaces" = "還原工作區";
+"Stop Restoring" = "停止還原";
+"Starting “%@”…" = "正在啟動「%@」…";
+"%1$d of %2$d" = "%1$d / %2$d";
+"did not start in time" = "未能及時啟動";
 /* VM dashboard: workspace notes */
 "Notes" = "備註";
 "Return saves · Shift-Return adds a line · Esc cancels" = "Return 儲存 · Shift-Return 換行 · Esc 取消";

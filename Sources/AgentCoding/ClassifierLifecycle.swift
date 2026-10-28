@@ -1,5 +1,27 @@
 import Foundation
 
+/// Where an on-device detector model stands, asked without waiting for it.
+enum ModelReadiness: Equatable, Sendable {
+    /// Loaded: a scan runs now.
+    case ready
+    /// Being loaded (seconds, at first use or after an idle release).
+    case loading
+    /// Not installed, or it failed to load: the scan goes on without it.
+    case absent
+}
+
+/// The queue a detector's load and inference run on. Both block for a long
+/// time — an ONNX session over a few hundred MB takes seconds to build — and
+/// an actor's default executor is one of Swift concurrency's shared threads
+/// (one per core): a load there held it, and with them the async work of the
+/// whole app (see `MitmBlockingExecutor`). A dispatch queue's thread is its
+/// own.
+enum ClassifierQueue {
+    static func make(_ label: String) -> DispatchSerialQueue {
+        DispatchSerialQueue(label: "io.bromure.classifier.\(label)", qos: .userInitiated)
+    }
+}
+
 /// Keeps the in-process ONNX classifiers (PII/Rampart, prompt-injection
 /// source + rules) resident only while something needs them (B46: ~1.3 GB
 /// RSS with both loaded for a whole demo day).

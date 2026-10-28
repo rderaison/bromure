@@ -46,9 +46,13 @@ actor PromptInjectionClassifier {
     /// Which `…/Models/<dir>/` this instance loads, and the tag it logs under.
     let modelDirName: String
     let logLabel: String
+    /// Load and inference on a queue of their own (`ClassifierQueue`).
+    private let queue: DispatchSerialQueue
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     init(modelDirName: String, logLabel: String) {
         self.modelDirName = modelDirName
         self.logLabel = logLabel
+        queue = ClassifierQueue.make(logLabel)
     }
 
     struct Verdict: Sendable {
@@ -101,8 +105,25 @@ actor PromptInjectionClassifier {
     /// `await` (actors are reentrant across suspension) prevents two
     /// concurrent scans from both loading the session.
     private var loadTask: Task<Loaded?, Never>?
+    /// Set once `loadTask` has finished: loaded or not.
+    private var loadedOK: Bool?
+    /// Which load `loadedOK` answers for: an idle release starts a new one.
+    private var loadGeneration = 0
     /// Last time the classifier was asked for (load or inference).
     private var lastUsed = Date.distantPast
+
+    /// Where the model stands, without waiting for it: a request that would
+    /// be scanned is answered "try again" while it loads rather than held
+    /// for the whole load (HTTPMitmConnection.detectorsWarming). Starts the
+    /// load when nothing has.
+    func readiness() -> ModelReadiness {
+        lastUsed = Date()
+        if let ok = loadedOK { return ok ? .ready : .absent }
+        guard FileManager.default.fileExists(atPath: modelDirectory.appendingPathComponent(Self.modelName).path)
+        else { return .absent }
+        if loadTask == nil { _ = startLoad() }
+        return .loading
+    }
 
     /// Release the ONNX session (+ verdict cache) when nothing has used it
     /// for `idle` seconds — called by ClassifierLifecycle when no running
@@ -112,6 +133,8 @@ actor PromptInjectionClassifier {
     func unloadIfIdle(_ idle: TimeInterval) -> Bool {
         guard loadTask != nil, Date().timeIntervalSince(lastUsed) >= idle else { return false }
         loadTask = nil
+        loadedOK = nil
+        loadGeneration += 1
         verdictCache.removeAll()
         cacheOrder.removeAll()
         FileHandle.standardError.write(Data("[mitm/injection] \(logLabel) classifier released (idle)\n".utf8))
@@ -243,23 +266,32 @@ actor PromptInjectionClassifier {
 
     private func loaded() async -> Loaded? {
         lastUsed = Date()
-        if let task = loadTask { return await task.value }
+        return await (loadTask ?? startLoad()).value
+    }
+
+    private func startLoad() -> Task<Loaded?, Never> {
+        loadGeneration += 1
+        let generation = loadGeneration
         let task = Task { () -> Loaded? in
+            let loaded: Loaded?
             do {
-                let loaded = try await self.load()
+                let l = try await self.load()
                 FileHandle.standardError.write(Data(
-                    "[mitm/injection] \(logLabel) classifier ready (maxLen=\(loaded.maxLength), threshold=\(loaded.threshold))\n".utf8))
-                return loaded
+                    "[mitm/injection] \(logLabel) classifier ready (maxLen=\(l.maxLength), threshold=\(l.threshold))\n".utf8))
+                loaded = l
             } catch {
                 // One-time, non-alarming note. Absence is the common
                 // case (the model is an opt-in download).
                 FileHandle.standardError.write(Data(
                     "[mitm/injection] \(logLabel) classifier disabled — \(error.localizedDescription). Install a model into \(self.modelDirectory.path) to enable.\n".utf8))
-                return nil
+                loaded = nil
             }
+            // Still this load's (an idle release may have dropped it).
+            if self.loadGeneration == generation { self.loadedOK = loaded != nil }
+            return loaded
         }
         loadTask = task
-        return await task.value
+        return task
     }
 
     private enum LoadError: LocalizedError {

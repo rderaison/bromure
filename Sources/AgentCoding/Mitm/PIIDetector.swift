@@ -55,6 +55,13 @@ actor PIIDetector {
     }
 
     private var loadTask: Task<Loaded?, Never>?
+    /// Set once `loadTask` has finished: loaded or not.
+    private var loadedOK: Bool?
+    /// Which load `loadedOK` answers for: a release or reload starts a new one.
+    private var loadGeneration = 0
+    /// Load and inference on a queue of their own (`ClassifierQueue`).
+    private let queue = ClassifierQueue.make("pii")
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private var cache: [CacheKey: [PIISpan]] = [:]
     private var cacheOrder: [CacheKey] = []
     private static let cacheLimit = 65_536
@@ -66,7 +73,19 @@ actor PIIDetector {
     }
 
     /// Forget a failed load so a freshly downloaded model is picked up.
-    func reload() { loadTask = nil }
+    func reload() { loadTask = nil; loadedOK = nil; loadGeneration += 1 }
+
+    /// Where the classifier stands, without waiting for it (see
+    /// `PromptInjectionClassifier.readiness`). Starts the load when nothing
+    /// has. Absent, the recognizers still run.
+    func readiness() -> ModelReadiness {
+        lastUsed = Date()
+        if let ok = loadedOK { return ok ? .ready : .absent }
+        guard FileManager.default.fileExists(atPath: modelDirectory.appendingPathComponent("model.onnx").path)
+        else { return .absent }
+        if loadTask == nil { _ = startLoad() }
+        return .loading
+    }
 
     /// Last time the classifier was asked for (load or inference).
     private var lastUsed = Date.distantPast
@@ -79,6 +98,8 @@ actor PIIDetector {
     func unloadIfIdle(_ idle: TimeInterval) -> Bool {
         guard loadTask != nil, Date().timeIntervalSince(lastUsed) >= idle else { return false }
         loadTask = nil
+        loadedOK = nil
+        loadGeneration += 1
         cache.removeAll()
         cacheOrder.removeAll()
         FileHandle.standardError.write(Data("[pii] Rampart classifier released (idle)\n".utf8))
@@ -255,21 +276,29 @@ actor PIIDetector {
 
     private func loaded() async -> Loaded? {
         lastUsed = Date()
-        if let t = loadTask { return await t.value }
+        return await (loadTask ?? startLoad()).value
+    }
+
+    private func startLoad() -> Task<Loaded?, Never> {
         let dir = modelDirectory
+        loadGeneration += 1
+        let generation = loadGeneration
         let t = Task { () -> Loaded? in
+            let loaded: Loaded?
             do {
                 let l = try Self.load(dir)
                 FileHandle.standardError.write(Data("[pii] Rampart classifier ready (\(l.numLabels) labels)\n".utf8))
-                return l
+                loaded = l
             } catch {
                 FileHandle.standardError.write(Data(
                     "[pii] classifier unavailable — \(error.localizedDescription); recognizers only\n".utf8))
-                return nil
+                loaded = nil
             }
+            if self.loadGeneration == generation { self.loadedOK = loaded != nil }
+            return loaded
         }
         loadTask = t
-        return await t.value
+        return t
     }
 
     private struct LoadError: LocalizedError {

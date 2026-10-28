@@ -2878,6 +2878,13 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ ne peut pas utiliser les modèles %2$@ ; il utilise donc son propre fournisseur. Choisissez un autre modèle.";
 "%d sessions whose machine or folder is gone" = "%d sessions dont la machine ou le dossier n’existe plus";
 "(empty)" = "(vide)";
+"Restore these workspaces and their sessions at next start" = "Restaurer ces espaces de travail et leurs sessions au prochain démarrage";
+"Restoring your workspaces" = "Restauration de vos espaces de travail";
+"Restoring Workspaces" = "Restauration des espaces de travail";
+"Stop Restoring" = "Arrêter la restauration";
+"Starting “%@”…" = "Démarrage de « %@ »…";
+"%1$d of %2$d" = "%1$d sur %2$d";
+"did not start in time" = "n’a pas démarré à temps";
 /* VM dashboard: workspace notes */
 "Notes" = "Notes";
 "Return saves · Shift-Return adds a line · Esc cancels" = "Retour enregistre · Maj-Retour ajoute une ligne · Échap annule";

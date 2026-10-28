@@ -4116,6 +4116,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // seconds in, once the switch + control plane are settled.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.kubeClusterEngine.startAutoStartClusters()
+            // What the last quit asked to bring back (its checkbox).
+            self?.restoreAtLaunch()
         }
         // Planning sessions that were in flight when the app last quit must
         // not spin forever — re-arm their watchdogs (which abort with a
@@ -7985,6 +7987,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        // Bring the workspaces (and the sessions open in them) back at the
+        // next start. The infrastructure machines come up with their
+        // clusters, not from here.
+        let restoreBox: NSButton? = workspaces.isEmpty ? nil : {
+            let b = NSButton(checkboxWithTitle: NSLocalizedString(
+                "Restore these workspaces and their sessions at next start",
+                comment: "quit confirmation checkbox"), target: nil, action: nil)
+            b.state = UserDefaults.standard.object(forKey: LaunchRestorePlan.preferenceKey) as? Bool ?? true ? .on : .off
+            return b
+        }()
+        alert.accessoryView = restoreBox
         // Come forward first. Quit usually arrives as an Apple Event (menu,
         // ⌘Q, Dock, `osascript`) while another app is frontmost, and a modal
         // put up from that handler can end up unfocused and behind whatever
@@ -7993,8 +8006,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // they're actually being asked about.
         NSApp.activate(ignoringOtherApps: true)
         quitAlert = alert
-        return alert.runModal() == .alertFirstButtonReturn
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        if let restoreBox {
+            let restore = restoreBox.state == .on
+            UserDefaults.standard.set(restore, forKey: LaunchRestorePlan.preferenceKey)
+            // Taken now, before the drain: shutting a workspace down unbinds
+            // its sessions' tabs. Written at applicationWillTerminate, so a
+            // quit AppKit refuses after this leaves nothing behind.
+            restorePlanAtQuit = restore ? LaunchRestorePlan.make(
+                running: running.filter { $0.kubeClusterID == nil }
+                    .map { (id: $0.profileID, name: $0.profile.name) }
+                    .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending },
+                sessions: agentSessionStore.sessions) : nil
+            restoreDecidedAtQuit = true
+        }
+        return true
     }
+
+    /// The quit confirmation's restore checkbox: what to bring back at the
+    /// next start (nil: nothing), and whether the user was asked at all.
+    private var restorePlanAtQuit: LaunchRestorePlan?
+    private var restoreDecidedAtQuit = false
 
     /// The quit confirmation's body: what happens to each running workspace,
     /// grouped by what its close action does at quit (shut down; anything
@@ -8127,6 +8159,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.stamp("applicationWillTerminate (clean quit)")
+        if restoreDecidedAtQuit {
+            if let plan = restorePlanAtQuit {
+                LaunchRestorePlan.save(plan)
+                AppLog.stamp("quit: \(plan.workspaces.count) workspace(s) to restore at next start")
+            } else {
+                LaunchRestorePlan.discard()
+            }
+        }
         SquelchLedger.shared.flush()
         // `vm run --rm` workspaces whose VM is off (a reboot's relaunch
         // waiting, a boot that gave up): over with the app.
