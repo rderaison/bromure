@@ -70,9 +70,11 @@ enum MobileSessions {
         model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888"
     }
 
-    /// "3m" — when the session last did something; nil while starting.
-    static func when(_ s: AgentSession) -> String? {
-        s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s))
+    /// "3m" — when the session last did something ("now" while it works);
+    /// nil while starting.
+    @MainActor
+    static func when(_ s: AgentSession, in model: SessionListModel) -> String? {
+        SessionHome.rowWhen(s, in: model)
     }
 }
 
@@ -379,7 +381,7 @@ struct MobileSessionHeader: View {
         let detail: String?
         switch bucket {
         case .working: detail = s.isLaunching ? NSLocalizedString("starting", comment: "pill") : nil
-        case .idle:    detail = SessionHome.elapsed(since: s.lastSeenAt)
+        case .idle:    detail = SessionHome.elapsed(since: SessionHome.lastActivity(s))
         case .ended:   detail = SessionHome.elapsed(since: s.endedAt).map {
             String(format: NSLocalizedString("%@ ago", comment: "pill"), $0) }
         default:       detail = nil
@@ -717,7 +719,7 @@ struct MobileSessionsSection: View {
                 }
                 Spacer(minLength: 4)
                 let unread = SessionHome.showsUnread(s, in: model)
-                if let when = MobileSessions.when(s) {
+                if let when = MobileSessions.when(s, in: model) {
                     Text(when).font(.caption2.monospacedDigit().weight(unread ? .semibold : .regular))
                         .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
                 }
@@ -968,7 +970,7 @@ struct PadSessionSections<Boards: View>: View {
                     let unread = SessionHome.showsUnread(s, in: model)
                     Text(s.title).lineLimit(1).fontWeight(unread ? .semibold : nil)
                     Spacer(minLength: 0)
-                    if let when = MobileSessions.when(s) {
+                    if let when = MobileSessions.when(s, in: model) {
                         Text(when).font(.caption2.monospacedDigit())
                             .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
                     }

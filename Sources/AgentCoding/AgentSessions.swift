@@ -251,7 +251,12 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var launchingSince: Date?
     var launchBaselineIndex: Int?
     var endedAt: Date?
+    /// When a roster pass last found the session's tab — every pass while
+    /// the tab is there, idle or not: liveness, never activity.
     var lastSeenAt: Date?
+    /// When the agent last finished a turn or stopped to ask (`noteReply`):
+    /// what the card's "3m" and the stage's "Idle · 3 min" count from.
+    var activeAt: Date?
     var lastError: String?
     /// When an agent was last seen RUNNING in the tab. A tab that is a bare
     /// shell only counts as "the agent exited" once it has run here before
@@ -747,6 +752,7 @@ final class AgentSessionStore {
     func noteReply(_ id: UUID) {
         guard !isMirror, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
         sessions[i].replies = (sessions[i].replies ?? 0) + 1
+        sessions[i].activeAt = Date()
         save()
         onReply?(id)
     }
@@ -2283,9 +2289,20 @@ enum SessionHome {
         return String(format: NSLocalizedString("%dd", comment: "elapsed compact"), s / 86400)
     }
 
-    /// When the session last did something — what the row's timestamp shows.
+    /// When the session last did something: its agent's last reply, its
+    /// end, its last resume, its start — the latest. Not `lastSeenAt`: the
+    /// roster stamps that on every pass while the tab is up, so every live
+    /// session read "now", idle for hours or not.
     static func lastActivity(_ s: AgentSession) -> Date {
-        s.lastSeenAt ?? s.endedAt ?? s.resumedAt ?? s.createdAt
+        [s.activeAt, s.endedAt, s.resumedAt].compactMap { $0 }.reduce(s.createdAt) { max($0, $1) }
+    }
+
+    /// The row's trailing timestamp: "now" while the agent works, else how
+    /// long since it last did something; nothing while it starts.
+    @MainActor
+    static func rowWhen(_ s: AgentSession, in model: SessionListModel, now: Date = Date()) -> String? {
+        if s.isLaunching { return nil }
+        return elapsedCompact(since: bucket(for: s, in: model) == .working ? now : lastActivity(s), now: now)
     }
 
     @MainActor
@@ -3684,7 +3701,7 @@ struct SessionSectionsView: View {
             accentHex: accentHex(s.profileID),
             dot: SessionHome.dot(for: s, in: model),
             statusLine: SessionHome.statusLine(for: s, in: model),
-            when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
+            when: SessionHome.rowWhen(s, in: model),
             gone: gone,
             depth: depth,
             selected: model.selectedSessionID == s.id,

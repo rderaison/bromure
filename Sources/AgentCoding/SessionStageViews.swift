@@ -994,7 +994,7 @@ struct SessionHeaderView: View {
         let detail: String?
         switch bucket {
         case .working: detail = nil
-        case .idle:    detail = SessionHome.elapsed(since: s.lastSeenAt)
+        case .idle:    detail = SessionHome.elapsed(since: SessionHome.lastActivity(s))
         case .ended:   detail = SessionHome.elapsed(since: s.endedAt).map {
             // "3 min ago" — but never "just now ago".
             $0 == NSLocalizedString("just now", comment: "elapsed")

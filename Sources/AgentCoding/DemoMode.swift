@@ -209,6 +209,7 @@ enum DemoMode {
             s.roomID = e.room.flatMap { roomIDs[$0] }
             s.lastSeenAt = now.addingTimeInterval(-60 * (e.idleMinutes ?? 1))
             s.agentSeenAt = s.lastSeenAt
+            s.activeAt = s.lastSeenAt
             if let b = e.branch {
                 s.worktreeBranch = b.name
                 s.branchParent = b.parent ?? "main"
