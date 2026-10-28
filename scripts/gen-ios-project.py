@@ -460,6 +460,12 @@ def main():
         "CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;",
         "ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;",
         "ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;",
+        # SwiftUI's VideoPlayer and PhotosPicker live in cross-import overlays
+        # (_AVKit_SwiftUI, _PhotosUI_SwiftUI) whose classes subclass AVKit's
+        # and PhotosUI's own. Autolinking links only the overlay: the base
+        # framework never loads, and the first VideoPlayer aborts the app
+        # ("failed to demangle superclass of VideoPlayerView ... AVPlayerView").
+        "OTHER_LDFLAGS = (\"$(inherited)\", \"-framework\", AVKit, \"-framework\", PhotosUI);",
     ]
     # The NSE inherits the project-level common settings; only its target
     # specifics differ. No app icon/assets, its own Info.plist + entitlements,

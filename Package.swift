@@ -97,6 +97,12 @@ let package = Package(
                 .linkedFramework("Metal"),
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("CoreText"),
+                // SwiftUI's VideoPlayer (DisplayCards' video card) is in the
+                // _AVKit_SwiftUI overlay, whose VideoPlayerView subclasses
+                // AVKit's AVPlayerView. Autolinking links only the overlay, so
+                // AVKit never loaded and the first video aborted the app
+                // ("failed to demangle superclass of VideoPlayerView").
+                .linkedFramework("AVKit"),
                 .linkedLibrary("c++"),
             ]
         ),
