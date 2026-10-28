@@ -757,6 +757,14 @@ final class AgentSessionStore {
         onReply?(id)
     }
 
+    /// The agent did something that counts as activity without being a
+    /// reply to read (a hook-less agent's turn ending): the card's time.
+    func noteActive(_ id: UUID, at now: Date = Date()) {
+        guard !isMirror, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[i].activeAt = now
+        save()
+    }
+
     /// Told after each `noteReply` (the app reads it at once if the session
     /// is on screen, and tells its clients).
     var onReply: ((UUID) -> Void)?

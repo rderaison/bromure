@@ -2321,6 +2321,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let pane = pane(for: id) else { return }
         for (tab, kind) in agentTabs(of: pane) where !Self.hookDrivenAgents.contains(kind) {
             if status == .done && tab.agentStatus != .working { continue }
+            // Its turn ended: the card counts from now (no hook to say so,
+            // and no reply to count -- this is read off the traffic).
+            if status == .done, let s = agentSessionStore.session(profileID: id, windowIndex: tab.index) {
+                agentSessionStore.noteActive(s.id)
+            }
             tab.agentStatus = status
         }
     }
