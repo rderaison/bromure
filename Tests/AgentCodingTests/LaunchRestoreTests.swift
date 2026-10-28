@@ -132,6 +132,45 @@ struct DetectorLoadingTests {
         #expect(await c.detect(spans: [(id: nil, content: "x")]) == nil)
     }
 
+    /// The tokenizer's load (about a second, the library's own async code)
+    /// and the session's build (blocking) run off the shared pool and off
+    /// the detector's queue.
+    @Test("a load's slow parts run on threads of their own", .enabled(if: { if #available(macOS 15, *) { true } else { false } }()))
+    func loadThreads() async throws {
+        #expect(await ClassifierQueue.offPool { await Self.threadName() } == "mitm-io")
+        #expect(try await ClassifierQueue.load("t") { String(cString: __dispatch_queue_get_label(nil)) }
+                == "io.bromure.classifier.t.load")
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let c = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Mitm/PromptInjectionClassifier.swift"), encoding: .utf8)
+        #expect(c.contains("try await ClassifierQueue.offPool { try await AutoTokenizer.from(modelFolder: dir) }"))
+        #expect(c.contains("let (env, session, inputNames) = try await ClassifierQueue.load(logLabel) {"))
+        let p = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Mitm/PIIDetector.swift"), encoding: .utf8)
+        #expect(p.contains("let l = try await ClassifierQueue.load(\"pii\") { try Self.load(dir) }"))
+    }
+    nonisolated static func threadName() async -> String? { Thread.current.name }
+
+    /// The installed PromptGuard model (a real, seconds-long load), when
+    /// this Mac has it.
+    static let realModelInstalled = PromptInjectionModels.isInstalled(.promptGuard)
+
+    @Test("readiness answers while a real load runs, not after it",
+          .enabled(if: realModelInstalled))
+    func answersDuringLoad() async throws {
+        let c = PromptInjectionClassifier(modelDirName: "prompt-injection", logLabel: "t3")
+        #expect(await c.readiness() == .loading)
+        // Asked over and over through the whole load: every answer is quick.
+        var settled = ModelReadiness.loading
+        var slowest = 0.0
+        for _ in 0..<500 where settled == .loading {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            let t0 = Date()
+            settled = await c.readiness()
+            slowest = max(slowest, Date().timeIntervalSince(t0))
+        }
+        #expect(settled == .ready)
+        #expect(slowest < 0.2, "a readiness call waited \(slowest)s behind the load")
+    }
+
     @Test("a load that runs long stops answering 503: the request waits for it")
     func grace() {
         let t = Date()

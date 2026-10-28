@@ -288,7 +288,8 @@ actor PIIDetector {
         let t = Task { () -> Loaded? in
             let loaded: Loaded?
             do {
-                let l = try Self.load(dir)
+                // Off this actor's queue: `readiness()` answers meanwhile.
+                let l = try await ClassifierQueue.load("pii") { try Self.load(dir) }
                 FileHandle.standardError.write(Data("[pii] Rampart classifier ready (\(l.numLabels) labels)\n".utf8))
                 loaded = l
             } catch {

@@ -320,7 +320,10 @@ actor PromptInjectionClassifier {
         // Tokenizer straight from the model's own HF assets — handles
         // whatever family it is (DeBERTa/SentencePiece for PromptGuard,
         // BERT/WordPiece for others) without us re-implementing it.
-        let tokenizer = try await AutoTokenizer.from(modelFolder: dir)
+        // Its load (parsing tokenizer.json: about a second for PromptGuard's)
+        // is async code of the library's own, which runs on the shared pool
+        // unless told otherwise.
+        let tokenizer = try await ClassifierQueue.offPool { try await AutoTokenizer.from(modelFolder: dir) }
 
         // Optional bromure-side config (label index / threshold / len).
         var cfg = Config()
@@ -338,19 +341,24 @@ actor PromptInjectionClassifier {
         // footprint sitting next to the VM. CPU holds both models in ~2 GB at
         // identical accuracy. Opt back into CoreML with
         // BROMURE_INJECTION_COREML=1; BROMURE_NO_COREML still forces CPU.
-        let env = try ORTEnv(loggingLevel: .warning)
-        let opts = try ORTSessionOptions()
-        try opts.setGraphOptimizationLevel(.all)
-        let useCoreML = ORTIsCoreMLExecutionProviderAvailable()
-            && ProcessInfo.processInfo.environment["BROMURE_INJECTION_COREML"] == "1"
-            && ProcessInfo.processInfo.environment["BROMURE_NO_COREML"] == nil
-        if useCoreML {
-            let coreml = ORTCoreMLExecutionProviderOptions()
-            coreml.enableOnSubgraphs = true
-            try opts.appendCoreMLExecutionProvider(with: coreml)
+        // Building the session blocks for a while: off this actor's queue,
+        // so `readiness()` answers meanwhile.
+        let (env, session, inputNames) = try await ClassifierQueue.load(logLabel) {
+            () throws -> (ORTEnv, ORTSession, Set<String>) in
+            let env = try ORTEnv(loggingLevel: .warning)
+            let opts = try ORTSessionOptions()
+            try opts.setGraphOptimizationLevel(.all)
+            let useCoreML = ORTIsCoreMLExecutionProviderAvailable()
+                && ProcessInfo.processInfo.environment["BROMURE_INJECTION_COREML"] == "1"
+                && ProcessInfo.processInfo.environment["BROMURE_NO_COREML"] == nil
+            if useCoreML {
+                let coreml = ORTCoreMLExecutionProviderOptions()
+                coreml.enableOnSubgraphs = true
+                try opts.appendCoreMLExecutionProvider(with: coreml)
+            }
+            let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
+            return (env, session, Set(try session.inputNames()))
         }
-        let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
-        let inputNames = Set(try session.inputNames())
 
         return Loaded(
             env: env,
