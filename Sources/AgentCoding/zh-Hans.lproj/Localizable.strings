@@ -2878,6 +2878,7 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ 无法使用 %2$@ 的模型，因此改用它自己的提供方。请选择其他模型。";
 "%d sessions whose machine or folder is gone" = "%d 个会话的机器或文件夹已不存在";
 "(empty)" = "（空）";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "代理打开的登录页面指向这台 Mac 或其本地网络，因此 Bromure 没有打开它。";
 "Restore these workspaces and their sessions at next start" = "下次启动时恢复这些工作区及其会话";
 "Restoring your workspaces" = "正在恢复你的工作区";
 "Restoring Workspaces" = "恢复工作区";
