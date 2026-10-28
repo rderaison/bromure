@@ -126,5 +126,11 @@ struct URLIPv4HostTests {
         let publish = try #require(r.range(of: "url: url.absoluteString, callbackPort:"))
         #expect(gate.lowerBound < publish.lowerBound)
         #expect(!r[gate.upperBound..<publish.lowerBound].contains("RemoteRegistrationBroker.shared.pending != nil"))
+        // And the client checks again before it opens (an older server).
+        let f = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
+        let open = try #require(f.range(of: "remote registration: opening sign-in page locally"))
+        let clientGate = try #require(f[open.upperBound...].range(of: "guard ACAppDelegate.opensInRealBrowser(url) else {"))
+        let opened = try #require(f[open.upperBound...].range(of: "NSWorkspace.shared.open(url)"))
+        #expect(clientGate.lowerBound < opened.lowerBound)
     }
 }

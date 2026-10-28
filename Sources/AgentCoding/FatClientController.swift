@@ -460,6 +460,12 @@ final class RemoteHostController {
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
 #if os(macOS)
+        // The server gates the guest's URL before it publishes it; an older
+        // server didn't, and this Mac's loopback / LAN is what it would reach.
+        guard ACAppDelegate.opensInRealBrowser(url) else {
+            FatClientLog.log("remote registration: refused sign-in URL with a local/private host")
+            return
+        }
         NSWorkspace.shared.open(url)
 #else
         UIApplication.shared.open(url)
