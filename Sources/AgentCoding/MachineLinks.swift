@@ -816,9 +816,12 @@ extension AttachedMachine: AgentHostLink {
     /// shown at once here (no orb until the next poll), then told to the
     /// machine, which keeps the count.
     func markRead(_ sid: UUID, upTo seen: Int) {
+        // Never backward, and nothing to do for what's already shown read
+        // (a refocus during the hold) -- as `AgentSessionStore.markRead`.
+        guard seen > (sessionStore.session(sid)?.readReplies ?? 0) else { return }
         let sent = Date()
         pendingReads[sid] = (seen, sent)
-        sessionStore.applyMirror(Self.holdingReads(machineSessions, &pendingReads))
+        showReads()
         // The hold ends on its own -- not only when a snapshot comes in, which
         // a dead link never brings.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.readHold + 0.1) { [weak self] in self?.reapplyReads() }
@@ -846,8 +849,29 @@ extension AttachedMachine: AgentHostLink {
     /// stays marked read until /state succeeds").
     func reapplyReads() {
         let before = sessionStore.sessions
-        sessionStore.applyMirror(Self.holdingReads(machineSessions, &pendingReads))
+        showReads()
         if sessionStore.sessions != before { onChange?() }
+    }
+
+    /// The read cursors -- the machine's, or a read still held -- laid onto
+    /// the sessions shown, and nothing else of them: a room move or a review
+    /// draft made here and not yet echoed by the machine stays (Finding
+    /// CWE-670, "Attached-machine read hold drops room membership and review
+    /// drafts"). Only a snapshot that comes in replaces the sessions.
+    private func showReads() {
+        var cursor: [UUID: Int?] = [:]
+        for s in Self.holdingReads(machineSessions, &pendingReads) { cursor[s.id] = s.readReplies }
+        sessionStore.applyMirror(Self.withReads(sessionStore.sessions, cursor))
+    }
+
+    /// `shown` with each session's read cursor replaced by `cursor`'s.
+    nonisolated static func withReads(_ shown: [AgentSession], _ cursor: [UUID: Int?]) -> [AgentSession] {
+        shown.map { s in
+            guard let c = cursor[s.id] else { return s }
+            var s = s
+            s.readReplies = c
+            return s
+        }
     }
 
     /// How long a read sent is shown before the machine has to agree.

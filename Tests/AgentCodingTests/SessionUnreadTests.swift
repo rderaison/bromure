@@ -260,6 +260,7 @@ struct SessionUnreadTests {
         var s = AgentSession(profileID: m.id, tool: .claude, title: "t", cwd: "~")
         s.replies = 2; s.readReplies = 1
         m.machineSessions = [s]
+        m.sessionStore.applyMirror([s])   // as a poll leaves it
         m.reapplyReads()
         #expect(m.sessionStore.session(s.id)?.isUnread == true)
         var changed = 0
@@ -275,6 +276,60 @@ struct SessionUnreadTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
         #expect(ac.contains("guard m.unreadOnMachine(id), let n = m.machineSessions.first(where: { $0.id == id })?.replies else { return }"))
+    }
+
+    /// Finding (CWE-670): "Attached-machine read hold drops room membership
+    /// and review drafts". The hold rebuilt the shown sessions from the last
+    /// snapshot, undoing a room move or a review draft made here and not yet
+    /// echoed; a smaller read moved the cursor back.
+    @Test("a read held on a machine session keeps its room and review drafts, and never goes backward")
+    func machineReadKeepsMirrorEdits() async throws {
+        let m = AttachedMachine(id: UUID(), name: "gone", makeServer: { _ in nil })
+        defer { m.stop() }
+        var s = AgentSession(profileID: m.id, tool: .claude, title: "t", cwd: "~")
+        s.replies = 5; s.readReplies = 1
+        m.machineSessions = [s]
+        m.sessionStore.applyMirror([s])
+        // Made here, not yet in any snapshot.
+        let room = UUID()
+        let draft = ReviewComment(text: "rename this")
+        m.sessionStore.mutate(s.id) {
+            $0.roomID = room
+            $0.reviewComments = [draft]
+            $0.reviewViewed = ["a.swift": "f1"]
+        }
+        m.markRead(s.id, upTo: 4)
+        var shown = try #require(m.sessionStore.session(s.id))
+        #expect(shown.readReplies == 4)
+        #expect(shown.roomID == room)
+        #expect(shown.reviewComments == [draft])
+        #expect(shown.reviewViewed == ["a.swift": "f1"])
+        m.markRead(s.id, upTo: 3)                                   // another client's older read
+        #expect(m.sessionStore.session(s.id)?.readReplies == 4)
+        m.reapplyReads()                                            // a failed poll
+        shown = try #require(m.sessionStore.session(s.id))
+        #expect(shown.roomID == room && shown.reviewComments == [draft] && shown.readReplies == 4)
+        // The failed read lets go (2 s): the cursor is the machine's again, the edits stay.
+        for _ in 0..<60 where m.sessionStore.session(s.id)?.readReplies != 1 {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        shown = try #require(m.sessionStore.session(s.id))
+        #expect(shown.readReplies == 1)
+        #expect(shown.roomID == room && shown.reviewComments == [draft])
+        // A session the machine never marked read (no cursor at all) shows
+        // unread again too, and its read can go again.
+        var fresh = AgentSession(profileID: m.id, tool: .claude, title: "u", cwd: "~")
+        fresh.replies = 2
+        m.machineSessions = [s, fresh]
+        m.sessionStore.applyMirror([shown, fresh])
+        m.markRead(fresh.id, upTo: 2)
+        #expect(m.sessionStore.session(fresh.id)?.isUnread == false)
+        for _ in 0..<60 where m.sessionStore.session(fresh.id)?.isUnread != true {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(m.sessionStore.session(fresh.id)?.readReplies == nil)
+        m.markRead(fresh.id, upTo: 2)
+        #expect(m.sessionStore.session(fresh.id)?.isUnread == false)
     }
 
     /// Finding (CWE-670): "Opening a room in the focused window never marks
