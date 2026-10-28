@@ -389,6 +389,14 @@ extension ACAppDelegate {
                 // so its presence IS the "route this to the client" signal —
                 // no need to thread a flag down into the sandbox wiring.
                 if RemoteRegistrationBroker.shared.pending != nil {
+                    // The client opens this in its user's browser: the same
+                    // gate as a local open, or a guest points the client
+                    // Mac at its own loopback / LAN.
+                    guard ACAppDelegate.opensInRealBrowser(url) else {
+                        FileHandle.standardError.write(Data(
+                            "[ac] refused to publish guest sign-in URL with local/private host: \(url.host ?? "?")\n".utf8))
+                        return
+                    }
                     let port = ACAppDelegate.loopbackCallbackPort(from: url)
                     RemoteRegistrationBroker.shared.publish(
                         url: url.absoluteString, callbackPort: Int(port ?? 0))
