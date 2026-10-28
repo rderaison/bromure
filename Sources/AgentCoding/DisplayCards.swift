@@ -675,7 +675,10 @@ struct MediaView: View {
     /// another file.
     private func showVideo(_ url: URL) {
         #if canImport(AVKit)
-        if url != videoURL || player == nil { player = AVPlayer(url: url) }
+        if url != videoURL || player == nil {
+            player?.pause()   // another file: the one it played stops now
+            player = AVPlayer(url: url)
+        }
         #endif
         videoURL = url
     }

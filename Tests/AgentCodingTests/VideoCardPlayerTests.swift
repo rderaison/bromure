@@ -46,6 +46,7 @@ struct VideoCardPlayerTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let s = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/DisplayCards.swift"), encoding: .utf8)
         #expect(!s.contains("VideoPlayer(player: AVPlayer("))
-        #expect(s.contains("if url != videoURL || player == nil { player = AVPlayer(url: url) }"))
+        #expect(s.contains("if url != videoURL || player == nil {"))
+        #expect(s.contains("player = AVPlayer(url: url)"))
     }
 }
