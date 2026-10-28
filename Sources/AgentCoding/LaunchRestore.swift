@@ -113,6 +113,7 @@ extension ACAppDelegate {
         panel.title = NSLocalizedString("Restoring Workspaces", comment: "launch restore panel window title")
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
         panel.contentViewController = NSHostingController(rootView: LaunchRestoreView(progress: progress) { [weak panel] in
             if progress.over { panel?.close() } else { progress.stopped = true }
         })

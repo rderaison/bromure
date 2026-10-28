@@ -7966,6 +7966,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// proceed (nothing running, or the user clicked Quit), false to abort.
     @MainActor
     private func confirmQuit() -> Bool {
+        // A quit AppKit refused after an earlier confirmation must not leave
+        // its answer to a later one (that may not even ask).
+        restorePlanAtQuit = nil
+        restoreDecidedAtQuit = false
         let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
         if running.isEmpty { return true }
         // A background agent (`--headless`: no window, nobody at the Mac to
