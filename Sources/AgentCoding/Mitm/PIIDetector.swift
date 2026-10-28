@@ -59,6 +59,7 @@ actor PIIDetector {
     private var loadedOK: Bool?
     /// Which load `loadedOK` answers for: a release or reload starts a new one.
     private var loadGeneration = 0
+    private var loadStartedAt = Date()
     /// Load and inference on a queue of their own (`ClassifierQueue`).
     private let queue = ClassifierQueue.make("pii")
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -84,7 +85,7 @@ actor PIIDetector {
         guard FileManager.default.fileExists(atPath: modelDirectory.appendingPathComponent("model.onnx").path)
         else { return .absent }
         if loadTask == nil { _ = startLoad() }
-        return .loading
+        return .loading(since: loadStartedAt)
     }
 
     /// Last time the classifier was asked for (load or inference).
@@ -282,6 +283,7 @@ actor PIIDetector {
     private func startLoad() -> Task<Loaded?, Never> {
         let dir = modelDirectory
         loadGeneration += 1
+        loadStartedAt = Date()
         let generation = loadGeneration
         let t = Task { () -> Loaded? in
             let loaded: Loaded?

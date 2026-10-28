@@ -6,8 +6,17 @@ enum ModelReadiness: Equatable, Sendable {
     case ready
     /// Being loaded (seconds, at first use or after an idle release).
     case loading
+    /// Still loading past `warmupGrace`: a request no longer gets "try
+    /// again" (an agent's retries run out), it waits for the load as before.
+    case loadingLong
     /// Not installed, or it failed to load: the scan goes on without it.
     case absent
+
+    static let warmupGrace: TimeInterval = 30
+
+    static func loading(since start: Date, now: Date = Date()) -> ModelReadiness {
+        now.timeIntervalSince(start) < warmupGrace ? .loading : .loadingLong
+    }
 }
 
 /// The queue a detector's load and inference run on. Both block for a long

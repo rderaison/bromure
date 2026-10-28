@@ -132,6 +132,15 @@ struct DetectorLoadingTests {
         #expect(await c.detect(spans: [(id: nil, content: "x")]) == nil)
     }
 
+    @Test("a load that runs long stops answering 503: the request waits for it")
+    func grace() {
+        let t = Date()
+        #expect(ModelReadiness.loading(since: t, now: t.addingTimeInterval(5)) == .loading)
+        #expect(ModelReadiness.loading(since: t, now: t.addingTimeInterval(ModelReadiness.warmupGrace + 1)) == .loadingLong)
+        let both = PromptInjectionPolicy(detectSourceInjection: true, detectRulesInjection: true, onDetection: .block)
+        #expect(HTTPMitmConnection.warmingDetectors(injection: both, source: .loadingLong, rules: .loadingLong).isEmpty)
+    }
+
     @Test("an enforcing policy waits on the detectors it uses; log mode on none")
     func warming() {
         let both = PromptInjectionPolicy(detectSourceInjection: true, detectRulesInjection: true, onDetection: .block)

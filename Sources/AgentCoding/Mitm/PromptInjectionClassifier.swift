@@ -109,6 +109,7 @@ actor PromptInjectionClassifier {
     private var loadedOK: Bool?
     /// Which load `loadedOK` answers for: an idle release starts a new one.
     private var loadGeneration = 0
+    private var loadStartedAt = Date()
     /// Last time the classifier was asked for (load or inference).
     private var lastUsed = Date.distantPast
 
@@ -122,7 +123,7 @@ actor PromptInjectionClassifier {
         guard FileManager.default.fileExists(atPath: modelDirectory.appendingPathComponent(Self.modelName).path)
         else { return .absent }
         if loadTask == nil { _ = startLoad() }
-        return .loading
+        return .loading(since: loadStartedAt)
     }
 
     /// Release the ONNX session (+ verdict cache) when nothing has used it
@@ -271,6 +272,7 @@ actor PromptInjectionClassifier {
 
     private func startLoad() -> Task<Loaded?, Never> {
         loadGeneration += 1
+        loadStartedAt = Date()
         let generation = loadGeneration
         let task = Task { () -> Loaded? in
             let loaded: Loaded?
