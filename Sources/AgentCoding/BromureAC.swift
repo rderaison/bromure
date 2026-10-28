@@ -2197,19 +2197,44 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The workspace's notes (markdown), saved: the dashboard's in-place
     /// editor. Nothing in the guest changes.
     @discardableResult
-    func setNotes(_ id: Profile.ID, _ text: String) -> Bool {
-        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return false }
+    /// The dashboard's notes save. `ifStill`: an implicit save (the focus
+    /// or the dashboard went away) writes only while the stored notes are
+    /// still the ones its edit started from; notes saved since (settings)
+    /// win. nil: Return / Save, an unconditional write.
+    func setNotes(_ id: Profile.ID, _ text: String, ifStill base: String? = nil) -> VMDashboardView.NotesSave {
+        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return .failed }
         var p = profiles[i]
-        guard p.comments != text else { return true }
+        if let base, !Self.notesStill(p.comments, base) { return .superseded }
+        guard p.comments != text else { return .saved }
         p.comments = text
         do { try store.update(p) } catch {
             NSLog("[bromure-ac] notes: couldn't save profile: \(error)")
-            return false
+            return .failed
         }
         profiles[i] = p
         runningSessions[id]?.profile.comments = text
         refreshSidebar()   // the row's tooltip carries the notes
+        return .saved
+    }
+
+    /// An implicit notes save over the API (`_commentsIfStill`) whose base
+    /// isn't the stored notes any more: its `comments` is dropped (true).
+    nonisolated static func dropSupersededComments(_ doc: inout [String: Any], stored: String,
+                                                   ifStill base: String?) -> Bool {
+        guard let base, doc["comments"] != nil, !notesStill(stored, base) else { return false }
+        doc.removeValue(forKey: "comments")
         return true
+    }
+
+    /// Stored notes still the ones an edit started from: trailing blanks
+    /// aside, as the dashboard saves them.
+    nonisolated static func notesStill(_ stored: String, _ base: String) -> Bool {
+        func trimmed(_ s: String) -> Substring {
+            var t = Substring(s)
+            while t.last?.isWhitespace == true { t.removeLast() }
+            return t
+        }
+        return trimmed(stored) == trimmed(base)
     }
 
     @discardableResult
@@ -11484,6 +11509,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         doc.removeValue(forKey: "_secretsRedacted")
         let generateSSH = (rawDoc["generateSSH"] as? Bool) == true
         doc.removeValue(forKey: "generateSSH")
+        // `_commentsIfStill`: the notes an implicit dashboard save started
+        // from. Other notes stored since (settings) win: its `comments` is
+        // dropped here, where the check and the write are one step.
+        let commentsIfStill = rawDoc["_commentsIfStill"] as? String
+        doc.removeValue(forKey: "_commentsIfStill")
+        var commentsSuperseded = false
 
         let profile: Profile
         let editing: Profile?
@@ -11494,6 +11525,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let existing = profileByNameOrID(idOrName) else {
                 return ["ok": false, "error": "Workspace not found: \(idOrName)"]
             }
+            commentsSuperseded = Self.dropSupersededComments(&doc, stored: existing.comments, ifStill: commentsIfStill)
             // A partial document (only the fields to change) is overlaid on
             // the stored workspace; a full one replaces every field it names.
             var incoming: Profile
@@ -11596,6 +11628,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var result = automationProfileDescribe(toSave.id.uuidString) ?? ["id": toSave.id.uuidString]
         result["ok"] = true
+        if commentsSuperseded { result["commentsSuperseded"] = true }
         // Surface the freshly-minted public key so the caller can show it for
         // pasting into GitHub etc. (public, not a secret).
         if generateSSH, let pub = toSave.sshPublicKey, !pub.isEmpty { result["sshPublicKey"] = pub }

@@ -41,10 +41,11 @@ struct VMDashboardNotesTests {
     @Test("a failed notes save is reported back to the dashboard")
     func failedSaveReported() throws {
         let v = try Self.src("Sources/AgentCoding/VMDashboard.swift")
-        #expect(v.contains("var onSaveNotes: (@MainActor (String) async -> Bool)? = nil"))
-        #expect(v.contains("guard !(await save(text)), notesSaved == text else { return }"))
+        #expect(v.contains("var onSaveNotes: (@MainActor (String, String?) async -> NotesSave)? = nil"))
+        #expect(v.contains("guard outcome != .saved, notesSaved == text else { return }"))
+        #expect(v.contains("if outcome == .failed, notesDraft == nil { notesDraft = text; notesDraftBase = notesText }"))
         let f = try Self.src("Sources/AgentCoding/FatClientController.swift")
-        #expect(f.contains("onSaveNotes:   { text in (try? await c.saveProfileDoc(id, [\"comments\": text])) != nil }"))
+        #expect(f.contains("guard let r = try? await c.saveProfileDoc(id, doc) else { return .failed }"))
     }
 
     @Test("the tooltip carries the notes' first five lines, at most 300 characters")

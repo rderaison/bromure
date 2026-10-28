@@ -2207,6 +2207,17 @@ final class RemoteHostController {
     /// `fetchProfileDoc`). Returns the response body (e.g. `sshPublicKey`
     /// when the doc asked for a generated key).
     @discardableResult
+    /// The dashboard's notes save on the host (`ACAppDelegate.setNotes`'s
+    /// remote twin): the host applies an implicit save only while its notes
+    /// are still `base`, and says when they weren't.
+    static func saveNotes(_ c: RemoteHostController, _ id: Profile.ID, _ text: String,
+                          ifStill base: String?) async -> VMDashboardView.NotesSave {
+        var doc: [String: Any] = ["comments": text]
+        if let base { doc["_commentsIfStill"] = base }
+        guard let r = try? await c.saveProfileDoc(id, doc) else { return .failed }
+        return (r["commentsSuperseded"] as? Bool) == true ? .superseded : .saved
+    }
+
     func saveProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> [String: Any] {
         let host = self.host
         let path = "/profiles/\(seg(id))"
@@ -7305,7 +7316,7 @@ final class RemoteHostWindow: NSWindow {
             onShutdown:    { c.shutdownWorkspace(id) },
             onResume:      { c.startWorkspace(id) },
             // A partial document: the host overlays the one field it names.
-            onSaveNotes:   { text in (try? await c.saveProfileDoc(id, ["comments": text])) != nil })
+            onSaveNotes:   { text, base in await RemoteHostController.saveNotes(c, id, text, ifStill: base) })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         host.sizingOptions = []   // never let SwiftUI size the window

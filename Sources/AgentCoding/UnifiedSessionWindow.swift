@@ -3259,7 +3259,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
             onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
             onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() },
-            onSaveNotes:   { [weak self] text in self?.acDelegate?.setNotes(id, text) ?? false },
+            onSaveNotes:   { [weak self] text, base in self?.acDelegate?.setNotes(id, text, ifStill: base) ?? .failed },
             startsEditingNotes: editingNotes)
         let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false

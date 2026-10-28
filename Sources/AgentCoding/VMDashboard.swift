@@ -30,7 +30,11 @@ struct VMDashboardView: View {
     let onResume: () -> Void
     /// Save the notes edited in place (markdown); false when the save
     /// failed. nil hides "Edit".
-    var onSaveNotes: (@MainActor (String) async -> Bool)? = nil
+    /// Saves the notes. The second argument is the notes the edit started
+    /// from when the save is implicit (written only while they're still the
+    /// stored ones), nil for Return / Save.
+    var onSaveNotes: (@MainActor (String, String?) async -> NotesSave)? = nil
+    enum NotesSave: Equatable { case saved, failed, superseded }
     /// Open with the notes already in their editor (the `vm-notes:` shot).
     var startsEditingNotes = false
 
@@ -301,11 +305,16 @@ struct VMDashboardView: View {
         while text.last?.isWhitespace == true { text.removeLast() }
         guard text != notesText, let save = onSaveNotes else { return }
         notesSaved = text
+        // Checked again where it is written: notes saved while this one is
+        // on its way (a fat client's PUT) still win over an implicit save.
+        let base = implicit ? notesDraftBase : nil
         Task { @MainActor in
-            // A failed save shows the notes as they are, and the edit again.
-            guard !(await save(text)), notesSaved == text else { return }
+            let outcome = await save(text, base)
+            guard outcome != .saved, notesSaved == text else { return }
             notesSaved = nil
-            if notesDraft == nil { notesDraft = text; notesDraftBase = notesText }
+            // A failed save shows the notes as they are, and the edit again;
+            // a superseded one, the notes that won.
+            if outcome == .failed, notesDraft == nil { notesDraft = text; notesDraftBase = notesText }
         }
     }
 

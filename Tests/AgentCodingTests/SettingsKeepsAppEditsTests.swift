@@ -95,4 +95,46 @@ struct SettingsKeepsAppEditsTests {
         #expect(v.contains("if !notesEditorFocused { commitNotes(implicit: true) }"))
         #expect(v.contains("if notesDraft != nil, notesDraft == notesDraftBase {"))
     }
+
+    // Finding (CWE-362): "Dashboard blur-save still overwrites notes saved
+    // while the write is in flight". The implicit save compared with the
+    // edit's base once, before an awaited write (a fat client's PUT); notes
+    // settings saved meanwhile were overwritten. The base now travels with
+    // the write and is checked where it is applied.
+    @Test("an implicit notes save over the API is dropped once other notes were stored")
+    func hostDropsSuperseded() {
+        var doc: [String: Any] = ["comments": "draft"]
+        #expect(ACAppDelegate.dropSupersededComments(&doc, stored: "settings", ifStill: "base"))
+        #expect(doc["comments"] == nil)
+        doc = ["comments": "draft"]
+        #expect(!ACAppDelegate.dropSupersededComments(&doc, stored: "base\n\n", ifStill: "base"))   // trailing blanks aside
+        #expect(doc["comments"] as? String == "draft")
+        // Return / Save: no base, an unconditional write.
+        #expect(!ACAppDelegate.dropSupersededComments(&doc, stored: "settings", ifStill: nil))
+        #expect(doc["comments"] as? String == "draft")
+        #expect(ACAppDelegate.notesStill("a  \n", "a"))
+        #expect(!ACAppDelegate.notesStill("a", "b"))
+    }
+
+    @Test("the base is checked where the notes are written: locally, on the host, and sent by a fat client")
+    func baseTravels() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
+        let ac = try src("Sources/AgentCoding/BromureAC.swift")
+        let set = try #require(ac.range(of: "func setNotes(_ id: Profile.ID, _ text: String, ifStill base: String? = nil)"))
+        let write = try #require(ac[set.upperBound...].range(of: "try store.update(p)"))
+        #expect(ac[set.upperBound..<write.lowerBound].contains("if let base, !Self.notesStill(p.comments, base) { return .superseded }"))
+        let upsert = try #require(ac.range(of: "func automationUpsertProfile(idOrName: String?, doc rawDoc: [String: Any])"))
+        let merge = try #require(ac[upsert.upperBound...].range(of: "switch ProfileDocument.merge(doc, over: existing)"))
+        #expect(ac[upsert.upperBound..<merge.lowerBound].contains(
+            "commentsSuperseded = Self.dropSupersededComments(&doc, stored: existing.comments, ifStill: commentsIfStill)"))
+        #expect(ac.contains("if commentsSuperseded { result[\"commentsSuperseded\"] = true }"))
+        let fc = try src("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("if let base { doc[\"_commentsIfStill\"] = base }"))
+        let v = try src("Sources/AgentCoding/VMDashboard.swift")
+        #expect(v.contains("let base = implicit ? notesDraftBase : nil"))
+        #expect(v.contains("let outcome = await save(text, base)"))
+        let w = try src("Sources/AgentCoding/UnifiedSessionWindow.swift")
+        #expect(w.contains("setNotes(id, text, ifStill: base)"))
+    }
 }
