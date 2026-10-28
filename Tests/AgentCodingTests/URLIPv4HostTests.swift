@@ -67,4 +67,64 @@ struct URLIPv4HostTests {
     func publicOpens(host: String) {
         #expect(!ACAppDelegate.hostIsLocalOrPrivate(host), "\(host)")
     }
+
+    // Finding (CWE-918): "Loopback gate skips UTS46 mappings, so a
+    // compatibility-dot host still opens on the Mac". The browser's host
+    // parser runs UTS #46 over the percent-decoded host before the IPv4
+    // parser; `URL` maps a raw host but only decodes an encoded one, so
+    // `127%E3%80%820%E3%80%820%E3%80%821` read as a public name.
+    @Test("compatibility dots and digits, raw or percent-encoded, read as the address the browser dials",
+          arguments: ["http://127%E3%80%820%E3%80%820%E3%80%821:631/", "http://%EF%BC%90%EF%BD%98:631/",
+                      "http://127。0。0。1:631/", "http://127．0．0．1/", "http://127｡0｡0｡1/", "http://０ｘ/",
+                      "http://⑫⑦.0.0.1/", "http://%E2%91%AB%E2%91%A6.0.0.1/", "http://%EF%BC%91%EF%BC%92%EF%BC%97.1/",
+                      "http://%F0%9D%9F%8F%F0%9D%9F%90%F0%9D%9F%95.0.0.1/", "http://%EF%BC%AC%EF%BC%AF%EF%BC%A3%EF%BC%A1%EF%BC%AC%EF%BC%A8%EF%BC%AF%EF%BC%B3%EF%BC%B4/"])
+    func compatibilityLoopback(_ s: String) throws {
+        let url = try #require(URL(string: s))
+        let host = try #require(url.host)
+        #expect(ACAppDelegate.reachesLoopback(host), "\(s) → \(host)")
+        #expect(ACAppDelegate.hostIsLocalOrPrivate(host), "\(s)")
+        #expect(!ACAppDelegate.opensInRealBrowser(url), "\(s)")
+    }
+
+    @Test("an encoded private address is private too", arguments: ["http://10%E3%80%820%E3%80%820%E3%80%821/",
+                                                                     "http://192%EF%BC%8E168%EF%BC%8E1%EF%BC%8E1/"])
+    func compatibilityPrivate(_ s: String) throws {
+        let url = try #require(URL(string: s))
+        #expect(ACAppDelegate.hostIsLocalOrPrivate(try #require(url.host)), "\(s)")
+        #expect(!ACAppDelegate.opensInRealBrowser(url))
+    }
+
+    @MainActor
+    @Test("a sign-in redirect to such a host is a callback port, so its owner is checked",
+          arguments: ["http://127%E3%80%820%E3%80%820%E3%80%821:1455/cb", "http://127。0。0。1:1455/cb",
+                      "http://⑫⑦.0.0.1:1455/cb", "http://%EF%BC%90%EF%BD%98:1455/cb"])
+    func compatibilityRedirect(_ redirect: String) throws {
+        var c = URLComponents(string: "https://auth.openai.com/oauth/authorize")!
+        c.queryItems = [URLQueryItem(name: "redirect_uri", value: redirect)]
+        #expect(ACAppDelegate.loopbackCallbackPort(from: try #require(c.url)) == 1455, "\(redirect)")
+    }
+
+    @Test("a host the browser's parser refuses opens nothing",
+          arguments: ["http://ab%EF%BF%BD.com/", "http://evil.com%2F@127.0.0.1/", "http://a%20b.com/", "http://x%3A80/"])
+    func refusedHosts(_ s: String) throws {
+        let url = try #require(URL(string: s))
+        #expect(!ACAppDelegate.opensInRealBrowser(url), "\(s) → \(url.host ?? "-")")
+    }
+
+    @Test("public names, Unicode or encoded, still open",
+          arguments: ["https://bücher.de/", "https://b%C3%BCcher.de/", "https://☃.com/", "https://ＥＸＡＭＰＬＥ.com/",
+                      "https://%EF%BC%A5%EF%BC%B8%EF%BC%A1%EF%BC%AD%EF%BC%B0%EF%BC%AC%EF%BC%A5.com/", "https://example.com/"])
+    func publicUnicode(_ s: String) throws {
+        #expect(ACAppDelegate.opensInRealBrowser(try #require(URL(string: s))), "\(s)")
+    }
+
+    @Test("a guest's sign-in URL for a fat client passes the same gate before it is published")
+    func remoteRegistrationGated() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let r = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/ClaudeRegistrationCoordinator.swift"), encoding: .utf8)
+        let gate = try #require(r.range(of: "guard ACAppDelegate.opensInRealBrowser(url) else {"))
+        let publish = try #require(r.range(of: "url: url.absoluteString, callbackPort:"))
+        #expect(gate.lowerBound < publish.lowerBound)
+        #expect(!r[gate.upperBound..<publish.lowerBound].contains("RemoteRegistrationBroker.shared.pending != nil"))
+    }
 }

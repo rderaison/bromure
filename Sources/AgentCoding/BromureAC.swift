@@ -3536,6 +3536,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return host
     }
 
+    /// A URL host as the browser's host parser leaves it before reading an
+    /// address: UTS #46 domain-to-ASCII over the percent-decoded host (what
+    /// `URL.host` hands back). `URL` maps a host it parses itself
+    /// (`127。0。0。1` → `127.0.0.1`), but a percent-encoded one is only
+    /// decoded: `%E3%80%82` stays an ideographic full stop, `%EF%BC%90%EF%BD%98`
+    /// fullwidth `０ｘ`, and both read as public names while the browser
+    /// dials 127.0.0.1 and 0.0.0.0 (Finding CWE-918, "Loopback gate skips
+    /// UTS46 mappings, so a compatibility-dot host still opens on the Mac").
+    /// The mapping is the one `URL` runs on a host it parses. nil: the host
+    /// parser fails on it (a forbidden code point, a label UTS #46 refuses)
+    /// -- no URL a browser opens, so nothing to open either. An IPv6 literal
+    /// (bracketed or not, a zone allowed) is returned as is.
+    nonisolated static func browserHost(_ rawHost: String) -> String? {
+        if rawHost.hasPrefix("[") || rawHost.contains(":") {
+            // An IPv6 literal, or a decoded colon a browser refuses.
+            var v6 = in6_addr()
+            return inet_pton(AF_INET6, bareHost(rawHost), &v6) == 1 ? rawHost : nil
+        }
+        // The URL standard's forbidden domain code points: C0 controls,
+        // space, # % / : < > ? @ [ \ ] ^ | and DEL. Decoded out of the host
+        // they fail the URL; re-parsed below they would change what the host is.
+        let forbidden = CharacterSet(charactersIn: " #%/:<>?@[\\]^|\u{7F}")
+            .union(CharacterSet(charactersIn: UnicodeScalar(0)...UnicodeScalar(0x1F)))
+        guard rawHost.unicodeScalars.allSatisfy({ !forbidden.contains($0) }) else { return nil }
+        guard !rawHost.unicodeScalars.allSatisfy(\.isASCII) else { return rawHost }
+        guard let mapped = URL(string: "http://" + rawHost + "/")?.host,
+              !mapped.isEmpty, mapped.unicodeScalars.allSatisfy(\.isASCII) else { return nil }
+        return mapped
+    }
+
     /// What a browser makes of a host under the URL standard's IPv4 parser.
     enum URLIPv4 { case notIPv4, invalid, address(UInt32) }
 
@@ -3589,7 +3619,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// IPv6 `::1`, `::` and the v4-mapped loopback (`::ffff:127.0.0.1`),
     /// bracketed or not, with or without a trailing dot.
     nonisolated static func reachesLoopback(_ rawHost: String) -> Bool {
-        let host = bareHost(rawHost)
+        // A host the browser's parser refuses goes nowhere; one it maps
+        // (`127%E3%80%820%E3%80%820%E3%80%821`) is read as it maps it.
+        guard let mapped = browserHost(rawHost) else { return false }
+        let host = bareHost(mapped)
         if host == "localhost" || host.hasSuffix(".localhost") { return true }
         // IPv4, every form a URL parser accepts (shorthand, octal, hex, a
         // single number, a bare `0x`).
@@ -3644,7 +3677,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Every loopback spelling first (`127.1`, `0x7f000001`, `[::1%lo0]`
         // -- inet_pton below takes none of them, and a browser goes there).
         if reachesLoopback(rawHost) { return true }
-        let host = bareHost(rawHost)
+        // Read as the browser's host parser leaves it (UTS #46); a host it
+        // refuses opens nothing: refused too.
+        guard let mapped = browserHost(rawHost) else { return true }
+        let host = bareHost(mapped)
         // Named loopback / mDNS.
         if host == "localhost" || host.hasSuffix(".localhost") { return true }
         if host == "local" || host.hasSuffix(".local") { return true }
