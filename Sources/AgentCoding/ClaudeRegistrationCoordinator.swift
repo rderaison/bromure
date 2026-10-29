@@ -462,15 +462,15 @@ extension ACAppDelegate {
     }
 
     /// End a sign-in that can't go on, saying why: to the card that started
-    /// it, else as a notice — or, for a fat client's run, in /state's
-    /// `registrationEnded` (nobody is at this Mac to read a notice).
-    /// Teardown finishes a fat client's relay, stops the credential poll and
-    /// the scratch VM.
+    /// it, else as a notice. A fat client's run also hears it through
+    /// /state's `registrationEnded` (the notice stays for an older client,
+    /// which doesn't read that). Teardown finishes a fat client's relay,
+    /// stops the credential poll and the scratch VM.
     func failClaudeRegistration(_ message: String) {
         if let ev = claudeRegistration?.onEvent {
             ev(.finished(success: false, message: message))
             claudeRegistration?.onEvent = nil
-        } else if RemoteRegistrationBroker.shared.pending == nil {
+        } else {
             unifiedWindow?.showNotice(message)
         }
         teardownClaudeRegistration(reason: .failure, message: message)

@@ -58,12 +58,11 @@ struct RemoteSignInEndTests {
         #expect(late == "late")
     }
 
-    @Test("every remote failure carries its reason into the end; no host notice for a remote run")
+    @Test("every remote failure carries its reason into the end")
     func hostFailuresSayWhy() throws {
         let r = try Self.src("Sources/AgentCoding/ClaudeRegistrationCoordinator.swift")
         let fail = try #require(r.range(of: "func failClaudeRegistration(_ message: String) {"))
         let failBody = r[fail.upperBound...].prefix(500)
-        #expect(failBody.contains("} else if RemoteRegistrationBroker.shared.pending == nil {"))
         #expect(failBody.contains("teardownClaudeRegistration(reason: .failure, message: message)"))
         #expect(r.contains("RemoteRegistrationBroker.shared.finish(success: reason == .success, message: message)"))
         // VM start, CLI launch and timeout failures too.
