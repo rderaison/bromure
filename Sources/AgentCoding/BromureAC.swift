@@ -1497,6 +1497,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // CLI / automation, a timeline action, an expiry): re-arm the
             // expiry timer and refresh what's listening (the timeline).
             firewallProfilesChanged(from: oldValue)
+            // An open VM dashboard shows the stored notes, whoever stored
+            // them (settings, AppleScript, the CLI): a card left on older
+            // ones had its next Save write them back over the newer.
+            unifiedWindow?.refreshVMDashboard()
         }
     }
 
@@ -2204,7 +2208,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func setNotes(_ id: Profile.ID, _ text: String, ifStill base: String? = nil) -> VMDashboardView.NotesSave {
         guard let i = profiles.firstIndex(where: { $0.id == id }) else { return .failed }
         var p = profiles[i]
-        if let base, !Self.notesStill(p.comments, base) { return .superseded }
+        if let base, !Self.notesStill(p.comments, base) { return .superseded(p.comments) }
         guard p.comments != text else { return .saved }
         p.comments = text
         do { try store.update(p) } catch {
@@ -11660,7 +11664,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         do {
             try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH, policySource: "api")
         } catch {
-            return ["ok": false, "error": error.localizedDescription]
+            var r: [String: Any] = ["ok": false, "error": error.localizedDescription]
+            // The notes it dropped are still the ones that won: a client that
+            // read only "failed" reopened its stale draft.
+            if commentsSuperseded, let editing { r["commentsSuperseded"] = true; r["comments"] = editing.comments }
+            return r
         }
 
         // Push host-side cosmetic + live-swap updates into a running session,

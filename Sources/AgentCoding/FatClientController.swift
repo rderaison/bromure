@@ -2209,10 +2209,19 @@ final class RemoteHostController {
         }
     }
 
-    /// Secret-preserving whole-document save (the counterpart of
-    /// `fetchProfileDoc`). Returns the response body (e.g. `sshPublicKey`
-    /// when the doc asked for a generated key).
-    @discardableResult
+    /// One notes save in flight per workspace, in the order they were made.
+    /// Each PUT dialed its own connection and the host applies whichever
+    /// reaches its main queue first: a second blur's save (its base the
+    /// first's draft, not stored yet) could land first, be refused as
+    /// superseded, and the first then wrote the older draft over it. In
+    /// order, the second's base is what the first left stored -- or it lost
+    /// to notes saved meanwhile, as it should.
+    private let notesSaves = InOrder<Profile.ID, VMDashboardView.NotesSave>()
+
+    func saveNotesInOrder(_ id: Profile.ID, _ text: String, ifStill base: String?) async -> VMDashboardView.NotesSave {
+        await notesSaves.run(id) { await Self.saveNotes(self, id, text, ifStill: base) }
+    }
+
     /// The dashboard's notes save on the host (`ACAppDelegate.setNotes`'s
     /// remote twin): the host applies an implicit save only while its notes
     /// are still `base`, and says when they weren't.
@@ -2220,10 +2229,33 @@ final class RemoteHostController {
                           ifStill base: String?) async -> VMDashboardView.NotesSave {
         var doc: [String: Any] = ["comments": text]
         if let base { doc["_commentsIfStill"] = base }
-        guard let r = try? await c.saveProfileDoc(id, doc) else { return .failed }
-        return (r["commentsSuperseded"] as? Bool) == true ? .superseded : .saved
+        guard let r = try? await c.putProfileDoc(id, doc) else { return .failed }
+        return notesOutcome(status: r.status, json: r.json)
     }
 
+    /// What the host's answer to a notes save means. Superseded (even when
+    /// the rest of the save then failed): the notes that won are in the
+    /// answer, and the card shows them.
+    nonisolated static func notesOutcome(status: Int, json: [String: Any]) -> VMDashboardView.NotesSave {
+        if (json["commentsSuperseded"] as? Bool) == true { return .superseded(json["comments"] as? String) }
+        return status == 200 && (json["ok"] as? Bool) == true ? .saved : .failed
+    }
+
+    /// PUT a workspace document; the host's answer whatever it says.
+    func putProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> (status: Int, json: [String: Any]) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("PUT", path, body: doc)
+        }.value
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        return (resp.status, resp.json)
+    }
+
+    /// Secret-preserving whole-document save (the counterpart of
+    /// `fetchProfileDoc`). Returns the response body (e.g. `sshPublicKey`
+    /// when the doc asked for a generated key).
+    @discardableResult
     func saveProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> [String: Any] {
         let host = self.host
         let path = "/profiles/\(seg(id))"
@@ -7322,7 +7354,7 @@ final class RemoteHostWindow: NSWindow {
             onShutdown:    { c.shutdownWorkspace(id) },
             onResume:      { c.startWorkspace(id) },
             // A partial document: the host overlays the one field it names.
-            onSaveNotes:   { text, base in await RemoteHostController.saveNotes(c, id, text, ifStill: base) })
+            onSaveNotes:   { text, base in await c.saveNotesInOrder(id, text, ifStill: base) })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         host.sizingOptions = []   // never let SwiftUI size the window
@@ -8488,3 +8520,23 @@ struct OutgoingIndicator: View {
 }
 #endif
 
+/// Runs the operations given for one key one after the other, in the order
+/// they were asked for; different keys don't wait on each other.
+@MainActor
+final class InOrder<Key: Hashable, Value> {
+    private var tails: [Key: Task<Value, Never>] = [:]
+
+    func run(_ key: Key, _ operation: @escaping @MainActor () async -> Value) async -> Value {
+        let previous = tails[key]
+        let task = Task { @MainActor in
+            _ = await previous?.value
+            return await operation()
+        }
+        tails[key] = task
+        let value = await task.value
+        if tails[key] == task { tails[key] = nil }
+        return value
+    }
+
+    var idle: Bool { tails.isEmpty }
+}
