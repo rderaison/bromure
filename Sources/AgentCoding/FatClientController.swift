@@ -435,6 +435,18 @@ final class RemoteHostController {
             registrationTerminalID = sid
             onRegistrationTerminal?(sid, (reg["provider"] as? String) ?? "")
         }
+        // A published sign-in URL is the guest's: a page on this device's
+        // loopback or LAN opens nowhere, and no callback tunnel stands up
+        // for it. A current server never publishes one; an older one did, and
+        // Bromure Remote (iPhone, iPad, Vision Pro) opened it unchecked.
+        if let s = reg["url"] as? String, let url = URL(string: s), !GuestURLGate.opensInRealBrowser(url) {
+            if openedRegistrationURLs.insert(s).inserted {
+                FatClientLog.log("remote registration: refused sign-in URL with a local/private host")
+            }
+            registrationCallback?.stop()
+            registrationCallback = nil
+            return
+        }
         // Loopback-callback flows (Claude/Codex sign in via a localhost redirect)
         // need a tunnel from our 127.0.0.1:port to the VM's port so the browser's
         // callback reaches the CLI in the VM. Device-code flows (Grok's
@@ -459,13 +471,9 @@ final class RemoteHostController {
         let tunnel = registrationCallback.map { "callback 127.0.0.1:\($0.port) -> \($0.vmIP):\($0.port)" }
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
+        // Checked above, before the tunnel.
+        guard GuestURLGate.opensInRealBrowser(url) else { return }
 #if os(macOS)
-        // The server gates the guest's URL before it publishes it; an older
-        // server didn't, and this Mac's loopback / LAN is what it would reach.
-        guard ACAppDelegate.opensInRealBrowser(url) else {
-            FatClientLog.log("remote registration: refused sign-in URL with a local/private host")
-            return
-        }
         NSWorkspace.shared.open(url)
 #else
         UIApplication.shared.open(url)

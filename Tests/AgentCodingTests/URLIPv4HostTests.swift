@@ -126,11 +126,42 @@ struct URLIPv4HostTests {
         let publish = try #require(r.range(of: "url: url.absoluteString, callbackPort:"))
         #expect(gate.lowerBound < publish.lowerBound)
         #expect(!r[gate.upperBound..<publish.lowerBound].contains("RemoteRegistrationBroker.shared.pending != nil"))
-        // And the client checks again before it opens (an older server).
+        // And the client checks again (an older server), on every platform:
+        // before the callback tunnel stands up, and before either open.
         let f = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
-        let open = try #require(f.range(of: "remote registration: opening sign-in page locally"))
-        let clientGate = try #require(f[open.upperBound...].range(of: "guard ACAppDelegate.opensInRealBrowser(url) else {"))
-        let opened = try #require(f[open.upperBound...].range(of: "NSWorkspace.shared.open(url)"))
-        #expect(clientGate.lowerBound < opened.lowerBound)
+        let fn = try #require(f.range(of: "private func applyPendingRegistration(_ reg: [String: Any]?) {"))
+        let body = f[fn.upperBound...].prefix(4500)
+        let refuse = try #require(body.range(of: "!GuestURLGate.opensInRealBrowser(url) {"))
+        let tunnel = try #require(body.range(of: "registrationCallback = RegistrationCallbackTunnel("))
+        let macOpen = try #require(body.range(of: "NSWorkspace.shared.open(url)"))
+        let iosOpen = try #require(body.range(of: "UIApplication.shared.open(url)"))
+        #expect(refuse.lowerBound < tunnel.lowerBound && tunnel.lowerBound < macOpen.lowerBound && macOpen.lowerBound < iosOpen.lowerBound)
+        #expect(body[refuse.upperBound..<tunnel.lowerBound].contains("registrationCallback?.stop()"))
+        // No platform conditional between the gate and the opens.
+        let gate2 = try #require(body.range(of: "guard GuestURLGate.opensInRealBrowser(url) else { return }"))
+        #expect(gate2.lowerBound < macOpen.lowerBound && !body[gate2.upperBound..<macOpen.lowerBound].contains("#else"))
+        let mac = body[..<gate2.lowerBound].components(separatedBy: "#if os(macOS)").count
+        #expect(mac == 1, "the gate must not sit inside #if os(macOS)")
+    }
+
+    @Test("the gate is on Bromure Remote's shared sources, with the code that opens the URL")
+    func gateShippedToRemote() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let gen = try String(contentsOf: top.appendingPathComponent("scripts/gen-ios-sources.py"), encoding: .utf8)
+        #expect(gen.contains(#""GuestURLGate.swift","#) && gen.contains(#""FatClientController.swift","#))
+        let pbx = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/BromureRemote.xcodeproj/project.pbxproj"), encoding: .utf8)
+        #expect(pbx.contains("GuestURLGate.swift"))
+        let gate = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/GuestURLGate.swift"), encoding: .utf8)
+        #expect(!gate.contains("AppKit") && !gate.contains("ACAppDelegate"))
+    }
+
+    @Test("GuestURLGate and the app's names agree", arguments: [
+        "http://127.0.0.1/", "http://0x/", "http://127%E3%80%820%E3%80%820%E3%80%821/", "http://10.0.0.1/", "http://[::1]/",
+        "http://foo.local/", "https://example.com/", "https://bücher.de/", "http://ab%EF%BF%BD.com/"])
+    func gateAgrees(_ s: String) throws {
+        let url = try #require(URL(string: s))
+        #expect(GuestURLGate.opensInRealBrowser(url) == ACAppDelegate.opensInRealBrowser(url))
+        let host = try #require(url.host)
+        #expect(GuestURLGate.reachesLoopback(host) == ACAppDelegate.reachesLoopback(host))
     }
 }
