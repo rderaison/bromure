@@ -159,6 +159,18 @@ if [ "${ACCEPT_CLAUDE:-0}" = 1 ]; then
   req POST /sessions/x/tab "{\"action\":\"close\",\"index\":$cw}" >/dev/null
 fi
 
+echo "== agents, driven through the CLI"
+# Through the CLI binary on purpose. Posting to /sidecar/agents/install
+# directly only proves the ROUTE works, and the route was never the problem:
+# the CLI sent {"tool":...} where the route reads "ids"/"id", so every
+# install silently resolved to an empty list and answered "nothing to
+# install". A bogus id reaches agents.Install() only if the key is right.
+r=$("$exe" agents install definitely-not-an-agent 2>&1)
+expect "CLI install reaches the installer" "$r" 'unknown agent definitely-not-an-agent'
+case "$r" in *"nothing to install"*) bad "CLI install sends the id the route reads" "the body key is wrong again";; *) ok "CLI install sends the id the route reads";; esac
+r=$("$exe" agents 2>&1)
+expect "CLI lists the agents" "$r" 'codex'
+
 echo
 echo "passed $pass, failed $fail"
 [ "$fail" = 0 ]

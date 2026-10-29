@@ -300,7 +300,10 @@ func cliAgents(args []string) int {
 			return 2
 		}
 		fmt.Printf("installing %s with its maker's installer; this streams to the log.\n", args[1])
-		if _, err := req("POST", "/sidecar/agents/install", map[string]any{"tool": args[1]}); err != nil {
+		// "ids", like the Windows UI sends: the route takes a list (or a bare
+		// "id"), and a body keyed anything else installs NOTHING -- it reads as
+		// an empty list and comes back "nothing to install".
+		if _, err := req("POST", "/sidecar/agents/install", map[string]any{"ids": []string{args[1]}}); err != nil {
 			return cliFail(err)
 		}
 		fmt.Println("started. Follow it with: bromure-sidecar logs -f")
