@@ -2878,6 +2878,7 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ は %2$@ のモデルを使用できないため、独自のプロバイダーで動作します。別のモデルを選択してください。";
 "%d sessions whose machine or folder is gone" = "マシンまたはフォルダーが存在しないセッション %d 件";
 "(empty)" = "(空)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "エージェントが開いたサインインページはこの Mac またはローカルネットワークを指しているため、Bromure は開きませんでした。";
 "Restore these workspaces and their sessions at next start" = "次回起動時にこれらのワークスペースとセッションを復元する";
 "Restoring your workspaces" = "ワークスペースを復元しています";
 "Restoring Workspaces" = "ワークスペースの復元";

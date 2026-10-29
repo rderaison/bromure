@@ -15917,6 +15917,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 // A sign-in card is waiting on this very page.
                 if let signIn = self.proxySignIns[pid], !signIn.finished {
+                    // A page on this Mac's loopback or network is never
+                    // opened: the sign-in ends instead of waiting out its
+                    // timeout on a page nobody will see.
+                    guard Self.opensInRealBrowser(url) else {
+                        self.endProxySignIn(signIn, success: false, message: NSLocalizedString(
+                            "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.",
+                            comment: "sign-in refused: the guest's sign-in URL has a local or private host"))
+                        Self.openGuestRelayedURL(url)   // logs the refusal
+                        return
+                    }
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }

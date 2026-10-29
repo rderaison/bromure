@@ -2912,6 +2912,7 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model.";
 "%d sessions whose machine or folder is gone" = "%d sessions whose machine or folder is gone";
 "(empty)" = "(empty)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.";
 "Restore these workspaces and their sessions at next start" = "Restore these workspaces and their sessions at next start";
 "Restoring your workspaces" = "Restoring your workspaces";
 "Restoring Workspaces" = "Restoring Workspaces";

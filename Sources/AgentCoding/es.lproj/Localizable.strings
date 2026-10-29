@@ -2880,6 +2880,7 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ no puede usar modelos de %2$@, así que usa su propio proveedor. Elige otro modelo.";
 "%d sessions whose machine or folder is gone" = "%d sesiones cuya máquina o carpeta ya no existe";
 "(empty)" = "(vacío)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "La página de inicio de sesión que abrió el agente apunta a este Mac o a su red local, así que Bromure no la abrió.";
 "Restore these workspaces and their sessions at next start" = "Restaurar estos espacios de trabajo y sus sesiones en el próximo inicio";
 "Restoring your workspaces" = "Restaurando tus espacios de trabajo";
 "Restoring Workspaces" = "Restaurando espacios de trabajo";

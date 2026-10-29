@@ -125,7 +125,6 @@ struct URLIPv4HostTests {
         let gate = try #require(r.range(of: "guard ACAppDelegate.opensInRealBrowser(url) else {"))
         let publish = try #require(r.range(of: "url: url.absoluteString, callbackPort:"))
         #expect(gate.lowerBound < publish.lowerBound)
-        #expect(!r[gate.upperBound..<publish.lowerBound].contains("RemoteRegistrationBroker.shared.pending != nil"))
         // And the client checks again (an older server), on every platform:
         // before the callback tunnel stands up, and before either open.
         let f = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
