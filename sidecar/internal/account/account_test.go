@@ -74,8 +74,15 @@ func TestSignInSyncSignOut(t *testing.T) {
 	}
 	pu, _ := url.Parse(u)
 	state := pu.Query().Get("state")
+	// The page reads os= and host= to name what is being enrolled; it cannot
+	// ask the browser, which is usually on another machine entirely.
+	wantQuery := "capability=agent-host&state=" + state + "&app=agent-host"
+	if osName := enrollOS(); osName != "" {
+		wantQuery += "&os=" + osName
+	}
+	wantQuery += "&host=Your+PC"
 	if pu.Scheme+"://"+pu.Host+pu.Path != EnrollURL || pu.Query().Get("capability") != "agent-host" ||
-		pu.Query().Get("app") != "agent-host" || len(state) != 36 || pu.RawQuery != "capability=agent-host&state="+state+"&app=agent-host" {
+		pu.Query().Get("app") != "agent-host" || len(state) != 36 || pu.RawQuery != wantQuery {
 		t.Fatalf("enroll url %s", u)
 	}
 	if b, _ := os.ReadFile(PendingStateFile()); string(b) != state {
@@ -169,5 +176,22 @@ func TestHelpers(t *testing.T) {
 	}
 	if _, ok := ClientKeyLine("ssh-ed25519"); ok {
 		t.Fatal("accepted")
+	}
+	// Every platform the Sidecar ships on must name itself in the value set
+	// the enroll page knows. A typo here is invisible in use: the page just
+	// ignores os= and quietly falls back to neutral wording.
+	switch got := enrollOS(); got {
+	case "linux", "macos", "windows":
+	default:
+		t.Fatalf("enrollOS() = %q, not a value the page understands", got)
+	}
+	if h := enrollHost("  lnx\x00-ntv\n  "); h != "lnx-ntv" {
+		t.Fatalf("enrollHost kept control characters: %q", h)
+	}
+	if h := enrollHost(strings.Repeat("x", 200)); len([]rune(h)) != 64 {
+		t.Fatalf("enrollHost cap: %d runes", len([]rune(h)))
+	}
+	if h := enrollHost("   "); h != "" {
+		t.Fatalf("enrollHost blank: %q", h)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"runtime"
 
 	"github.com/rderaison/bromure/sidecar/internal/account"
 	"github.com/rderaison/bromure/sidecar/internal/control"
@@ -51,6 +53,33 @@ func (x acct) Servers() []map[string]any {
 	return out
 }
 
+// openEnrollURL opens the enroll page when there is a browser to open it
+// in. On a headless Linux host there isn't: `bromure-sidecar enroll` prints
+// the URL for the user to open on another machine, and xdg-open would only
+// spawn a doomed child whose failure is invisible (exec.Command.Start does
+// not wait for it). Skipping is not a failure, so it reports none.
+//
+// A desktop Linux session whose user manager never imported DISPLAY reads as
+// headless here and won't auto-open; the printed URL still works, which is
+// the safer way round.
+func openEnrollURL(u string) error {
+	if runtime.GOOS == "linux" && !hasDisplay() {
+		return nil
+	}
+	return winopen.URL(u)
+}
+
+func hasDisplay() bool {
+	if os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "" {
+		return true
+	}
+	switch os.Getenv("XDG_SESSION_TYPE") {
+	case "x11", "wayland":
+		return true
+	}
+	return false
+}
+
 var theAccount *account.Account
 
 // startAccount brings up the bromure.io account: enrollment, key sync,
@@ -62,7 +91,7 @@ func startAccount(r *remote) accountAPI {
 		UserName:        userName(),
 		ClientPublicKey: sshdial.ClientPublicKeyLine,
 		SetManagedKeys:  sshserver.SetManagedKeys,
-		OpenURL:         winopen.URL,
+		OpenURL:         openEnrollURL,
 	})
 	theAccount.Start()
 	return acct{theAccount}

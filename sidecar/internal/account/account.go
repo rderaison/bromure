@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -158,6 +159,36 @@ func newState() string {
 	return strings.ToUpper(fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]))
 }
 
+// enrollOS names this platform for the enroll page, in the value set the
+// page understands; anything else it ignores, and reads as neutral.
+func enrollOS() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "linux"
+	case "darwin":
+		return "macos"
+	case "windows":
+		return "windows"
+	}
+	return ""
+}
+
+// enrollHost is the machine name the page shows beside its heading. Display
+// only, so control characters go and the length is capped: this travels in a
+// URL the user may have to retype off another screen.
+func enrollHost(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(name))
+	if r := []rune(name); len(r) > 64 {
+		name = string(r[:64])
+	}
+	return name
+}
+
 // BeginSignIn writes a fresh handoff state and opens bromure.io's enroll
 // page; the browser comes back as bromure-agent-host://enroll?code=…&state=….
 func (a *Account) BeginSignIn() (string, error) {
@@ -172,6 +203,20 @@ func (a *Account) BeginSignIn() (string, error) {
 	a.lastError = ""
 	a.mu.Unlock()
 	u := EnrollURL + "?capability=agent-host&state=" + url.QueryEscape(state) + "&app=agent-host"
+	// What the page cannot work out for itself: which OS is being enrolled,
+	// and what it is called. The browser is routinely on a DIFFERENT machine
+	// than the enrollee -- that is the whole point of the handoff on a
+	// headless host -- so sniffing the User-Agent there would confidently
+	// name the wrong platform. An omitted or unknown os= leaves the page on
+	// its neutral wording.
+	if osName := enrollOS(); osName != "" {
+		u += "&os=" + osName
+	}
+	if a.cfg.MachineName != nil {
+		if h := enrollHost(a.cfg.MachineName()); h != "" {
+			u += "&host=" + url.QueryEscape(h)
+		}
+	}
 	if a.cfg.OpenURL != nil {
 		if err := a.cfg.OpenURL(u); err != nil {
 			logx.Printf("p2p: opening the enroll page failed: %v", err)
