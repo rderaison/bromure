@@ -26,6 +26,9 @@ final class EgressConnectionRegistry: @unchecked Sendable {
         let route: String
         /// The rule that allowed it when it opened (nil: the default action).
         let rule: String?
+        /// The program that opened it, when the guest's attestor named one:
+        /// a re-check under `binaries:` rules decides for it, not for nobody.
+        var identity: OpenShellPolicy.BinaryIdentity? = nil
         /// Close both sides. Called at most once, never under the lock.
         let cut: @Sendable () -> Void
     }
@@ -150,12 +153,14 @@ final class EgressConnectionRegistry: @unchecked Sendable {
     /// a reused descriptor.
     @discardableResult
     func register(profileID: UUID, host: String, port: Int, route: String, rule: String?,
+                  identity: OpenShellPolicy.BinaryIdentity? = nil,
                   cut: @escaping @Sendable () -> Void) -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         let id = nextID
         nextID += 1
         entries[id] = Entry(id: id, profileID: profileID, host: host.lowercased(),
-                            port: UInt16(truncatingIfNeeded: port), route: route, rule: rule, cut: cut)
+                            port: UInt16(truncatingIfNeeded: port), route: route, rule: rule,
+                            identity: identity, cut: cut)
         return id
     }
 
@@ -176,7 +181,8 @@ final class EgressConnectionRegistry: @unchecked Sendable {
         lock.lock()
         var victims: [Entry] = []
         for (id, e) in entries where e.profileID == profileID {
-            if policy.verdict(ip: nil, hostnames: [e.host], proto: .tcp, port: e.port, now: now) == .deny {
+            if policy.verdict(ip: nil, hostnames: [e.host], proto: .tcp, port: e.port,
+                              identity: e.identity, now: now) == .deny {
                 victims.append(e)
                 entries.removeValue(forKey: id)
             }

@@ -1205,6 +1205,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "Este Mac já encaminha %@ para outro lado — normalmente para os seus próprios espaços de trabalho, que usam a mesma sub-rede que os do remoto. O túnel não o pode assumir.\n\nAuxiliar: %@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "O auxiliar de rede só serve o utilizador com sessão iniciada no ecrã.\n\nAuxiliar: %@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "O auxiliar de rede não conseguiu criar a interface do túnel.\n\nAuxiliar: %@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "O auxiliar de rede só encaminha uma rede privada /24 (em 10/8, 172.16/12, 192.168/16 ou 100.64/10), e a sub-rede %@ do sistema remoto não é uma delas.\n\nAuxiliar: %@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "O auxiliar de rede só serve a cópia do Bromure Agentic Coding a partir da qual foi instalado, assinada da mesma forma. Se acabou de atualizar ou recompilar a app, reinicie o auxiliar: desative e volte a ativar “Bromure Agentic Coding” em Itens de Início.\n\nAuxiliar: %@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "O auxiliar de rede já mantém %d túneis, o seu limite. Feche a janela de um sistema remoto que não esteja a usar, ou saia da app e volte a abri-la.\n\nAuxiliar: %@";
 "The network helper couldn't create the tunnel interface." = "O auxiliar de rede não conseguiu criar a interface do túnel.";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -2875,6 +2878,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ não pode usar modelos de %2$@, então usa o próprio provedor. Escolha outro modelo.";
 "%d sessions whose machine or folder is gone" = "%d sessões cuja máquina ou pasta não existe mais";
 "(empty)" = "(vazio)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "A página de login que o agente abriu aponta para este Mac ou para a rede local dele, então o Bromure não a abriu.";
+"Restore these workspaces and their sessions at next start" = "Restaurar estes espaços de trabalho e suas sessões na próxima inicialização";
+"Restoring your workspaces" = "Restaurando seus espaços de trabalho";
+"Restoring Workspaces" = "Restaurando espaços de trabalho";
+"Stop Restoring" = "Parar a restauração";
+"Starting “%@”…" = "Iniciando “%@”…";
+"%1$d of %2$d" = "%1$d de %2$d";
+"did not start in time" = "não iniciou a tempo";
+/* VM dashboard: workspace notes */
+"Notes" = "Notas";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return salva · Shift-Return adiciona uma linha · Esc cancela";
+"Save the notes (Return)" = "Salvar as notas (Return)";
+"Edit the notes as markdown" = "Editar as notas em markdown";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3128,6 +3144,7 @@
 "Erasing and restoring storage is done on the server Mac." = "Apagar e restaurar o armazenamento é feito no Mac servidor.";
 "Home folder size" = "Tamanho da pasta pessoal";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d GB (o tamanho atual — uma pasta pessoal não pode diminuir) até 1024 GB. Uma pasta maior entra em vigor na próxima vez que o espaço de trabalho iniciar. A imagem de disco só ocupa o espaço que seus arquivos usam.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "De %d GB até 1024 GB. A pasta pessoal é criada com este tamanho quando o espaço de trabalho inicia pela primeira vez; depois disso, pode crescer, mas não diminuir. A imagem de disco só ocupa o espaço que seus arquivos usam.";
 "Queued — sent when the agent is done" = "Na fila — enviado quando o agente terminar";
 "Queued — sent when %@ is done" = "Na fila — enviado quando %@ terminar";
 "Queued — the agent reads it next" = "Na fila — o agente lê em seguida";
@@ -4308,3 +4325,14 @@
 "Add a rule for this host and port, for %@" = "Adicionar uma regra para este host e porta, para %@";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "“%@” não existe mais: outro processo do Bromure o excluiu.";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "para %@ (assinatura SigV4 no host)";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "“%@” está aberto no outro processo do Bromure (a app ou o seu agente de início de sessão). Use-o lá, ou desligue-o lá primeiro.";
+"The workspace is open in the other Bromure process, which runs this automation there" = "O espaço de trabalho está aberto no outro processo do Bromure, que executa lá esta automação";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "Não lido";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Login não aberto: a porta %d está sendo usada por outro login. Conclua ou cancele esse login e tente novamente.";

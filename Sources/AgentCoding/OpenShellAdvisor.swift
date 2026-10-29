@@ -316,7 +316,8 @@ public final class OpenShellAdvisor: @unchecked Sendable {
     func riskFindings(_ rule: OpenShellPolicy.NetworkRule, profileID: UUID,
                       current: OpenShellPolicy) -> [String] {
         var out: [String] = []
-        let scopes = credentialScopesProvider(profileID).map { $0.lowercased() }
+        // A `host:port` scope (a kube API) credentials its host.
+        let scopes = credentialScopesProvider(profileID).map { TokenSwapper.splitScope($0.lowercased()).host }
         let metadataHosts: Set<String> = ["metadata.google.internal", "metadata", "instance-data",
                                           "metadata.azure.com", "169.254.169.254"]
         let dbPorts: Set<UInt16> = [1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 11211, 27017]

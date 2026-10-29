@@ -217,6 +217,10 @@ struct ProfileStorageContext {
     /// new profiles. When set, the home row sizes/labels against the
     /// image instead of walking the directory.
     var profileHomeImageURL: URL?
+    /// Where an ext4 home's image lives, whether or not it exists yet: the
+    /// size field stats it on every draw, so an image a boot created after
+    /// the editor opened is its floor even before a remeasure arrives.
+    var homeImageFile: URL? = nil
     /// True if the profile's VM is currently open in a session window —
     /// reset actions are unsafe in that state.
     var isRunning: Bool
@@ -235,6 +239,13 @@ struct ProfileStorageContext {
     /// server (the URLs above are only placeholders there), and the erase /
     /// reset / restore actions left to the server Mac.
     var remoteSizes: StorageSizes? = nil
+    /// The same context measured again now. Everything above is a snapshot
+    /// taken when the editor opened, and the editor stays open across a
+    /// boot that creates the home image or an erase that deletes it: the
+    /// home-size floor read "no image yet" from it and let a size below
+    /// the image be saved (Finding CWE-670, "Home size stays shrinkable
+    /// after the image exists"). nil: nothing to re-read.
+    var remeasure: (@MainActor () async -> ProfileStorageContext?)? = nil
 
     static func empty(baseImageURL: URL) -> ProfileStorageContext {
         ProfileStorageContext(
@@ -251,6 +262,13 @@ struct ProfileStorageContext {
             onRestoreHome: nil
         )
     }
+}
+
+extension Notification.Name {
+    /// A workspace's storage may have changed under an open editor: it
+    /// started (a boot creates the home image) or stopped. `object` is the
+    /// profile id; its editor measures the storage again.
+    static let bromureWorkspaceStorageChanged = Notification.Name("io.bromure.workspaceStorageChanged")
 }
 
 /// What each storage layer costs on the Mac that holds it.
@@ -480,6 +498,14 @@ struct ProfileEditorView: View {
     @State private var bgColor: Color
     @State private var fgColor: Color
     @State private var selectedCategory: EditorCategory = .general
+    /// Bumped when an erase or reset in Resources changed the disks.
+    @State private var storageRevision = 0
+    /// `storageContext` measured again since the editor opened (after an
+    /// erase, a boot, a stop); nil until then.
+    @State private var liveStorage: ProfileStorageContext?
+    /// Bumped when `liveStorage` arrives, so the storage stack re-measures it.
+    @State private var storageGeneration = 0
+    private var currentStorage: ProfileStorageContext? { liveStorage ?? storageContext }
     /// The pane a freshly opened Preferences editor starts on (set just before
     /// a workspace editor opens Preferences), consumed on init.
     static var pendingPreferencesCategory: EditorCategory?
@@ -986,7 +1012,10 @@ struct ProfileEditorView: View {
     /// draft (the pane can't save it live the way the local store does).
     private func commitSave() {
         if case .remoteGlobal? = modelsPane { onSaveGlobalModels?(remoteGlobalDraft) }
-        onSave(draft, generateSSH)
+        var out = draft
+        out.homeImageGB = Self.homeSetting(out.homeImageGB, existingGB: homeCapacityGB, saved: savedHomeImageGB)
+        draft = out
+        onSave(out, generateSSH)
     }
 
     /// "Create" / "Save", localized. A bare `isNew ? "Create" : "Save"`
@@ -1454,12 +1483,18 @@ struct ProfileEditorView: View {
                 // A grouped Form draws an empty TextField borderless and
                 // right-aligned — invisible until typed into. The prompt
                 // makes the field visible.
-                TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
-                          text: $draft.comments,
-                          prompt: Text(NSLocalizedString("Add a note about this workspace",
-                                                         comment: "Profile notes field placeholder")),
-                          axis: .vertical)
+                let notes = TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
+                                      text: $draft.comments,
+                                      prompt: Text(NSLocalizedString("Add a note about this workspace",
+                                                                     comment: "Profile notes field placeholder")),
+                                      axis: .vertical)
                     .lineLimit(2...6)
+                #if os(macOS)
+                // Markdown wants its lines: Shift-Return adds one.
+                notes.shiftReturnInsertsNewline()
+                #else
+                notes
+                #endif
             }
 
             // Delegation / @nickname reach: one machine's own policy.
@@ -3968,10 +4003,10 @@ struct ProfileEditorView: View {
 
     /// The home image's size now, GiB — nil before it exists.
     private var homeCapacityGB: Int? {
-        if let r = storageContext?.remoteSizes {
+        if let r = currentStorage?.remoteSizes {
             return r.homeCapacity > 0 ? Int(r.homeCapacity >> 30) : nil
         }
-        guard let u = storageContext?.profileHomeImageURL,
+        guard let u = currentStorage?.profileHomeImageURL ?? currentStorage?.homeImageFile,
               let n = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.size] as? NSNumber
         else { return nil }
         return Int(n.int64Value >> 30)
@@ -3981,25 +4016,85 @@ struct ProfileEditorView: View {
         #if os(macOS)
         SessionDisk.resolvedHomeImageGB()
         #else
-        64
+        16
         #endif
     }
 
+    /// Smallest home a workspace can be created with, GiB (what
+    /// SessionDisk clamps a setting to).
+    static let minHomeGB = 8
+
     /// Grow-only: a running VM can't see its disk grow, so a bigger size
     /// lands at the workspace's next start (the host grows the image, the
-    /// guest grows the filesystem).
+    /// guest grows the filesystem). Before the image exists (a new
+    /// workspace, or one whose home was erased) any size from 8 GB is
+    /// fine: it's created at that size on the next boot.
+    /// The size field's numbers: `current` (the image's size, or the
+    /// default before it exists), the `floor` it can't go below (that size,
+    /// or 8 GB before it exists), and what a typed or stepped value becomes
+    /// (nil = keep following the default).
+    struct HomeSizeBounds: Equatable {
+        let current: Int
+        let floor: Int
+        init(existingGB: Int?, defaultGB: Int) {
+            current = existingGB ?? defaultGB
+            floor = existingGB ?? ProfileEditorView.minHomeGB
+        }
+        func shown(_ setting: Int?) -> Int { setting.map { max($0, floor) } ?? current }
+        func setting(for value: Int, saved: Int?) -> Int? {
+            let gb = min(1024, max(floor, value))
+            return (gb == current && saved == nil) ? nil : gb
+        }
+    }
+
+    /// Re-read the storage (the snapshot's own `remeasure`), then hold the
+    /// size setting to the image that is there now.
+    @MainActor
+    private func remeasureStorage() async {
+        let asked = storageRevision
+        guard let fresh = await storageContext?.remeasure?(),
+              Self.remeasureLands(asked: asked, now: storageRevision, cancelled: Task.isCancelled)
+        else { return }
+        liveStorage = fresh
+        storageGeneration += 1
+        clampHomeSetting()
+    }
+
+    /// Whether a remeasure's answer is still the newest. A start or stop
+    /// bumps the revision and cancels the task, but a fat client's fetch
+    /// still came back -- a slower one from before the image existed, after
+    /// a newer one, put the floor back at 8 GB (Finding CWE-362, "A slower
+    /// home-size remeasure can drop the floor back below the image").
+    static func remeasureLands(asked: Int, now: Int, cancelled: Bool) -> Bool {
+        !cancelled && asked == now
+    }
+
+    /// A setting below the existing image is raised to its size: the disk
+    /// layer never shrinks an image, so a smaller stored number would only
+    /// resurface as the size of the next home after an erase.
+    private func clampHomeSetting() {
+        let gb = Self.homeSetting(draft.homeImageGB, existingGB: homeCapacityGB, saved: savedHomeImageGB)
+        if gb != draft.homeImageGB { draft.homeImageGB = gb }
+    }
+
+    /// `setting` held to an existing image of `existingGB` (nil = none yet).
+    static func homeSetting(_ setting: Int?, existingGB: Int?, saved: Int?) -> Int? {
+        guard let existingGB, let setting, setting < existingGB else { return setting }
+        return HomeSizeBounds(existingGB: existingGB, defaultGB: existingGB).setting(for: setting, saved: saved)
+    }
+
     private var homeSizeSection: some View {
-        let current = homeCapacityGB ?? Self.defaultHomeGB
-        let chosen = draft.homeImageGB.map { max($0, current) } ?? current
-        // Any whole GB from the current size up to 1 TB; below the current
-        // size it clamps (the image only grows — shrinking would cut the
-        // filesystem short).
+        _ = storageRevision   // re-read the image after an erase or reset
+        let existing = homeCapacityGB
+        let bounds = HomeSizeBounds(existingGB: existing, defaultGB: Self.defaultHomeGB)
+        let (current, floor) = (bounds.current, bounds.floor)
+        let chosen = bounds.shown(draft.homeImageGB)
+        // Any whole GB from the floor up to 1 TB; below an existing
+        // image's size it clamps (the image only grows — shrinking would
+        // cut the filesystem short).
         let size = Binding<Int>(
             get: { chosen },
-            set: { v in
-                let gb = min(1024, max(current, v))
-                draft.homeImageGB = (gb == current && savedHomeImageGB == nil) ? nil : gb
-            })
+            set: { v in draft.homeImageGB = bounds.setting(for: v, saved: savedHomeImageGB) })
         return VStack(alignment: .leading, spacing: 6) {
             Text("Home folder size")
                 .font(.headline)
@@ -4009,10 +4104,12 @@ struct ProfileEditorView: View {
                     .multilineTextAlignment(.trailing)
                     .frame(width: 72)
                 Text(verbatim: "GB")
-                Stepper("", value: size, in: current...1024, step: 8)
+                Stepper("", value: size, in: floor...1024, step: 8)
                     .labelsHidden()
             }
-            Text(String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
+            Text(existing == nil
+                 ? String(format: NSLocalizedString("From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use.", comment: "home folder size, before the home exists"), floor)
+                 : String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -4029,17 +4126,25 @@ struct ProfileEditorView: View {
                 Text("Three layers stack to make this workspace's environment. The bottom is shared and immutable; the top two are yours and can be erased independently.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let storageContext {
+                if let currentStorage {
                     StorageStackView(
                         isNewProfile: isNew,
-                        context: storageContext
+                        context: currentStorage,
+                        onStorageChanged: { storageRevision += 1 }
                     )
+                    .id(storageGeneration)   // a fresh context: measure it again
                 } else {
                     Text("Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            // Each time the pane shows, after an erase or reset, and when the
+            // workspace starts or stops, the storage is measured again.
+            .task(id: storageRevision) { await remeasureStorage() }
+            .onReceive(NotificationCenter.default.publisher(for: .bromureWorkspaceStorageChanged)) { note in
+                if (note.object as? UUID) == draft.id { storageRevision += 1 }
             }
 
             if draft.homeModel == .ext4 {
@@ -6192,6 +6297,15 @@ private struct MCPServerRow: View {
 private struct StorageStackView: View {
     let isNewProfile: Bool
     let context: ProfileStorageContext
+    /// An erase or reset changed the disks under the editor: the home size
+    /// field's floor follows the image (gone after an erase, so a smaller
+    /// home can be picked), and nothing else would redraw it.
+    var onStorageChanged: () -> Void = {}
+
+    /// Run a storage action, then re-measure and tell the editor.
+    private func changing(_ action: @escaping () -> Void) -> () -> Void {
+        { action(); onStorageChanged(); Task { await refreshSizes() } }
+    }
 
     /// Computed asynchronously on view appear so a huge npm-global tree
     /// doesn't block the editor's first paint.
@@ -6228,7 +6342,7 @@ private struct StorageStackView: View {
                         disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
-                        handler: context.onResetHome
+                        handler: changing(context.onResetHome)
                       ),
                 // One slot, model-exclusive: legacy homes offer the upgrade,
                 // ext4 homes offer the checkpoint rollback.
@@ -6275,7 +6389,7 @@ private struct StorageStackView: View {
                         disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
-                        handler: context.onResetDisk
+                        handler: changing(context.onResetDisk)
                       )
             )
 

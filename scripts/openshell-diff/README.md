@@ -35,6 +35,7 @@ SEED=7 FOCUS=mcp N_POLICIES=300 scripts/openshell-diff/run.sh /tmp/OpenShell /tm
 
 Last full run: 2026-09-29 against OpenShell `cfcc373`, re-run against `c0eb3db` the same day. It covered 125,666 cases across 11
 corpora (seeds 1/2/3/5, MCP ×2, GraphQL ×2, IP, WebSocket, conformance replay) with 0 mismatches.
+Re-run 2026-10-26 against v0.1.5 (`c0eb3db`..v0.1.5 = 247 commits) after porting #4336 endpoint path matching: 59,370 cases over 5 corpora (seed 1, MCP/GraphQL/WS/IP at seed 7) with 0 mismatches. The oracle doesn't cover relay-level upgrade refusal (#3753/#3841); that is pinned by `OpenShellPolicyTests` instead.
 
 `mcp-params/` holds the ground-truth setup for `OpenShellMCPParams.swift`: a Rust program that
 decodes payloads with tower-mcp-types' own types (`rust-oracle/`), plus the payload generators.

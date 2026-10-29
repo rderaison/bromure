@@ -6338,7 +6338,12 @@ def _migrate_home_into(dev):
         total = [0]
 
         def _du():
-            out = _capture(["du", "-sb", HOME_MOUNT], timeout=600)
+            # Housekeeping, like the probes in `_grow_home_fs`: this runs
+            # before the OpenShell supervisor is up, where `_capture` refuses
+            # to route (SandboxRoutingError killed this thread, so the
+            # progress never got a total).
+            out = _sys_capture(["du", "-sb", HOME_MOUNT], "home size for the migration progress",
+                               timeout=600)
             try:
                 total[0] = int(out.split()[0])
             except (ValueError, IndexError):
@@ -6733,10 +6738,18 @@ def _grow_home_fs(dev):
     """The host grows home.img when the workspace's home size goes up
     (at a cold boot — a running VM never sees its disk grow). ext4 grows
     online, so this runs on the mounted filesystem; with nothing to gain
-    resize2fs just says so."""
+    resize2fs just says so.
+
+    The probes are housekeeping (fixed argv, a device path agentd found
+    itself), so they run as agentd via `_sys_capture`, like the fsck next
+    door. Through `_capture` they went into the OpenShell sandbox, where
+    sudo is refused: both came back empty and every grow was skipped."""
+    if not _have_sudo():
+        return
     try:
-        dev_bytes = int(_capture(["sudo", "blockdev", "--getsize64", dev]).strip() or 0)
-        head = _capture(["sudo", "dumpe2fs", "-h", dev])
+        dev_bytes = int(_sys_capture(["sudo", "blockdev", "--getsize64", dev],
+                                     "home device size").strip() or 0)
+        head = _sys_capture(["sudo", "dumpe2fs", "-h", dev], "ext4 superblock of the home device")
         count = int(re.search(r"^Block count:\s+(\d+)", head, re.M).group(1))
         size = int(re.search(r"^Block size:\s+(\d+)", head, re.M).group(1))
     except (AttributeError, ValueError):

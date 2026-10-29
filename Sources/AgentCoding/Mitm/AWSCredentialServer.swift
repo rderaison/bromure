@@ -43,6 +43,10 @@ public final class AWSCredentialServer: @unchecked Sendable {
         var vendedSecret: String
     }
     private var byProfile: [UUID: Entry] = [:]
+    /// Keys the guest minted through the proxy (STS, iam:CreateAccessKey,
+    /// DigitalOcean Spaces), by profile then access key id. See
+    /// `MintedCredential`.
+    private var mintedByProfile: [UUID: [String: MintedCredential]] = [:]
     private let lock = NSLock()
     private let consent: ConsentBroker
 
@@ -67,6 +71,63 @@ public final class AWSCredentialServer: @unchecked Sendable {
     public func clearCredentials(for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         byProfile.removeValue(forKey: profileID)
+        mintedByProfile.removeValue(forKey: profileID)
+    }
+
+    /// The workspace's saved minted keys (launch, live refresh). Replaces
+    /// what was there, keeping keys minted since the save was read.
+    public func setMinted(_ minted: [MintedCredential], for profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        var byKey = mintedByProfile[profileID] ?? [:]
+        for m in minted where m.kind == .sigV4 && !m.accessKeyID.isEmpty { byKey[m.accessKeyID] = m }
+        mintedByProfile[profileID] = byKey.isEmpty ? nil : byKey
+    }
+
+    /// One key the proxy just minted.
+    public func addMinted(_ m: MintedCredential, for profileID: UUID) {
+        guard m.kind == .sigV4, !m.accessKeyID.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        mintedByProfile[profileID, default: [:]][m.accessKeyID] = m
+    }
+
+    public enum MintedLookup {
+        /// Not a minted key: sign as the workspace (its own key, or an SSO
+        /// key the guest cached before a refresh).
+        case none
+        case material(SigV4Signer.Credentials, source: String)
+        /// A minted key past its expiry. Never re-signed as the workspace's
+        /// own key -- that would run the request as another identity.
+        case expired(source: String)
+    }
+
+    /// The minted key the guest signed with, if `accessKeyID` is one, and
+    /// it's valid for `host` (AWS, or the S3-compatible family it was
+    /// minted for).
+    public func minted(accessKeyID: String, host: String, profileID: UUID,
+                       now: Date = Date()) -> MintedLookup {
+        lock.lock()
+        let m = mintedByProfile[profileID]?[accessKeyID]
+        lock.unlock()
+        guard let m else { return .none }
+        let h = host.lowercased()
+        let forHost = m.hosts.isEmpty
+            ? AWSResigner.isAWSHost(h)
+            : m.hosts.contains { h == $0 || h.hasSuffix("." + $0) }
+        guard forHost else { return .none }
+        if m.isExpired(at: now) { return .expired(source: m.source) }
+        return .material(SigV4Signer.Credentials(
+            accessKeyID: m.accessKeyID, secretAccessKey: m.secret,
+            sessionToken: m.sessionToken.isEmpty ? nil : m.sessionToken), source: m.source)
+    }
+
+    /// Whether `host` is one a minted key signs for (Spaces), so the
+    /// resigner looks at it although it isn't AWS.
+    public func hasMintedHost(_ host: String, profileID: UUID) -> Bool {
+        let h = host.lowercased()
+        lock.lock(); defer { lock.unlock() }
+        return mintedByProfile[profileID]?.values.contains { m in
+            m.hosts.contains { h == $0 || h.hasSuffix("." + $0) }
+        } ?? false
     }
 
     /// The workspace's AWS access key id (not secret — the guest holds it,

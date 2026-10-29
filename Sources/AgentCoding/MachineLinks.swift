@@ -619,6 +619,11 @@ final class AttachedMachine {
     let id: UUID
     private(set) var name: String
     let sessionStore = AgentSessionStore(mirror: true)
+    /// Reads sent to the machine and not yet in its snapshot: the reply count.
+    var pendingReads: [UUID: (seen: Int, at: Date)] = [:]
+    /// The sessions as the machine last listed them, before any read held
+    /// here is laid over them (`sessionStore` shows them with it).
+    var machineSessions: [AgentSession] = []
     /// Its tmux roster, as the local window's sidebar and session buckets
     /// read a VM's (fed from the machine's /state like a fat client's mirror).
     let tabsModel = TabsModel()
@@ -678,6 +683,9 @@ final class AttachedMachine {
         let r = await Task.detached { MachineLinkHub.shared.request(id, "GET", "/state", timeout: 10) }.value
         guard let r, r.status == 200 else {
             failedPolls += 1
+            // A read the machine never confirmed doesn't outlive its hold
+            // because the link is down too.
+            reapplyReads()
             if connected, failedPolls >= Self.failuresBeforeOffline {
                 // Gone for real: off, but its sessions stay listed (asleep)
                 // rather than vanishing from every client's stage.
@@ -716,9 +724,10 @@ final class AttachedMachine {
         tabsModel.applyRoster(roster)
         if tabsModel.rosterLive != !roster.isEmpty { tabsModel.rosterLive = !roster.isEmpty }
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        sessionStore.applyMirror(sessions.compactMap { d in
+        machineSessions = sessions.compactMap { d in
             (try? JSONSerialization.data(withJSONObject: d)).flatMap { try? dec.decode(AgentSession.self, from: $0) }
-        })
+        }
+        sessionStore.applyMirror(Self.holdingReads(machineSessions, &pendingReads))
         MachineLinkHub.shared.setFragment(id, .init(
             workspace: ws, vm: vm, sessions: sessions,
             sessionIDs: Set(sessions.compactMap { ($0["id"] as? String)?.uppercased() }),
@@ -801,6 +810,92 @@ extension AttachedMachine: AgentHostLink {
 
     func hostControl(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])? {
         await call(method, path, body)
+    }
+
+    /// The user read one of this machine's sessions up to `seen` replies:
+    /// shown at once here (no orb until the next poll), then told to the
+    /// machine, which keeps the count.
+    func markRead(_ sid: UUID, upTo seen: Int) {
+        // Never backward, and nothing to do for what's already shown read
+        // (a refocus during the hold) -- as `AgentSessionStore.markRead`.
+        guard seen > (sessionStore.session(sid)?.readReplies ?? 0) else { return }
+        let sent = Date()
+        pendingReads[sid] = (seen, sent)
+        showReads()
+        // The hold ends on its own -- not only when a snapshot comes in, which
+        // a dead link never brings.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.readHold + 0.1) { [weak self] in self?.reapplyReads() }
+        Task {
+            let r = await call("POST", "/agent-sessions/\(sid.uuidString)/read", ["seen": seen])
+            // Refused or unanswered (Finding CWE-670, "Attached-machine read is
+            // latched before the command finishes"): the hold ends 2 s on, not
+            // 10 -- then the session shows unread again and a watched
+            // session's read goes again. At most one retry per 2 s.
+            guard Self.readFailed(r), let p = pendingReads[sid], p.seen == seen, p.at == sent else { return }
+            pendingReads[sid] = (seen, Date().addingTimeInterval(2 - Self.readHold))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { [weak self] in self?.reapplyReads() }
+        }
+    }
+
+    /// Whether the MACHINE has the session unread (its own count, not the
+    /// read shown here while it's on its way): a read to send.
+    func unreadOnMachine(_ sid: UUID) -> Bool {
+        machineSessions.first { $0.id == sid }?.isUnread == true
+    }
+
+    /// Recompute what's shown from the machine's last word and the reads
+    /// still held, and tell the host when that changed -- a hold that ran out
+    /// shows unread again (Finding CWE-670, "A failed attached-machine read
+    /// stays marked read until /state succeeds").
+    func reapplyReads() {
+        let before = sessionStore.sessions
+        showReads()
+        if sessionStore.sessions != before { onChange?() }
+    }
+
+    /// The read cursors -- the machine's, or a read still held -- laid onto
+    /// the sessions shown, and nothing else of them: a room move or a review
+    /// draft made here and not yet echoed by the machine stays (Finding
+    /// CWE-670, "Attached-machine read hold drops room membership and review
+    /// drafts"). Only a snapshot that comes in replaces the sessions.
+    private func showReads() {
+        var cursor: [UUID: Int?] = [:]
+        for s in Self.holdingReads(machineSessions, &pendingReads) { cursor[s.id] = s.readReplies }
+        sessionStore.applyMirror(Self.withReads(sessionStore.sessions, cursor))
+    }
+
+    /// `shown` with each session's read cursor replaced by `cursor`'s.
+    nonisolated static func withReads(_ shown: [AgentSession], _ cursor: [UUID: Int?]) -> [AgentSession] {
+        shown.map { s in
+            guard let c = cursor[s.id] else { return s }
+            var s = s
+            s.readReplies = c
+            return s
+        }
+    }
+
+    /// How long a read sent is shown before the machine has to agree.
+    static let readHold: TimeInterval = 10
+
+    /// The machine didn't take a read: no answer, an error status, or an error.
+    nonisolated static func readFailed(_ r: (status: Int, json: [String: Any])?) -> Bool {
+        guard let r else { return true }
+        return !(200..<300).contains(r.status) || r.json["error"] != nil
+    }
+
+    /// `sessions` with the reads not yet in a snapshot applied; a read the
+    /// machine has (or that never landed in 10 s -- it's sent again) is let go.
+    static func holdingReads(_ sessions: [AgentSession], _ pending: inout [UUID: (seen: Int, at: Date)],
+                             now: Date = Date()) -> [AgentSession] {
+        var out = sessions
+        for (id, p) in pending {
+            guard let i = out.firstIndex(where: { $0.id == id }),
+                  (out[i].readReplies ?? 0) < p.seen, now.timeIntervalSince(p.at) <= readHold else {
+                pending[id] = nil; continue
+            }
+            out[i].readReplies = p.seen
+        }
+        return out
     }
 
     func hostSessionCommand(_ sid: UUID, _ action: String, _ body: [String: Any]) {

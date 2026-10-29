@@ -729,7 +729,15 @@ final class SessionPane {
             guard let self, let delegate = self.acDelegate,
                   let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
             else { return }
-            delegate.agentSessionStore.setAwaitingAnswer(s.id, waiting)
+            // A dialog while its hooks still say working is the agent asking
+            // from inside its turn (omp's `ask`): a reply to read. Any other
+            // question was counted by its hook already (needsInput, or the
+            // turn's done) -- counting it again, a scan later, brought the
+            // mark back on clients that had read it.
+            if delegate.agentSessionStore.setAwaitingAnswer(s.id, waiting), waiting,
+               self.model.tabs.first(where: { $0.index == windowIndex })?.agentStatus == .working {
+                delegate.agentSessionStore.noteReply(s.id)
+            }
         }
         m.recordedFailureAppeared = { [weak self] in
             guard let self, let delegate = self.acDelegate,

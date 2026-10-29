@@ -618,9 +618,15 @@ enum GuestSharePaths {
                 // ~/inj.txt", not "/home/ubuntu/inj.txt"); a command line
                 // stays as it runs (it's copied from there), and so does
                 // the call's detail.
+                // A display-MCP call's detail is what its card reads the file
+                // from: "~/shot.png" isn't a path the machine can open, and the
+                // card refused it -- the chat drew a bare "display show media"
+                // row instead of the picture.
                 let shell = isShellTool(name)
+                let shownDetail = DisplayRequest.parse(name: name, detail: detail) != nil ? detail
+                    : shell ? d(detail) : homeDisplay(d(detail))
                 item.kind = .toolUse(name: name, summary: shell ? d(summary) : homeDisplay(d(summary)),
-                                     detail: shell ? d(detail) : homeDisplay(d(detail)))
+                                     detail: shownDetail)
             case .toolResult(let tool, let content, let isError):
                 item.kind = .toolResult(tool: tool, content: d(content), isError: isError)
             case .assistantText(let t): item.kind = .assistantText(d(t))

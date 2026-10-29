@@ -386,6 +386,105 @@ struct OpenShellPolicyTests {
         #expect(req("unrelated.example.com", "DELETE", "/x") == .allow)
     }
 
+    // OpenShell #4336 (v0.1.4): Rego selects endpoints by `path` with the
+    // route selector's matcher, so a sibling's allow can't bypass the deny
+    // rules of an endpoint whose selector covers the request. Vectors from
+    // relay.rs `assert_endpoint_path_deny`.
+    @Test("Endpoint path selectors use route semantics for deny rules",
+          arguments: [("/p/**", "POST", "/p", true), ("/v1/*", "POST", "/v1/a/b", true),
+                      ("/p/**", "POST", "/p/child", true), ("/v1/*", "POST", "/v1/a", true),
+                      ("/p/**", "GET", "/p", false), ("/p/**", "POST", "/public", false),
+                      ("/p/**", "POST", "/prefix", false)])
+    func endpointPathSelectorDeny(selector: String, method: String, path: String, denied: Bool) throws {
+        let p = try policy("""
+        version: 1
+        network_policies:
+          route_api:
+            endpoints:
+              - host: gateway.example.test
+                port: 443
+                path: "\(selector)"
+                protocol: rest
+                enforcement: enforce
+                rules:
+                  - allow: { method: "*", path: "**" }
+                deny_rules:
+                  - { method: POST, path: "**" }
+              - host: gateway.example.test
+                port: 443
+                protocol: rest
+                enforcement: enforce
+                rules:
+                  - allow: { method: "*", path: "**" }
+        """)
+        let d = p.evaluateRequest(host: "gateway.example.test", port: 443, method: method, target: path)
+        if denied {
+            #expect(d == .violation(reason: "\(method) \(path) blocked by deny rule", rule: "route_api", enforced: true))
+        } else {
+            #expect(d == .allow)
+        }
+    }
+
+    // OpenShell #3753 / #3841: JSON-RPC, MCP and GraphQL endpoints refuse any
+    // request carrying `Upgrade`; every inspected protocol refuses h2c.
+    // Fixtures from rest.rs `unsupported_upgrade_detail_*`.
+    @Test("Inspected routes refuse upgrades they can't follow")
+    func unsupportedUpgrades() throws {
+        let p = try policy("""
+        version: 1
+        network_policies:
+          apis:
+            endpoints:
+              - { host: example.com, port: 443, path: "/mcp", protocol: mcp, enforcement: audit,
+                  rules: [{ allow: { method: initialize } }] }
+              - { host: example.com, port: 443, path: "/rpc", protocol: json-rpc, enforcement: enforce,
+                  rules: [{ allow: { method: "*" } }] }
+              - { host: example.com, port: 443, path: "/graphql", protocol: graphql, enforcement: enforce,
+                  rules: [{ allow: { operation_type: query } }] }
+              - { host: example.com, port: 443, path: "/ws", protocol: websocket, enforcement: enforce, access: full }
+              - { host: example.com, port: 443, path: "/api/**", protocol: rest, enforcement: enforce, access: full }
+              - { host: plain.example.com, port: 443 }
+        """)
+        let ws = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+        func detail(_ head: String, host: String = "example.com") -> String? {
+            let target = String(head.split(separator: " ")[1])
+            return p.unsupportedUpgradeDetail(host: host, port: 443, target: target, headerBlock: head + "\r\n")
+        }
+        let rpc = "HTTP upgrade is not supported for JSON-RPC or MCP endpoints"
+        let gql = "HTTP upgrade is not supported for GraphQL endpoints; serve GraphQL over WebSocket from a separate protocol: websocket endpoint on another path or port"
+        let h2c = "HTTP/2 cleartext upgrade (h2c) is not supported for L7-inspected endpoints"
+
+        // Any Upgrade header on the JSON-RPC family, even without Connection: upgrade
+        // (audit mode included: the refusal isn't a rule decision).
+        for path in ["/mcp", "/rpc"] {
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nAccept: text/event-stream\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\(ws)") == rpc)
+            #expect(detail("POST \(path) HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, upgrade\r\nContent-Length: 0\r\n") == rpc)
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nUpgrade: custom\r\n") == rpc)
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nUPGRADE: WebSocket\r\nCONNECTION: UPGRADE\r\n\(ws)") == rpc)
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nUpgrade:\r\nConnection: upgrade\r\n") == rpc)
+        }
+        #expect(detail("GET /graphql?query=%7Bviewer%7D HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\(ws)") == gql)
+        #expect(detail("POST /graphql HTTP/1.1\r\nHost: example.com\r\nUpgrade: custom\r\nConnection: upgrade\r\nContent-Length: 0\r\n") == gql)
+
+        // h2c is refused on every inspected protocol, REST and WebSocket included.
+        for path in ["/api/x", "/ws", "/mcp", "/graphql"] {
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAAP__\r\n") == h2c)
+        }
+
+        // Relaying protocols keep WebSocket upgrades; ordinary requests and
+        // look-alikes stay allowed; uninspected hosts are never refused.
+        #expect(detail("GET /ws HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\(ws)") == nil)
+        #expect(detail("GET /api/x HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\(ws)") == nil)
+        for path in ["/mcp", "/rpc", "/graphql"] {
+            #expect(detail("POST \(path) HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 2\r\n") == nil)
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nAccept: text/event-stream\r\n") == nil)
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nUpgrade-Insecure-Requests: 1\r\n") == nil)
+            #expect(detail("GET \(path) HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade\r\n") == nil)
+        }
+        #expect(detail("GET / HTTP/1.1\r\nHost: plain.example.com\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n",
+                       host: "plain.example.com") == nil)
+    }
+
     @Test("Audit mode reports without blocking")
     func auditMode() throws {
         let p = try policy("""

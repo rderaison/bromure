@@ -36,6 +36,9 @@ public final class MitmEngine {
     /// requests and re-signs with material that lives only on the host.
     /// See `AWSResigner` for the threat model.
     public let awsResigner: AWSResigner
+    /// Rewrites the responses of calls that issue a credential; see
+    /// `CredentialMint`. The app sets its `sink` to save what it mints.
+    public let credentialMinter: CredentialMinter
     public let consent: ConsentBroker
     /// Per-profile, per-scope consent for the `.promptOnWrite`
     /// guardrails mode. Lives alongside the credential `consent`
@@ -405,6 +408,7 @@ public final class MitmEngine {
                 ofItemAtPath: saltURL.path)
             self.fakeTokenSalt = fresh
         }
+        self.credentialMinter = CredentialMinter(salt: fakeTokenSalt, swapper: swapper, awsCreds: awsCreds)
     }
 
     /// Wire vsock listeners on the VM's socket device. Call once per
@@ -433,6 +437,7 @@ public final class MitmEngine {
         }
         // Claude subscription auth: one closure lets the proxy reach the shared
         // store (bogus-key lookup) + refresher (live access token).
+        HTTPMitmConnection.credentialMinterProvider = { [weak self] in self?.credentialMinter }
         HTTPMitmConnection.claudeSubscriptionProvider = { [weak self] in
             guard let self else { return nil }
             return (self.claudeSubscriptionStore, self.claudeRefresher)

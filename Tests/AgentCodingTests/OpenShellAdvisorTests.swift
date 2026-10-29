@@ -136,6 +136,17 @@ struct OpenShellAdvisorTests {
         #expect(p3.findings.contains("credential_reach_expansion"))
     }
 
+    /// The kube swap's scopes are `host:port` (Finding CWE-670, "Kube bearer
+    /// and exec tokens are scoped to host:port…"): the risk check compared a
+    /// rule's bare host with the whole scope and never saw them credentialed.
+    @Test("A host carrying a port-scoped kube token counts as credentialed")
+    func portScopedCredential() throws {
+        let (a, pid, _) = advisor(mode: .auto, scopes: ["k8s.example.com:6443"])
+        let r = a.submit(profileID: pid, body: proposal("k8s", host: "k8s.example.com"))
+        let p = try #require(a.proposal(id: (r["accepted_chunk_ids"] as? [String])!.first!, profileID: pid))
+        #expect(p.findings.contains("credential_reach_expansion"))
+    }
+
     @Test("Blocked connections become drafts; an agent proposal supersedes the draft")
     func drafts() throws {
         let (a, pid, _) = advisor(mode: .review)

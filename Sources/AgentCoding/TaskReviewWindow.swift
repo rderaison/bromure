@@ -22,8 +22,13 @@ enum TaskLitter {
     /// clean filter there ran on every dirty check.
     /// A status that fails says so (`RepoGitPrograms.statusFailed`): it
     /// isn't a clean tree. A folder that's gone reads as clean, as before.
+    /// Starts with a space: every caller wraps it in `$(…)`, and `$((` is
+    /// ARITHMETIC to dash -- the guest's /bin/sh -- so each landing check,
+    /// review count and empty-branch test was a syntax error there (exit 2,
+    /// read as "couldn't reach the workspace"). bash and zsh guess a
+    /// subshell, which is why it passed on the Mac.
     static func status(_ quotedDir: String) -> String {
-        "( [ -d \(quotedDir) ] || exit 0; \(RepoGitPrograms.off(quotedDir))git -C \(quotedDir) status --porcelain --untracked-files=all --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(quotedDir)) ) | \(statusFilter)"
+        " ( [ -d \(quotedDir) ] || exit 0; \(RepoGitPrograms.off(quotedDir))git -C \(quotedDir) status --porcelain --untracked-files=all --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(quotedDir)) ) | \(statusFilter)"
     }
 }
 

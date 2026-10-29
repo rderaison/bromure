@@ -264,7 +264,7 @@ public final class TokenSwapper: @unchecked Sendable {
     /// the connection until the user (or a live grant) decides.
     static let openShellPlaceholderPrefix = "openshell:resolve:env:"
 
-    public func swap(rawRequest: Data, host: String, profileID: UUID,
+    public func swap(rawRequest: Data, host: String, port: Int? = nil, profileID: UUID,
                      placeholderBody: Bool = false) async -> SwapResult {
         // Read the map through a non-async helper so NSLock never sits
         // across an `await` (Swift 6 forbids it).
@@ -297,7 +297,7 @@ public final class TokenSwapper: @unchecked Sendable {
             if let h = entry.host, !h.isEmpty {
                 let matched = entry.acceptSiblings
                     ? Self.hostMatchesScopeFamily(host: host, scope: h)
-                    : Self.hostMatchesScope(host: host, scope: h)
+                    : Self.hostMatchesScope(host: host, port: port, scope: h)
                 if !matched && !sessionAllowed { continue }
             }
 
@@ -638,9 +638,12 @@ public final class TokenSwapper: @unchecked Sendable {
             // family match so a token minted for `api.anthropic.com`
             // doesn't trip a compromise alert when it appears on
             // `mcp-tools.anthropic.com`. Everything else stays strict.
+            // A port-scoped fake (a kube API on :6443) on its own host but
+            // another port goes out unswapped: useless there, not a leak.
+            let scopeHost = Self.splitScope(scope).host
             let matched = entry.acceptSiblings
-                ? Self.hostMatchesScopeFamily(host: host, scope: scope)
-                : Self.hostMatchesScope(host: host, scope: scope)
+                ? Self.hostMatchesScopeFamily(host: host, scope: scopeHost)
+                : Self.hostMatchesScope(host: host, scope: scopeHost)
             if matched { continue }
             leaks.append(CompromiseLeak(
                 fakeTokenPreview: Self.preview(entry.fake),
@@ -685,6 +688,29 @@ public final class TokenSwapper: @unchecked Sendable {
         let h = host.lowercased()
         let s = scope.lowercased()
         return h == s || h.hasSuffix("." + s)
+    }
+
+    /// The swap's match: a `host:port` scope (a kubeconfig server, a docker
+    /// registry) names its host and the port the connection must be dialed
+    /// on -- the proxy's host is a bare name (CONNECT's host before the port,
+    /// or the SNI), so comparing it with the whole scope never matched and
+    /// the fake went upstream (Finding CWE-670, "Kube bearer and exec tokens
+    /// are scoped to host:port, so the proxy never injects them"). Two
+    /// contexts on one name and different ports keep their own tokens. An
+    /// unknown port matches no port-scoped entry; a bare scope, any port.
+    static func hostMatchesScope(host: String, port: Int?, scope: String) -> Bool {
+        let (scopeHost, scopePort) = splitScope(scope)
+        if let scopePort, scopePort != port { return false }
+        return hostMatchesScope(host: host, scope: scopeHost)
+    }
+
+    /// `host:port` → (host, port); a bare host, or an IPv6 literal's colons,
+    /// → (scope, nil).
+    static func splitScope(_ scope: String) -> (host: String, port: Int?) {
+        guard let colon = scope.lastIndex(of: ":"), !scope[..<colon].contains(":"),
+              let port = Int(scope[scope.index(after: colon)...]), (1...65535).contains(port)
+        else { return (scope, nil) }
+        return (String(scope[..<colon]), port)
     }
 
     /// Relaxed `hostMatchesScope` for compromise detection only.

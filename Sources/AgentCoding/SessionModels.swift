@@ -357,6 +357,24 @@ final class SessionListModel {
         /// or a machine Squelch doesn't reach).
         var squelch = false
         var squelchSummary: SquelchSummary? = nil
+        /// The workspace's notes (markdown source), for the row's tooltip.
+        var notes = ""
+
+        /// The notes' opening, for a tooltip: the first five lines, at most
+        /// 300 characters, an ellipsis when there is more. Empty when none.
+        var notesExcerpt: String {
+            let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return "" }
+            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+            var excerpt = lines.prefix(5).joined(separator: "\n")
+            var cut = lines.count > 5
+            if excerpt.count > 300 {
+                excerpt = String(excerpt.prefix(300))
+                cut = true
+            }
+            excerpt = excerpt.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cut ? excerpt + "…" : excerpt
+        }
     }
 
     /// Running, attached panes — carry live tab models.

@@ -379,8 +379,23 @@ extension ACAppDelegate {
         let providerName = self.claudeRegistration?.provider.displayName ?? "your account"
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
+                guard let self else { return }
                 // The CLI got as far as its sign-in URL: it is running.
-                self?.claudeRegistration?.agentLaunchConfirmed = true
+                self.claudeRegistration?.agentLaunchConfirmed = true
+                // A page on this Mac's loopback or its network opens nowhere,
+                // here or on a fat client (whose user's browser would reach
+                // the client Mac's own). Refused, the sign-in ends: the
+                // outbox file is gone, the URL never comes again, and a
+                // registration left in flight held the next attempt off for
+                // the whole credential poll.
+                guard ACAppDelegate.opensInRealBrowser(url) else {
+                    FileHandle.standardError.write(Data(
+                        "[ac] refused guest sign-in URL with local/private host: \(url.host ?? "?")\n".utf8))
+                    self.failClaudeRegistration(NSLocalizedString(
+                        "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.",
+                        comment: "sign-in refused: the guest's sign-in URL has a local or private host"))
+                    return
+                }
                 // Remote-initiated: the human is at the fat client, so hand
                 // it the URL + the VM's loopback port and let it open the page
                 // and tunnel the callback. Opening here would sign in on the
@@ -392,30 +407,41 @@ extension ACAppDelegate {
                     let port = ACAppDelegate.loopbackCallbackPort(from: url)
                     RemoteRegistrationBroker.shared.publish(
                         url: url.absoluteString, callbackPort: Int(port ?? 0))
-                    if let pid = self?.claudeRegistration?.scratchProfile.id,
-                       let ip = self?.runningSessions[pid]?.lastIP {
+                    if let pid = self.claudeRegistration?.scratchProfile.id,
+                       let ip = self.runningSessions[pid]?.lastIP {
                         RemoteRegistrationBroker.shared.publish(vmIP: ip)
                     }
                     return
                 }
-                if let self, let sandbox,
-                   let port = ACAppDelegate.loopbackCallbackPort(from: url),
-                   let dev = sandbox.socketDevice,
-                   // Registration answers the browser itself with a clean
-                   // success page — the CLI callback servers otherwise leave
-                   // Safari on an error even though login succeeded.
-                   let fwd = LoopbackCallbackForwarder(
-                        port: port, socketDevice: dev,
-                        browserResponse: LoopbackCallbackForwarder
-                            .registrationSuccessResponse(provider: providerName)) {
-                    self.loopbackForwarders.removeAll { !$0.isRunning }
-                    self.loopbackForwarders.append(fwd)
+                // Registration answers the browser itself with a clean
+                // success page — the CLI callback servers otherwise leave
+                // Safari on an error even though login succeeded. A port
+                // another sign-in holds: the page is never opened (its
+                // redirect would go to that one), the registration fails.
+                if let refused = self.loopbackCallbackRefusal(
+                    for: url, device: sandbox?.socketDevice,
+                    browserResponse: LoopbackCallbackForwarder.registrationSuccessResponse(provider: providerName)) {
+                    self.failClaudeRegistration(refused)
+                    return
                 }
-                self?.claudeRegistration?.onEvent?(.status(NSLocalizedString(
+                self.claudeRegistration?.onEvent?(.status(NSLocalizedString(
                     "Finish signing in in your browser…", comment: "sign-in")))
                 ACAppDelegate.openGuestRelayedURL(url)
             }
         }
+    }
+
+    /// End a sign-in that can't go on, saying why: to the card that started
+    /// it, else as a notice. Teardown finishes a fat client's relay, stops the
+    /// credential poll and the scratch VM.
+    func failClaudeRegistration(_ message: String) {
+        if let ev = claudeRegistration?.onEvent {
+            ev(.finished(success: false, message: message))
+            claudeRegistration?.onEvent = nil
+        } else {
+            unifiedWindow?.showNotice(message)
+        }
+        teardownClaudeRegistration(reason: .failure)
     }
 
     /// Make sure the login CLI actually runs in the scratch VM's tmux window,

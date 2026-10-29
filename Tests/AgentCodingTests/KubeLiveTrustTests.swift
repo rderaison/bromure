@@ -38,16 +38,17 @@ struct KubeLiveTrustTests {
 
         let mat = KubeconfigMaterializer().materialize(profile: p, bromureCAPEM: "PEM")
         MitmEngine.applyKubeMaterial(mat, profileID: pid, identities: ids, clusterCAs: cas, poller: poller, swapper: swapper)
-        #expect(cas.ca(for: "10.163.15.50:6443", profileID: pid) != nil)
-        #expect(cas.ca(for: "10.163.15.50", profileID: pid) != nil)
+        #expect(cas.ca(for: "10.163.15.50", port: 6443, profileID: pid) != nil)
+        // Its endpoint only: another port on that address isn't pinned to it.
+        #expect(cas.ca(for: "10.163.15.50", port: 443, profileID: pid) == nil)
 
         // The entry removed while the VM runs: no longer trusted; another
         // workspace's cluster untouched.
         p.kubeconfigs = []
         MitmEngine.applyKubeMaterial(KubeconfigMaterializer().materialize(profile: p, bromureCAPEM: "PEM"),
                                      profileID: pid, identities: ids, clusterCAs: cas, poller: poller, swapper: swapper)
-        #expect(cas.ca(for: "10.163.15.50", profileID: pid) == nil)
-        #expect(cas.ca(for: "k8s.other", profileID: other) != nil)
+        #expect(cas.ca(for: "10.163.15.50", port: 6443, profileID: pid) == nil)
+        #expect(cas.ca(for: "k8s.other", port: 443, profileID: other) != nil)
     }
 
     /// Finding (CWE-362): "Live kube trust rebuild drops the cluster CA and
@@ -66,7 +67,7 @@ struct KubeLiveTrustTests {
         let swapper = TokenSwapper(consent: ConsentBroker())
         let mat = KubeconfigMaterializer().materialize(profile: p, bromureCAPEM: "PEM")
         MitmEngine.applyKubeMaterial(mat, profileID: pid, identities: ids, clusterCAs: cas, poller: poller, swapper: swapper)
-        #expect(cas.ca(for: "10.163.15.50", profileID: pid) != nil)
+        #expect(cas.ca(for: "10.163.15.50", port: 6443, profileID: pid) != nil)
 
         // The proxy's queue looks the CA up while live pushes rebuild it.
         final class Probe: @unchecked Sendable {
@@ -77,7 +78,7 @@ struct KubeLiveTrustTests {
             while true {
                 probe.lock.lock(); let done = probe.stop; probe.lock.unlock()
                 if done { return }
-                let miss = cas.ca(for: "10.163.15.50:6443", profileID: pid) == nil
+                let miss = cas.ca(for: "10.163.15.50", port: 6443, profileID: pid) == nil
                 probe.lock.lock(); probe.looks += 1; if miss { probe.misses += 1 }; probe.lock.unlock()
             }
         }
@@ -93,11 +94,10 @@ struct KubeLiveTrustTests {
         // An edit that breaks the PEM: the cluster keeps its pinned CA.
         cas.replaceAll([(pem: "-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----",
                          host: "10.163.15.50:6443")], for: pid)
-        #expect(cas.ca(for: "10.163.15.50:6443", profileID: pid) != nil)
-        #expect(cas.ca(for: "10.163.15.50", profileID: pid) != nil)
+        #expect(cas.ca(for: "10.163.15.50", port: 6443, profileID: pid) != nil)
         // Removed: gone.
         cas.replaceAll([], for: pid)
-        #expect(cas.ca(for: "10.163.15.50", profileID: pid) == nil)
+        #expect(cas.ca(for: "10.163.15.50", port: 6443, profileID: pid) == nil)
 
         let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()

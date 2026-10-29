@@ -2,6 +2,7 @@ import Foundation
 #if canImport(Darwin)
 import Darwin
 #endif
+import Security
 
 // MARK: - Privileged tunnel daemon (root, launchd via SMAppService)
 
@@ -14,8 +15,29 @@ import Darwin
 /// Protocol: the app connects, sends `SETUP <cidr>\n`, and receives `OK <utun>\n`
 /// plus the utun fd as ancillary data. The daemon holds the connection open for
 /// the tunnel's lifetime; when the app disconnects it deletes the route.
+///
+/// A root helper acting for whoever connects must not do more than the app
+/// needs (the Tailworm class: tailscaled forwarding for unprivileged users).
+/// So it serves only a caller signed like itself, routes only a private /24
+/// nothing else routes yet, and holds at most `maxTunnels` at once.
 enum FatClientTunnelDaemon {
     static let socketPath = "/var/run/io.bromure.fatclient-tunnel.sock"
+    static let maxTunnels = 16
+
+    private static let slotLock = NSLock()
+    private static var activeTunnels = 0
+
+    /// Take one of the `maxTunnels` slots; false when they're all held.
+    static func reserveSlot() -> Bool {
+        slotLock.lock(); defer { slotLock.unlock() }
+        guard activeTunnels < maxTunnels else { return false }
+        activeTunnels += 1
+        return true
+    }
+
+    static func releaseSlot() {
+        slotLock.lock(); activeTunnels = max(0, activeTunnels - 1); slotLock.unlock()
+    }
 
     static func run() -> Never {
         guard getuid() == 0 else {
@@ -40,6 +62,9 @@ enum FatClientTunnelDaemon {
         // EACCES on every connect, reboot after reboot ("helper isn't
         // reachable" with the helper enabled).
         chmod(socketPath, 0o666)
+        if selfRequirement == nil {
+            FileHandle.standardError.write(Data("tunnel-helper: can't pin its own signature; only root is served\n".utf8))
+        }
         while true {
             let cfd = accept(lfd, nil, nil)
             if cfd < 0 { if errno == EINTR { continue }; break }
@@ -50,7 +75,18 @@ enum FatClientTunnelDaemon {
                 _ = why.withCString { Darwin.write(cfd, $0, strlen($0)) }
                 close(cfd); continue
             }
-            Thread.detachNewThread { serve(cfd) }
+            // The console user may run anything; only Bromure gets a tunnel.
+            guard peer == 0 || peerSignedLikeSelf(cfd) else {
+                let why = "ERR unsigned: the caller isn't signed like this helper\n"
+                _ = why.withCString { Darwin.write(cfd, $0, strlen($0)) }
+                close(cfd); continue
+            }
+            guard reserveSlot() else {
+                let why = "ERR busy: \(maxTunnels) tunnels already open\n"
+                _ = why.withCString { Darwin.write(cfd, $0, strlen($0)) }
+                close(cfd); continue
+            }
+            Thread.detachNewThread { defer { releaseSlot() }; serve(cfd) }
         }
         exit(0)
     }
@@ -72,15 +108,19 @@ enum FatClientTunnelDaemon {
     /// disconnects, then delete the route.
     private static func serve(_ fd: Int32) {
         defer { close(fd) }
-        guard let line = readLine(fd), line.hasPrefix("SETUP ") else {
-            _ = write(fd, "ERR bad request\n", 16); return
-        }
-        let cidr = String(line.dropFirst("SETUP ".count)).trimmingCharacters(in: .whitespaces)
+        // A caller that never sends SETUP doesn't keep its slot.
+        setReceiveTimeout(fd, seconds: 10)
         // Each failure says which step and why: the app shows it as is.
         func fail(_ why: String) {
             let line = "ERR " + why.replacingOccurrences(of: "\n", with: " ") + "\n"
             _ = line.withCString { Darwin.write(fd, $0, strlen($0)) }
         }
+        let cidr: String
+        switch admit(readLine(fd), routeGet: { run("/sbin/route", ["-n", "get", $0]) }) {
+        case .success(let c): cidr = c
+        case .failure(let refusal): fail(refusal.reason); return
+        }
+        setReceiveTimeout(fd, seconds: 0)   // the hold below lasts the tunnel's lifetime
         guard let (utunFD, name) = openUtun() else {
             fail("utun: \(String(cString: strerror(errno)))"); return
         }
@@ -95,6 +135,113 @@ enum FatClientTunnelDaemon {
         _ = readLine(fd)
         _ = run("/sbin/route", ["-n", "delete", "-net", cidr])
         Darwin.close(utunFD)   // drops the interface (app's passed fd may still hold it briefly)
+    }
+
+    struct Refusal: Error, Equatable { let reason: String }
+
+    /// What a SETUP line may route: one private (RFC 1918 or CGNAT) /24, the
+    /// shape of every Bromure workspace subnet and fleet alias, that no other
+    /// route covers yet. `routeGet` runs `route -n get <network>`. Returns the
+    /// canonical "a.b.c.0/24", or why not (the text after "ERR ").
+    static func admit(_ line: String?,
+                      routeGet: (String) -> (ok: Bool, output: String)) -> Result<String, Refusal> {
+        guard let line, line.hasPrefix("SETUP ") else { return .failure(Refusal(reason: "bad request")) }
+        let asked = String(line.dropFirst("SETUP ".count)).trimmingCharacters(in: .whitespaces)
+        guard let cidr = privateSlash24(asked) else {
+            return .failure(Refusal(reason: "cidr \(asked.prefix(64)): not a private /24 network"))
+        }
+        let net = String(cidr.dropLast(3))
+        let lookup = routeGet(net)
+        // "not in table" (no default route either) fails: nothing covers it.
+        if lookup.ok, let taken = coveringRoute(lookup.output) {
+            return .failure(Refusal(reason: "route taken: \(cidr) is already routed to \(taken)"))
+        }
+        return .success(cidr)
+    }
+
+    /// "a.b.c.0/24" in 10/8, 172.16/12, 192.168/16 or 100.64/10, strictly
+    /// spelled (no host bits, no leading zeros); nil otherwise.
+    static func privateSlash24(_ s: String) -> String? {
+        let parts = s.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[1] == "24" else { return nil }
+        let octets = parts[0].split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        var o: [Int] = []
+        for t in octets {
+            guard (1...3).contains(t.count), t.allSatisfy(\.isASCII), t.allSatisfy(\.isNumber),
+                  t == "0" || !t.hasPrefix("0"), let v = Int(t), v <= 255 else { return nil }
+            o.append(v)
+        }
+        guard o[3] == 0 else { return nil }
+        let isPrivate = o[0] == 10
+            || (o[0] == 172 && (16...31).contains(o[1]))
+            || (o[0] == 192 && o[1] == 168)
+            || (o[0] == 100 && (64...127).contains(o[1]))
+        return isPrivate ? "\(o[0]).\(o[1]).\(o[2]).0/24" : nil
+    }
+
+    /// The route `route -n get` found, unless it's the default route: any other
+    /// one already claims these addresses (a LAN, a VPN, another tunnel).
+    static func coveringRoute(_ output: String) -> String? {
+        var dest: String?, mask: String?, iface: String?
+        for raw in output.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let key = line[..<colon], value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            switch key {
+            case "destination": dest = value
+            case "mask": mask = value
+            case "interface": iface = value
+            default: break
+            }
+        }
+        guard let dest, dest != "default" else { return nil }
+        return dest + (mask.map { " mask \($0)" } ?? "") + (iface.map { " on \($0)" } ?? "")
+    }
+
+    /// Whether the peer of `fd` passes this helper's own designated requirement
+    /// (same team and identifier, or the same cdhash for an ad-hoc build). The
+    /// audit token is the peer's at connect time, so a pid reuse can't fool it.
+    static func peerSignedLikeSelf(_ fd: Int32) -> Bool {
+        var token = audit_token_t()
+        var len = socklen_t(MemoryLayout<audit_token_t>.size)
+        guard getsockopt(fd, 0 /*SOL_LOCAL*/, 0x006 /*LOCAL_PEERTOKEN*/, &token, &len) == 0 else { return false }
+        return signedLikeSelf(auditToken: token)
+    }
+
+    static func signedLikeSelf(auditToken token: audit_token_t) -> Bool {
+        guard let requirement = selfRequirement else { return false }
+        return signed(auditToken: token, satisfying: requirement)
+    }
+
+    static func signed(auditToken token: audit_token_t, satisfying requirement: SecRequirement) -> Bool {
+        let tokenData = withUnsafeBytes(of: token) { Data($0) }
+        var peer: SecCode?
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributeAudit: tokenData] as CFDictionary,
+                                             [], &peer) == errSecSuccess, let peer else { return false }
+        return SecCodeCheckValidity(peer, [], requirement) == errSecSuccess
+    }
+
+    /// This helper's designated requirement, pinned once for the process's
+    /// lifetime. Read again per connection, it would come from whatever file
+    /// sits at the helper's path NOW: a console user who can write the bundle
+    /// (~/Applications, a dev build) swaps in an ad-hoc binary — the running
+    /// root helper keeps the old vnode — and its process then passes. So the
+    /// running code must match its file when it's pinned (checkValidity on
+    /// self compares the kernel's cdhash with the disk's), or nothing is.
+    static let selfRequirement: SecRequirement? = {
+        var me: SecCode?, myStatic: SecStaticCode?, requirement: SecRequirement?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let me,
+              SecCodeCheckValidity(me, [], nil) == errSecSuccess,
+              SecCodeCopyStaticCode(me, [], &myStatic) == errSecSuccess, let myStatic,
+              SecCodeCopyDesignatedRequirement(myStatic, [], &requirement) == errSecSuccess
+        else { return nil }
+        return requirement
+    }()
+
+    private static func setReceiveTimeout(_ fd: Int32, seconds: Int) {
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
     // Distinct /30 link net per utun unit so several coexist without claiming /8.

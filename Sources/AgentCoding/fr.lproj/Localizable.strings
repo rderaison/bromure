@@ -1205,6 +1205,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "Ce Mac route déjà %@ ailleurs — en général vers ses propres espaces de travail, qui utilisent le même sous-réseau que ceux du distant. Le tunnel ne peut pas le reprendre.\n\nAssistant : %@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "L’assistant réseau ne sert que l’utilisateur connecté à l’écran.\n\nAssistant : %@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "L’assistant réseau n’a pas pu créer l’interface du tunnel.\n\nAssistant : %@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "L’assistant réseau ne route qu’un réseau privé /24 (dans 10/8, 172.16/12, 192.168/16 ou 100.64/10), et le sous-réseau %@ du système distant n’en est pas un.\n\nAssistant : %@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "L’assistant réseau ne sert que la copie de Bromure Agentic Coding depuis laquelle il a été installé, signée de la même façon. Si vous venez de mettre à jour ou de recompiler l’app, redémarrez l’assistant : désactivez puis réactivez « Bromure Agentic Coding » dans Ouverture.\n\nAssistant : %@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "L’assistant réseau tient déjà %d tunnels, sa limite. Fermez la fenêtre d’un système distant que vous n’utilisez pas, ou quittez et rouvrez l’app.\n\nAssistant : %@";
 "The network helper couldn't create the tunnel interface." = "L'assistant réseau n'a pas pu créer l'interface du tunnel.";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -2875,6 +2878,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ ne peut pas utiliser les modèles %2$@ ; il utilise donc son propre fournisseur. Choisissez un autre modèle.";
 "%d sessions whose machine or folder is gone" = "%d sessions dont la machine ou le dossier n’existe plus";
 "(empty)" = "(vide)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "La page de connexion ouverte par l’agent pointe vers ce Mac ou son réseau local : Bromure ne l’a pas ouverte.";
+"Restore these workspaces and their sessions at next start" = "Restaurer ces espaces de travail et leurs sessions au prochain démarrage";
+"Restoring your workspaces" = "Restauration de vos espaces de travail";
+"Restoring Workspaces" = "Restauration des espaces de travail";
+"Stop Restoring" = "Arrêter la restauration";
+"Starting “%@”…" = "Démarrage de « %@ »…";
+"%1$d of %2$d" = "%1$d sur %2$d";
+"did not start in time" = "n’a pas démarré à temps";
+/* VM dashboard: workspace notes */
+"Notes" = "Notes";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Retour enregistre · Maj-Retour ajoute une ligne · Échap annule";
+"Save the notes (Return)" = "Enregistrer les notes (Retour)";
+"Edit the notes as markdown" = "Modifier les notes en markdown";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3128,6 +3144,7 @@
 "Erasing and restoring storage is done on the server Mac." = "L’effacement et la restauration du stockage se font sur le Mac serveur.";
 "Home folder size" = "Taille du dossier personnel";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d Go (sa taille actuelle — un dossier personnel ne peut pas rétrécir) à 1024 Go. Un dossier plus grand prend effet au prochain démarrage de l’espace de travail. L’image disque n’occupe que la place utilisée par ses fichiers.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "De %d Go à 1024 Go. Le dossier personnel est créé à cette taille au premier démarrage de l’espace de travail ; ensuite, il peut grandir mais pas rétrécir. L’image disque n’occupe que la place utilisée par ses fichiers.";
 "Queued — sent when the agent is done" = "En attente — envoyé quand l’agent aura fini";
 "Queued — sent when %@ is done" = "En attente — envoyé quand %@ aura fini";
 "Queued — the agent reads it next" = "En attente — l’agent le lira ensuite";
@@ -4308,3 +4325,14 @@
 "Add a rule for this host and port, for %@" = "Ajouter une règle pour cet hôte et ce port, pour %@";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "« %@ » n’existe plus : un autre processus Bromure l’a supprimé.";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "pour %@ (signature SigV4 sur l'hôte)";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "« %@ » est ouvert dans l’autre processus Bromure (l’app ou son agent de connexion). Utilisez-le là-bas, ou éteignez-le d’abord là-bas.";
+"The workspace is open in the other Bromure process, which runs this automation there" = "L’espace de travail est ouvert dans l’autre processus Bromure, qui y exécute cette automatisation";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "Non lu";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Connexion non ouverte : le port %d est utilisé par une autre connexion. Terminez-la ou annulez-la, puis réessayez.";

@@ -220,8 +220,32 @@ final class RemoteHostController {
         var cpus = 0
         var diskAllocatedBytes: Int64 = 0
         var diskCapacityBytes: Int64 = 0
+        /// home.img's size on the server (nil: none, or a server that
+        /// doesn't say) -- what an open editor's home-size floor is.
+        var homeImageBytes: Int64? = nil
     }
     private(set) var specs: [Profile.ID: WorkspaceSpec] = [:]
+
+    /// Workspaces whose open editor should measure the server's storage
+    /// again: one booting (its prepare creates the home image), running,
+    /// stopped or back off after a failed boot -- and one whose home.img
+    /// changed with no run-state change at all (a compromise wipe deletes it
+    /// and the row stays off, a reset or a checkpoint rollback rewrites it;
+    /// the server's own notification never reaches this process). Finding
+    /// (CWE-670): "Compromise wipe deletes the home image without updating
+    /// an open editor's size floor".
+    nonisolated static func storageChanged(
+        rows: (was: [SessionListModel.ProfileRow], now: [SessionListModel.ProfileRow]),
+        specs: (was: [Profile.ID: WorkspaceSpec], now: [Profile.ID: WorkspaceSpec])
+    ) -> [Profile.ID] {
+        let was = Dictionary(rows.was.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return rows.now.compactMap { r in
+            guard let old = was[r.id] else { return nil }
+            let moved = old.state != r.state || old.compromised != r.compromised
+                || specs.was[r.id]?.homeImageBytes != specs.now[r.id]?.homeImageBytes
+            return moved ? r.id : nil
+        }
+    }
     /// Boot time of each running VM, derived from the mirrored uptime (kept
     /// stable across polls so the dashboard's uptime doesn't jitter).
     private(set) var bootTimes: [Profile.ID: Date] = [:]
@@ -411,6 +435,18 @@ final class RemoteHostController {
             registrationTerminalID = sid
             onRegistrationTerminal?(sid, (reg["provider"] as? String) ?? "")
         }
+        // A published sign-in URL is the guest's: a page on this device's
+        // loopback or LAN opens nowhere, and no callback tunnel stands up
+        // for it. A current server never publishes one; an older one did, and
+        // Bromure Remote (iPhone, iPad, Vision Pro) opened it unchecked.
+        if let s = reg["url"] as? String, let url = URL(string: s), !GuestURLGate.opensInRealBrowser(url) {
+            if openedRegistrationURLs.insert(s).inserted {
+                FatClientLog.log("remote registration: refused sign-in URL with a local/private host")
+            }
+            registrationCallback?.stop()
+            registrationCallback = nil
+            return
+        }
         // Loopback-callback flows (Claude/Codex sign in via a localhost redirect)
         // need a tunnel from our 127.0.0.1:port to the VM's port so the browser's
         // callback reaches the CLI in the VM. Device-code flows (Grok's
@@ -435,6 +471,8 @@ final class RemoteHostController {
         let tunnel = registrationCallback.map { "callback 127.0.0.1:\($0.port) -> \($0.vmIP):\($0.port)" }
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
+        // Checked above, before the tunnel.
+        guard GuestURLGate.opensInRealBrowser(url) else { return }
 #if os(macOS)
         NSWorkspace.shared.open(url)
 #else
@@ -967,13 +1005,15 @@ final class RemoteHostController {
                 squelchSummary: (w["squelchSummary"] as? [String: Any]).flatMap {
                     (try? JSONSerialization.data(withJSONObject: $0))
                         .flatMap { try? JSONDecoder().decode(SquelchSummary.self, from: $0) }
-                }))
+                },
+                notes: w["comments"] as? String ?? ""))
 
             var spec = WorkspaceSpec()
             spec.memoryGB = w["memoryGB"] as? Int ?? 4
             spec.cpus = w["cpuCount"] as? Int ?? 0
             spec.diskAllocatedBytes = Int64((w["diskAllocatedBytes"] as? Int) ?? 0)
             spec.diskCapacityBytes = Int64((w["diskCapacityBytes"] as? Int) ?? 0)
+            spec.homeImageBytes = (w["homeImageBytes"] as? Int).map(Int64.init)
             newSpecs[id] = spec
 
             var p = Profile(
@@ -982,6 +1022,7 @@ final class RemoteHostController {
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
             p.squelch.enabled = (w["squelch"] as? Bool) ?? false
+            p.comments = w["comments"] as? String ?? ""
             p.memoryGB = spec.memoryGB
             p.additionalTools = Self.additionalTools(from: w, primary: p.tool)
             // Terminal appearance overrides, mirrored so the client's ghostty
@@ -1013,8 +1054,12 @@ final class RemoteHostController {
         }
         profilesByID = newProfiles
         if credentialsByID != newCredentials { credentialsByID = newCredentials }
+        let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))
         specs = newSpecs
         if listModel.profileRows != rows { listModel.profileRows = rows }
+        for id in storageMoved {
+            NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
+        }
 
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
@@ -1418,7 +1463,38 @@ final class RemoteHostController {
                 mirrored[i].userTitled = true
             }
         }
+        // A read just sent: no unread mark flashing back for a round trip.
+        for (id, pending) in pendingReads {
+            guard let i = mirrored.firstIndex(where: { $0.id == id }) else { pendingReads[id] = nil; continue }
+            if (mirrored[i].readReplies ?? 0) >= pending.seen || Date().timeIntervalSince(pending.at) > 10 {
+                pendingReads[id] = nil
+            } else {
+                mirrored[i].readReplies = pending.seen
+            }
+        }
         sessionStore.applyMirror(mirrored)
+        // A reply on a session on screen: read as it arrives.
+        for id in watching() { markRead(id) }
+    }
+
+    /// Reads sent to the server and not yet in a snapshot: the reply count.
+    private var pendingReads: [UUID: (seen: Int, at: Date)] = [:]
+
+    /// The sessions the user is looking at now (the window is key, the app
+    /// active; on iOS the screen marks its own).
+    var watching: () -> [UUID] = { [] }
+
+    /// The user saw a session's replies: the mark goes at once, here and —
+    /// through the server — on every other client.
+    func markRead(_ id: UUID) {
+        guard let s = sessionStore.session(id), s.isUnread, let n = s.replies else { return }
+        pendingReads[id] = (n, Date())
+        var list = sessionStore.sessions
+        if let i = list.firstIndex(where: { $0.id == id }) {
+            list[i].readReplies = n
+            sessionStore.applyMirror(list)
+        }
+        sessionCommand(id, "read", body: ["seen": n])
     }
 
     /// Renames sent to the server and not yet in a snapshot.
@@ -1723,6 +1799,21 @@ final class RemoteHostController {
     var hasSnapshot: Bool { revision > 0 }
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
+
+    /// A settings document without what the editor left as it opened it and
+    /// the app saves meanwhile (the dashboard's notes, the sidebar's Squelch
+    /// switch): the host's merge keeps a key left out (Finding CWE-362,
+    /// "Saving workspace settings overwrites notes edited on the VM
+    /// dashboard"). An edited Squelch policy goes whole: its encoder omits
+    /// the default one, which would read as "unchanged".
+    static func dropUnedited(_ doc: inout [String: Any], edited: Profile, opened: Profile) {
+        if edited.comments == opened.comments { doc.removeValue(forKey: "comments") }
+        if edited.squelch == opened.squelch {
+            doc.removeValue(forKey: "squelch")
+        } else if let sq = ACAppDelegate.codableToDict(edited.squelch) {
+            doc["squelch"] = sq
+        }
+    }
 
     /// The host deleted this workspace (DELETE /profiles answered 200): its
     /// row goes now, not at the next snapshot.
@@ -2070,7 +2161,8 @@ final class RemoteHostController {
         let path = "/profiles/\(seg(id))?storage=1"
         guard let resp = try? await Task.detached(priority: .userInitiated, operation: {
             try RemoteTransport.client(for: host).request("GET", path)
-        }).value, resp.status == 200, let j = resp.json["baseBytes"] as? Int64 ?? (resp.json["baseBytes"] as? Int).map(Int64.init)
+        }).value, !Task.isCancelled,   // superseded while the request ran: its answer is stale
+              resp.status == 200, let j = resp.json["baseBytes"] as? Int64 ?? (resp.json["baseBytes"] as? Int).map(Int64.init)
         else { return nil }
         func bytes(_ k: String) -> Int64 {
             (resp.json[k] as? Int64) ?? (resp.json[k] as? Int).map(Int64.init) ?? 0
@@ -2092,6 +2184,7 @@ final class RemoteHostController {
             base: j, disk: bytes("diskBytes"), home: bytes("homeBytes"),
             homeMTime: (resp.json["homeModified"] as? String).flatMap(iso.date(from:)),
             homeCapacity: bytes("homeCapacity"))
+        c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }
         return c
     }
 
@@ -2122,6 +2215,49 @@ final class RemoteHostController {
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             firewallQueue.async { done.resume() }
         }
+    }
+
+    /// One notes save in flight per workspace, in the order they were made.
+    /// Each PUT dialed its own connection and the host applies whichever
+    /// reaches its main queue first: a second blur's save (its base the
+    /// first's draft, not stored yet) could land first, be refused as
+    /// superseded, and the first then wrote the older draft over it. In
+    /// order, the second's base is what the first left stored -- or it lost
+    /// to notes saved meanwhile, as it should.
+    private let notesSaves = InOrder<Profile.ID, VMDashboardView.NotesSave>()
+
+    func saveNotesInOrder(_ id: Profile.ID, _ text: String, ifStill base: String?) async -> VMDashboardView.NotesSave {
+        await notesSaves.run(id) { await Self.saveNotes(self, id, text, ifStill: base) }
+    }
+
+    /// The dashboard's notes save on the host (`ACAppDelegate.setNotes`'s
+    /// remote twin): the host applies an implicit save only while its notes
+    /// are still `base`, and says when they weren't.
+    static func saveNotes(_ c: RemoteHostController, _ id: Profile.ID, _ text: String,
+                          ifStill base: String?) async -> VMDashboardView.NotesSave {
+        var doc: [String: Any] = ["comments": text]
+        if let base { doc["_commentsIfStill"] = base }
+        guard let r = try? await c.putProfileDoc(id, doc) else { return .failed }
+        return notesOutcome(status: r.status, json: r.json)
+    }
+
+    /// What the host's answer to a notes save means. Superseded (even when
+    /// the rest of the save then failed): the notes that won are in the
+    /// answer, and the card shows them.
+    nonisolated static func notesOutcome(status: Int, json: [String: Any]) -> VMDashboardView.NotesSave {
+        if (json["commentsSuperseded"] as? Bool) == true { return .superseded(json["comments"] as? String) }
+        return status == 200 && (json["ok"] as? Bool) == true ? .saved : .failed
+    }
+
+    /// PUT a workspace document; the host's answer whatever it says.
+    func putProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> (status: Int, json: [String: Any]) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("PUT", path, body: doc)
+        }.value
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        return (resp.status, resp.json)
     }
 
     /// Secret-preserving whole-document save (the counterpart of
@@ -3412,9 +3548,11 @@ final class RemoteHostWindow: NSWindow {
         buildToolbar()
         observeSending()
         showGrid()
+        controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
             self.syncSessionsHome()
+            self.refreshDashboardProfile()
             // Re-attempt the browser-MCP relay dial for the selected
             // workspace and any with an open/remembered browser: the
             // dial is guarded on a live VM, so a workspace selected
@@ -4172,6 +4310,10 @@ final class RemoteHostWindow: NSWindow {
         if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
         if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
+        // Notes and the Squelch switch left as the window opened them aren't
+        // this save's: the host keeps what it has (a dashboard save, the
+        // sidebar's switch meanwhile).
+        if let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }
         let c = controller
         // The firewall's live commits and this document are one ordered
         // stream: nothing more goes live, the ones sent land first, then the
@@ -5611,6 +5753,7 @@ final class RemoteHostWindow: NSWindow {
         let model = controller.listModel
         if selectedSessionID == id, !model.newSessionSelected {
             presentSession(s)
+            controller.markRead(id)
             return
         }
         gridView?.removeFromSuperview()
@@ -5630,6 +5773,23 @@ final class RemoteHostWindow: NSWindow {
         UserDefaults.standard.set(id.uuidString, forKey: Self.remoteSelectedSessionKey)
         sessionPresentationKey = nil
         presentSession(s)
+        controller.markRead(id)
+    }
+
+    /// The sessions on this window's stage while the user can see them (the
+    /// window key, the app active): one, or a room's page. Their replies are
+    /// read as they come.
+    var sessionsOnScreen: [UUID] {
+        let model = controller.listModel
+        guard NSApp.isActive, isKeyWindow, isVisible, !isMiniaturized, !model.newSessionSelected else { return [] }
+        if let rc = roomController { return rc.onScreenIDs }
+        return model.selectedSessionID.map { [$0] } ?? []
+    }
+
+    /// Back to this window (or to the app): what's on its stage is seen.
+    override func becomeKey() {
+        super.becomeKey()
+        for id in sessionsOnScreen { controller.markRead(id) }
     }
 
     private func sessionStageDidChange() {
@@ -5905,8 +6065,19 @@ final class RemoteHostWindow: NSWindow {
         rc.onResumeAll = { ids in for sid in ids { c.sessionCommand(sid, "resume") } }
         rc.onEndAll = { ids in for sid in ids { c.sessionCommand(sid, "close") } }
         roomController = rc
+        // As the host's showRoom: wired before the view goes in, marked at
+        // once, and called once after the room opens (CWE-670, "Opening a
+        // room in the focused window never marks the chats on screen").
+        rc.onShownChanged = { [weak self, weak rc] in
+            guard let ids = rc?.onScreenIDs, !ids.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }
+                for sid in ids { c.markRead(sid) }
+            }
+        }
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: rc))
+        rc.onShownChanged?()
     }
 
     /// Leave the room stage (its chat models stop polling).
@@ -7189,13 +7360,28 @@ final class RemoteHostWindow: NSWindow {
             onSuspend:     { c.suspendWorkspace(id) },
             onReboot:      { [weak self] in self?.confirmReboot(id) },
             onShutdown:    { c.shutdownWorkspace(id) },
-            onResume:      { c.startWorkspace(id) })
+            onResume:      { c.startWorkspace(id) },
+            // A partial document: the host overlays the one field it names.
+            onSaveNotes:   { text, base in await c.saveNotesInOrder(id, text, ifStill: base) })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         host.sizingOptions = []   // never let SwiftUI size the window
         dashboardHost = host
         shownDashboard = (id, state)
         mount(host)
+    }
+
+    /// A snapshot changed the shown workspace's profile (notes saved in its
+    /// settings, a rename): the dashboard shows the new copy without being
+    /// rebuilt, so its vitals history keeps.
+    private func refreshDashboardProfile() {
+        guard let id = shownDashboard?.id, let host = dashboardHost,
+              let profile = controller.profile(for: id) else { return }
+        var view = host.rootView
+        guard view.profile != profile else { return }
+        view.profile = profile
+        view.accentHex = profile.color.hexInUI
+        host.rootView = view
     }
 
     /// A deleted workspace leaves the stage, the selection, its pop-out and
@@ -8342,3 +8528,23 @@ struct OutgoingIndicator: View {
 }
 #endif
 
+/// Runs the operations given for one key one after the other, in the order
+/// they were asked for; different keys don't wait on each other.
+@MainActor
+final class InOrder<Key: Hashable, Value> {
+    private var tails: [Key: Task<Value, Never>] = [:]
+
+    func run(_ key: Key, _ operation: @escaping @MainActor () async -> Value) async -> Value {
+        let previous = tails[key]
+        let task = Task { @MainActor in
+            _ = await previous?.value
+            return await operation()
+        }
+        tails[key] = task
+        let value = await task.value
+        if tails[key] == task { tails[key] = nil }
+        return value
+    }
+
+    var idle: Bool { tails.isEmpty }
+}

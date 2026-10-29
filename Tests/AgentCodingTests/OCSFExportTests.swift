@@ -58,6 +58,36 @@ struct OCSFExportTests {
         #expect(e["status_detail"] as? String == "not permitted")
     }
 
+    @Test("The URL scheme is the flow's, not a guess from the port (OpenShell #4684)")
+    func l7Scheme() throws {
+        func scheme(_ data: [String: AnyJSON]) throws -> String? {
+            let e = try map("egress.firewall", data.merging(["action": .string("deny"), "layer": .string("l7"),
+                                                             "host": .string("api.example.com"),
+                                                             "method": .string("GET"), "path": .string("/")]) { a, _ in a })
+            return ((e["http_request"] as? [String: Any])?["url"] as? [String: Any])?["scheme"] as? String
+        }
+        #expect(try scheme(["port": .int(8443), "scheme": .string("https")]) == "https")
+        #expect(try scheme(["port": .int(8080), "scheme": .string("http")]) == "http")
+        #expect(try scheme(["port": .int(443), "scheme": .string("wss")]) == "wss")
+        // Events recorded before the proxy stamped the scheme.
+        #expect(try scheme(["port": .int(80)]) == "http")
+        #expect(try scheme(["port": .int(443)]) == "https")
+    }
+
+    @Test("Every record names the workspace VM as an OCSF 1.8 device (OpenShell #4677)")
+    func device() throws {
+        let e = try map("egress.firewall", ["action": .string("deny"), "layer": .string("sni"),
+                                            "proto": .string("tcp"), "host": .string("httpbin.org"),
+                                            "port": .int(443)])
+        let device = try #require(e["device"] as? [String: Any])
+        #expect(device["hostname"] as? String == "demo")
+        #expect(device["type_id"] as? Int == 99)
+        #expect(device["type"] as? String == "Sandbox")
+        let os = try #require(device["os"] as? [String: Any])
+        #expect(os["name"] as? String == "Linux")
+        #expect(os["type_id"] as? Int == 200)
+    }
+
     @Test("Exfiltration is a high-severity Detection Finding alert")
     func finding() throws {
         let e = try map("credential.exfiltration", ["observed_host": .string("evil.example"),

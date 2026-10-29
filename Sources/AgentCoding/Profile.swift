@@ -150,11 +150,20 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     }
 
     /// Bare host[:port] used as the proxy's routing key when
-    /// registering client identities or scoped token swaps.
+    /// registering client identities and cluster CAs (see `endpointKey`).
     public var hostPattern: String {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
         if let port = url.port { return "\(host):\(port)" }
         return host
+    }
+
+    /// The token swap's scope: host and the port kubectl dials, 443 (80 for
+    /// http) when the URL omits it, so a token meant for `h:6443` is never
+    /// handed to `h:443` or the other way round.
+    public var tokenScope: String {
+        guard let url = URL(string: serverURL), let host = url.host else { return "" }
+        let port = url.port ?? (url.scheme?.lowercased() == "http" ? 80 : 443)
+        return "\(host):\(port)"
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1401,6 +1410,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// stay on the host; the VM's env carries fakes. See ManualToken.
     public var manualTokens: [ManualToken]
 
+    /// Credentials the VM created through an API (STS, iam:CreateAccessKey,
+    /// registry and cluster logins …) and the proxy kept on the host,
+    /// handing the VM fakes. Saved here so the fakes keep working after a
+    /// restart. See `MintedCredential`.
+    public var mintedCredentials: [MintedCredential] = []
+
     /// Pre-existing SSH private keys the user has pointed at this
     /// profile. Loaded into the bromure ssh-agent at every session
     /// launch alongside the auto-generated key.
@@ -1934,6 +1949,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     /// Fields the app maintains itself, never the editor: a save from a
     /// working copy takes them from the stored profile instead.
+    /// What the app saves outside the editor while it's open -- the VM
+    /// dashboard's notes, the sidebar's Squelch switch: a field the editor
+    /// left as it `opened` it takes `stored`'s; one edited keeps the edit.
+    mutating func adoptAppEdits(from stored: Profile, opened: Profile) {
+        if comments == opened.comments { comments = stored.comments }
+        if squelch.enabled == opened.squelch.enabled { squelch.enabled = stored.squelch.enabled }
+    }
+
     public mutating func adoptRuntimeFields(from stored: Profile) {
         createdAt = stored.createdAt
         // The later of the two: a use recorded while the editor was open
@@ -2351,6 +2374,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case gitHTTPSCredentials
         case additionalTools
         case manualTokens
+        case mintedCredentials
         case importedSSHKeys
         case environmentVariables
         case traceLevel
@@ -2479,6 +2503,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         additionalTools = dedup
         manualTokens = try c.decodeIfPresent([ManualToken].self, forKey: .manualTokens) ?? []
+        mintedCredentials = try c.decodeIfPresent([MintedCredential].self, forKey: .mintedCredentials) ?? []
         importedSSHKeys = try c.decodeIfPresent([ImportedSSHKey].self, forKey: .importedSSHKeys) ?? []
         environmentVariables = try c.decodeIfPresent([EnvironmentVariable].self,
                                                      forKey: .environmentVariables) ?? []
@@ -2608,6 +2633,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !manualTokens.isEmpty {
             try c.encode(manualTokens, forKey: .manualTokens)
+        }
+        if !mintedCredentials.isEmpty {
+            try c.encode(mintedCredentials, forKey: .mintedCredentials)
         }
         if !importedSSHKeys.isEmpty {
             try c.encode(importedSSHKeys, forKey: .importedSSHKeys)
@@ -3079,6 +3107,14 @@ struct ProfileSecrets: Codable {
     /// write-only over the remote export path like everything else here.
     /// Keyed by EnvironmentVariable.id.uuidString.
     var environmentVariableValues: [String: String]?
+    /// Minted credentials' real values, keyed by MintedCredential.id: the
+    /// token or secret access key, and the session token. Optional for
+    /// older `secrets.enc` blobs.
+    var mintedCredentialSecrets: [String: MintedSecret]?
+    struct MintedSecret: Codable, Equatable {
+        var secret: String
+        var sessionToken: String
+    }
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -3101,6 +3137,7 @@ struct ProfileSecrets: Codable {
             && (mcpEnvironmentValues?.isEmpty ?? true)
             && (mcpRawJSONs?.isEmpty ?? true)
             && (environmentVariableValues?.isEmpty ?? true)
+            && (mintedCredentialSecrets?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -3135,6 +3172,13 @@ struct ProfileSecrets: Codable {
                 s.manualTokenValues[t.id.uuidString] = t.realValue
                 profile.manualTokens[i].realValue = ""
             }
+        }
+
+        for (i, m) in profile.mintedCredentials.enumerated() where !m.secret.isEmpty || !m.sessionToken.isEmpty {
+            s.mintedCredentialSecrets = s.mintedCredentialSecrets ?? [:]
+            s.mintedCredentialSecrets?[m.id.uuidString] = MintedSecret(secret: m.secret, sessionToken: m.sessionToken)
+            profile.mintedCredentials[i].secret = ""
+            profile.mintedCredentials[i].sessionToken = ""
         }
 
         if !profile.kubeconfigs.isEmpty {
@@ -3258,6 +3302,13 @@ struct ProfileSecrets: Codable {
             }
         }
 
+        for (i, m) in profile.mintedCredentials.enumerated() {
+            if let v = mintedCredentialSecrets?[m.id.uuidString] {
+                profile.mintedCredentials[i].secret = v.secret
+                profile.mintedCredentials[i].sessionToken = v.sessionToken
+            }
+        }
+
         if let kcs = kubeconfigs { profile.kubeconfigs = kcs }
         if let do_ = digitalOceanToken { profile.digitalOceanToken = do_ }
         if let lin = linearToken { profile.linearToken = lin }
@@ -3345,6 +3396,9 @@ struct ProfileSecrets: Codable {
         additionalToolApiKeys.merge(newer.additionalToolApiKeys) { _, n in n }
         gitHTTPSTokens.merge(newer.gitHTTPSTokens) { _, n in n }
         manualTokenValues.merge(newer.manualTokenValues) { _, n in n }
+        if let v = newer.mintedCredentialSecrets {
+            mintedCredentialSecrets = (mintedCredentialSecrets ?? [:]).merging(v) { _, n in n }
+        }
         // Kube round-trips through the redacted export with blank auth. Merge per
         // id so an identity/guardrail edit (name, requireApproval, …) applies while
         // a blank auth keeps the stored cert/token; a real incoming auth still wins.
@@ -3817,6 +3871,9 @@ public final class ProfileStore {
         if profile.manualTokens.contains(where: { !$0.realValue.isEmpty }) {
             return true
         }
+        if profile.mintedCredentials.contains(where: { !$0.secret.isEmpty || !$0.sessionToken.isEmpty }) {
+            return true
+        }
         if !profile.awsCredentials.secretAccessKey.isEmpty
             || !profile.awsCredentials.sessionToken.isEmpty {
             return true
@@ -3827,9 +3884,11 @@ public final class ProfileStore {
         return false
     }
 
-    public func save(_ profile: Profile) throws {
+    @discardableResult
+    public func save(_ profile: Profile) throws -> Profile {
         let dir = profileDirectory(for: profile)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let profile = carryingStoredMinted(profile, dir: dir)
 
         // Split secrets out. The Profile in memory keeps every field;
         // on disk we write profile.json (no secrets) + secrets.enc
@@ -3841,6 +3900,29 @@ public final class ProfileStore {
         try data.write(to: dir.appendingPathComponent("profile.json"), options: .atomic)
 
         try writeSecretsBlob(secrets, dir: dir)
+        return profile
+    }
+
+    /// `profile` with the minted credentials already stored kept. Only the
+    /// process whose VM minted one records it, while every other copy in
+    /// memory -- the other Bromure process's, loaded at its startup, an
+    /// editor's, a launch's -- still has the older list: a save from one of
+    /// those dropped the record and its secret, and the access key the guest
+    /// still holds was then signed with the workspace's own key (Finding
+    /// CWE-284, "The other Bromure process's launch rewrites a workspace and
+    /// drops minted keys"). A stored credential the copy doesn't have is
+    /// kept; the copy's own version of one wins; long-expired ones go.
+    func carryingStoredMinted(_ profile: Profile, dir: URL) -> Profile {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("profile.json")),
+              var stored = try? JSONDecoder.iso8601().decode(Profile.self, from: data),
+              stored.id == profile.id else { return profile }
+        let have = Set(profile.mintedCredentials.map(\.id))
+        guard stored.mintedCredentials.contains(where: { !have.contains($0.id) }) else { return profile }
+        mergeSecrets(into: &stored, dir: dir)
+        var out = profile
+        out.mintedCredentials = MintedCredential.pruned(
+            profile.mintedCredentials + stored.mintedCredentials.filter { !have.contains($0.id) })
+        return out
     }
 
     /// Drop the encrypted blob (and best-effort delete any plaintext
@@ -3887,7 +3969,22 @@ public final class ProfileStore {
     /// launch; an older copy wrote it backwards).
     public func saveEdited(_ profile: inout Profile) throws {
         if let stored = storedProfile(id: profile.id) { profile.adoptRuntimeFields(from: stored) }
+        holdHomeSizeToImage(&profile)
         try save(profile)
+    }
+
+    /// A home size below the workspace's existing image is raised to the
+    /// image's size. The disk layer only grows an image, so a smaller
+    /// setting never took effect and only came back as the size of the next
+    /// home after an erase -- and an editor that opened before the image
+    /// existed offered one (Finding CWE-670, "Home size stays shrinkable
+    /// after the image exists").
+    func holdHomeSizeToImage(_ profile: inout Profile) {
+        guard profile.homeModel == .ext4, let gb = profile.homeImageGB,
+              let n = (try? fm.attributesOfItem(atPath: homeImageURL(for: profile).path))?[.size] as? NSNumber
+        else { return }
+        let imageGB = Int(n.int64Value >> 30)
+        if gb < imageGB { profile.homeImageGB = imageGB }
     }
 
     /// A workspace whose directory is gone: the other process sharing this
@@ -3912,16 +4009,21 @@ public final class ProfileStore {
 
     /// Save a change to a workspace that is already saved -- from a copy
     /// held in memory, which may outlive the directory. Never recreates it.
-    public func update(_ profile: Profile) throws {
+    /// Returns what was written: `profile` with the stored minted
+    /// credentials it lacked (see `carryingStoredMinted`).
+    @discardableResult
+    public func update(_ profile: Profile) throws -> Profile {
         guard exists(profile) else { throw ProfileGone(name: profile.name) }
-        try save(profile)
+        return try save(profile)
     }
 
     /// Stamp a launch on a saved workspace; never recreates a deleted one.
-    public func touch(_ profile: Profile) throws {
+    /// Returns what was written, minted credentials as stored.
+    @discardableResult
+    public func touch(_ profile: Profile) throws -> Profile {
         var p = profile
         p.lastUsedAt = Date()
-        try update(p)
+        return try update(p)
     }
 
     public func delete(_ profile: Profile) throws {
@@ -4207,6 +4309,18 @@ public final class ProfileStore {
         try revertImage(fromCheckpoint: checkpointID,
                         in: homeCheckpointsDirectory(for: profile),
                         over: homeImageURL(for: profile), profile: profile)
+        Self.homeImageChanged(profile.id)   // a checkpoint from before a grow is smaller
+    }
+
+    /// A workspace's home image was created, grown, erased or rolled back:
+    /// an open editor measures it again. Posted where the file changes --
+    /// a boot creates it in `prepare()`, long before the session registers,
+    /// and a boot that then fails never registers at all (Finding CWE-670,
+    /// "Home-size floor stays at 8 GB after prepare() has created the image").
+    public static func homeImageChanged(_ id: UUID) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
+        }
     }
 
     private func revertImage(fromCheckpoint checkpointID: String, in dir: URL,
@@ -4240,6 +4354,7 @@ public final class ProfileStore {
         let img = homeImageURL(for: profile)
         if fm.fileExists(atPath: img.path) {
             try fm.removeItem(at: img)
+            Self.homeImageChanged(profile.id)
         }
         // Erased means erased: the home's rollback checkpoints hold the
         // same data and must not survive the wipe.

@@ -2105,6 +2105,20 @@ final class ScheduledAutomationEngine {
             return
         }
 
+        // Running in the other Bromure process (the app, or its login
+        // agent), whose engine fires this automation into it: booting it
+        // here would start a second VM from this process's stale copy.
+        if delegate.workspaceOpenElsewhere(a.profileID) {
+            BACDebug.log("automation", "skipping “\(a.name)” — workspace open in the other Bromure process")
+            store.record(AutomationRunRecord(
+                automationID: a.id, firedAt: now, outcome: .skipped,
+                detail: NSLocalizedString(
+                    "The workspace is open in the other Bromure process, which runs this automation there",
+                    comment: "skipped automation run"),
+                itemKey: itemKey))
+            return
+        }
+
         // Workspace off/suspended. Only boot it when the automation says so;
         // otherwise the fire is recorded as skipped — visible, not silent.
         guard a.startWorkspaceIfNeeded else {

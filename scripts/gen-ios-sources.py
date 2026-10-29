@@ -46,6 +46,8 @@ SHARED = [
     "Mitm/SquelchPolicy.swift",
     "Mitm/SupplyChainPolicy.swift",
     "Mitm/GuardrailsPolicy.swift",
+    "Mitm/AWSHosts.swift",          # the AWS host test GuardrailsPolicy shares with the resigner
+    "Mitm/MintedCredential.swift",  # the record Profile.swift stores (the mint engine stays mac-only)
     "Mitm/SecretsVault.swift",
     "Mitm/SessionTokenPlan.swift",
     "SubscriptionTokenSwapState.swift",
@@ -56,6 +58,7 @@ SHARED = [
     "Terminal/TerminalImagePaste.swift",  # pure upload core (AppKit parts #if'd out)
     # Controller + connect flow (models; iOS provides the views)
     "FatClientController.swift",
+    "GuestURLGate.swift",  # the guest-URL host gate (FatClientController opens a published sign-in URL)
     "FatClientConnect.swift",
     "AgentSessions.swift",      # session model/store + shared row/section views (sessions home)
     "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)

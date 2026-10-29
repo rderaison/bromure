@@ -138,10 +138,26 @@ enum FatClientTunnelDiagnosis {
                 comment: "tunnel diagnosis: no reply to SETUP")
         }
         let why = String(detail.dropFirst(4))
-        if why.hasPrefix("route "), why.localizedCaseInsensitiveContains("File exists") {
+        if why.hasPrefix("route taken")
+            || (why.hasPrefix("route ") && why.localizedCaseInsensitiveContains("File exists")) {
             return String(format: NSLocalizedString(
                 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@",
                 comment: "tunnel diagnosis: route exists"), cidr, why)
+        }
+        if why.hasPrefix("cidr ") {
+            return String(format: NSLocalizedString(
+                "The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@",
+                comment: "tunnel diagnosis: subnet refused"), cidr, why)
+        }
+        if why.hasPrefix("unsigned") {
+            return String(format: NSLocalizedString(
+                "The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@",
+                comment: "tunnel diagnosis: caller not signed like the helper"), why)
+        }
+        if why.hasPrefix("busy") {
+            return String(format: NSLocalizedString(
+                "The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@",
+                comment: "tunnel diagnosis: too many tunnels"), FatClientTunnelDaemon.maxTunnels, why)
         }
         if why.hasPrefix("denied") {
             return String(format: NSLocalizedString(

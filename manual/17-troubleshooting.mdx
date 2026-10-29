@@ -397,7 +397,7 @@ Storage lives under `~/Library/Application Support/BromureAC/` (see the [Appendi
 |---|---|---|
 | The Ubuntu base image | `base.img` | 24 GB logical, a few GB physical |
 | Per-machine system disks | `profiles/<uuid>/disk.img` | Copy-on-write clone of the base; grows only as the guest writes |
-| Per-machine homes | `profiles/<uuid>/home.img` | Sparse ext4, 64 GB apparent by default, allocated lazily |
+| Per-machine homes | `profiles/<uuid>/home.img` | Sparse ext4, 16 GB apparent by default, allocated lazily |
 | Suspended-VM RAM snapshots | `profiles/<uuid>/vm.state` | Up to the machine's allocated RAM, per suspended machine |
 | Disk and home checkpoints | `profiles/<uuid>/checkpoints/` | Real space only as they diverge from the live disks |
 | Kubernetes nodes, registries, messaging connector | `kube/<id>/nodes/<uuid>/` | One system disk each, plus a data disk per node with Longhorn (40 GB apparent by default) or the registry's **Image storage** |

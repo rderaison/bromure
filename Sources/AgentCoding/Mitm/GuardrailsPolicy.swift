@@ -323,9 +323,9 @@ public struct GuardrailsConfig: Sendable {
 
     /// Any AWS endpoint. AWS uses well-known `*.amazonaws.com` hosts, so —
     /// unlike kube — there's no per-profile host list to maintain.
+    /// The resigner's test: a host it signs for is one the guardrail sees.
     public static func isAWSHost(_ host: String) -> Bool {
-        let h = host.lowercased()
-        return h == "amazonaws.com" || h.hasSuffix(".amazonaws.com")
+        AWSHosts.isAWSHost(host)
     }
 
     /// Classify an AWS action name by prefix. Read-ish prefixes mirror the

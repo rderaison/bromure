@@ -1891,6 +1891,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
     func debugToast(_ text: String) { toasts.show(text) {} }
+    /// A passing notice at the bottom of the window (no Undo).
+    func showNotice(_ text: String) { toasts.show(text, undo: nil) }
     func debugBranchAction(_ action: String, _ id: UUID) {
         let a = sessionStageActions
         switch action {
@@ -2147,6 +2149,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if selectedSessionID == id, !listModel.newSessionSelected {
             presentSession(s)
             makeKeyAndOrderFront(nil)
+            delegate.markSessionRead(id)
             return
         }
         guard clearAutomationEditor() else { return }   // dirty draft kept
@@ -2167,6 +2170,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sessionPresentationKey = nil   // a fresh surface on an explicit pick
         presentSession(s)
         makeKeyAndOrderFront(nil)
+        delegate.markSessionRead(id)
+    }
+
+    /// The sessions whose chats this window's stage shows: the selected one,
+    /// or a room's page (its zoomed cell).
+    var sessionsOnStage: [UUID] {
+        if listModel.newSessionSelected { return [] }
+        if let rc = roomController { return rc.onScreenIDs }
+        return listModel.selectedSessionID.map { [$0] } ?? []
+    }
+
+    /// Back to this window (or to the app): what's on its stage is seen.
+    override func becomeKey() {
+        super.becomeKey()
+        for id in sessionsOnStage { acDelegate?.markSessionRead(id) }
     }
 
     /// The session behind a workspace's tmux window (a kanban run's tab, an
@@ -2790,9 +2808,29 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self?.roomController?.refresh()
         }
         roomController = controller
+        // The chats on show are read, and so is each page, zoom, dock or tab
+        // shown next. Wired BEFORE the view goes in (its appear and initial
+        // onChange fire during showSessionOverlay's layout), marked at once
+        // with the set that changed, and called once after the room opens:
+        // the controller already knows what the stage opens on. A window
+        // that isn't key reads them when it becomes key (`becomeKey`) --
+        // opening a room in the window already focused got no becomeKey and
+        // the assign-after-show missed the appear, so nothing was read
+        // (Finding CWE-670, "Opening a room in the focused window never
+        // marks the chats on screen").
+        // The set is taken now, the store written a turn later: this runs
+        // inside the view's onAppear/onChange too, mid view update.
+        controller.onShownChanged = { [weak self, weak controller] in
+            guard let ids = controller?.onScreenIDs, !ids.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }   // else becomeKey reads them
+                for sid in ids { delegate.markSessionRead(sid) }
+            }
+        }
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: controller))
         makeKeyAndOrderFront(nil)
+        controller.onShownChanged?()
     }
 
     /// Leave the room stage (its chat models stop polling).
@@ -3191,7 +3229,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Show the workspace VM dashboard (vitals + config) over the framebuffer.
     /// Shown for any run state: a running VM gets live vitals; a suspended/off
     /// one shows the spec + config (more useful than a black framebuffer).
-    func showVMDashboard(_ id: Profile.ID) {
+    func showVMDashboard(_ id: Profile.ID, editingNotes: Bool = false) {
         guard let profile = acDelegate?.profile(for: id) else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
         clearAutomationBoard()
@@ -3207,8 +3245,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let info = acDelegate?.vmDashboardData(for: id)
         let view = VMDashboardView(
             model: p?.model,
-            profile: p?.profile ?? profile,
-            accentHex: (p?.profile ?? profile).color.hexInUI,
+            // The saved copy: the pane's is the one it booted with (its
+            // notes from before a dashboard save).
+            profile: profile,
+            accentHex: profile.color.hexInUI,
             state: state,
             vCPUs: UbuntuSandboxVM.runtimeCPUs,
             diskAllocatedBytes: info?.diskAllocated ?? 0,
@@ -3218,7 +3258,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSuspend:     { [weak self] in self?.acDelegate?.suspendProfile(id) },
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
             onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
-            onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() })
+            onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() },
+            onSaveNotes:   { [weak self] text, base in self?.acDelegate?.setNotes(id, text, ifStill: base) ?? .failed },
+            startsEditingNotes: editingNotes)
         let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.addSubview(host)
@@ -3230,6 +3272,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         ])
         vmDashboardHosting = host
         updateVMOverlay()
+    }
+
+    /// The shown workspace's profile changed (a settings save, the sidebar
+    /// refresh): the dashboard shows the new copy — notes, name, color —
+    /// without being rebuilt, so its vitals history keeps.
+    func refreshVMDashboard() {
+        // The saved copy, never the pane's: a pane keeps the profile it
+        // booted with, and would turn a running workspace's dashboard back
+        // to its notes from before the save.
+        guard let id = vmDashboardSelectedID, let host = vmDashboardHosting,
+              let profile = acDelegate?.profile(for: id) else { return }
+        var view = host.rootView
+        guard view.profile != profile else { return }
+        view.profile = profile
+        view.accentHex = profile.color.hexInUI
+        host.rootView = view
     }
 
     func clearVMDashboard() {
@@ -4320,6 +4378,7 @@ private struct CompactRail: View {
                             accentHex: model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888",
                             isActive: model.selectedSessionID == s.id
                                 && !model.gridSelected && !model.newSessionSelected,
+                            unread: SessionHome.showsUnread(s, in: model),
                             onSelect: { onSelectSession(s.id) })
                     }
                     Divider().padding(.horizontal, 10)
@@ -4406,6 +4465,7 @@ private struct RailSessionButton: View {
     let statusLine: String
     let accentHex: String
     let isActive: Bool
+    var unread = false
     let onSelect: () -> Void
     @State private var hovering = false
 
@@ -4422,6 +4482,9 @@ private struct RailSessionButton: View {
         Button(action: onSelect) {
             AgentAvatar(tool: session.tool, size: 22, status: dot)
                 .opacity(bucket == .ended || bucket == .asleep ? 0.55 : 1)
+                .overlay(alignment: .topTrailing) {
+                    if unread { UnreadMark(size: 7).offset(x: 3, y: -2) }
+                }
                 .frame(width: 30, height: 26)
                 .background(RoundedRectangle(cornerRadius: 6)
                     .fill(isActive ? Color(hex: accentHex).opacity(0.16)
@@ -4979,6 +5042,7 @@ private struct VMSection: View {
                             .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                             .foregroundStyle(isSelected ? .primary : .secondary)
+                            .help(row.notesExcerpt)   // its notes' opening; none: no tooltip
                         if row.compromised {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.system(size: 9))

@@ -60,20 +60,19 @@ public final class AWSResigner: @unchecked Sendable {
         case failed(reason: String, response: Data)
     }
 
-    /// Match `*.amazonaws.com` and `*.amazonaws.com.cn` (covers
-    /// govcloud, ISO partitions, regional + bucket-style S3, etc.)
-    public static func isAWSHost(_ host: String) -> Bool {
-        let h = host.lowercased()
-        return h == "amazonaws.com"
-            || h == "amazonaws.com.cn"
-            || h.hasSuffix(".amazonaws.com")
-            || h.hasSuffix(".amazonaws.com.cn")
-    }
+    /// Every partition's DNS suffix (see `AWSHosts`).
+    static var partitionDNSSuffixes: [String] { AWSHosts.partitionDNSSuffixes }
+
+    /// An AWS endpoint, in any partition (see `AWSHosts.isAWSHost`).
+    public static func isAWSHost(_ host: String) -> Bool { AWSHosts.isAWSHost(host) }
 
     /// Strip and re-sign. Returns `.unchanged` for non-AWS hosts so the
     /// caller can use this as a transparent pass-through filter.
     public func resign(rawRequest: Data, host: String, profileID: UUID) async -> Outcome {
-        guard Self.isAWSHost(host) else { return .unchanged }
+        // A Spaces key the guest minted signs for DigitalOcean's
+        // S3-compatible hosts too (`MintedCredential.hosts`).
+        let isAWS = Self.isAWSHost(host)
+        guard isAWS || credServer.hasMintedHost(host, profileID: profileID) else { return .unchanged }
         guard let parsed = ParsedHTTPRequest(rawRequest: rawRequest) else {
             return .unchanged
         }
@@ -104,27 +103,49 @@ public final class AWSResigner: @unchecked Sendable {
                                 body: "bromure: aws-chunked uploads not supported by the host signer\n"))
         }
 
-        // Pull the real signing material (consent-gated when the
-        // profile flagged the credential).
-        let scopeHint = NSLocalizedString(
-            "for any AWS API call (SigV4 signing on the host)",
-            comment: "")
-        let mat = await credServer.signingMaterial(
-            for: profileID, scopeHint: scopeHint)
+        // A key the guest minted through the proxy (STS, CreateAccessKey,
+        // Spaces) signs with its own real secret, matched on the access key
+        // id the guest signed with. Anything else signs as the workspace.
         let creds: SigV4Signer.Credentials
-        switch mat {
-        case .material(let c):
+        switch credServer.minted(accessKeyID: Self.parseAccessKeyID(oldAuth) ?? "",
+                                 host: host, profileID: profileID) {
+        case .material(let c, _):
             creds = c
-        case .denied:
+        case .expired(let source):
             return .denied(response: Self.errorResponse(
                 status: 403,
                 reason: "Forbidden",
-                body: "bromure: AWS API call denied by user consent\n"))
-        case .missing:
-            // Profile has no creds at all. Letting the request through
-            // gives the SDK an InvalidClientTokenId error, which is
-            // more diagnostic than us swallowing it.
-            return .unchanged
+                body: "bromure: the credentials from \(source) have expired; mint new ones\n"))
+        case .none:
+            guard isAWS else { return .unchanged }
+            // Pull the real signing material (consent-gated when the
+            // profile flagged the credential). The prompt names the call.
+            let action = CredentialMint.awsAction(
+                host: host.lowercased(), method: parsed.method, path: parsed.path,
+                query: parsed.query, headers: parsed.headers, body: parsed.body)
+            let scopeHint = action.map {
+                String(format: NSLocalizedString(
+                    "for %@ (SigV4 signing on the host)",
+                    comment: "AWS consent scope: the API call being signed, e.g. sts:AssumeRole"), $0)
+            } ?? NSLocalizedString(
+                "for any AWS API call (SigV4 signing on the host)",
+                comment: "")
+            let mat = await credServer.signingMaterial(
+                for: profileID, scopeHint: scopeHint)
+            switch mat {
+            case .material(let c):
+                creds = c
+            case .denied:
+                return .denied(response: Self.errorResponse(
+                    status: 403,
+                    reason: "Forbidden",
+                    body: "bromure: AWS API call denied by user consent\n"))
+            case .missing:
+                // Profile has no creds at all. Letting the request through
+                // gives the SDK an InvalidClientTokenId error, which is
+                // more diagnostic than us swallowing it.
+                return .unchanged
+            }
         }
 
         // Build the headers we'll BOTH sign over AND put on the wire.
@@ -219,6 +240,13 @@ public final class AWSResigner: @unchecked Sendable {
     /// Extract `(date, region, service)` from a SigV4 Authorization
     /// header. Format:
     ///   `AWS4-HMAC-SHA256 Credential=AKID/DATE/REGION/SERVICE/aws4_request, ...`
+    /// The access key id in a SigV4 Authorization header's `Credential=`.
+    static func parseAccessKeyID(_ auth: String) -> String? {
+        guard let credRange = auth.range(of: "Credential=") else { return nil }
+        let value = auth[credRange.upperBound...].prefix { $0 != "/" && $0 != "," && !$0.isWhitespace }
+        return value.isEmpty ? nil : String(value)
+    }
+
     static func parseScope(_ auth: String) -> (date: String, region: String, service: String)? {
         guard let credRange = auth.range(of: "Credential=") else { return nil }
         let after = auth[credRange.upperBound...]

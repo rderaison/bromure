@@ -25,6 +25,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// reported it (strict sandbox, transparent flows only). nil on the
     /// cooperative proxy path, which can't be attributed.
     var binaryIdentity: OpenShellPolicy.BinaryIdentity?
+    /// The scheme the guest's request travels in ("http" on a cleartext
+    /// flow), for the firewall events the OCSF export maps.
+    private var flowScheme = "https"
     /// Under an OpenShell policy: the upstream addresses that passed its
     /// destination checks (resolved host-side). Every upstream leg of this
     /// connection dials only these. nil = not pinned.
@@ -90,6 +93,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Reaches the host-owned Claude subscription store + refresher. nil →
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
+    /// The engine's `CredentialMinter`: rewrites the responses of calls
+    /// that issue a credential (`CredentialMint`). Set by MitmEngine.
+    nonisolated(unsafe) static var credentialMinterProvider: (@Sendable () -> CredentialMinter?)?
     nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
     /// A sign-in the host is capturing for this workspace (SignInCapture.swift):
     /// the token exchange is answered by the host, not the provider.
@@ -354,14 +360,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let rule = guardrailsProvider()?.egressPolicy?
             .firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text
         let token = EgressConnectionRegistry.shared.register(
-            profileID: profileID, host: host, port: port, route: route, rule: rule) { [weak self] in
+            profileID: profileID, host: host, port: port, route: route, rule: rule,
+            identity: binaryIdentity) { [weak self] in
                 self?.cutForFirewall()
             }
         defer { EgressConnectionRegistry.shared.unregister(token) }
         // `policy.local` (the OpenShell advisor) is answered here, never
-        // forwarded: no rule governs it.
+        // forwarded: no rule governs it. Decided for the attested program:
+        // without it, a strict workspace's `binaries:` rules match nothing
+        // and every flow they allow was closed here, unlogged.
         if host.lowercased() != OpenShellAdvisor.host, let policy = guardrailsProvider()?.egressPolicy,
-           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16) == .deny {
+           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16, identity: binaryIdentity) == .deny {
             return
         }
         try await body()
@@ -475,7 +484,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private func egressVerdict(host: String, port: Int) -> EgressPolicy.Verdict {
         guard let policy = guardrailsProvider()?.egressPolicy else { return .allow }
         let p16 = UInt16(truncatingIfNeeded: port)
-        let verdict = policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16)
+        let verdict = policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16, identity: binaryIdentity)
         guard verdict == .deny else { return verdict }
         // Refused every time; reported once a minute per destination.
         guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
@@ -649,13 +658,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     private func rejectBeforePolicy(tls: MitmServerStream, status: Int, error: String, detail: String,
-                                    host: String, port: Int) {
+                                    host: String, port: Int, method: String? = nil, path: String? = nil) {
         SupplyChainLog.shared.record(
             "[firewall] ✗ deny \(host):\(port) — \(detail) (\(profileID.uuidString.prefix(8)))")
-        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+        var data: [String: AnyJSON] = [
             "action": .string("deny"), "layer": .string("l7"), "proto": .string("tcp"),
-            "host": .string(host), "port": .int(port), "reason": .string(detail),
-        ])
+            "host": .string(host), "port": .int(port), "reason": .string(detail), "scheme": .string(flowScheme),
+        ]
+        if let method { data["method"] = .string(method) }
+        if let path { data["path"] = .string(path) }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: data)
         let body = "{\"error\":\"\(error)\",\"detail\":\(Self.jsonString(detail)),\"layer\":\"l7\"}"
         let reason = status == 403 ? "Forbidden" : "Bad Request"
         let resp = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\n"
@@ -754,6 +766,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    (the forward-proxy path). Everything downstream is identical; only
         //    the upstream scheme differs (http vs https).
         let tls: MitmServerStream
+        flowScheme = cleartext ? "http" : "https"
         if cleartext {
             tls = PlaintextServerStream(fd: fd, prefix: prefix)
         } else {
@@ -789,7 +802,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
                 rejectBeforePolicy(tls: tls, status: 403, error: "request_authority_mismatch",
                                    detail: "HTTP request authority does not match the authorized tunnel endpoint",
-                                   host: host, port: port)
+                                   host: host, port: port, method: head.method, path: head.target)
+                return
+            }
+            // An upgrade the inspected route can't follow (h2c anywhere; any
+            // Upgrade on JSON-RPC / MCP / GraphQL) is refused whatever the
+            // enforcement mode — after it, no rule would see the traffic.
+            if let detail = openShell.unsupportedUpgradeDetail(
+                host: host, port: UInt16(truncatingIfNeeded: port), target: head.target,
+                headerBlock: head.headerString, identity: binaryIdentity,
+                enforceBinaries: guardrailsProvider()?.egressPolicy?.enforceBinaries ?? false) {
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                rejectBeforePolicy(tls: tls, status: 403, error: "unsupported_l7_protocol", detail: detail,
+                                   host: host, port: port, method: head.method, path: head.target)
                 return
             }
             if let canonical = openShell.canonicalRequestTarget(host: host, port: UInt16(truncatingIfNeeded: port),
@@ -854,6 +879,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
                 "proto": .string("tcp"), "host": .string(host), "port": .int(port),
                 "method": .string(reqMethod), "path": .string(reqPath), "reason": .string(reason),
+                "scheme": .string(flowScheme),
             ]
             if let rule { data["rule"] = .string(rule) }
             BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
@@ -1163,7 +1189,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }()
         var swap = insecure
             ? SwapResult(modified: request, swaps: [])
-            : await swapper.swap(rawRequest: request, host: host, profileID: profileID,
+            : await swapper.swap(rawRequest: request, host: host, port: port, profileID: profileID,
                                  placeholderBody: placeholderBody)
         if !swap.swaps.isEmpty {
             for s in swap.swaps {
@@ -1502,7 +1528,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 // the real path.
                 upstream = sim
             } else {
-                let captureSession = upstreamSession(for: host, insecure: insecure)
+                let captureSession = upstreamSession(for: host, port: port, insecure: insecure)
                 noteUpstreamSession(captureSession)
                 defer { captureSession.finishTasksAndInvalidate() }
                 upstream = try await relayUpstreamCollecting(
@@ -1583,7 +1609,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let wsPath = OpenShellPolicy.canonicalPath(ofTarget: reqPath)
                 let placeholders = swapper.entries(for: profileID).filter { e in
                     e.fake.hasPrefix(TokenSwapper.openShellPlaceholderPrefix)
-                        && (e.host.map { $0.isEmpty || TokenSwapper.hostMatchesScope(host: host, scope: $0) } ?? true)
+                        && (e.host.map { $0.isEmpty || TokenSwapper.hostMatchesScope(host: host, port: port, scope: $0) } ?? true)
                         && (e.paths.isEmpty || wsPath.map { p in
                             e.paths.contains { OpenShellPolicy.pathSelector($0, matches: p) } } ?? false)
                 }
@@ -1625,6 +1651,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
             let pid = profileID
             let wsPath = reqPath
+            let wsScheme = flowScheme == "http" ? "ws" : "wss"
             let onViolation: @Sendable (String, Bool) -> Void = { reason, enforced in
                 SupplyChainLog.shared.record(
                     "[firewall] \(enforced ? "✗ deny" : "⚠ audit") WEBSOCKET_TEXT \(host)\(wsPath) — \(reason) (\(pid.uuidString.prefix(8)))")
@@ -1632,6 +1659,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
                     "proto": .string("tcp"), "host": .string(host), "port": .int(port),
                     "method": .string("WEBSOCKET_TEXT"), "path": .string(wsPath), "reason": .string(reason),
+                    "scheme": .string(wsScheme),
                 ])
             }
             // PII protection / prompt-injection detection on a model
@@ -1704,6 +1732,40 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     with a response written straight back to the guest, so
         //     the SDK gets a meaningful HTTP error rather than an
         //     opaque InvalidSignatureException after a round-trip.
+        // A call that issues a credential (sts:AssumeRole, iam:CreateAccessKey,
+        // ecr:GetAuthorizationToken, doctl registry/kubernetes/spaces …): its
+        // response is buffered and the credentials in it replaced by fakes
+        // before the VM sees it (`CredentialMint`); one whose secret no fake
+        // can stand in for is refused here, in every guardrail mode.
+        let mintKind: CredentialMint.Kind?
+        switch CredentialMint.classify(rawRequest: swap.modified, host: host) {
+        case .deny(let action)?:
+            FileHandle.standardError.write(Data("[mitm] refused \(action) on \(host): issues an unswappable credential\n".utf8))
+            if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+            let response = CredentialMint.denial(action)
+            try tls.write(response)
+            await emitTrace(host: host, port: port, preSwapRequest: request,
+                            upstreamResponse: response, upstreamWireBytes: response.count,
+                            responseTruncated: false, swaps: swap.swaps, leaks: leaks,
+                            latencyMs: Date().timeIntervalSince(t0) * 1000)
+            return
+        case .mint(let kind)?:
+            mintKind = kind
+        case nil:
+            mintKind = nil
+        }
+        let minter = Self.credentialMinterProvider?()
+        if mintKind != nil, minter == nil || bodyFile != nil {
+            if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+            let response = CredentialMint.refusal(minter == nil ? "no credential minter" : "a streamed body")
+            try tls.write(response)
+            await emitTrace(host: host, port: port, preSwapRequest: request,
+                            upstreamResponse: response, upstreamWireBytes: response.count,
+                            responseTruncated: false, swaps: swap.swaps, leaks: leaks,
+                            latencyMs: Date().timeIntervalSince(t0) * 1000)
+            return
+        }
+
         var toForward: Data
         // Skip AWS SigV4 re-signing for an insecure request — resigning uses
         // the real AWS secret, exactly the credential we won't put on an
@@ -1756,7 +1818,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     The session's delegate looks up the profile's per-host
         //     SecIdentity (Kubernetes API server et al.) when the
         //     upstream challenges for a client cert.
-        let session = upstreamSession(for: host, insecure: insecure)
+        let session = upstreamSession(for: host, port: port, insecure: insecure)
         noteUpstreamSession(session)
         // URLSession strong-refs its delegate until invalidated (per
         // Apple's docs). Without this `defer`, every MITM connection
@@ -2407,6 +2469,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
            pi.onDetection != .log,
            let conv = ConversationParser.parse(host: host, requestBody: toForward,
                                                responseBody: nil) {
+            // A detector model still loading: "try again" now, not a
+            // request held for the whole load.
+            let warming = Self.warmingDetectors(
+                injection: pi,
+                source: pi.detectSourceInjection ? await PromptInjectionClassifier.shared.readiness() : .absent,
+                rules: pi.detectRulesInjection ? await PromptInjectionClassifier.claudeMd.readiness() : .absent)
+            if !warming.isEmpty {
+                await answerWarming(warming, tls: tls, request: request, host: host, port: port, t0: t0, leaks: leaks)
+                return
+            }
             if let f = await Self.detectPromptInjection(in: conv, policy: pi) {
                 let pid = profileID
                 // Record + forward the *resolved outcome* (not just the mode):
@@ -2507,6 +2579,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                            inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
             if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body,
                                                 localEngineOffMac: offMacEngine != nil) {
+                if await PIIDetector.shared.readiness() == .loading {
+                    await answerWarming(["PII protection"], tls: tls, request: request, host: host, port: port, t0: t0, leaks: leaks)
+                    return
+                }
                 let vault = PIIVault.forProfile(profileID)
                 let t = Date()
                 let outcome = await PIIRewriter.rewriteRequest(body, policy: pii, vault: vault)
@@ -2588,7 +2664,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         defer { if ownsRelaySession { relaySession.finishTasksAndInvalidate() } }
         let relay: RelayResponse
-        if depiRouted {
+        if let mintKind, let minter {
+            // Buffered so no byte of a real credential reaches the guest; a
+            // response the rewrite can't account for becomes a 502.
+            let pid = profileID
+            relay = try await relayUpstreamBuffered(
+                rawRequest: toForward, host: upstreamHost, port: upstreamPort,
+                session: relaySession, tls: tls, scheme: upstreamScheme,
+                rewrite: { minter.process(response: $0, kind: mintKind, profileID: pid) })
+        } else if depiRouted {
             // Depi-routed npm traffic goes through the buffered
             // relay so a 401 can be swapped for a self-explanatory
             // error before any byte reaches the guest — the
@@ -2735,7 +2819,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // pinned cluster CA. Skipping either is what made `kubectl exec`
         // (an HTTP upgrade) fail its upstream handshake against a private
         // API server while `kubectl get` succeeded.
-        let identityEntry = clientIdentities.entry(for: host, profileID: profileID)
+        let identityEntry = clientIdentities.entry(for: host, port: port, profileID: profileID)
         // Same consent gate the URLSession path applies to the identity, so
         // an upgrade can't become a way around a prompt that an ordinary
         // request would raise.
@@ -2768,7 +2852,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
         let clientIdentity = identityEntry?.identity
-        let pinnedCA = clusterCAs.ca(for: host, profileID: profileID)
+        let pinnedCA = clusterCAs.ca(for: host, port: port, profileID: profileID)
 
         let upstreamFD = try pinnedUpstream.map { try UpstreamPinning.connect($0, port: port) }
             ?? connectTCP(host: host, port: port)
@@ -3215,6 +3299,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// here so the proxy hot path doesn't pay the cost when traces
     /// are off. Runs on the connection's Task — no main-actor hop
     /// for the body files (TraceStore.queue handles them off-thread).
+    /// Answer a request whose detector model is still loading (see
+    /// `detectorWarmingResponse`), and trace it like any other.
+    private func answerWarming(_ detectors: [String], tls: MitmServerStream, request: Data,
+                               host: String, port: Int, t0: Date, leaks: [LeakEntry]) async {
+        FileHandle.standardError.write(Data(
+            "[mitm] \(host): \(detectors.joined(separator: " + ")) model still loading — answered 503\n".utf8))
+        let response = Self.detectorWarmingResponse(detectors)
+        try? tls.write(response)
+        await emitTrace(host: host, port: port, preSwapRequest: request, upstreamResponse: response,
+                        upstreamWireBytes: response.count, responseTruncated: false, swaps: [],
+                        leaks: leaks, latencyMs: Date().timeIntervalSince(t0) * 1000)
+    }
+
     private func emitTrace(host: String, port: Int,
                            preSwapRequest: Data,
                            upstreamResponse: Data,
@@ -3579,6 +3676,34 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// forwarded (it would leave unscanned). 415 is the status RFC 9110
     /// §15.5.16 assigns to an unsupported content coding; the plain-text body
     /// tells the user why their agent's call failed and what to change.
+    /// The detectors an enforcing prompt-injection policy waits on whose
+    /// model is still loading.
+    static func warmingDetectors(injection pi: PromptInjectionPolicy,
+                                 source: ModelReadiness, rules: ModelReadiness) -> [String] {
+        guard pi.isActive, pi.onDetection != .log else { return [] }
+        var out: [String] = []
+        if pi.detectSourceInjection, source == .loading { out.append("prompt-injection detection") }
+        if pi.detectRulesInjection, rules == .loading { out.append("instruction-file detection") }
+        return out
+    }
+
+    /// 503 while a detector's model loads (seconds, at first use or after an
+    /// idle release). Every agent retries a 503 on its own, by then against
+    /// a loaded model; nothing was sent.
+    static func detectorWarmingResponse(_ detectors: [String]) -> Data {
+        let body = "Bromure is loading its \(detectors.joined(separator: " and ")) model. "
+            + "This request was not sent; retry in a few seconds.\n"
+        var r = "HTTP/1.1 503 Service Unavailable\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "Retry-After: \(detectorWarmingRetryAfter)\r\n"
+        r += "X-Bromure-Blocked: detector-model-loading\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
+    }
+    static let detectorWarmingRetryAfter = 2
+
     static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
         let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
             .joined(separator: " and ")
@@ -3731,12 +3856,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// profile's identity registry. The session is single-use because
     /// URLSessionDelegate must be retained for the session's lifetime
     /// and we want the connection's identity binding to be tight.
-    private func upstreamSession(for host: String, insecure: Bool = false) -> URLSession {
+    private func upstreamSession(for host: String, port: Int, insecure: Bool = false) -> URLSession {
         let delegate = ClientCertChallengeDelegate(
             identityRegistry: clientIdentities,
             caRegistry: clusterCAs,
             consent: consent,
-            profileID: profileID, host: host, insecure: insecure)
+            profileID: profileID, host: host, port: port, insecure: insecure)
         let cfg = URLSessionConfiguration.ephemeral
         // `timeoutIntervalForRequest` is an IDLE timer — it fires when no byte
         // arrives from upstream for this long, NOT a wall-clock cap on the
@@ -5515,6 +5640,9 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     let consent: ConsentBroker
     let profileID: UUID
     let host: String
+    /// The upstream port: the identity and CA are the ones registered for
+    /// this endpoint, not for another context on the same host name.
+    let port: Int
     /// The guest asked (and the profile permitted) this request to skip
     /// upstream cert validation — accept any server trust. See
     /// `GuardrailsPolicy.allowInsecureBypass`.
@@ -5531,12 +5659,13 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     init(identityRegistry: ClientIdentityRegistry,
          caRegistry: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         profileID: UUID, host: String, insecure: Bool = false) {
+         profileID: UUID, host: String, port: Int, insecure: Bool = false) {
         self.identityRegistry = identityRegistry
         self.caRegistry = caRegistry
         self.consent = consent
         self.profileID = profileID
         self.host = host
+        self.port = port
         self.insecure = insecure
     }
 
@@ -5547,7 +5676,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
         let method = challenge.protectionSpace.authenticationMethod
         switch method {
         case NSURLAuthenticationMethodClientCertificate:
-            guard let entry = identityRegistry.entry(for: host, profileID: profileID) else {
+            guard let entry = identityRegistry.entry(for: host, port: port, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
@@ -5598,7 +5727,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
                 return
             }
             guard let trust = challenge.protectionSpace.serverTrust,
-                  let ca = caRegistry.ca(for: host, profileID: profileID) else {
+                  let ca = caRegistry.ca(for: host, port: port, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }

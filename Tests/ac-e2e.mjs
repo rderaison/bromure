@@ -1902,7 +1902,10 @@ async function main() {
     await test("15.4 workspaces rm refuses while the VM is running", async () => {
       await withCLIVM("ACE2E_CLI_RmGuard", [], async (name) => {
         const out = cli(["workspaces", "rm", name, "-f"], { allowFail: true });
-        assert(/running VM/i.test(out), `expected a refusal, got: ${out}`);
+        // "“<name>” is running — shut it down (or `vm kill` it), then delete it."
+        assert(/is running/i.test(out) && /shut it down/i.test(out), `expected a refusal, got: ${out}`);
+        const ls = cli(["workspaces", "ls"], { allowFail: true });
+        assertIncludes(ls, name, "the refused rm deleted the workspace anyway");
       });
     });
   }

@@ -151,13 +151,81 @@ def pids_for_inode(inode):
     return found.get(inode, [])
 
 
+# What the kernel appends to /proc/<pid>/exe once the path is unlinked.
+_DELETED = " (deleted)"
+
+
+def reported_path(read, nlink):
+    """The path to report for an exe link; `read()` reads the link,
+    `nlink()` the open exe's link count, each afresh.
+
+    The kernel's " (deleted)" is only an annotation when the running image
+    is unlinked: a LIVE file the workload named `curl (deleted)` reads
+    exactly the same, and stripping it reported the sibling `curl` -- a path
+    the guest user picks, in any directory it can write, matched by
+    `binaries:` and pinned to the forged image's digest on first use
+    (Finding CWE-807, "Attestor strips a real ' (deleted)' filename into an
+    allowlisted binary path").
+
+    Whether it is unlinked is asked of the open exe itself, never of the
+    path text: a stat of the name can be fooled by renaming it aside and
+    back around the stat, which the link reads before and after never see
+    (Finding CWE-367, "Attestor strips a live '(deleted)' binary when its
+    name is restored around the stat"). Link count 0 is an unlinked inode
+    -- it can't get a name back (that takes linkat with AT_EMPTY_PATH, i.e.
+    CAP_DAC_READ_SEARCH) -- so the one trailing suffix is the kernel's and
+    is cut. Any other count is a file with a name, kept as read: a binary
+    unlinked here but hard-linked elsewhere keeps its " (deleted)" and
+    matches nothing, which fails closed. The count must be the same on both
+    sides of the read, or the read raced an unlink; never steady: OSError,
+    and the host fails closed.
+    """
+    for _ in range(4):
+        before = nlink()
+        raw = read()
+        if nlink() != before:
+            continue
+        if before == 0 and raw.endswith(_DELETED):
+            return raw[: -len(_DELETED)]
+        return raw
+    raise OSError("exe link count kept changing")
+
+
 def exe_identity(pid):
-    """(real path, sha256) of a process's executable, hashing the live object."""
-    path = os.readlink("/proc/%d/exe" % pid)
-    if path.endswith(" (deleted)"):
-        raise OSError("executable was deleted")
-    with open("/proc/%d/exe" % pid, "rb") as f:
+    """(real path, sha256) of a process's executable, hashing the live object.
+
+    A DELETED executable is still identified, by hashing the image through the
+    still-open `/proc/<pid>/exe` link. Refusing it was the bug behind "strict
+    workspaces lose every binary-gated flow": an agent that has updated itself
+    is running a deleted image almost all the time -- npm unpacks the new
+    Claude Code into a fresh directory and removes the old one, so
+    `/proc/<pid>/exe` reads
+
+        /home/…/@anthropic-ai/.claude-code-IVk0osNH/bin/claude.exe (deleted)
+
+    for the rest of that process's life. It is an ANCESTOR of every shell and
+    every `curl` the agent runs, so `who()` failed for all of them, the host
+    got no identity, and `binaries:` rules could not match -- fail closed, on
+    a condition that says nothing about the program that opened the socket.
+
+    Hashing the open link is what this module already claims to do ("hashed
+    through the open exe link") and is stronger evidence than re-reading the
+    path: it is the image the process is ACTUALLY running, immune to a binary
+    swapped after launch. Measured: a 291 MB deleted claude.exe hashes fine
+    through its own /proc link.
+
+    The path is reported without the kernel's " (deleted)" decoration (and
+    only that: see `reported_path`, a real name can end the same way), because
+    the path is the identity the policy matches on. The consequence, which is
+    the host's to weigh: that path gets pinned (trust-on-first-use) to the
+    OLD image's digest, so a new binary later appearing at the same path is
+    refused as changed -- which is what TOFU is for, but it means an in-place
+    upgrade needs the old processes gone before the new one is attested.
+    """
+    link = "/proc/%d/exe" % pid
+    with open(link, "rb") as f:
         st = os.fstat(f.fileno())
+        path = reported_path(lambda: os.readlink(link), lambda: os.fstat(f.fileno()).st_nlink)
         key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
         digest = _hash_cache.get(key)
         if digest is None:
@@ -200,14 +268,30 @@ def who(sport, dst, dport):
     leaf = min(pids)
     exe, digest = idents[leaf]
     ancestors = []
-    cur = ppid_of(leaf)
+    # An ancestor that cannot be identified TRUNCATES the chain; it does not
+    # discard the answer. The leaf is what `binaries:` matches, and the chain
+    # is context -- it is already cut short at MAX_ANCESTORS, so a shorter one
+    # is a shape the host accepts. Discarding the whole identity because a
+    # parent exited mid-walk (a shell that has finished) or cannot be read
+    # fails closed on something that says nothing about the program that
+    # opened the socket.
+    #
+    # Every link still carries a digest: the host refuses an identity with a
+    # missing one anywhere in the chain (OpenShell's rule, BinaryPinStore
+    # .verifyOrPin), so a link that cannot be hashed must be left OUT rather
+    # than sent incomplete.
+    try:
+        cur = ppid_of(leaf)
+    except OSError:
+        cur = 0
     while cur > 1 and len(ancestors) < MAX_ANCESTORS:
         try:
             a_exe, a_digest = exe_identity(cur)
-        except OSError as e:
-            return {"ok": False, "reason": "ancestor %d: %s" % (cur, e)}
+            nxt = ppid_of(cur)
+        except OSError:
+            break
         ancestors.append({"exe": a_exe, "sha256": a_digest})
-        cur = ppid_of(cur)
+        cur = nxt
     return {"ok": True, "exe": exe, "sha256": digest, "ancestors": ancestors, "pids": sorted(pids)}
 
 

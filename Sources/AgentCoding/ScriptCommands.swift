@@ -248,6 +248,9 @@ final class BromureACSetProfileJSONCommand: NSScriptCommand {
                 var incomingCopy = incoming
                 merged.overlay(with: ProfileSecrets.extract(stripping: &incomingCopy))
                 merged.apply(to: &incoming)
+                // Minted credentials are the VM's, not the blob's: keep the
+                // stored ones (secrets included) whatever the blob carries.
+                incoming.mintedCredentials = existing.mintedCredentials
                 try d.store.update(incoming)
                 d.profiles = d.store.loadAll()
                 // Apply live to a running session (no reboot) — matching the

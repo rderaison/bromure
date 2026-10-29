@@ -47,6 +47,13 @@ else
     fails=$((fails + 1))
 fi
 
+banner "attestor binary identity"
+# Needs no root and no VM state: it builds its own processes and sockets. The
+# host-side BinaryIdentityTests drive the service through `queryOverride`, so
+# attestd's own answer is never computed there -- which is how a deleted
+# ancestor sinking every identity reached a release.
+run_suite "attestor binary identity" python3 "$HERE/test_attestd_identity.py"
+
 banner "idmapped mounts"
 run_suite "idmapped mounts" sudo python3 "$HERE/test_idmap.py"
 

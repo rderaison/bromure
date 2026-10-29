@@ -2221,7 +2221,7 @@ struct sentry_tc_probe {
  * to include after all.
  */
 static void sentry_tc_describe(struct bromure_sentry_event *event,
-			       struct nlmsghdr *n, u8 op)
+			       struct net *net, struct nlmsghdr *n, u8 op)
 {
 	struct tcmsg *tcm;
 	struct nlattr *kind;
@@ -2241,8 +2241,15 @@ static void sentry_tc_describe(struct bromure_sentry_event *event,
 	if (tcm->tcm_ifindex > 0) {
 		struct net_device *dev;
 
+		/* The netlink socket's namespace, for the same reason the
+		 * AF_PACKET lookup uses the sending socket's: `tcm_ifindex` is
+		 * issued by whoever sent the message, and `tc` inside a
+		 * container names that namespace's devices. Resolving in
+		 * `init_net` reports the host's device at that index instead.
+		 * `tc_modify_qdisc` and friends take their own `net` from
+		 * `sock_net(skb->sk)`; this is the same value. */
 		rcu_read_lock();
-		dev = dev_get_by_index_rcu(&init_net, tcm->tcm_ifindex);
+		dev = dev_get_by_index_rcu(net, tcm->tcm_ifindex);
 		if (dev)
 			strscpy(event->dev, dev->name, sizeof(event->dev));
 		rcu_read_unlock();
@@ -2260,9 +2267,18 @@ static int sentry_kp_tc(struct kprobe *probe, struct pt_regs *regs)
 		container_of(probe, struct sentry_tc_probe, probe);
 	struct bromure_sentry_event *event = sentry_probe_event();
 
+	/* arg0 is the netlink skb; its socket carries the namespace the
+	 * message's ifindex belongs to. `&init_net` only as a fallback: a
+	 * netlink skb without a socket is not expected on these paths, and
+	 * dereferencing one would be an oops inside a kprobe -- so the
+	 * previous behaviour is kept for that case rather than guessed at. */
+	struct sk_buff *skb = (struct sk_buff *)regs->regs[0];
+	struct net *net = (skb && skb->sk) ? sock_net(skb->sk) : &init_net;
+
 	sentry_fill_common(event, BSK_TC_CHANGE);
 	sentry_fill_exe(event);
-	sentry_tc_describe(event, (struct nlmsghdr *)regs->regs[1], entry->op);
+	sentry_tc_describe(event, net, (struct nlmsghdr *)regs->regs[1],
+			   entry->op);
 	/* Unfolded and immediate: these are rare, and the host acts on the
 	 * first one. Folding would delay the very event it revokes on. */
 	sentry_submit(event);
@@ -2704,8 +2720,54 @@ static int sentry_flow_packet(struct pt_regs *regs,
 	event->proto = BSPR_PACKET;
 	event->addr_family = AF_PACKET;
 
-	if (msg && msg->msg_name &&
-	    msg->msg_namelen >= sizeof(struct sockaddr_ll)) {
+	/* Which address shape the message carries follows the SOCKET TYPE, not
+	 * which symbol was probed. `packet_create` keys the ops table on
+	 * exactly that --
+	 *
+	 *     if (sock->type == SOCK_PACKET) sock->ops = &packet_ops_spkt;
+	 *
+	 * -- so reading the socket keeps this right even if a kernel ever
+	 * routes the two sendmsg symbols differently, and one handler serves
+	 * both probes.
+	 */
+	if (sock->type == SOCK_PACKET) {
+		/* The obsolete API names the device by NAME, not by ifindex, in
+		 * a `sockaddr_pkt`. The length test is the kernel's own:
+		 * `packet_sendmsg_spkt` refuses a namelen below
+		 * `sizeof(struct sockaddr)` and reads `spkt_protocol` only at
+		 * the full `sockaddr_pkt` length -- so the 14-byte name is
+		 * complete from `sizeof(struct sockaddr)` up, and requiring the
+		 * longer struct would miss a legitimate caller.
+		 */
+		if (msg && msg->msg_name &&
+		    msg->msg_namelen >= offsetof(struct sockaddr_pkt,
+						 spkt_protocol)) {
+			struct sockaddr_pkt *spkt = msg->msg_name;
+			char name[sizeof(spkt->spkt_device) + 1];
+			struct net_device *dev;
+
+			/* Not necessarily NUL-terminated on the wire; the
+			 * kernel terminates it in place before its own lookup
+			 * and we must not write to the caller's buffer.
+			 * Where the kernel does: `packet_sendmsg_spkt` stores
+			 * the NUL at spkt_device[13], so a 14-byte name with no
+			 * NUL in it names its 13-character prefix -- the device
+			 * that sends (or -ENODEV). Terminating at [14] looked up
+			 * a different name (Finding CWE-670, "SOCK_PACKET
+			 * device lookup does not truncate spkt_device the way
+			 * the kernel does"). */
+			memcpy(name, spkt->spkt_device,
+			       sizeof(spkt->spkt_device));
+			name[sizeof(spkt->spkt_device) - 1] = '\0';
+			rcu_read_lock();
+			dev = dev_get_by_name_rcu(sock_net(sock->sk), name);
+			if (dev)
+				strscpy(event->dev, dev->name,
+					sizeof(event->dev));
+			rcu_read_unlock();
+		}
+	} else if (msg && msg->msg_name &&
+		   msg->msg_namelen >= sizeof(struct sockaddr_ll)) {
 		struct sockaddr_ll *sll = (struct sockaddr_ll *)msg->msg_name;
 		int ifindex = sll->sll_ifindex;
 
@@ -2715,8 +2777,20 @@ static int sentry_flow_packet(struct pt_regs *regs,
 		if (ifindex > 0) {
 			struct net_device *dev;
 
+			/* The SENDING SOCKET's namespace, not `init_net`: an
+			 * `sll_ifindex` means nothing outside the namespace it
+			 * was issued in. A container's eth0 is usually index 2,
+			 * and index 2 in the guest's init netns is the virtio
+			 * NIC -- or whatever Docker created there. Resolving in
+			 * the wrong namespace names the wrong interface, or
+			 * drops `dev` when the index does not exist there, and
+			 * the timeline then says "raw frames on <some other
+			 * device>". The sender is still right; the place was
+			 * not. The kernel's own `packet_sendmsg_spkt` looks its
+			 * device up in `sock_net(sk)` for the same reason.
+			 */
 			rcu_read_lock();
-			dev = dev_get_by_index_rcu(&init_net, ifindex);
+			dev = dev_get_by_index_rcu(sock_net(sock->sk), ifindex);
 			if (dev)
 				strscpy(event->dev, dev->name,
 					sizeof(event->dev));
@@ -2879,8 +2953,19 @@ static struct sentry_flow_probe sentry_flow_probes[] = {
 	SENTRY_FLOW("rawv6_sendmsg",		BSPR_RAW,	SFS_SOCK_MSG),
 	/* AF_PACKET. Not a `struct proto` method like the rest -- a
 	 * `proto_ops` one, with a `struct socket *` first -- so it has its own
-	 * handler. See `sentry_flow_packet`. */
+	 * handler. See `sentry_flow_packet`.
+	 *
+	 * TWO symbols, because AF_PACKET has two ops tables. `packet_sendmsg`
+	 * serves SOCK_RAW and SOCK_DGRAM; `socket(AF_PACKET, SOCK_PACKET, …)`
+	 * gets `packet_ops_spkt`, whose `sendmsg` is `packet_sendmsg_spkt` --
+	 * and that function does NOT call `packet_sendmsg`, it goes straight to
+	 * `dev_queue_xmit`. Probing only the first left the obsolete API
+	 * silent: measured on 6.8.0, a 54-byte SOCK_PACKET frame went out and
+	 * the stream carried no event at all. Creating one still needs
+	 * CAP_NET_RAW, which guest root has in a non-strict workspace, so the
+	 * audit row is exactly what was missing. */
 	SENTRY_FLOW("packet_sendmsg",		BSPR_PACKET,	SFS_PACKET_MSG),
+	SENTRY_FLOW("packet_sendmsg_spkt",	BSPR_PACKET,	SFS_PACKET_MSG),
 };
 
 struct sentry_kprobe {

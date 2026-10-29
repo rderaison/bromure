@@ -16,6 +16,10 @@ struct HostSession: Codable, Equatable {
     var launchingSince: Date?
     var endedAt: Date?
     var lastSeenAt: Date?
+    /// When the agent last finished a turn or asked (the window's hook
+    /// stamp): what a client's session card counts from. `lastSeenAt` moves
+    /// on every roster pass while the window is there.
+    var activeAt: Date?
     var agentSeenAt: Date?
     var agentAlive: Bool?
     var resumedAt: Date?
@@ -173,6 +177,7 @@ final class SessionEngine: @unchecked Sendable {
                 if tool != nil { s.agentSeenAt = now; s.launchingSince = nil }
                 if !w.agentSessionID.isEmpty { s.agentTranscriptID = w.agentSessionID }
                 if !w.transcriptPath.isEmpty { s.transcriptPath = w.transcriptPath }
+                if let a = w.activeAt, a > (s.activeAt ?? .distantPast) { s.activeAt = a }
                 if s.launchDisplay == nil { s.launchDisplay = w.title }
                 // Renamed (or resumed) by an older build, which rewrote the
                 // tab's @display but kept the old launchDisplay: clients
@@ -205,6 +210,7 @@ final class SessionEngine: @unchecked Sendable {
             s.agentAlive = true
             s.agentSeenAt = now
             s.lastSeenAt = now
+            s.activeAt = w.activeAt
             s.launchDisplay = w.title
             Tmux.setWindowOption(w.index, "@bromure_session", s.id.uuidString)
             sessions.append(s)

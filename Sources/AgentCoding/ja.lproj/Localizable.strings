@@ -1205,6 +1205,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "この Mac はすでに %@ を別の経路に送っています。通常はこの Mac 自身のワークスペースで、リモートのものと同じサブネットを使っています。トンネルはこれを引き継げません。\n\nヘルパー：%@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "ネットワークヘルパーは、画面にログインしているユーザーにのみ対応します。\n\nヘルパー：%@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "ネットワークヘルパーがトンネルインターフェイスを作成できませんでした。\n\nヘルパー：%@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "ネットワークヘルパーがルーティングするのはプライベートな /24 ネットワーク（10/8、172.16/12、192.168/16、100.64/10 内）だけですが、リモートのサブネット %@ はそれに当たりません。\n\nヘルパー：%@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "ネットワークヘルパーは、インストール元と同じ署名の Bromure Agentic Coding にのみ対応します。アプリをアップデートまたは再ビルドした直後であれば、ヘルパーを再起動してください：ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにします。\n\nヘルパー：%@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "ネットワークヘルパーはすでに上限の %d 本のトンネルを保持しています。使っていないリモートのウインドウを閉じるか、アプリを終了して開き直してください。\n\nヘルパー：%@";
 "The network helper couldn't create the tunnel interface." = "ネットワークヘルパーはトンネルインターフェイスを作成できませんでした。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -2875,6 +2878,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ は %2$@ のモデルを使用できないため、独自のプロバイダーで動作します。別のモデルを選択してください。";
 "%d sessions whose machine or folder is gone" = "マシンまたはフォルダーが存在しないセッション %d 件";
 "(empty)" = "(空)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "エージェントが開いたサインインページはこの Mac またはローカルネットワークを指しているため、Bromure は開きませんでした。";
+"Restore these workspaces and their sessions at next start" = "次回起動時にこれらのワークスペースとセッションを復元する";
+"Restoring your workspaces" = "ワークスペースを復元しています";
+"Restoring Workspaces" = "ワークスペースの復元";
+"Stop Restoring" = "復元を中止";
+"Starting “%@”…" = "「%@」を起動しています…";
+"%1$d of %2$d" = "%2$d 件中 %1$d 件";
+"did not start in time" = "時間内に起動しませんでした";
+/* VM dashboard: workspace notes */
+"Notes" = "メモ";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return で保存 · Shift-Return で改行 · Esc でキャンセル";
+"Save the notes (Return)" = "メモを保存（Return）";
+"Edit the notes as markdown" = "メモを Markdown で編集";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3128,6 +3144,7 @@
 "Erasing and restoring storage is done on the server Mac." = "ストレージの消去と復元はサーバーの Mac で行います。";
 "Home folder size" = "ホームフォルダのサイズ";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "%d GB（現在のサイズ。ホームは縮小できません）から 1024 GB まで。大きくしたホームはワークスペースの次回起動時に反映されます。ディスクイメージはファイルが使う分だけ容量を消費します。";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "%d GB から 1024 GB まで。ホームはワークスペースの初回起動時にこのサイズで作成されます。その後は拡大できますが、縮小はできません。ディスクイメージはファイルが使う分だけ容量を消費します。";
 "Queued — sent when the agent is done" = "待機中 — エージェントの作業が終わると送信します";
 "Queued — sent when %@ is done" = "待機中 — %@ の作業が終わると送信します";
 "Queued — the agent reads it next" = "待機中 — エージェントが次に読みます";
@@ -4308,3 +4325,14 @@
 "Add a rule for this host and port, for %@" = "このホストとポートのルールを %@ に追加";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "「%@」はもう存在しません。別の Bromure プロセスが削除しました。";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "%@ に対して（ホストで SigV4 署名）";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "「%@」はもう一方の Bromure プロセス（アプリまたはそのログインエージェント）で開いています。そちらで使うか、先にそちらでシャットダウンしてください。";
+"The workspace is open in the other Bromure process, which runs this automation there" = "ワークスペースはもう一方の Bromure プロセスで開いており、このオートメーションはそちらで実行されます";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "未読";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "サインインを開きませんでした：ポート %d は別のサインインで使用中です。そちらを完了するかキャンセルしてから、もう一度お試しください。";

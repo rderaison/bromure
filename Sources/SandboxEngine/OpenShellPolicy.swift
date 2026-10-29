@@ -478,13 +478,12 @@ public struct OpenShellPolicy: Sendable, Equatable {
             return .violation(reason: "\(method.uppercased()) rejected: encoded '/' is not allowed on this endpoint",
                               rule: primary.rule, enforced: true)
         }
-        // Rego re-matches endpoints by `path` with glob.match (rego
-        // `endpoint_path_matches_request`), which — unlike the route selector
-        // above — does not let `/v1/**` match `/v1` itself.
+        // Rego re-matches endpoints by `path` with the route selector's own
+        // matcher (`openshell.endpoint_path_matches`, OpenShell #4336), so
+        // `/v1/**` covers `/v1` and its deny rules apply there too.
         let inspected = matching.filter { m in
             guard m.ep.l7?.inspects ?? false else { return false }
-            guard let p = m.ep.path, !p.isEmpty else { return true }
-            return Self.pathMatches(canonical.path, p)
+            return m.ep.selects(path: canonical.path)
         }
         let enforced = primary.ep.enforcement == .enforce
         let request = L7Request(method: method.uppercased(), path: canonical.path, query: canonical.query,
@@ -565,6 +564,46 @@ public struct OpenShellPolicy: Sendable, Equatable {
         routedEndpoint(host: host, port: port, target: target)?.primary.l7 == .websocket
     }
 
+    /// Why the inspected route for `target` must refuse this request's protocol
+    /// upgrade, or nil (port of l7/rest.rs `unsupported_upgrade_detail`). Every
+    /// inspected protocol refuses h2c; JSON-RPC, MCP and GraphQL judge each HTTP
+    /// request, so any `Upgrade` header ends inspection and is refused. Checked
+    /// before the request decision and whatever the enforcement mode.
+    /// `headerBlock` is the request head as sent (request line first).
+    public func unsupportedUpgradeDetail(host: String, port: UInt16, target: String,
+                                         headerBlock: String,
+                                         identity: BinaryIdentity? = nil,
+                                         enforceBinaries: Bool = false) -> String? {
+        let headers: [(String, String)] = headerBlock.components(separatedBy: "\r\n").dropFirst().compactMap {
+            guard let colon = $0.firstIndex(of: ":") else { return nil }
+            return (String($0[..<colon]), String($0[$0.index(after: colon)...]))
+        }
+        var scoped = self
+        if enforceBinaries {
+            scoped.networkPolicies = networkPolicies.filter { $0.applies(to: identity, enforce: true) }
+        }
+        guard let route = scoped.routedEndpoint(host: host, port: port, target: target) else { return nil }
+        func hasToken(_ value: String, _ token: String) -> Bool {
+            value.split(separator: ",").contains { $0.trimmingCharacters(in: .whitespaces).lowercased() == token }
+        }
+        let upgrades = headers.filter { $0.0.trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" }
+        let connectionUpgrade = headers.contains {
+            $0.0.trimmingCharacters(in: .whitespaces).lowercased() == "connection" && hasToken($0.1, "upgrade")
+        }
+        if connectionUpgrade, upgrades.contains(where: { hasToken($0.1, "h2c") }) {
+            return "HTTP/2 cleartext upgrade (h2c) is not supported for L7-inspected endpoints"
+        }
+        guard !upgrades.isEmpty else { return nil }
+        switch route.primary.l7 {
+        case .mcp, .jsonRPC:
+            return "HTTP upgrade is not supported for JSON-RPC or MCP endpoints"
+        case .graphql:
+            return "HTTP upgrade is not supported for GraphQL endpoints; serve GraphQL over WebSocket from a separate protocol: websocket endpoint on another path or port"
+        default:
+            return nil
+        }
+    }
+
     func routedEndpoint(host: String, port: UInt16, target: String) -> Route? {
         var matching: [(rule: String, ep: Endpoint)] = []
         for rule in networkPolicies {
@@ -583,10 +622,7 @@ public struct OpenShellPolicy: Sendable, Equatable {
                 guard let b = best else { return e }
                 return specificity(e.ep.path) >= specificity(b.ep.path) ? e : b
             }) else { return nil }
-        let inspected = routes.filter { m in
-            guard let p = m.ep.path, !p.isEmpty else { return true }
-            return Self.pathMatches(c.path, p)
-        }.map(\.ep)
+        let inspected = routes.filter { $0.ep.selects(path: c.path) }.map(\.ep)
         return Route(primary: primary.ep, inspected: inspected, path: c.path, query: c.query)
     }
 

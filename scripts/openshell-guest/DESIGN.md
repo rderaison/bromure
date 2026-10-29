@@ -2017,8 +2017,9 @@ where a CNI that installs an egress qdisc (Cilium's bandwidth manager, for one)
 
 #### `AF_PACKET` sends are reported
 
-The blind spot the withdrawal exposed is now covered: `packet_sendmsg` is
-probed, so a raw frame handed to a device produces a `net_flow` with
+The blind spot the withdrawal exposed is now covered: `packet_sendmsg` **and
+`packet_sendmsg_spkt`** are probed, so a raw frame handed to a device produces
+a `net_flow` with
 `proto: "packet"` and the sender's chain. It reports **who**, not a
 destination — there is none to read, since the frame carries its own headers.
 It fires for `PACKET_QDISC_BYPASS` too, because the probe sits at the socket
@@ -2032,6 +2033,28 @@ message's `sockaddr_ll` when there is one; a socket that bound to an interface
 and sends with no `msg_name` leaves it empty, because the ifindex then lives in
 `struct packet_sock`, which no header exports. Repeated sends from one process
 fold into one event with a count.
+
+**Two symbols, because AF_PACKET has two ops tables.** `packet_sendmsg` serves
+`SOCK_RAW` and `SOCK_DGRAM`; `socket(AF_PACKET, SOCK_PACKET, …)` gets
+`packet_ops_spkt`, whose `sendmsg` is `packet_sendmsg_spkt` — and that function
+does **not** call `packet_sendmsg`, it goes straight to `dev_queue_xmit`.
+Probing only the first left the obsolete API exactly as silent as AF_PACKET was
+before any probe existed: measured on 6.8.0, a 54-byte `SOCK_PACKET` frame left
+the host and the stream carried no event at all. Creating one still needs
+`CAP_NET_RAW`, which guest root has in a non-strict workspace.
+
+Which address shape the message carries follows the **socket type**, not which
+symbol fired — `packet_create` keys the ops table on exactly that — so one
+handler serves both probes and stays right if a kernel ever routes them
+differently. The obsolete API names its device by NAME in a `sockaddr_pkt`,
+resolved with `dev_get_by_name_rcu` in the socket's own namespace.
+
+Still not covered, and the same class: **`AF_XDP`** (`xsk_sendmsg`) hands frames
+to the NIC without the stack at all, and `socket(AF_XDP, SOCK_RAW, 0)` succeeds
+in this guest. It is not probed, because driving one needs a UMEM, rings and a
+bind to a queue whose device supports XDP TX — `lo` does not — so the probe
+could not be shown to fire here, and an alarm nobody has driven is the failure
+this file keeps recording.
 
 ### 4.4 Tamper resistance
 

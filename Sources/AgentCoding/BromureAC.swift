@@ -1497,6 +1497,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // CLI / automation, a timeline action, an expiry): re-arm the
             // expiry timer and refresh what's listening (the timeline).
             firewallProfilesChanged(from: oldValue)
+            // An open VM dashboard shows the stored notes, whoever stored
+            // them (settings, AppleScript, the CLI): a card left on older
+            // ones had its next Save write them back over the newer.
+            unifiedWindow?.refreshVMDashboard()
         }
     }
 
@@ -1780,6 +1784,80 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { unattendedLaunchRefusals[id] }
 
+    /// The workspace is booting or running in the other Bromure process.
+    func workspaceOpenElsewhere(_ id: Profile.ID) -> Bool {
+        guard !diskInUse(id), let p = profiles.first(where: { $0.id == id }) else { return false }
+        return WorkspaceLease.heldElsewhere(id, dir: store.profileDirectory(for: p))
+    }
+
+    /// This process's VM of `id` is gone: let the other process have it --
+    /// unless a reboot is between its stop and its next boot.
+    func releaseLeaseIfIdle(_ id: Profile.ID) {
+        if leasePins.isLive(id) { return }
+        leasePins.clear(id)
+        if !diskInUse(id) { WorkspaceLease.release(id) }
+    }
+
+    /// Workspaces whose lease outlives their VM: a reboot stops the old one
+    /// and boots the next, and the other process must not take the workspace
+    /// in between -- however long the next boot's launch waits first (a
+    /// fat client's prompts, up to two minutes each; Kimi provisioning). The
+    /// next boot's acquire takes the pin over (`launch`); an attempt that
+    /// gives up lets it lapse at `pinLeaseSeconds`, and the lease goes then.
+    /// Deadlines and the wake's sleep share one monotonic clock (`LeasePins`).
+    private var leasePins = LeasePins()
+    static let pinLeaseSeconds: TimeInterval = 600
+    /// How often a pin whose reboot is still waiting is looked at again.
+    static let pinRecheckSeconds: TimeInterval = 30
+    func pinLease(_ id: Profile.ID) {
+        var until = leasePins.pin(id, for: Self.pinLeaseSeconds)
+        Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(until: until, clock: .continuous)
+                // Lapsed, unless re-pinned or taken over meanwhile: cleared
+                // here, so releaseLeaseIfIdle sees no pin.
+                guard let self, self.leasePins.lapse(id, deadline: until) else { return }
+                // The reboot's launch may still be waiting: a local wipe or
+                // base-image alert has no timeout, and the lease went with
+                // it on screen -- the other process then booted its stale
+                // copy (Finding CWE-667, "Reboot pin drops the workspace lease
+                // while a local prompt is still up"). Kept while it asks or
+                // holds the disk; only a launch that gave up lets it go.
+                guard Self.pinOutlivesWait(questionUp: self.launchQuestions.isUp(id),
+                                           diskInUse: self.diskInUse(id)) else {
+                    self.releaseLeaseIfIdle(id)
+                    return
+                }
+                until = self.leasePins.pin(id, for: Self.pinRecheckSeconds)
+            }
+        }
+    }
+
+    /// At a pin's deadline: keep it (true) while its reboot's launch still
+    /// asks a question or holds the disk (a boot under way, Kimi
+    /// provisioning), else let it lapse.
+    nonisolated static func pinOutlivesWait(questionUp: Bool, diskInUse: Bool) -> Bool {
+        questionUp || diskInUse
+    }
+    /// The reboot gave up before any boot (nothing left to launch).
+    func unpinLease(_ id: Profile.ID) {
+        leasePins.clear(id)
+        releaseLeaseIfIdle(id)
+    }
+
+    private func refuseOpenElsewhere(_ profile: Profile, unattended: Bool) {
+        let reason = String(format: NSLocalizedString(
+            "“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first.",
+            comment: "launch refused: the workspace runs in the other process"), profile.name)
+        if unattended { refuseUnattendedLaunch(profile, reason); return }
+        FileHandle.standardError.write(Data("[launch] \(reason)\n".utf8))
+        let alert = NSAlert()
+        alert.messageText = reason
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
     private func refuseUnattendedLaunch(_ profile: Profile, _ reason: String) {
         unattendedLaunchRefusals[profile.id] = reason
         FileHandle.standardError.write(Data(
@@ -1999,7 +2077,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 state: runState(for: p),
                 compromised: SessionDisk.isCompromised(profile: p, store: store),
                 squelch: p.squelch.enabled,
-                squelchSummary: SquelchLedger.shared.summary(p.id))
+                squelchSummary: SquelchLedger.shared.summary(p.id),
+                notes: p.comments)
         } + machines.map { m in
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)
@@ -2028,6 +2107,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The new-session screen holds the workspaces by value: rebuild it
         // when they changed (the first one just saved from the editor).
         w.workspacesDidChange()
+        // So does the VM dashboard on the stage (its notes, name, color).
+        w.refreshVMDashboard()
         // A pane came or went: the selected session's tab may have appeared
         // (boot landed) or the workspace gone to sleep.
         agentSessionStore.reconcile(entries: sessionEntries(for: w.listModel))
@@ -2098,6 +2179,68 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // handlers without holding the Profile itself.
     /// Squelch on or off for a workspace: saved, and in force from its next
     /// model request (the proxy reads `SquelchSettings`, kept by `profiles`).
+    /// Keep a credential the VM minted (`MintedCredential`) in its
+    /// workspace's configuration, dropping ones long expired. No live
+    /// refresh: the proxy registered it already, and nothing in the guest's
+    /// environment changes.
+    func saveMintedCredential(_ minted: MintedCredential, profileID: Profile.ID) {
+        guard let i = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        var p = profiles[i]
+        p.mintedCredentials = MintedCredential.pruned(p.mintedCredentials) + [minted]
+        do { try store.update(p) } catch {
+            NSLog("[bromure-ac] minted credential: couldn't save profile: \(error)")
+            return
+        }
+        profiles[i] = p
+        runningSessions[profileID]?.profile = p
+        if lastStagedProfiles[profileID] != nil {
+            lastStagedProfiles[profileID]?.mintedCredentials = p.mintedCredentials
+        }
+    }
+
+    /// The workspace's notes (markdown), saved: the dashboard's in-place
+    /// editor. Nothing in the guest changes.
+    @discardableResult
+    /// The dashboard's notes save. `ifStill`: an implicit save (the focus
+    /// or the dashboard went away) writes only while the stored notes are
+    /// still the ones its edit started from; notes saved since (settings)
+    /// win. nil: Return / Save, an unconditional write.
+    func setNotes(_ id: Profile.ID, _ text: String, ifStill base: String? = nil) -> VMDashboardView.NotesSave {
+        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return .failed }
+        var p = profiles[i]
+        if let base, !Self.notesStill(p.comments, base) { return .superseded(p.comments) }
+        guard p.comments != text else { return .saved }
+        p.comments = text
+        do { try store.update(p) } catch {
+            NSLog("[bromure-ac] notes: couldn't save profile: \(error)")
+            return .failed
+        }
+        profiles[i] = p
+        runningSessions[id]?.profile.comments = text
+        refreshSidebar()   // the row's tooltip carries the notes
+        return .saved
+    }
+
+    /// An implicit notes save over the API (`_commentsIfStill`) whose base
+    /// isn't the stored notes any more: its `comments` is dropped (true).
+    nonisolated static func dropSupersededComments(_ doc: inout [String: Any], stored: String,
+                                                   ifStill base: String?) -> Bool {
+        guard let base, doc["comments"] != nil, !notesStill(stored, base) else { return false }
+        doc.removeValue(forKey: "comments")
+        return true
+    }
+
+    /// Stored notes still the ones an edit started from: trailing blanks
+    /// aside, as the dashboard saves them.
+    nonisolated static func notesStill(_ stored: String, _ base: String) -> Bool {
+        func trimmed(_ s: String) -> Substring {
+            var t = Substring(s)
+            while t.last?.isWhitespace == true { t.removeLast() }
+            return t
+        }
+        return trimmed(stored) == trimmed(base)
+    }
+
     @discardableResult
     func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
         guard let i = profiles.firstIndex(where: { $0.id == id }) else { return false }
@@ -2182,6 +2325,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let pane = pane(for: id) else { return }
         for (tab, kind) in agentTabs(of: pane) where !Self.hookDrivenAgents.contains(kind) {
             if status == .done && tab.agentStatus != .working { continue }
+            // Its turn ended: the card counts from now (no hook to say so,
+            // and no reply to count -- this is read off the traffic).
+            if status == .done, let s = agentSessionStore.session(profileID: id, windowIndex: tab.index) {
+                agentSessionStore.noteActive(s.id)
+            }
             tab.agentStatus = status
         }
     }
@@ -2294,6 +2442,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // pane here, and dropping the report left every tab of it "Ready".
         let recorded = runningSessions[id]?.agentStatus[index]
         runningSessions[id]?.agentStatus[index] = status
+        // A turn that ended, or a question: the session's card shows unread
+        // on every client until someone looks.
+        let before = pane(for: id)?.model.tabs.first(where: { $0.index == index })?.agentStatus ?? recorded
+        if Self.isReply(from: before, to: status),
+           let s = agentSessionStore.session(profileID: id, windowIndex: index) {
+            agentSessionStore.noteReply(s.id)
+        }
         // A new turn (hook activity) means no dialog is waiting any more;
         // a chat still showing one re-asserts it on its next screen scan.
         if status == .working,
@@ -2421,6 +2576,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return { [weak self] in
             guard let self else { return }
             if claimed { self.bootsInFlight.end(id) }
+            self.releaseLeaseIfIdle(id)   // the relaunch failed: no VM holds it
             self.refreshSidebar()
         }
     }
@@ -2514,6 +2670,75 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// A session by id, here or on an attached machine — synchronous, unlike
     /// `homeSessionStore` (which follows a change a runloop turn later).
+    /// A status change that leaves something for the user to read: a turn
+    /// that ended (working → done), or the agent stopping to ask. An unknown
+    /// "before" that is done says nothing (a replayed status at launch).
+    nonisolated static func isReply(from before: AgentStatus?, to now: AgentStatus) -> Bool {
+        switch now {
+        case .done:       return before == .working
+        case .needsInput: return before != .needsInput
+        case .working:    return false
+        }
+    }
+
+    /// The sessions the user is looking at on this Mac right now: on the
+    /// stage of the key window of the active app (one, or a room's page).
+    var sessionsOnScreen: [UUID] {
+        guard NSApp.isActive, let w = unifiedWindow, w.isKeyWindow, w.isVisible, !w.isMiniaturized
+        else { return [] }
+        return w.sessionsOnStage
+    }
+
+
+    /// The user read a session (here, or on a client: `upTo` is the reply
+    /// count that client showed). Every client's mark goes with the next
+    /// snapshot. A session on an attached machine is that machine's to keep.
+    func markSessionRead(_ id: UUID, upTo: Int? = nil) {
+        if let m = machine(forSession: id) {
+            // Its count lives on the machine: shown read here at once, the
+            // read sent there (what this screen showed; nothing to read: none).
+            // Unread on the MACHINE (not as shown here, where a read on its
+            // way already reads as read): until it confirms, another read goes.
+            guard m.unreadOnMachine(id), let n = m.machineSessions.first(where: { $0.id == id })?.replies else { return }
+            m.markRead(id, upTo: min(upTo ?? n, n))
+            homeSessionStore.applyMirror(allSessionRecords)   // the sidebar's copy, now
+            return
+        }
+        if agentSessionStore.markRead(id, upTo: upTo) { ACAutomationServer.noteMutation() }
+    }
+
+    /// The host half of a guest page whose OAuth redirect is a loopback port:
+    /// that port's forwarder into this VM. nil: open the page (no loopback
+    /// redirect, or the forwarder is up). Else why it must NOT be opened:
+    /// another workspace's sign-in holds the port (or another program, or the
+    /// VM has no socket) -- the browser's redirect, code and all, would land
+    /// on that listener, not this sign-in (Finding CWE-441, "A refused
+    /// loopback port still opens the sign-in, so another workspace receives
+    /// the OAuth code").
+    func loopbackCallbackRefusal(for url: URL, device: VZVirtioSocketDevice?,
+                                 browserResponse: String? = nil) -> String? {
+        guard let port = Self.loopbackCallbackPort(from: url) else { return nil }
+        if let device, LoopbackCallbackForwarder.forPort(port, socketDevice: device, browserResponse: browserResponse,
+                                                         in: &loopbackForwarders) != nil {
+            FileHandle.standardError.write(Data("[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+            return nil
+        }
+        FileHandle.standardError.write(Data("[ac] sign-in page not opened: 127.0.0.1:\(port) is taken\n".utf8))
+        return String(format: NSLocalizedString(
+            "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again.",
+            comment: "sign-in: a guest's OAuth callback port is held by another workspace's sign-in"), Int(port))
+    }
+
+    /// Stop the OAuth callback listeners that relay into `device` (its VM is
+    /// going), and any whose VM is already gone.
+    func stopLoopbackForwarders(of device: VZVirtioSocketDevice?) {
+        loopbackForwarders.removeAll { fwd in
+            guard fwd.relays(into: device) || !fwd.hasWorkspace else { return false }
+            fwd.stop()
+            return true
+        }
+    }
+
     func sessionRecord(_ id: UUID) -> AgentSession? {
         agentSessionStore.session(id) ?? attachedMachines.values.lazy.compactMap { $0.sessionStore.session(id) }.first
     }
@@ -2535,6 +2760,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func refreshHomeSessions() {
         homeSessionStore.applyMirror(allSessionRecords)
+        // An attached machine's session on stage: a reply that came with its
+        // snapshot is read as it lands (ours are read in `onReply`) -- once:
+        // the machine's mirror shows it read until its count catches up, and
+        // a read that never lands shows unread again and is sent again.
+        for id in sessionsOnScreen where machine(forSession: id) != nil && sessionRecord(id)?.isUnread == true {
+            markSessionRead(id)
+        }
     }
 
     private func trackHomeSessions() {
@@ -2568,6 +2800,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         refreshHomeSessions()
         trackHomeSessions()
+        // A reply on the session the user is watching is read already.
+        agentSessionStore.onReply = { [weak self] id in
+            guard let self else { return }
+            if self.sessionsOnScreen.contains(id) { self.agentSessionStore.markRead(id) }
+            ACAutomationServer.noteMutation()
+        }
         machineLinksObserver = NotificationCenter.default.addObserver(
             forName: MachineLinkHub.machinesChanged, object: nil, queue: .main) { [weak self] note in
             MainActor.assumeIsolated {
@@ -2709,6 +2947,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// is the strong owner that keeps the VM alive independent of any window.
     @discardableResult
     func registerSession(_ sandbox: UbuntuSandboxVM, profile: Profile) -> RunningSession {
+        // Every running VM holds its workspace's lease (`launch` took it
+        // already; a boot that didn't come through there takes it here).
+        if !WorkspaceLease.acquire(profile.id, dir: store.profileDirectory(for: profile)),
+           store.exists(profile) {
+            FileHandle.standardError.write(Data(
+                "[launch] '\(profile.name)' registered while the other Bromure process holds its lease\n".utf8))
+        }
         // A stop asked for during the boot (it had no session to stop then):
         // honored now that there is one.
         if let action = bootsInFlight.takeStop(profile.id) {
@@ -2722,6 +2967,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         let session = RunningSession(profileID: profile.id, profile: profile, sandbox: sandbox)
         runningSessions[profile.id] = session
+        // The boot created the home image an open editor may still think absent.
+        NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: profile.id)
         updateStatusMenu()
         // Boot completes asynchronously after the launch path's initial render,
         // so refresh the picker now that the VM is actually running (Start →
@@ -2734,10 +2981,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// deallocates once any in-flight stop/suspend task also releases it
     /// (its `deinit` then detaches the vmnet switch port).
     func unregisterSession(_ id: Profile.ID) {
+        // Its OAuth callback listeners go with it: a stopped VM must not keep
+        // a sign-in's port (the next one couldn't bind it, and the browser's
+        // redirect would be reset or relayed into a VM shutting down).
+        if let dev = runningSessions[id]?.sandbox.socketDevice { stopLoopbackForwarders(of: dev) }
         runningSessions.removeValue(forKey: id)
+        releaseLeaseIfIdle(id)
         updateStatusMenu()
         // "Until the workspace stops" firewall rules end here.
         endUntilStopFirewallRules(for: id)
+        // An open editor's Erase / Reset come back now it's stopped.
+        NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
     }
 
     /// NSEvent monitor that intercepts ⌘T / ⌘W / ⌘1-9 at the
@@ -2835,6 +3089,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // A supply-chain override prompt's "Always allow" saves to the
             // workspace's reputation allowlist.
             self.wireSupplyChainOverrides(e.supplyChainBroker)
+            // A credential the VM minted through an API is saved in its
+            // workspace (the proxy already made it usable).
+            e.credentialMinter.sink = { [weak self] pid, minted in
+                Task { @MainActor in self?.saveMintedCredential(minted, profileID: pid) }
+            }
             if BACEnrollmentStore.load() != nil {
                 let up = BACTraceUploader()
                 up.setPrivateProfiles(Set(self.profiles.filter { $0.privateMode }.map { $0.id }))
@@ -3281,17 +3540,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return config
     }
 
+    /// The port of a guest page's loopback OAuth redirect -- the one the
+    /// host's forwarder must own before the page may open (see
+    /// `loopbackCallbackRefusal`). Any host the browser would take to this
+    /// Mac's loopback counts (`reachesLoopback`): only `127.0.0.1` and
+    /// `localhost` did, so a `[::1]` redirect -- which the forwarder also
+    /// listens on -- skipped the ownership check and the page opened, the
+    /// code landing on whichever workspace held the port (Finding CWE-441,
+    /// "Sign-in refusal ignores a [::1] redirect, so the other workspace
+    /// still receives the OAuth code").
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let redirect = comps.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
               let rc = URLComponents(string: redirect),
-              let host = rc.host?.lowercased(),
-              host == "127.0.0.1" || host == "localhost",
+              let host = rc.host, reachesLoopback(host),
               let port = rc.port, port > 0, port <= 65_535 else {
             return nil
         }
         return UInt16(port)
     }
+
+    // The host checks are GuestURLGate's (shared with Bromure Remote, which
+    // opens the same guest sign-in URLs); these keep their names here.
+    typealias URLIPv4 = GuestURLGate.URLIPv4
+    nonisolated static func bareHost(_ h: String) -> String { GuestURLGate.bareHost(h) }
+    nonisolated static func browserHost(_ h: String) -> String? { GuestURLGate.browserHost(h) }
+    nonisolated static func urlIPv4(_ h: String) -> URLIPv4 { GuestURLGate.urlIPv4(h) }
+    nonisolated static func ipv4IsLocalOrPrivate(_ a: UInt32) -> Bool { GuestURLGate.ipv4IsLocalOrPrivate(a) }
+    nonisolated static func reachesLoopback(_ h: String) -> Bool { GuestURLGate.reachesLoopback(h) }
+    nonisolated static func opensInRealBrowser(_ url: URL) -> Bool { GuestURLGate.opensInRealBrowser(url) }
+    nonisolated static func hostIsLocalOrPrivate(_ h: String) -> Bool { GuestURLGate.hostIsLocalOrPrivate(h) }
 
     /// Open a guest-relayed URL (from the VM's `bromure-open` outbox) in the
     /// user's REAL browser — unless its host is local/private. A compromised
@@ -3308,52 +3586,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         NSWorkspace.shared.open(url)
-    }
-
-    /// Whether `url` may be handed to the user's real browser: it must have a
-    /// PUBLIC host. Empty / local / private / link-local / ULA / `.local`
-    /// hosts are refused.
-    nonisolated static func opensInRealBrowser(_ url: URL) -> Bool {
-        guard let host = url.host, !host.isEmpty else { return false }
-        return !hostIsLocalOrPrivate(host)
-    }
-
-    /// Classify a URL host as local/private (loopback, RFC1918, CGNAT,
-    /// link-local, IPv6 loopback/ULA/link-local, or an mDNS `.local` /
-    /// `localhost` name). A plain public DNS name returns false. Pure — no
-    /// actor state — so callers on any executor (and tests) can use it.
-    nonisolated static func hostIsLocalOrPrivate(_ rawHost: String) -> Bool {
-        var host = rawHost.lowercased()
-        if host.hasPrefix("["), host.hasSuffix("]") {
-            host = String(host.dropFirst().dropLast())   // IPv6 literal brackets
-        }
-        // Named loopback / mDNS.
-        if host == "localhost" || host.hasSuffix(".localhost") { return true }
-        if host == "local" || host.hasSuffix(".local") { return true }
-        // IPv4 literal.
-        var v4 = in_addr()
-        if inet_pton(AF_INET, host, &v4) == 1 {
-            let o = withUnsafeBytes(of: v4.s_addr) { Array($0) }   // network order
-            switch (o[0], o[1]) {
-            case (0, _), (127, _), (10, _): return true            // unspecified / loopback / RFC1918
-            case (172, 16...31): return true                       // 172.16/12
-            case (192, 168): return true                           // 192.168/16
-            case (169, 254): return true                           // link-local
-            case (100, 64...127): return true                      // CGNAT 100.64/10
-            default: return false
-            }
-        }
-        // IPv6 literal.
-        var v6 = in6_addr()
-        if inet_pton(AF_INET6, host, &v6) == 1 {
-            let b = withUnsafeBytes(of: v6) { Array($0) }
-            if b.allSatisfy({ $0 == 0 }) { return true }                       // ::
-            if b.prefix(15).allSatisfy({ $0 == 0 }), b[15] == 1 { return true }// ::1
-            if b[0] == 0xFE, (b[1] & 0xC0) == 0x80 { return true }             // fe80::/10 link-local
-            if (b[0] & 0xFE) == 0xFC { return true }                           // fc00::/7 ULA
-            return false
-        }
-        return false   // a normal public DNS name
     }
 
     /// Per-profile shell bridges (vsock 5800), created for every session —
@@ -3846,6 +4078,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // seconds in, once the switch + control plane are settled.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.kubeClusterEngine.startAutoStartClusters()
+            // What the last quit asked to bring back (its checkbox).
+            self?.restoreAtLaunch()
         }
         // Planning sessions that were in flight when the app last quit must
         // not spin forever — re-arm their watchdogs (which abort with a
@@ -4534,6 +4768,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     window = self.branchesWindows.window(for: pid)
                 case let w where w.hasPrefix("session-review:"):
                     window = UUID(uuidString: String(w.dropFirst(15))).flatMap { self.sessionReviews.window(for: $0) }
+                case let w where w.hasPrefix("vm:"):
+                    // A workspace's VM dashboard ("vm:<name or id>") as the
+                    // stage surface, then the unified window.
+                    guard let p = self.profileByNameOrID(String(w.dropFirst(3))) else {
+                        return ["error": "unknown profile"]
+                    }
+                    self.ensureUnifiedWindow().showVMDashboard(p.id)
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("vm-notes:"):
+                    // The same dashboard with its notes open in their editor.
+                    guard let p = self.profileByNameOrID(String(w.dropFirst(9))) else {
+                        return ["error": "unknown profile"]
+                    }
+                    self.ensureUnifiedWindow().showVMDashboard(p.id, editingNotes: true)
+                    window = self.unifiedWindow
                 case "grid":
                     // The Grid as the stage surface (side panes fold for it).
                     self.ensureUnifiedWindow().showGrid()
@@ -4781,12 +5030,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         }
                         let page = (params["override"] as? Bool) == true
                             ? LoopbackCallbackForwarder.registrationSuccessResponse(provider: "ace2e") : nil
-                        guard let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev,
-                                                                  browserResponse: page) else {
+                        guard LoopbackCallbackForwarder.forPort(port, socketDevice: dev, browserResponse: page,
+                                                                in: &self.loopbackForwarders) != nil else {
                             return ["error": "couldn't bind 127.0.0.1:\(port)"]
                         }
-                        self.loopbackForwarders.removeAll { !$0.isRunning }
-                        self.loopbackForwarders.append(fwd)
                         return ["ok": true, "port": Int(port)]
                     }
                 case "start-session":
@@ -5746,6 +5993,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case (let sid?, "branch-keep"):
                     guard self.agentSessionStore.session(sid)?.worktreeBranch != nil else { return ["error": "not a branch session"] }
                     self.agentSessionEngine.keepBranchQuietly(sid)
+                    return ["ok": true]
+                case (let sid?, "read"):
+                    // {seen?}: the reply count the client's screen showed.
+                    guard self.sessionRecord(sid) != nil else { return ["error": "unknown session"] }
+                    self.markSessionRead(sid, upTo: body["seen"] as? Int)
                     return ["ok": true]
                 case (let sid?, "rename"):
                     guard self.agentSessionStore.session(sid) != nil,
@@ -6758,6 +7010,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// All workspaces (running or not) as sidebar rows — the exact shape
     /// `refreshSidebar()` builds `ProfileRow` from, so a fat client renders the
     /// source list 1:1.
+    /// home.img's size, or NSNull when there is none (the row says so, rather
+    /// than leaving the key out like a server too old to report it).
+    nonisolated static func homeImageBytes(_ url: URL) -> Any {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? NSNull()
+    }
+
     @MainActor func automationWorkspaceList() -> [[String: Any]] {
         profiles.map { p in
             let state: String
@@ -6783,6 +7041,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "diskAllocatedBytes": dash.diskAllocated,
                 "diskCapacityBytes": dash.diskCapacity,
+                // A fat client's editor remeasures when this moves (a wipe,
+                // reset or rollback leaves the run state as it was).
+                "homeImageBytes": Self.homeImageBytes(store.homeImageURL(for: p)),
                 // Which credentials it holds (never the values): a fat client's
                 // automation and code-review editors gate on them, and its
                 // mirrored profile carries no credentials at all.
@@ -6802,6 +7063,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
                 },
                 "squelch": p.squelch.enabled,
+                // Its notes: the fat client's dashboard card and row tooltip.
+                "comments": p.comments,
             ]
             if let sum = SquelchLedger.shared.summary(p.id) { row["squelchSummary"] = Self.codableToDict(sum) }
             // Wedged at boot on filesystem errors (the decision prompt rides
@@ -6931,6 +7194,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
         rebootingProfiles.insert(id)
+        // The lease stays with this process from the stop to the next boot's
+        // acquire (launch takes the pin over; one that gives up lets it lapse).
+        pinLease(id)
         if force, let vm = session.sandbox.vm {
             await Self.forceStop(vm)
             handleSessionStopped(profileID: id)   // a forced stop fires no onStopped
@@ -7662,6 +7928,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// proceed (nothing running, or the user clicked Quit), false to abort.
     @MainActor
     private func confirmQuit() -> Bool {
+        // A quit AppKit refused after an earlier confirmation must not leave
+        // its answer to a later one (that may not even ask).
+        restorePlanAtQuit = nil
+        restoreDecidedAtQuit = false
         let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
         if running.isEmpty { return true }
         // A background agent (`--headless`: no window, nobody at the Mac to
@@ -7683,6 +7953,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        // Bring the workspaces (and the sessions open in them) back at the
+        // next start. The infrastructure machines come up with their
+        // clusters, not from here.
+        let restoreBox: NSButton? = workspaces.isEmpty ? nil : {
+            let b = NSButton(checkboxWithTitle: NSLocalizedString(
+                "Restore these workspaces and their sessions at next start",
+                comment: "quit confirmation checkbox"), target: nil, action: nil)
+            b.state = UserDefaults.standard.object(forKey: LaunchRestorePlan.preferenceKey) as? Bool ?? true ? .on : .off
+            return b
+        }()
+        alert.accessoryView = restoreBox
         // Come forward first. Quit usually arrives as an Apple Event (menu,
         // ⌘Q, Dock, `osascript`) while another app is frontmost, and a modal
         // put up from that handler can end up unfocused and behind whatever
@@ -7691,8 +7972,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // they're actually being asked about.
         NSApp.activate(ignoringOtherApps: true)
         quitAlert = alert
-        return alert.runModal() == .alertFirstButtonReturn
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        if let restoreBox {
+            let restore = restoreBox.state == .on
+            UserDefaults.standard.set(restore, forKey: LaunchRestorePlan.preferenceKey)
+            // Taken now, before the drain: shutting a workspace down unbinds
+            // its sessions' tabs. Written at applicationWillTerminate, so a
+            // quit AppKit refuses after this leaves nothing behind.
+            restorePlanAtQuit = restore ? LaunchRestorePlan.make(
+                running: running.filter { $0.kubeClusterID == nil }
+                    .map { (id: $0.profileID, name: $0.profile.name) }
+                    .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending },
+                sessions: agentSessionStore.sessions) : nil
+            restoreDecidedAtQuit = true
+        }
+        return true
     }
+
+    /// The quit confirmation's restore checkbox: what to bring back at the
+    /// next start (nil: nothing), and whether the user was asked at all.
+    private var restorePlanAtQuit: LaunchRestorePlan?
+    private var restoreDecidedAtQuit = false
 
     /// The quit confirmation's body: what happens to each running workspace,
     /// grouped by what its close action does at quit (shut down; anything
@@ -7825,6 +8125,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.stamp("applicationWillTerminate (clean quit)")
+        if restoreDecidedAtQuit {
+            if let plan = restorePlanAtQuit {
+                LaunchRestorePlan.save(plan)
+                AppLog.stamp("quit: \(plan.workspaces.count) workspace(s) to restore at next start")
+            } else {
+                LaunchRestorePlan.discard()
+            }
+        }
         SquelchLedger.shared.flush()
         // `vm run --rm` workspaces whose VM is off (a reboot's relaunch
         // waiting, a boot that gave up): over with the app.
@@ -10534,7 +10842,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let homeImage = store.homeImageURL(for: editing)
         let hasHomeImage = editing.homeModel == .ext4
             && FileManager.default.fileExists(atPath: homeImage.path)
-        return ProfileStorageContext(
+        var context = ProfileStorageContext(
             baseImageURL: baseURL,
             baseImageVersion: readCurrentBaseVersion(),
             baseImageBuildDate: buildDate,
@@ -10552,6 +10860,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ? { [weak self] in self?.restoreHomeStorage(editing) }
                 : nil
         )
+        context.homeImageFile = editing.homeModel == .ext4 ? homeImage : nil
+        context.remeasure = { [weak self] in self?.makeStorageContext(for: editing) }
+        return context
     }
 
     func closeEditorWindow() {
@@ -10932,6 +11243,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var t = $0; t.realValue = t.realValue.trimmingCharacters(in: .whitespacesAndNewlines); return t
         }
 
+        // Credentials the VM minted while the editor was open
+        // (`saveMintedCredential`): the editor never edits them, so the app's
+        // copy -- secrets included -- is the current one.
+        if let current = profiles.first(where: { $0.id == profile.id }) {
+            profile.mintedCredentials = current.mintedCredentials
+            // Fields the app saves while settings is open -- the dashboard's
+            // notes, the sidebar's Squelch switch: left as the editor opened
+            // them, they're the stored ones (Finding CWE-362, "Saving
+            // workspace settings overwrites notes edited on the VM
+            // dashboard"). Edited here, the editor's win.
+            if let opened = editing { profile.adoptAppEdits(from: current, opened: opened) }
+        }
         // The editor's copy is as old as the window: keep what the app
         // updated meanwhile (lastUsedAt went backwards on a save).
         try store.saveEdited(&profile)
@@ -11076,6 +11399,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         doc.removeValue(forKey: "_secretsRedacted")
         let generateSSH = (rawDoc["generateSSH"] as? Bool) == true
         doc.removeValue(forKey: "generateSSH")
+        // `_commentsIfStill`: the notes an implicit dashboard save started
+        // from. Other notes stored since (settings) win: its `comments` is
+        // dropped here, where the check and the write are one step.
+        let commentsIfStill = rawDoc["_commentsIfStill"] as? String
+        doc.removeValue(forKey: "_commentsIfStill")
+        var commentsSuperseded = false
 
         let profile: Profile
         let editing: Profile?
@@ -11086,6 +11415,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let existing = profileByNameOrID(idOrName) else {
                 return ["ok": false, "error": "Workspace not found: \(idOrName)"]
             }
+            commentsSuperseded = Self.dropSupersededComments(&doc, stored: existing.comments, ifStill: commentsIfStill)
             // A partial document (only the fields to change) is overlaid on
             // the stored workspace; a full one replaces every field it names.
             var incoming: Profile
@@ -11122,6 +11452,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var merged = existingSecrets
             merged.overlay(with: incomingSecrets)
             merged.apply(to: &incoming)
+            // Minted credentials are the VM's, never the document's: a copy
+            // round-tripped while the VM minted one would drop it (and its
+            // secret), and the next boot would sign its key as the workspace.
+            incoming.mintedCredentials = existing.mintedCredentials
 
             // Kube contexts are part of this full-document replace: honor the
             // caller's exact set so removing one in the (redacted) editor sticks.
@@ -11175,7 +11509,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         do {
             try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH, policySource: "api")
         } catch {
-            return ["ok": false, "error": error.localizedDescription]
+            var r: [String: Any] = ["ok": false, "error": error.localizedDescription]
+            // The notes it dropped are still the ones that won: a client that
+            // read only "failed" reopened its stale draft.
+            if commentsSuperseded, let editing { r["commentsSuperseded"] = true; r["comments"] = editing.comments }
+            return r
         }
 
         // Push host-side cosmetic + live-swap updates into a running session,
@@ -11184,6 +11522,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var result = automationProfileDescribe(toSave.id.uuidString) ?? ["id": toSave.id.uuidString]
         result["ok"] = true
+        if commentsSuperseded { result["commentsSuperseded"] = true }
         // Surface the freshly-minted public key so the caller can show it for
         // pasting into GitHub etc. (public, not a secret).
         if generateSSH, let pub = toSave.sshPublicKey, !pub.isEmpty { result["sshPublicKey"] = pub }
@@ -11280,6 +11619,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var merged = existingSecrets
         merged.overlay(with: incomingSecrets)
         merged.apply(to: &incoming)
+        // No VM runs on the template: it mints nothing.
+        incoming.mintedCredentials = []
         // Only an explicitly-sent kubeconfigs array is authoritative (removing a
         // context in the redacted editor must stick); an absent key = untouched.
         if let sentKube = rawDoc["kubeconfigs"] as? [[String: Any]] {
@@ -11730,6 +12071,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Full map = profile plan + kubeconfig bearer/exec swaps, the
             // same composition the launch path builds.
             var fresh = plan.tokenMap()
+            // Credentials the VM minted earlier (`MintedCredential`).
+            fresh.entries += MintedCredential.tokenEntries(profile.mintedCredentials, salt: salt)
+            engine.awsCreds.setMinted(profile.mintedCredentials, for: profile.id)
             let kubeMat = KubeconfigMaterializer().materialize(
                 profile: profile, bromureCAPEM: engine.ca.certificatePEM,
                 directClusters: kubeClusterEngine.directClusters(for: profile.id),
@@ -11921,6 +12265,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         /// False: this workspace already has one up — don't ask, don't boot.
         mutating func begin(_ id: Profile.ID) -> Bool { up.insert(id).inserted }
         mutating func end(_ id: Profile.ID) { up.remove(id) }
+        func isUp(_ id: Profile.ID) -> Bool { up.contains(id) }
     }
 
     enum UpgradeAnswerOutcome: Equatable {
@@ -12151,6 +12496,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Deleted by the other process (its `vm run --rm` sweep): the row
         // is stale. Booting it would save it back as a kept workspace.
         guard store.exists(profile) else { forgetDeletedProfile(profile, unattended: unattended); return }
+        // Open in the other Bromure process (the app, or its login agent):
+        // it runs there, and this process's copy of it is stale.
+        if workspaceOpenElsewhere(profile.id) {
+            refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
+            return
+        }
         // A Kimi subscription whose record has no managed config (registration
         // captured the credential but not what `kimi login` provisions) would
         // boot a guest that can't start its agent at all — "LLM not set". Ask
@@ -12307,9 +12658,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
+        // Held from here until the VM is gone (or its boot fails): the other
+        // process sees it open and leaves it alone. Taken after the
+        // questions above, which wait on the user.
+        guard WorkspaceLease.acquire(profile.id, dir: store.profileDirectory(for: profile)) else {
+            refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
+            return
+        }
+        leasePins.clear(profile.id)   // a reboot's pin: this boot holds it now
         // Again after the questions above: they wait on the user, and the
-        // other process may have deleted it meanwhile.
-        do { try store.touch(profile) } catch is ProfileStore.ProfileGone {
+        // other process may have deleted it meanwhile. The stamp keeps the
+        // minted credentials on disk, which this copy may predate (the other
+        // process's VM minted them): the boot registers those.
+        do {
+            let written = try store.touch(profile)
+            if written.mintedCredentials != profile.mintedCredentials {
+                profile.mintedCredentials = written.mintedCredentials
+                if let i = profiles.firstIndex(where: { $0.id == profile.id }) {
+                    profiles[i].mintedCredentials = written.mintedCredentials
+                }
+            }
+        } catch is ProfileStore.ProfileGone {
+            releaseLeaseIfIdle(profile.id)
             forgetDeletedProfile(profile, unattended: unattended)
             return
         } catch {}
@@ -12372,6 +12742,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Token map = the profile-derived plan + the kubeconfig
             // bearer/exec swap entries.
             var tokenMap = plan.tokenMap()
+            // Credentials the VM minted in an earlier boot (`MintedCredential`).
+            tokenMap.entries += MintedCredential.tokenEntries(profile.mintedCredentials, salt: salt)
+            engine.awsCreds.setMinted(profile.mintedCredentials, for: profile.id)
             for swap in kubeMat.bearerSwaps {
                 tokenMap.entries.append(TokenMap.Entry(
                     fake: swap.fakeToken, real: swap.realToken, host: swap.host,
@@ -12494,6 +12867,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // its owner would delete the disk out from under this VM.
         if store.isEphemeral(profile), !store.claimEphemeral(profile) {
             bootsInFlight.end(profile.id)
+            releaseLeaseIfIdle(profile.id)
             refreshSidebar()
             FileHandle.standardError.write(Data(
                 "[launch] '\(profile.name)' is a vm run --rm workspace another Bromure process owns; not booting it here\n".utf8))
@@ -12544,6 +12918,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Task { @MainActor [self] in
             defer {
                 bootsInFlight.end(profile.id)
+                releaseLeaseIfIdle(profile.id)   // the boot failed: no VM holds it
                 refreshSidebar()
             }
             let sessionDisk = SessionDisk(
@@ -15521,20 +15896,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
+                guard let self else { return }
                 // If this is an OAuth login URL whose redirect_uri points at a
                 // guest loopback port, stand up a forwarder so the host
-                // browser's callback reaches the in-VM CLI before we open it.
-                if let self, let sandbox,
-                   let port = Self.loopbackCallbackPort(from: url),
-                   let dev = sandbox.socketDevice,
-                   let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev) {
-                    self.loopbackForwarders.removeAll { !$0.isRunning }
-                    self.loopbackForwarders.append(fwd)
-                    FileHandle.standardError.write(Data(
-                        "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+                // browser's callback reaches the in-VM CLI before we open it
+                // -- and when this workspace can't have that port, never open it.
+                if let refused = self.loopbackCallbackRefusal(for: url, device: sandbox?.socketDevice) {
+                    if let signIn = self.proxySignIns[pid], !signIn.finished {
+                        // Ended, not just reported: the card said "failed"
+                        // while the sign-in stayed in flight -- its capture
+                        // armed, and the retry refused as "another sign-in"
+                        // until the 5-minute timeout (Finding CWE-459, "A
+                        // refused workspace sign-in stays in flight, so retry
+                        // is blocked for five minutes").
+                        self.endProxySignIn(signIn, success: false, message: refused)
+                    } else {
+                        self.unifiedWindow?.showNotice(refused)
+                    }
+                    return
                 }
                 // A sign-in card is waiting on this very page.
-                if let self, let signIn = self.proxySignIns[pid], !signIn.finished {
+                if let signIn = self.proxySignIns[pid], !signIn.finished {
+                    // A page on this Mac's loopback or network is never
+                    // opened: the sign-in ends instead of waiting out its
+                    // timeout on a page nobody will see.
+                    guard Self.opensInRealBrowser(url) else {
+                        self.endProxySignIn(signIn, success: false, message: NSLocalizedString(
+                            "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.",
+                            comment: "sign-in refused: the guest's sign-in URL has a local or private host"))
+                        Self.openGuestRelayedURL(url)   // logs the refusal
+                        return
+                    }
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }
@@ -16012,6 +16404,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let profile = currentProfile(profileID) ?? runningSessions[profileID]?.profile
             let remedy = pendingBootRemedies.removeValue(forKey: profileID)
             rebootingProfiles.insert(profileID)
+            pinLease(profileID)   // kept from this stop to the next boot
             handleSessionStopped(profileID: profileID)
             rebootingProfiles.remove(profileID)
             if let profile {
@@ -16024,12 +16417,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let stop = await self.whileHoldingDisk(profileID) {
                             await self.executeBootRemedy(remedy, profile: profile, pane: nil)
                         }
+                        if stop != nil { self.unpinLease(profileID) }   // left off: no boot follows
                         guard stop == nil else { self.dropAbandonedEphemeral(profileID); return }
                         self.launch(profile, detached: true)
                     }
                 } else {
                     launch(profile, detached: true)
                 }
+            } else {
+                unpinLease(profileID)
             }
         }
     }
@@ -16439,11 +16835,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Drop the old VM from the registry (and the window borrow) so it
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.
-        unregisterSession(profile.id)
         // Out of runningSessions, but the remedy, the fresh VM's prepare() and
         // start() still own the disk until it registers: in use (booting) for
         // the whole gap, or a delete / reset / revert landed under the new VM.
+        // Held before the old VM leaves the registry, so the workspace's lease
+        // stays with this process across the reboot (the other one would boot
+        // its stale copy into the gap).
         let release = holdDiskForRelaunch(profile.id)
+        unregisterSession(profile.id)
         // The reboot killed any streamed planning driver with the guest;
         // without this the hub session stays un-ended forever (no terminal
         // event, the dead driver never reconnects), pinning the plan

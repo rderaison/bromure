@@ -1206,6 +1206,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "The network helper only serves the user logged in at the screen.\n\nHelper: %@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "The network helper couldn't create the tunnel interface.\n\nHelper: %@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@";
 "The network helper couldn't create the tunnel interface." = "The network helper couldn't create the tunnel interface.";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -2909,6 +2912,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model.";
 "%d sessions whose machine or folder is gone" = "%d sessions whose machine or folder is gone";
 "(empty)" = "(empty)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.";
+"Restore these workspaces and their sessions at next start" = "Restore these workspaces and their sessions at next start";
+"Restoring your workspaces" = "Restoring your workspaces";
+"Restoring Workspaces" = "Restoring Workspaces";
+"Stop Restoring" = "Stop Restoring";
+"Starting “%@”…" = "Starting “%@”…";
+"%1$d of %2$d" = "%1$d of %2$d";
+"did not start in time" = "did not start in time";
+/* VM dashboard: workspace notes */
+"Notes" = "Notes";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return saves · Shift-Return adds a line · Esc cancels";
+"Save the notes (Return)" = "Save the notes (Return)";
+"Edit the notes as markdown" = "Edit the notes as markdown";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3162,6 +3178,7 @@
 "Erasing and restoring storage is done on the server Mac." = "Erasing and restoring storage is done on the server Mac.";
 "Home folder size" = "Home folder size";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use.";
 "Queued — sent when the agent is done" = "Queued — sent when the agent is done";
 "Queued — sent when %@ is done" = "Queued — sent when %@ is done";
 "Queued — the agent reads it next" = "Queued — the agent reads it next";
@@ -4342,3 +4359,14 @@
 "Add a rule for this host and port, for %@" = "Add a rule for this host and port, for %@";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "“%@” no longer exists: another Bromure process deleted it.";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "for %@ (SigV4 signing on the host)";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first.";
+"The workspace is open in the other Bromure process, which runs this automation there" = "The workspace is open in the other Bromure process, which runs this automation there";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "Unread";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again.";

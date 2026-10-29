@@ -5,11 +5,32 @@ import _CryptoExtras
 import X509
 import SwiftASN1
 
+// MARK: - Endpoint keys
+
+/// The key both registries file an upstream under: the lowercased host,
+/// then `:port` unless it's 443 -- what `KubeconfigEntry.hostPattern`
+/// gives for `https://h` and `https://h:6443`, with an explicit `:443`
+/// folded onto the bare form (same endpoint). One key per endpoint, so a
+/// registration never writes into another context's slot and a lookup
+/// never falls back to one.
+func endpointKey(host: String, port: Int) -> String {
+    let h = host.lowercased()
+    return port == 443 ? h : "\(h):\(port)"
+}
+
+/// A registration's `host[:port]` as an `endpointKey`.
+func endpointKey(_ hostPattern: String) -> String {
+    let h = hostPattern.lowercased()
+    if h.hasSuffix(":443") { return String(h.dropLast(4)) }
+    return h
+}
+
 // MARK: - SecIdentity registry
 
 /// Per-host client identity table the proxy hands to URLSession when
 /// the upstream API server asks for client-cert auth (Kubernetes,
-/// internal mTLS APIs, etc.). Keyed by `host[:port]` lowercased.
+/// internal mTLS APIs, etc.). Keyed by `endpointKey` -- the host, with
+/// its port unless 443 -- and looked up the same way, exactly.
 public final class ClientIdentityRegistry: @unchecked Sendable {
     private let lock = NSLock()
 
@@ -39,20 +60,11 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
     public func setIdentity(_ identity: SecIdentity, host: String, profileID: UUID,
                             consentCredentialID: String? = nil,
                             consentDisplayName: String? = nil) {
-        let h = host.lowercased()
         let entry = Entry(identity: identity,
                           consentCredentialID: consentCredentialID,
                           consentDisplayName: consentDisplayName)
         lock.lock(); defer { lock.unlock() }
-        var byHost = perProfile[profileID] ?? [:]
-        byHost[h] = entry
-        // Also index by bare hostname — URLSession challenges + the
-        // proxy's CONNECT-parsed host typically drop the port, so a
-        // single registration must hit both forms.
-        if let bare = h.split(separator: ":").first.map(String.init), bare != h {
-            byHost[bare] = entry
-        }
-        perProfile[profileID] = byHost
+        perProfile[profileID, default: [:]][endpointKey(host)] = entry
     }
 
     public func clearAll(for profileID: UUID) {
@@ -67,27 +79,23 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
     /// cert between lock acquisitions").
     public func replaceAll(_ identities: [(host: String, entry: Entry)], for profileID: UUID) {
         var byHost: [String: Entry] = [:]
-        for (host, entry) in identities {
-            let h = host.lowercased()
-            byHost[h] = entry
-            if let bare = h.split(separator: ":").first.map(String.init), bare != h { byHost[bare] = entry }
-        }
+        for (host, entry) in identities { byHost[endpointKey(host)] = entry }
         lock.lock(); defer { lock.unlock() }
         perProfile[profileID] = byHost.isEmpty ? nil : byHost
     }
 
-    public func entry(for host: String, profileID: UUID) -> Entry? {
-        let h = host.lowercased()
+    /// The identity registered for this endpoint -- `host` and `port` as
+    /// the connection dials them. Never another port's: a `host:8443`
+    /// context's certificate isn't presented to `host:6443` or `host`.
+    public func entry(for host: String, port: Int, profileID: UUID) -> Entry? {
+        let key = endpointKey(host: host, port: port)
         lock.lock(); defer { lock.unlock() }
-        if let e = perProfile[profileID]?[h] { return e }
-        if let bareHost = h.split(separator: ":").first.map(String.init),
-           let e = perProfile[profileID]?[bareHost] { return e }
-        return nil
+        return perProfile[profileID]?[key]
     }
 
     /// Compatibility shortcut for code that only needs the SecIdentity.
-    public func identity(for host: String, profileID: UUID) -> SecIdentity? {
-        return entry(for: host, profileID: profileID)?.identity
+    public func identity(for host: String, port: Int, profileID: UUID) -> SecIdentity? {
+        return entry(for: host, port: port, profileID: profileID)?.identity
     }
 }
 
@@ -96,8 +104,9 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
 /// Per-host root-CA table the proxy hands to URLSession when an
 /// upstream uses a cert that doesn't chain to the macOS system trust
 /// store (e.g. a private k8s API server with its own CA). Keyed by
-/// `host[:port]` lowercased. When an entry is present, the registered
-/// PEM is the *only* anchor used to evaluate that host's server cert.
+/// `endpointKey` and looked up exactly. When an entry is present, the
+/// registered PEM is the *only* anchor used to evaluate that host's
+/// server cert.
 public final class ClusterCATrustRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var perProfile: [UUID: [String: SecCertificate]] = [:]
@@ -112,14 +121,8 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
                 "[mitm] cluster CA parse failed for host=\(host) — falling back to system trust\n".utf8))
             return
         }
-        let h = host.lowercased()
         lock.lock(); defer { lock.unlock() }
-        var byHost = perProfile[profileID] ?? [:]
-        byHost[h] = cert
-        if let bare = h.split(separator: ":").first.map(String.init), bare != h {
-            byHost[bare] = cert
-        }
-        perProfile[profileID] = byHost
+        perProfile[profileID, default: [:]][endpointKey(host)] = cert
     }
 
     public func clearAll(for profileID: UUID) {
@@ -132,71 +135,38 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
     /// system trust for that handshake: Finding CWE-362, "Live kube trust
     /// rebuild drops the cluster CA and client cert between lock
     /// acquisitions"). A host whose new PEM doesn't parse keeps the CA it
-    /// had, rather than falling back to system trust -- its own, never a
-    /// context's this rebuild removed (Finding CWE-295, "A failed
-    /// cluster-CA parse republishes a removed context's CA on the bare
-    /// host"): `restoreFailed`. With no previous CA of its own it stays
-    /// unpinned, as a new host would.
+    /// had, rather than falling back to system trust. Each endpoint has
+    /// its own key and nothing else writes it, so that CA is always its
+    /// own -- never a context's this rebuild removed, or another port's on
+    /// the same name (Findings CWE-295, "A failed cluster-CA parse
+    /// republishes a removed context's CA on the bare host" and "Portless
+    /// kube CA parse failure republishes another context's certificate").
+    /// With no previous CA of its own it stays unpinned, as a new host would.
     public func replaceAll(_ cas: [(pem: String, host: String)], for profileID: UUID) {
         var parsed: [String: SecCertificate] = [:]
         var failed: [String] = []
         for (pem, host) in cas {
-            let h = host.lowercased()
-            guard let cert = Self.parseFirstCertPEM(pem) else { failed.append(h); continue }
-            parsed[h] = cert
-            if let bare = h.split(separator: ":").first.map(String.init), bare != h { parsed[bare] = cert }
+            let key = endpointKey(host)
+            guard let cert = Self.parseFirstCertPEM(pem) else { failed.append(key); continue }
+            parsed[key] = cert
         }
         lock.lock(); defer { lock.unlock() }
         let previous = perProfile[profileID] ?? [:]
-        for h in failed {
+        for key in failed where parsed[key] == nil {
             FileHandle.standardError.write(Data(
-                "[mitm] cluster CA parse failed for host=\(h) — keeping its previous CA\n".utf8))
+                "[mitm] cluster CA parse failed for host=\(key) — keeping its previous CA\n".utf8))
+            parsed[key] = previous[key]
         }
-        Self.restoreFailed(failed, included: Set(cas.map { $0.host.lowercased() }),
-                           previous: previous, into: &parsed)
         perProfile[profileID] = parsed.isEmpty ? nil : parsed
     }
 
-    private static func bareHost(_ h: String) -> String {
-        h.split(separator: ":").first.map(String.init) ?? h
-    }
-
-    /// Hosts whose PEM didn't parse keep what they had. A `host:port` keeps
-    /// its own key. The bare slot -- the CONNECT lookup's, written by
-    /// whichever `host:port` (or port-less host) registered last -- keeps
-    /// its certificate only while the entry that wrote it is in this
-    /// rebuild; otherwise it takes the first failed `host:port`'s own CA,
-    /// and with none it stays unpinned. A slot a parsed PEM filled is
-    /// left alone.
-    static func restoreFailed(_ failed: [String], included: Set<String>,
-                              previous: [String: SecCertificate],
-                              into parsed: inout [String: SecCertificate]) {
-        for h in failed where bareHost(h) != h && parsed[h] == nil {
-            if let old = previous[h] { parsed[h] = old }
-        }
-        var seen = Set<String>()
-        for bare in failed.map(bareHost) where seen.insert(bare).inserted && parsed[bare] == nil {
-            if let slot = previous[bare] {
-                // Who wrote it: a host:port holding the same certificate,
-                // else the port-less host itself.
-                let writers = previous.filter { $0.key != bare && bareHost($0.key) == bare && CFEqual($0.value, slot) }
-                    .map(\.key)
-                let present = writers.isEmpty ? included.contains(bare) : writers.contains(where: included.contains)
-                if present { parsed[bare] = slot; continue }
-            }
-            if let own = failed.first(where: { $0 != bare && bareHost($0) == bare && previous[$0] != nil }) {
-                parsed[bare] = previous[own]
-            }
-        }
-    }
-
-    public func ca(for host: String, profileID: UUID) -> SecCertificate? {
-        let h = host.lowercased()
+    /// The CA pinned for this endpoint -- `host` and `port` as the
+    /// connection dials them -- and only that one: a `host:8443` context's
+    /// CA never anchors a handshake to `host` (443) or `host:6443`.
+    public func ca(for host: String, port: Int, profileID: UUID) -> SecCertificate? {
+        let key = endpointKey(host: host, port: port)
         lock.lock(); defer { lock.unlock() }
-        if let c = perProfile[profileID]?[h] { return c }
-        if let bareHost = h.split(separator: ":").first.map(String.init),
-           let c = perProfile[profileID]?[bareHost] { return c }
-        return nil
+        return perProfile[profileID]?[key]
     }
 
     /// PEM bundle → DER → SecCertificate (first cert). Handles both
@@ -461,7 +431,7 @@ public final class KubeconfigMaterializer {
             case .bearerToken(let realToken):
                 let fake = makeFakeToken()
                 bearerSwaps.append(BearerSwap(
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake, realToken: realToken,
                     consentCredentialID: consentID,
                     consentDisplayName: consentDisplay))
@@ -499,16 +469,16 @@ public final class KubeconfigMaterializer {
                 // placeholder; the poller updates the real value
                 // before kubectl needs it.
                 let fake = reusingExec.first {
-                    $0.entryID == entry.id && $0.host == entry.hostPattern && $0.command == cmd && $0.args == args
+                    $0.entryID == entry.id && $0.host == entry.tokenScope && $0.command == cmd && $0.args == args
                 }?.fakeToken ?? makeFakeToken()
                 bearerSwaps.append(BearerSwap(
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake, realToken: "",
                     consentCredentialID: consentID,
                     consentDisplayName: consentDisplay))
                 execContexts.append(ExecContext(
                     entryID: entry.id,
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake,
                     command: cmd, args: args,
                     refreshSeconds: max(60, secs)))

@@ -24,6 +24,9 @@ struct ComposerTextView: NSViewRepresentable {
     /// more specific than an ancestor holds it (a search field elsewhere
     /// in the window keeps it).
     var autofocus = false
+    /// Take the keyboard when the view lands in its window, whatever holds
+    /// it: an editor the user just asked for (the dashboard's notes).
+    var takesFocus = false
     @Binding var height: CGFloat
     @Binding var focused: Bool
     var onKey: ((ComposerKey) -> Bool)? = nil
@@ -125,8 +128,10 @@ struct ComposerTextView: NSViewRepresentable {
         /// unless a view that isn't one of our ancestors has it. Deferred a
         /// turn so the host's own first-responder pass has run.
         func focusIfFree() {
-            guard parent.autofocus, !focusedOnAttach, let textView, textView.window != nil else { return }
+            guard parent.autofocus || parent.takesFocus, !focusedOnAttach,
+                  let textView, textView.window != nil else { return }
             focusedOnAttach = true
+            let takes = parent.takesFocus
             DispatchQueue.main.async { [weak textView] in
                 guard let textView, let window = textView.window else { return }
                 let free: Bool
@@ -136,7 +141,7 @@ struct ComposerTextView: NSViewRepresentable {
                 case let v as NSView: free = textView.isDescendant(of: v)
                 default: free = false
                 }
-                if free { window.makeFirstResponder(textView) }
+                if free || takes { window.makeFirstResponder(textView) }
             }
         }
 
@@ -199,6 +204,21 @@ enum ComposerText {
 
 /// The scroll view around the composer's text: tells the coordinator when
 /// it was laid out, which is when its width may have changed.
+extension View {
+    /// Shift-Return inserts a newline in a vertical `TextField`. SwiftUI's
+    /// field binds Return to submit and Option-Return to a newline, and
+    /// drops Shift-Return; the key reaches `onKeyPress` before the field
+    /// editor, which inserts the newline the way Option-Return does.
+    func shiftReturnInsertsNewline() -> some View {
+        onKeyPress(keys: [.return]) { press in
+            guard press.modifiers.contains(.shift),
+                  let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return .ignored }
+            editor.insertNewlineIgnoringFieldEditor(nil)
+            return .handled
+        }
+    }
+}
+
 final class ComposerScrollView: NSScrollView {
     var onLayout: () -> Void = {}
     var onAttach: () -> Void = {}

@@ -1205,6 +1205,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "这台 Mac 已经把 %@ 路由到别处——通常是它自己的工作区，它们与远程的工作区使用相同的子网。隧道无法接管它。\n\n助手：%@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "网络助手只为在屏幕上登录的用户服务。\n\n助手：%@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "网络助手无法创建隧道接口。\n\n助手：%@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "网络助手只路由私有 /24 网络（位于 10/8、172.16/12、192.168/16 或 100.64/10 内），而远程主机的子网 %@ 不在其中。\n\n助手：%@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "网络助手只为安装它的那份 Bromure Agentic Coding（签名相同）服务。如果你刚更新或重新构建了 App，请重新启动助手：在“登录项”中关闭再打开“Bromure Agentic Coding”。\n\n助手：%@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "网络助手已持有 %d 条隧道，达到上限。请关闭一个未使用的远程主机窗口，或退出后重新打开 App。\n\n助手：%@";
 "The network helper couldn't create the tunnel interface." = "网络助手无法创建隧道接口。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -2875,6 +2878,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ 无法使用 %2$@ 的模型，因此改用它自己的提供方。请选择其他模型。";
 "%d sessions whose machine or folder is gone" = "%d 个会话的机器或文件夹已不存在";
 "(empty)" = "（空）";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "代理打开的登录页面指向这台 Mac 或其本地网络，因此 Bromure 没有打开它。";
+"Restore these workspaces and their sessions at next start" = "下次启动时恢复这些工作区及其会话";
+"Restoring your workspaces" = "正在恢复你的工作区";
+"Restoring Workspaces" = "恢复工作区";
+"Stop Restoring" = "停止恢复";
+"Starting “%@”…" = "正在启动“%@”…";
+"%1$d of %2$d" = "%1$d / %2$d";
+"did not start in time" = "未能及时启动";
+/* VM dashboard: workspace notes */
+"Notes" = "备注";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return 保存 · Shift-Return 换行 · Esc 取消";
+"Save the notes (Return)" = "保存备注（Return）";
+"Edit the notes as markdown" = "以 Markdown 编辑备注";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3128,6 +3144,7 @@
 "Erasing and restoring storage is done on the server Mac." = "存储的清除和恢复需在服务器 Mac 上进行。";
 "Home folder size" = "主文件夹大小";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "从 %d GB（当前大小——主文件夹不能缩小）到 1024 GB。更大的主文件夹将在工作区下次启动时生效。磁盘映像只占用其文件实际使用的空间。";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "从 %d GB 到 1024 GB。主文件夹会在工作区首次启动时按此大小创建；之后只能增大，不能缩小。磁盘映像只占用其文件实际使用的空间。";
 "Queued — sent when the agent is done" = "排队中 — 代理完成后发送";
 "Queued — sent when %@ is done" = "排队中 — %@ 完成后发送";
 "Queued — the agent reads it next" = "排队中 — 代理接下来会读取";
@@ -4308,3 +4325,14 @@
 "Add a rule for this host and port, for %@" = "为此主机和端口添加规则，适用于 %@";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "“%@”已不存在：另一个 Bromure 进程已将其删除。";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "用于 %@（SigV4 在主机端签名）";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "“%@”已在另一个 Bromure 进程（App 或其登录代理）中打开。请在那里使用它，或先在那里将其关闭。";
+"The workspace is open in the other Bromure process, which runs this automation there" = "工作区已在另一个 Bromure 进程中打开，此自动化将在那里运行";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "未读";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "未打开登录：端口 %d 正被另一个登录使用。请先完成或取消该登录，然后重试。";

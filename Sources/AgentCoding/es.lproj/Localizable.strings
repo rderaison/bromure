@@ -1207,6 +1207,9 @@
 "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "Este Mac ya enruta %@ a otro sitio, normalmente a sus propios espacios de trabajo, que usan la misma subred que los del remoto. El túnel no puede quedárselo.\n\nAyudante: %@";
 "The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "El ayudante de red solo atiende al usuario que ha iniciado sesión en la pantalla.\n\nAyudante: %@";
 "The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "El ayudante de red no pudo crear la interfaz del túnel.\n\nAyudante: %@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "El ayudante de red solo enruta una red privada /24 (en 10/8, 172.16/12, 192.168/16 o 100.64/10), y la subred %@ del equipo remoto no lo es.\n\nAyudante: %@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "El ayudante de red solo atiende a la copia de Bromure Agentic Coding desde la que se instaló, firmada de la misma forma. Si acabas de actualizar o recompilar la app, reinicia el ayudante: desactiva y vuelve a activar “Bromure Agentic Coding” en Ítems de inicio.\n\nAyudante: %@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "El ayudante de red ya mantiene %d túneles, su límite. Cierra la ventana de un equipo remoto que no estés usando, o sal de la app y vuelve a abrirla.\n\nAyudante: %@";
 "The network helper couldn't create the tunnel interface." = "El ayudante de red no pudo crear la interfaz del túnel.";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -2877,6 +2880,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ no puede usar modelos de %2$@, así que usa su propio proveedor. Elige otro modelo.";
 "%d sessions whose machine or folder is gone" = "%d sesiones cuya máquina o carpeta ya no existe";
 "(empty)" = "(vacío)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "La página de inicio de sesión que abrió el agente apunta a este Mac o a su red local, así que Bromure no la abrió.";
+"Restore these workspaces and their sessions at next start" = "Restaurar estos espacios de trabajo y sus sesiones en el próximo inicio";
+"Restoring your workspaces" = "Restaurando tus espacios de trabajo";
+"Restoring Workspaces" = "Restaurando espacios de trabajo";
+"Stop Restoring" = "Detener la restauración";
+"Starting “%@”…" = "Iniciando «%@»…";
+"%1$d of %2$d" = "%1$d de %2$d";
+"did not start in time" = "no se inició a tiempo";
+/* VM dashboard: workspace notes */
+"Notes" = "Notas";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Retorno guarda · Mayús-Retorno añade una línea · Esc cancela";
+"Save the notes (Return)" = "Guardar las notas (Retorno)";
+"Edit the notes as markdown" = "Editar las notas en markdown";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3130,6 +3146,7 @@
 "Erasing and restoring storage is done on the server Mac." = "El borrado y la restauración del almacenamiento se hacen en el Mac servidor.";
 "Home folder size" = "Tamaño de la carpeta personal";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d GB (su tamaño actual — una carpeta personal no puede reducirse) a 1024 GB. Una carpeta más grande se aplica la próxima vez que se inicie el espacio de trabajo. La imagen de disco solo ocupa el espacio que usan sus archivos.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "De %d GB a 1024 GB. La carpeta personal se crea con este tamaño la primera vez que se inicia el espacio de trabajo; después puede crecer, pero no reducirse. La imagen de disco solo ocupa el espacio que usan sus archivos.";
 "Queued — sent when the agent is done" = "En cola — se envía cuando el agente termine";
 "Queued — sent when %@ is done" = "En cola — se envía cuando %@ termine";
 "Queued — the agent reads it next" = "En cola — el agente lo leerá a continuación";
@@ -4310,3 +4327,14 @@
 "Add a rule for this host and port, for %@" = "Añadir una regla para este host y puerto, para %@";
 /* workspace deleted by the other process (login agent or app) */
 "“%@” no longer exists: another Bromure process deleted it." = "«%@» ya no existe: otro proceso de Bromure lo eliminó.";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "para %@ (firma SigV4 en el host)";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "«%@» está abierto en el otro proceso de Bromure (la app o su agente de inicio de sesión). Úsalo allí, o apágalo allí primero.";
+"The workspace is open in the other Bromure process, which runs this automation there" = "El espacio de trabajo está abierto en el otro proceso de Bromure, que ejecuta allí esta automatización";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "No leído";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "No se abrió el inicio de sesión: el puerto %d lo usa otro inicio de sesión. Termínalo o cancélalo y vuelve a intentarlo.";

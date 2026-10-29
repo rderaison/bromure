@@ -130,7 +130,9 @@ public final class OCSFExporter: @unchecked Sendable {
             return e
         }
         func httpRequest(method: String?, host: String?, path: String?, port: Int?) -> [String: Any] {
-            var url: [String: Any] = ["scheme": port == 80 ? "http" : "https"]
+            // The proxy records the flow's scheme; older events fall back to
+            // the port (OpenShell #4684 reports the TLS-terminated scheme).
+            var url: [String: Any] = ["scheme": s("scheme") ?? (port == 80 ? "http" : "https")]
             if let host { url["hostname"] = host }
             if let path {
                 let parts = path.split(separator: "?", maxSplits: 1)
@@ -343,6 +345,13 @@ public final class OCSFExporter: @unchecked Sendable {
             ] as [String: Any],
             "container": ["uid": profileID.uuidString.lowercased(), "name": workspace ?? ""]
                 .filter { !($0.value.isEmpty) },
+            // The workspace VM, as OpenShell describes its sandbox (OCSF 1.8
+            // requires `type_id` on both device and os; #4677).
+            "device": [
+                "hostname": SessionDisk.sanitizeHostname(workspace ?? ""),
+                "type_id": 99, "type": "Sandbox",
+                "os": ["name": "Linux", "type_id": 200, "type": "Linux"],
+            ] as [String: Any],
             "observation_point_id": 2,
         ]
         if let allowed {
