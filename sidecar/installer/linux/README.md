@@ -136,7 +136,7 @@ is served from it. Reasons, in order of weight:
    against one client contract.
 2. **AC's whole tmux surface is already covered, and it is tested against the
    real client.** `internal/shims`' contract test walks the Swift sources and
-   asserts every invocation parses: measured on this checkout, **365 Swift
+   asserts every invocation parses: measured on this checkout, **371 Swift
    files, 97 `tmux` invocations, 9 `ps` invocations and 20 format variables**.
    That test fails loudly when AC grows a new tmux use.
 3. **No dependency on tmux being installed**, which matters on the minimal
