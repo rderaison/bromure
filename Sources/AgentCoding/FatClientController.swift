@@ -311,6 +311,12 @@ final class RemoteHostController {
     private var registrationCallback: RegistrationCallbackTunnel?
     /// Sign-in URLs already opened, so a repeated poll doesn't reopen the page.
     private var openedRegistrationURLs: Set<String> = []
+    /// Sign-ins this client started, by the host's run id, each told how it
+    /// ended (/state's `registrationEnded`): a refused or failed run
+    /// otherwise just left /state, its reason shown only on the host.
+    private var registrationWaiters: [String: (_ success: Bool, _ message: String?) -> Void] = [:]
+    /// The last `registrationEnded` seen, for a waiter whose reply came late.
+    private var lastRegistrationEnd: (id: String, success: Bool, message: String?)?
     /// The scratch login session we've opened a terminal for (nil = none).
     private var registrationTerminalID: UUID?
 
@@ -381,10 +387,45 @@ final class RemoteHostController {
 #endif
 
     /// Ask the remote to start a registration; the URL arrives via /state.
-    func beginRemoteRegistration(provider: String, profileID: UUID?) {
+    /// `ended` hears how it ends (a host too old to say never calls it).
+    func beginRemoteRegistration(provider: String, profileID: UUID?,
+                                 ended: ((_ success: Bool, _ message: String?) -> Void)? = nil) {
         var body: [String: Any] = ["provider": provider]
         if let profileID { body["profileId"] = profileID.uuidString }
-        send("POST", "/subscriptions/register", body: body)
+        let host = self.host
+        Task { @MainActor [weak self] in
+            let resp = try? await Task.detached(priority: .userInitiated) {
+                try RemoteTransport.client(for: host).request("POST", "/subscriptions/register", body: body)
+            }.value
+            guard let self else { return }
+            self.pollOnce()
+            guard let ended else { return }
+            if let run = resp?.json["registration"] as? String {
+                self.awaitRegistration(run, ended)
+            } else if resp.map({ $0.status >= 400 }) ?? true {
+                ended(false, NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in"))
+            }
+        }
+    }
+
+    /// Tell `ended` how the host's sign-in run `id` ends — at once if it
+    /// already has.
+    func awaitRegistration(_ id: String, _ ended: @escaping (_ success: Bool, _ message: String?) -> Void) {
+        if let last = lastRegistrationEnd, last.id == id {
+            ended(last.success, last.message)
+        } else {
+            registrationWaiters[id] = ended
+        }
+    }
+
+    /// /state's `registrationEnded`: the host's last client-started run and
+    /// how it ended, kept a couple of minutes.
+    func applyRegistrationEnded(_ d: [String: Any]?) {
+        guard let d, let id = d["id"] as? String, lastRegistrationEnd?.id != id else { return }
+        let success = d["success"] as? Bool ?? false
+        let message = d["message"] as? String
+        lastRegistrationEnd = (id, success, message)
+        registrationWaiters.removeValue(forKey: id)?(success, message)
     }
 
     /// Ask the remote to log a subscription out (its store, its scope rules);
@@ -960,6 +1001,7 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
+        applyRegistrationEnded(snapshot["registrationEnded"] as? [String: Any])
 #if os(macOS)
         applyLocalModels(snapshot["localModels"] as? [String: Any])
         // Mirror the host's security-engine decisions so the Security Timeline
@@ -4299,7 +4341,16 @@ final class RemoteHostWindow: NSWindow {
         a.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         a.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID)
+        // A run that ends without its credential says why here: the host's
+        // own notice lands on a Mac nobody may be sitting at.
+        controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID) { [weak self] ok, message in
+            guard !ok, let message, let self else { return }
+            let failed = NSAlert()
+            failed.alertStyle = .warning
+            failed.messageText = String(format: NSLocalizedString("Register with %@", comment: ""), provider.displayName)
+            failed.informativeText = message
+            failed.beginSheetModal(for: self)
+        }
     }
 
     private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
@@ -8031,8 +8082,20 @@ final class RemoteHostWindow: NSWindow {
                         "This tab isn't a session — sign in from the machine's settings instead.", comment: "sign-in")))
                     return
                 }
-                self.controller.sessionCommand(s.id, "signin")
                 events(.status(NSLocalizedString("Sign-in started — your browser will open shortly…", comment: "sign-in")))
+                // The card hears the end: a refused start in the reply, a
+                // later one (refused page, timeout, success) through /state.
+                Task { @MainActor [weak self] in
+                    let r = await self?.controller.sessionRequest(s.id, "signin")
+                    guard let self else { return }
+                    if let run = r?.json["registration"] as? String {
+                        self.controller.awaitRegistration(run) { ok, message in
+                            events(.finished(success: ok, message: message))
+                        }
+                    } else if r.map({ $0.status >= 400 }) ?? true {
+                        events(.finished(success: false, message: r?.json["error"] as? String))
+                    }
+                }
             }
         }
         // An interactive slash command shows the tab's real terminal inline —

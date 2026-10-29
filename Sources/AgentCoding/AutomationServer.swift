@@ -346,6 +346,9 @@ final class ACAutomationServer {
     /// the throwaway VM's IP + loopback callback port), or nil. The fat client
     /// opens the URL in ITS browser and tunnels the callback back.
     var onPendingRegistration: (() -> [String: Any]?)?
+    /// The last client-initiated registration's outcome, kept a while after
+    /// it ended (`RemoteRegistrationBroker.endedDict`).
+    var onEndedRegistration: (() -> [String: Any]?)?
     /// Start a subscription registration on this host for a remote client.
     /// (provider, optional profile id) -> ok.
     var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> Bool)?
@@ -877,12 +880,18 @@ final class ACAutomationServer {
             guard !provider.isEmpty else {
                 sendResponse(fd: fd, status: 400, body: ["error": "Missing 'provider'"]); return
             }
-            let ok = DispatchQueue.main.sync {
-                self.onBeginRegistration?(provider, profileID) ?? false
+            // The run's id: the client finds how it ended under it in
+            // /state's `registrationEnded`.
+            let (ok, run) = DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    let ok = self.onBeginRegistration?(provider, profileID) ?? false
+                    return (ok, ok ? RemoteRegistrationBroker.shared.pending?.id.uuidString : nil)
+                }
             }
-            sendResponse(fd: fd, status: ok ? 202 : 409,
-                         body: ["ok": ok,
-                                "error": ok ? "" : "couldn't start registration (one may be in flight)"])
+            var reply: [String: Any] = ["ok": ok,
+                                        "error": ok ? "" : "couldn't start registration (one may be in flight)"]
+            if let run { reply["registration"] = run }
+            sendResponse(fd: fd, status: ok ? 202 : 409, body: reply)
 
         case ("POST", "/subscriptions/forget"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
@@ -2546,6 +2555,7 @@ final class ACAutomationServer {
             ]
             // Only present while a client-initiated registration is in flight.
             if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }
+            if let ended = self.onEndedRegistration?() { d["registrationEnded"] = ended }
             // Only present on a server with the sessions-first home: an older
             // client ignores it, a newer client falls back to the classic
             // layout when it's missing.

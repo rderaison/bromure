@@ -31,10 +31,10 @@ struct RefusedSignInURLTests {
         let fail = try #require(r.range(of: "func failClaudeRegistration(_ message: String) {"))
         let failBody = r[fail.upperBound...].prefix(400)
         #expect(failBody.contains("ev(.finished(success: false, message: message))"))
-        #expect(failBody.contains("teardownClaudeRegistration(reason: .failure)"))
-        let teardown = try #require(r.range(of: "func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason) {"))
+        #expect(failBody.contains("teardownClaudeRegistration(reason: .failure, message: message)"))
+        let teardown = try #require(r.range(of: "func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason, message: String? = nil) {"))
         let td = r[teardown.upperBound...].prefix(1200)
-        #expect(td.contains("RemoteRegistrationBroker.shared.finish()") && td.contains("state.pollTask?.cancel()"))
+        #expect(td.contains("RemoteRegistrationBroker.shared.finish(success: reason == .success, message: message)") && td.contains("state.pollTask?.cancel()"))
     }
 
     @Test("a workspace sign-in card waiting on a refused page ends instead of timing out")

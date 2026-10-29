@@ -6038,19 +6038,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let provider = SubscriptionProvider(rawValue: s.tool.rawValue) else {
                         return ["error": "no account sign-in for \(s.tool.rawValue)"]
                     }
-                    guard self.claudeRegistration == nil else { return ["error": "a sign-in is already in progress"] }
+                    guard self.claudeRegistration == nil else {
+                        return ["error": NSLocalizedString("Another sign-in is already in progress.", comment: "sign-in")]
+                    }
                     let pid = s.profileID
+                    // A start that fails at once says why in the reply; a
+                    // later end reaches the client's card through /state's
+                    // `registrationEnded`, under the id given here.
+                    var refused: String?
                     self.beginSubscriptionRegistration(
                         provider: provider, scope: .alwaysShared, remoteInitiated: true, quiet: true,
                         events: { [weak self] event in
-                            guard case .finished(true, _) = event else { return }
+                            guard case .finished(let ok, let message) = event else { return }
+                            guard ok else { refused = message; return }
                             Task { @MainActor in
                                 guard let self else { return }
                                 self.applyRegisteredSubscription(provider: provider, profileID: pid)
                                 self.agentSessionEngine.relaunchAfterSignIn(sid)
                             }
                         })
-                    return ["ok": true]
+                    guard let run = RemoteRegistrationBroker.shared.pending?.id else {
+                        return ["error": refused ?? RemoteRegistrationBroker.shared.ended?.message
+                            ?? "the sign-in couldn't start"]
+                    }
+                    return ["ok": true, "registration": run.uuidString]
                 default:
                     return ["error": "unknown action \(action)"]
                 }
@@ -6498,6 +6509,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return d
             }
         }
+        server.onEndedRegistration = {
+            MainActor.assumeIsolated { RemoteRegistrationBroker.shared.endedDict() }
+        }
         server.onBeginRegistration = { [weak self] provider, profileID in
             MainActor.assumeIsolated {
                 guard let self, let p = SubscriptionProvider(rawValue: provider) else { return false }
@@ -6506,7 +6520,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     .flatMap(UUID.init(uuidString:)).map { .askPerSession($0) } ?? .alwaysShared
                 self.beginSubscriptionRegistration(provider: p, scope: scope,
                                                    remoteInitiated: true)
-                return true
+                // Under way (not refused before it began, e.g. no proxy).
+                return RemoteRegistrationBroker.shared.pending != nil
             }
         }
         server.onForgetSubscription = { [weak self] provider, profileID in

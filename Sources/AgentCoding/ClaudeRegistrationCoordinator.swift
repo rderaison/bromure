@@ -113,6 +113,8 @@ final class RemoteRegistrationBroker {
     static let shared = RemoteRegistrationBroker()
 
     struct Pending {
+        /// Names this run, so a client can tell its own end from another's.
+        let id = UUID()
         let provider: String
         /// The provider's sign-in URL, for the client's browser.
         var url: String?
@@ -127,21 +129,49 @@ final class RemoteRegistrationBroker {
 
     private(set) var pending: Pending?
 
-    func begin(provider: String) { pending = Pending(provider: provider) }
+    /// How the last run ended, kept a while after `pending` is gone: the
+    /// client polls, and a run refused within a poll would otherwise just
+    /// vanish from /state with no reason given.
+    struct Ended: Equatable {
+        let id: UUID
+        let success: Bool
+        let message: String?
+        let at: Date
+    }
+    private(set) var ended: Ended?
+    static let endedKeptFor: TimeInterval = 120
+
+    @discardableResult
+    func begin(provider: String) -> UUID {
+        let p = Pending(provider: provider)
+        pending = p
+        return p.id
+    }
     func publish(url: String, callbackPort: Int) {
         pending?.url = url
         pending?.callbackPort = callbackPort
     }
     func publish(vmIP: String) { pending?.vmIP = vmIP }
-    func finish() { pending?.finished = true; pending = nil }
+    func finish(success: Bool = false, message: String? = nil, now: Date = Date()) {
+        if let p = pending { ended = Ended(id: p.id, success: success, message: message, at: now) }
+        pending = nil
+    }
 
     /// `/state` payload — nil until a remote registration is in flight.
     func stateDict() -> [String: Any]? {
         guard let p = pending else { return nil }
-        var d: [String: Any] = ["provider": p.provider]
+        var d: [String: Any] = ["id": p.id.uuidString, "provider": p.provider]
         if let u = p.url { d["url"] = u }
         if let ip = p.vmIP { d["vmIP"] = ip }
         if let port = p.callbackPort { d["callbackPort"] = port }
+        return d
+    }
+
+    /// `/state`'s `registrationEnded`: the last run's outcome, for a while.
+    func endedDict(now: Date = Date()) -> [String: Any]? {
+        guard let e = ended, now.timeIntervalSince(e.at) < Self.endedKeptFor else { return nil }
+        var d: [String: Any] = ["id": e.id.uuidString, "success": e.success]
+        if let m = e.message { d["message"] = m }
         return d
     }
 }
@@ -306,10 +336,10 @@ extension ACAppDelegate {
                         title: NSLocalizedString("Couldn't start the registration VM.", comment: ""),
                         text: error.localizedDescription)
                 }
-                state.onEvent?(.finished(success: false, message: NSLocalizedString(
-                    "Couldn't start the sign-in machine.", comment: "sign-in")))
+                let message = NSLocalizedString("Couldn't start the sign-in machine.", comment: "sign-in")
+                state.onEvent?(.finished(success: false, message: message))
                 state.onEvent = nil
-                self.teardownClaudeRegistration(reason: .failure)
+                self.teardownClaudeRegistration(reason: .failure, message: message)
                 return
             }
             guard let dev = sandbox.socketDevice else {
@@ -432,16 +462,18 @@ extension ACAppDelegate {
     }
 
     /// End a sign-in that can't go on, saying why: to the card that started
-    /// it, else as a notice. Teardown finishes a fat client's relay, stops the
-    /// credential poll and the scratch VM.
+    /// it, else as a notice — or, for a fat client's run, in /state's
+    /// `registrationEnded` (nobody is at this Mac to read a notice).
+    /// Teardown finishes a fat client's relay, stops the credential poll and
+    /// the scratch VM.
     func failClaudeRegistration(_ message: String) {
         if let ev = claudeRegistration?.onEvent {
             ev(.finished(success: false, message: message))
             claudeRegistration?.onEvent = nil
-        } else {
+        } else if RemoteRegistrationBroker.shared.pending == nil {
             unifiedWindow?.showNotice(message)
         }
-        teardownClaudeRegistration(reason: .failure)
+        teardownClaudeRegistration(reason: .failure, message: message)
     }
 
     /// Make sure the login CLI actually runs in the scratch VM's tmux window,
@@ -508,7 +540,7 @@ extension ACAppDelegate {
         if remote || state.quiet || headless {
             state.onEvent?(.finished(success: false, message: message))
             state.onEvent = nil
-            teardownClaudeRegistration(reason: .failure)
+            teardownClaudeRegistration(reason: .failure, message: message)
             return
         }
         let alert = NSAlert()
@@ -589,18 +621,16 @@ extension ACAppDelegate {
             // freeze the control loop until it's answered. Teardown clears the
             // relay so the client learns the sign-in didn't land. Only show the
             // alert when a local user started the registration.
-            state.onEvent?(.finished(success: false, message: String(format: NSLocalizedString(
+            let late = String(format: NSLocalizedString(
                 "Bromure didn't receive a %@ sign-in in time. You can try again.",
-                comment: ""), state.provider.displayName)))
+                comment: ""), state.provider.displayName)
+            state.onEvent?(.finished(success: false, message: late))
             state.onEvent = nil
             if RemoteRegistrationBroker.shared.pending == nil, !state.quiet {
                 self.registrationAlert(
-                    title: NSLocalizedString("Registration timed out", comment: ""),
-                    text: String(format: NSLocalizedString(
-                        "Bromure didn't receive a %@ sign-in in time. You can try again.",
-                        comment: ""), state.provider.displayName))
+                    title: NSLocalizedString("Registration timed out", comment: ""), text: late)
             }
-            self.teardownClaudeRegistration(reason: .timeout)
+            self.teardownClaudeRegistration(reason: .timeout, message: late)
         }
     }
 
@@ -856,7 +886,7 @@ extension ACAppDelegate {
     /// Idempotent teardown: stop polling + bridge, kill + delete the VM, close
     /// the window. Safe to call from the window-close handler, the poll task,
     /// or the success path.
-    func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason) {
+    func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason, message: String? = nil) {
         guard let state = claudeRegistration, !state.finished else { return }
         state.finished = true
         // A card still listening only hears from here when the flow died
@@ -868,9 +898,10 @@ extension ACAppDelegate {
 
         // Clear the remote-registration relay so a fat client's /state stops
         // advertising this flow and tears down its sign-in page + callback
-        // tunnel. No-op for a local flow (no pending). (Previously never called,
-        // so the relay lingered after every remote registration.)
-        RemoteRegistrationBroker.shared.finish()
+        // tunnel, and hears how it ended. No-op for a local flow (no
+        // pending). (Previously never called, so the relay lingered after
+        // every remote registration.)
+        RemoteRegistrationBroker.shared.finish(success: reason == .success, message: message)
 
         state.pollTask?.cancel()
         state.launchTask?.cancel()
