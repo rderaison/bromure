@@ -55,15 +55,31 @@ two. `enroll` prints a URL instead of opening one:
 ```sh
 bromure-sidecar enroll
 # → open this on a machine with a browser:
-#   https://bromure.io/app/enroll?capability=agent-host&state=…
+#   https://bromure.io/app/enroll?capability=agent-host&state=…&os=linux&host=lnx-01
 ```
 
-Open it there, sign in, and the page hands back a
-`bromure-agent-host://enroll?code=…&state=…` link. Paste it back:
+`os=` and `host=` tell the page what it is authorizing, because it cannot
+work that out for itself: the browser is usually on a *different machine*
+than the one being enrolled, so reading its User-Agent would name your
+laptop and not this server. An older page, or one that doesn't recognise the
+value, just shows neutral wording.
+
+Seeing `os=linux`, the page does not attempt the `bromure-agent-host://`
+handoff at all — nothing on a headless host could answer it, and the attempt
+dead-ends in "no apps" — and shows the code to paste back here instead:
 
 ```sh
-bromure-sidecar enroll 'bromure-agent-host://enroll?code=…&state=…'
+bromure-sidecar enroll '<code>'
 ```
+
+A bare code is enough: anything from 16 characters of letters, digits, `-`
+and `_` parses, and the default API base is filled in. It is also the form
+that survives a second `enroll` run, because it carries no state to check.
+
+A full `bromure-agent-host://enroll?code=…&state=…` link works too — that is
+what the Mac and Windows Sidecars receive — but only while the state it
+carries is still the one in `pending-enroll-state`. Any later `enroll` mints
+a fresh nonce and the older link is then refused as not started here.
 
 Then admit the machine in Bromure AC's fleet dialog, and attach it to an
 account server:
