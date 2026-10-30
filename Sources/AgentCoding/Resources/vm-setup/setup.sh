@@ -14,7 +14,8 @@
 #
 # Pipeline:
 #   1. Partition vda (GPT, EFI + ext4) and format.
-#   2. debootstrap Ubuntu 24.04 (Noble) for ARM64 onto /mnt.
+#   2. debootstrap Ubuntu 24.04 (Noble) for the installer's arch (arm64
+#      on Apple Silicon, amd64 on Linux/KVM hosts) onto /mnt.
 #   3. Bind-mount /dev /proc /sys, chroot, install kernel/grub/tooling.
 #   4. grub-install for EFI boot from vda1.
 #   5. umount, sync, print marker.
@@ -29,13 +30,32 @@ set -e
 DISPLAY_SCALE="${1:-2}"
 
 UBUNTU_RELEASE="${UBUNTU_RELEASE:-noble}"
-UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://ports.ubuntu.com/ubuntu-ports}"
 TARGET_DEV=/dev/vda
 TARGET_EFI=${TARGET_DEV}1
 TARGET_ROOT=${TARGET_DEV}2
 
 log() { printf '[ac-setup] %s\n' "$*"; }
 fail() { printf 'SANDBOX_SETUP_FAILED: %s\n' "$*"; exit 1; }
+
+# The image is built for the installer's own arch. The Mac bakes arm64
+# under VZ (console hvc0); a Linux host bakes amd64 under QEMU/KVM, where
+# the console is the 8250 UART ttyS0. GUEST_CONSOLE overrides the console.
+case "$(uname -m)" in
+    aarch64)
+        DEB_ARCH=arm64; GRUB_TARGET=arm64-efi; EFI_BOOT_ID=BOOTAA64
+        GUEST_CONSOLE="${GUEST_CONSOLE:-hvc0}"
+        # arm64.nosme: disable ARM Scalable Matrix Extension. Same option the
+        # browser sets — Apple Silicon doesn't expose SME and some kernel
+        # configs break early-boot when probing it.
+        ARCH_KERNEL_ARGS="arm64.nosme"
+        UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://ports.ubuntu.com/ubuntu-ports}" ;;
+    x86_64)
+        DEB_ARCH=amd64; GRUB_TARGET=x86_64-efi; EFI_BOOT_ID=BOOTX64
+        GUEST_CONSOLE="${GUEST_CONSOLE:-ttyS0}"
+        ARCH_KERNEL_ARGS=""
+        UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}" ;;
+    *) fail "unsupported installer arch $(uname -m)" ;;
+esac
 
 retry() {
     for i in 1 2 3; do
@@ -138,7 +158,7 @@ mount -t vfat "$TARGET_EFI" /mnt/boot/efi
 
 log "debootstrapping Ubuntu $UBUNTU_RELEASE (this is the slow step, ~3-5 min)"
 retry debootstrap \
-    --arch=arm64 \
+    --arch="$DEB_ARCH" \
     --variant=minbase \
     --include=ca-certificates,curl,gnupg,sudo,locales,tzdata \
     --components=main,universe \
@@ -233,6 +253,11 @@ mkdir -p /mnt/tmp
 {
     echo "DISPLAY_SCALE=$DISPLAY_SCALE"
     echo "BROMURE_PROXY=$ALPINE_REPO_BASE"
+    echo "DEB_ARCH=$DEB_ARCH"
+    echo "GRUB_TARGET=$GRUB_TARGET"
+    echo "EFI_BOOT_ID=$EFI_BOOT_ID"
+    echo "GUEST_CONSOLE=$GUEST_CONSOLE"
+    echo "ARCH_KERNEL_ARGS=\"$ARCH_KERNEL_ARGS\""
 } > /mnt/tmp/bromure-build.env
 
 # Resolv: cloud-init isn't running here; copy the installer's resolv.conf.
@@ -357,7 +382,7 @@ step "apt-get dist-upgrade (catch security + bug fixes)" \
 step "apt-get install kernel+grub+systemd+base" \
     retry apt-get install -y -q --no-install-recommends \
         linux-image-virtual initramfs-tools \
-        grub-efi-arm64 grub-efi-arm64-bin efibootmgr \
+        "grub-efi-$DEB_ARCH" "grub-efi-$DEB_ARCH-bin" efibootmgr \
         systemd systemd-sysv systemd-resolved udev \
         iproute2 iputils-ping netbase isc-dhcp-client \
         openssh-client git build-essential pkg-config \
@@ -367,28 +392,26 @@ step "apt-get install kernel+grub+systemd+base" \
 
 # Boot straight into the default kernel — no menu, no timeout. Hides
 # the GRUB prompt entirely unless the user holds Shift at boot.
-# `console=hvc0` only (no tty1) so the kernel doesn't paint boot logs onto
-# the framebuffer the user sees — they go to the host serial instead.
+# The serial console only (`console=hvc0` on VZ, ttyS0 on QEMU; no tty1)
+# so the kernel doesn't paint boot logs onto the framebuffer the user
+# sees — they go to the host serial instead.
 # `loglevel=0` + `vt.global_cursor_default=0` further suppresses any
 # residual console output before X starts.
-cat > /etc/default/grub <<'EOF'
+cat > /etc/default/grub <<EOF
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=0
 GRUB_TIMEOUT_STYLE=hidden
 GRUB_RECORDFAIL_TIMEOUT=0
 GRUB_DISTRIBUTOR=Ubuntu
 GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=0 vt.global_cursor_default=0"
-# arm64.nosme: disable ARM Scalable Matrix Extension. Same option the
-# browser sets — Apple Silicon doesn't expose SME and some kernel
-# configs break early-boot when probing it.
-GRUB_CMDLINE_LINUX="console=hvc0 root=LABEL=root rootfstype=ext4 arm64.nosme"
+GRUB_CMDLINE_LINUX="console=$GUEST_CONSOLE root=LABEL=root rootfstype=ext4${ARCH_KERNEL_ARGS:+ $ARCH_KERNEL_ARGS}"
 GRUB_TERMINAL=console
 EOF
 
 log "installing GRUB to EFI partition (removable mode)"
-grub-install --target=arm64-efi \
+grub-install --target="$GRUB_TARGET" \
     --efi-directory=/boot/efi \
-    --bootloader-id=BOOTAA64 \
+    --bootloader-id="$EFI_BOOT_ID" \
     --no-nvram \
     --removable
 update-grub
