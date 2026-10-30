@@ -831,3 +831,59 @@ struct FramePortTests {
         healthy.finish()
     }
 }
+
+@Suite("Tap uplink close")
+struct TapUplinkCloseTests {
+    /// A send storm racing close(): no write may reach the closed fd, nor the
+    /// descriptor the kernel hands out next under the same number. A regression
+    /// guard only: close() already waits out the reader's poll (≤200 ms) before
+    /// closing, so an unlocked writer passes this too in practice; the lock in
+    /// TapUplink is what makes it a guarantee.
+    @Test("a send storm racing close() never writes to the closed or reused fd")
+    func closeDuringSendStorm() async throws {
+        for _ in 0..<20 {
+            var sv: [Int32] = [-1, -1]
+            #expect(socketpair(AF_UNIX, Int32(SOCK_DGRAM.rawValue), 0, &sv) == 0)
+            let tapFD = sv[0], peer = sv[1]
+            _ = fcntl(peer, F_SETFL, fcntl(peer, F_GETFL) | O_NONBLOCK)
+            let tap = TapUplink(name: "fake-tap", fd: tapFD)
+            let frame = Data(repeating: 0xAB, count: 1500)
+            let stop = ManagedAtomicFlag()
+            let senders = (0..<4).map { _ in
+                Task.detached { while !stop.isSet { tap.send(frame); await Task.yield() } }
+            }
+            // Drain the peer so writes keep succeeding up to the close.
+            let drain = Task.detached {
+                var buf = [UInt8](repeating: 0, count: 2048)
+                while !stop.isSet { if buf.withUnsafeMutableBytes({ read(peer, $0.baseAddress, $0.count) }) <= 0 { await Task.yield() } }
+            }
+            try await Task.sleep(for: .milliseconds(20))
+            tap.close()
+            // Reuse the number at once: a stray write would land in this pipe.
+            var p: [Int32] = [-1, -1]
+            #expect(pipe(&p) == 0)
+            let reused = p[0] == tapFD ? p[0] : (p[1] == tapFD ? p[1] : -1)
+            try await Task.sleep(for: .milliseconds(30))
+            stop.set()
+            for s in senders { await s.value }
+            await drain.value
+            #expect(tap.badFDWrites == 0)
+            if reused == p[1] {
+                // The write end took the tap's number: nothing may have arrived.
+                _ = fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK)
+                var b = [UInt8](repeating: 0, count: 16)
+                #expect(b.withUnsafeMutableBytes { read(p[0], $0.baseAddress, $0.count) } < 0, "a frame went to the reused fd")
+            } else if reused == p[0] {
+                // A write to a pipe's read end fails EBADF: badFDWrites above.
+            }
+            Glibc.close(p[0]); Glibc.close(p[1]); Glibc.close(peer)
+        }
+    }
+}
+
+final class ManagedAtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func set() { lock.lock(); value = true; lock.unlock() }
+}

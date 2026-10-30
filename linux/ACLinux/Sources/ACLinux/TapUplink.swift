@@ -16,7 +16,11 @@ public final class TapUplink: FramePort {
     public let name: String
     let core: FramePortCore
     private let fd: Int32
-    private let state = NIOLockedValueBox<(running: Bool, sendErrors: Int)>((true, 0))
+    /// `running` and every write to `fd` share this lock: close() clears
+    /// `running` under it before closing the fd, so no write can land on a
+    /// closed (or by then reused) descriptor. The fd is non-blocking, so a
+    /// write holds the lock only briefly.
+    private let state = NIOLockedValueBox<(running: Bool, sendErrors: Int, badFD: Int)>((true, 0, 0))
     private let finished = DispatchSemaphore(value: 0)
 
     /// Attaches to an existing tap this user owns.
@@ -27,19 +31,27 @@ public final class TapUplink: FramePort {
         return TapUplink(name: name, fd: fd)
     }
 
+    /// Any datagram fd standing in for a tap (tests: one end of a socketpair).
     // @port-skip linux-only: tap uplink
-    private init(name: String, fd: Int32) {
+    init(name: String, fd: Int32) {
         self.name = name
         self.fd = fd
+        // Non-blocking: a write never holds `state`'s lock for long (a full
+        // tap queue is EAGAIN, a counted send error, as on a full NIC).
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         let state = self.state
         core = FramePortCore(name: name) { frames in
             // One write() per frame: a tap takes each write as one frame.
-            var failed = 0
-            for frame in frames {
-                let n = frame.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-                if n != frame.count { failed += 1 }
+            state.withLockedValue { st in
+                guard st.running else { return }
+                for frame in frames {
+                    let n = frame.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+                    if n != frame.count {
+                        st.sendErrors += 1
+                        if n < 0 && errno == EBADF { st.badFD += 1 }
+                    }
+                }
             }
-            if failed > 0 { state.withLockedValue { $0.sendErrors += failed } }
         }
         // The thread holds the uplink until close() ends the loop.
         let t = Thread { [self] in self.readLoop() }
@@ -81,6 +93,10 @@ public final class TapUplink: FramePort {
 
     // @port-skip linux-only: tap uplink
     public var sendErrors: Int { state.withLockedValue { $0.sendErrors } }
+
+    /// Writes that hit a closed descriptor (must stay 0: see `state`).
+    // @port-skip linux-only: tap uplink
+    var badFDWrites: Int { state.withLockedValue { $0.badFD } }
 
     /// The tap's MAC address as the host sees it (`aa:bb:…`).
     // @port-skip linux-only: tap uplink

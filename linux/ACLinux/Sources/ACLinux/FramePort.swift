@@ -129,6 +129,12 @@ public final class FramePortCore: Sendable {
     private let source: FrameSequence.Producer.Source
     private let demand: Demand
     private let queueFrames: Int, queueBytes: Int
+
+    /// The one room predicate for send, sendWaiting and isWritable: a frame is
+    /// taken while the queue is under both limits (the byte limit may be
+    /// overshot by that last frame).
+    // @port-skip linux-only: frame port plumbing
+    private func hasRoom(_ count: Int, _ bytes: Int) -> Bool { count < queueFrames && bytes < queueBytes }
     private let state = NIOLockedValueBox<(queue: [Data], bytes: Int, stats: FramePortStats, closed: Bool,
                                           drainWaiter: CheckedContinuation<Void, Never>?,
                                           spaceWaiters: [CheckedContinuation<Void, Never>])>(([], 0, FramePortStats(), false, nil, []))
@@ -245,7 +251,7 @@ public final class FramePortCore: Sendable {
     public func send(_ frame: Data) -> FrameSendResult {
         let (result, waiter) = state.withLockedValue { s -> (FrameSendResult, CheckedContinuation<Void, Never>?) in
             if s.closed { return (.closed, nil) }
-            if s.queue.count >= queueFrames || s.bytes + frame.count > queueBytes {
+            if !hasRoom(s.queue.count, s.bytes) {
                 s.stats.dropped += 1
                 return (.dropped, nil)
             }
@@ -267,7 +273,7 @@ public final class FramePortCore: Sendable {
             case .dropped:
                 await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
                     let roomNow = state.withLockedValue { s -> Bool in
-                        if s.closed || (s.queue.count < queueFrames && s.bytes + frame.count <= queueBytes) { return true }
+                        if s.closed || hasRoom(s.queue.count, s.bytes) { return true }
                         s.spaceWaiters.append(c)
                         return false
                     }
@@ -282,7 +288,7 @@ public final class FramePortCore: Sendable {
     private func send(frameIfRoom frame: Data) -> FrameSendResult {
         let (result, waiter) = state.withLockedValue { s -> (FrameSendResult, CheckedContinuation<Void, Never>?) in
             if s.closed { return (.closed, nil) }
-            if s.queue.count >= queueFrames || s.bytes + frame.count > queueBytes { return (.dropped, nil) }
+            if !hasRoom(s.queue.count, s.bytes) { return (.dropped, nil) }
             s.queue.append(frame)
             s.bytes += frame.count
             s.stats.queued = s.queue.count
@@ -295,7 +301,7 @@ public final class FramePortCore: Sendable {
 
     // @port-skip linux-only: frame port plumbing
     public var isWritable: Bool {
-        state.withLockedValue { !$0.closed && $0.queue.count < queueFrames && $0.bytes < queueBytes }
+        state.withLockedValue { !$0.closed && hasRoom($0.queue.count, $0.bytes) }
     }
 
     // @port-skip linux-only: frame port plumbing

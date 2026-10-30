@@ -81,7 +81,10 @@ public final class StreamPort: FramePort {
                     return (old, c.generation)
                 }
                 old?.close(promise: nil)
+                // One producer at a time (FramePortCore's demand gate assumes it):
+                // once QEMU has reconnected, this older pump stops delivering.
                 for try await frame in inbound {
+                    guard current.withLockedValue({ $0.generation }) == gen else { break }
                     guard await core.deliver(Data(frame.readableBytesView)) else { break }
                 }
                 current.withLockedValue { c in

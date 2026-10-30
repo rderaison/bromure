@@ -1,7 +1,7 @@
 import Foundation
 import NIOCore
 import Testing
-import ACLinux
+@testable import ACLinux
 
 /// Test stand-ins for the shared switch (VMNetSwitch, which comes through
 /// ACCore): just enough L2/L3 to put several VMs behind one uplink.
@@ -123,14 +123,8 @@ func startServices(ip: String, base: Int) async throws -> Process {
 
 /// The host's IPv4 source address toward the outside (its LAN address).
 func hostLANAddress() -> String? {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/sbin/ip")
-    p.arguments = ["-4", "-o", "route", "get", "1.1.1.1"]
-    let out = Pipe()
-    p.standardOutput = out
-    try? p.run()
-    p.waitUntilExit()
-    let s = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: " ")
+    guard let out = try? ChildProcess.capture("/usr/sbin/ip", ["-4", "-o", "route", "get", "1.1.1.1"], input: nil) else { return nil }
+    let s = String(decoding: out, as: UTF8.self).split(separator: " ")
     guard let i = s.firstIndex(of: "src"), i + 1 < s.count else { return nil }
     return String(s[i + 1])
 }

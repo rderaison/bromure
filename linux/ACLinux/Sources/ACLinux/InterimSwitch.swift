@@ -104,7 +104,9 @@ public final class InterimSwitch: Sendable {
 public final class InterimDHCP: Sendable {
     let server: [UInt8], dns: [UInt8], serverMAC: [UInt8]
     let mtu: @Sendable ([UInt8]) -> Int?
-    private let leases = NIOLockedValueBox<[[UInt8]: [UInt8]]>([:])
+    /// MAC -> IP, and the reverse index IP (big-endian u32) -> MAC that the
+    /// per-frame uplink lookup uses; both kept in lease() and release().
+    private let leases = NIOLockedValueBox<(byMAC: [[UInt8]: [UInt8]], byIP: [UInt32: [UInt8]])>(([:], [:]))
     private let acked = NIOLockedValueBox<[[UInt8]: ContinuousClock.Instant]>([:])
 
     // @port-skip linux-only: interim DHCP
@@ -116,12 +118,13 @@ public final class InterimDHCP: Sendable {
     // @port-skip linux-only: interim DHCP
     public func lease(for mac: [UInt8]) -> [UInt8] {
         leases.withLockedValue { l in
-            if let ip = l[mac] { return ip }
-            let used = Set(l.values.map { $0[3] })
+            if let ip = l.byMAC[mac] { return ip }
+            let used = Set(l.byMAC.values.map { $0[3] })
             var host: UInt8 = 2
             while used.contains(host) { host += 1 }
             let ip = Array(server[0..<3]) + [host]
-            l[mac] = ip
+            l.byMAC[mac] = ip
+            l.byIP[Self.u32(ip)] = mac
             return ip
         }
     }
@@ -129,22 +132,28 @@ public final class InterimDHCP: Sendable {
     /// The lease for `mac` as a dotted quad, if one was handed out.
     // @port-skip linux-only: interim DHCP
     public func leasedIP(for mac: String) -> String? {
-        leases.withLockedValue { $0[InterimSwitch.mac(mac)] }.map { $0.map(String.init).joined(separator: ".") }
+        leases.withLockedValue { $0.byMAC[InterimSwitch.mac(mac)] }.map { $0.map(String.init).joined(separator: ".") }
     }
 
     // @port-skip linux-only: interim DHCP
-    public func release(mac: String) { _ = leases.withLockedValue { $0.removeValue(forKey: InterimSwitch.mac(mac)) } }
-
-    // @port-skip linux-only: interim DHCP
-    func mac(for ip: [UInt8]) -> [UInt8]? { leases.withLockedValue { $0.first(where: { $0.value == ip })?.key } }
-
-    /// The MAC holding `ip` (big-endian u32), from a reverse index.
-    // @port-skip linux-only: interim DHCP
-    func mac(forIP ip: UInt32) -> [UInt8]? {
+    public func release(mac: String) {
         leases.withLockedValue { l in
-            l.first(where: { UInt32($0.value[0]) << 24 | UInt32($0.value[1]) << 16 | UInt32($0.value[2]) << 8 | UInt32($0.value[3]) == ip })?.key
+            if let ip = l.byMAC.removeValue(forKey: InterimSwitch.mac(mac)) { l.byIP.removeValue(forKey: Self.u32(ip)) }
         }
     }
+
+    // @port-skip linux-only: interim DHCP
+    static func u32(_ ip: [UInt8]) -> UInt32 {
+        UInt32(ip[0]) << 24 | UInt32(ip[1]) << 16 | UInt32(ip[2]) << 8 | UInt32(ip[3])
+    }
+
+    // @port-skip linux-only: interim DHCP
+    func mac(for ip: [UInt8]) -> [UInt8]? { ip.count == 4 ? mac(forIP: Self.u32(ip)) : nil }
+
+    /// The MAC holding `ip` (big-endian u32), from the reverse index: one
+    /// dictionary lookup per frame.
+    // @port-skip linux-only: interim DHCP
+    func mac(forIP ip: UInt32) -> [UInt8]? { leases.withLockedValue { $0.byIP[ip] } }
 
     // @port-skip linux-only: interim DHCP
     public func ackedAt(_ mac: [UInt8]) -> ContinuousClock.Instant? { acked.withLockedValue { $0[mac] } }

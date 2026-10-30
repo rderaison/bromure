@@ -1,7 +1,7 @@
 import Foundation
 import NIOCore
 import Testing
-import ACLinux
+@testable import ACLinux
 
 enum NetEnv {
     static let env = ProcessInfo.processInfo.environment
@@ -332,12 +332,8 @@ struct StallTests {
                 let pa = sw.portStats(mac: macA), up = passt.stats
                 if let o = pa?.sent, o == lastOut, !dumped {
                     dumped = true
-                    let ss = Process()
-                    ss.executableURL = URL(fileURLWithPath: "/usr/bin/ss")
-                    ss.arguments = ["-tnimp", "( sport = :\(base) or dport = :\(base) )"]
-                    let pipe = Pipe(); ss.standardOutput = pipe
-                    try? ss.run(); ss.waitUntilExit()
-                    print("DIAG ss:\n" + String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+                    let ss = (try? ChildProcess.capture("/usr/bin/ss", ["-tnimp", "( sport = :\(base) or dport = :\(base) )"], input: nil)) ?? Data()
+                    print("DIAG ss:\n" + String(decoding: ss, as: UTF8.self))
                     if pc.pcapPath != nil { print("DIAG pcap: \(dir)/passt.pcap (kept)"); FileManager.default.createFile(atPath: dir + "/KEEP", contents: nil) }
                 }
                 lastOut = pa?.sent ?? -1
