@@ -63,7 +63,7 @@ run_probes() {
     out[modprobe_signed]=$(probe x sudo modprobe -q dummy)
     out[insmod_unsigned]=$(probe x sudo insmod /tmp/lockdown-probe.ko)
     out[bpf_prog_load]=$(probe x sudo python3 -c "
-import ctypes, struct
+import ctypes, os, struct
 # BPF_PROG_LOAD of a minimal 'return 0' socket filter. Lockdown=confidentiality
 # blocks bpf(); integrity does not, which is exactly the kind of thing worth
 # measuring rather than assuming.
@@ -74,7 +74,7 @@ log = ctypes.create_string_buffer(4096)
 attr = struct.pack('<IIQQIIi16sIII', 1, 2, ctypes.addressof(buf), 0, 0, 0, 0,
                    b'GPL\\0'.ljust(16, b'\\0'), 0, 0, 0)
 a = ctypes.create_string_buffer(attr, 120)
-rc = libc.syscall(280, 5, a, 120)
+rc = libc.syscall({'aarch64': 280, 'x86_64': 321}[os.uname().machine], 5, a, 120)  # bpf
 raise SystemExit(0 if rc >= 0 else 1)
 ")
 

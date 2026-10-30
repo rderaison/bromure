@@ -427,10 +427,10 @@ PROBE
 
 probe_pane "ptrace is blocked in a pane" "EPERM" <<'PROBE'
 python3 -c '
-import ctypes, errno
+import ctypes, errno, os
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 ctypes.set_errno(0)
-libc.syscall(117, 0, 0, 0, 0)
+libc.syscall({"aarch64": 117, "x86_64": 101}[os.uname().machine], 0, 0, 0, 0)
 print(errno.errorcode.get(ctypes.get_errno()))
 '
 PROBE
@@ -445,10 +445,10 @@ PROBE
 
 probe_pane "setuid is blocked in a pane" "EPERM" <<'PROBE'
 python3 -c '
-import ctypes, errno
+import ctypes, errno, os
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 ctypes.set_errno(0)
-libc.syscall(146, 0)
+libc.syscall({"aarch64": 146, "x86_64": 105}[os.uname().machine], 0)
 print(errno.errorcode.get(ctypes.get_errno()))
 '
 PROBE
@@ -476,10 +476,10 @@ PROBE
 
 probe_pane "kill(-1) is blocked in a pane" "EPERM" <<'PROBE'
 python3 -c '
-import ctypes, errno
+import ctypes, errno, os
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 ctypes.set_errno(0)
-libc.syscall(129, -1, 0)
+libc.syscall({"aarch64": 129, "x86_64": 62}[os.uname().machine], -1, 0)
 print(errno.errorcode.get(ctypes.get_errno()))
 '
 PROBE
@@ -697,16 +697,19 @@ cat > "$WORK/scratch/probe.sh" <<PROBE
 python3 -c '
 import ctypes, errno, os
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
+# Raw syscall numbers differ per arch.
+NR = {"aarch64": {"kill": 129, "tgkill": 131, "tkill": 130, "ptrace": 117},
+      "x86_64":  {"kill": 62,  "tgkill": 234, "tkill": 200, "ptrace": 101}}[os.uname().machine]
 def sc(nr, *a):
     ctypes.set_errno(0)
     libc.syscall(ctypes.c_long(nr), *[ctypes.c_long(x) for x in a])
     return errno.errorcode.get(ctypes.get_errno(), "ok")
 AGENTD = $$
-print("kill_agentd=%s" % sc(129, AGENTD, 0))
-print("tgkill_agentd=%s" % sc(131, AGENTD, AGENTD, 0))
-print("tkill_any=%s" % sc(130, AGENTD, 0))
-print("kill_minus1=%s" % sc(129, -1, 0))
-print("ptrace_agentd=%s" % sc(117, 16, AGENTD, 0, 0))
+print("kill_agentd=%s" % sc(NR["kill"], AGENTD, 0))
+print("tgkill_agentd=%s" % sc(NR["tgkill"], AGENTD, AGENTD, 0))
+print("tkill_any=%s" % sc(NR["tkill"], AGENTD, 0))
+print("kill_minus1=%s" % sc(NR["kill"], -1, 0))
+print("ptrace_agentd=%s" % sc(NR["ptrace"], 16, AGENTD, 0, 0))
 try:
     open("/proc/%d/mem" % AGENTD, "rb").read(1); print("proc_mem=READABLE")
 except OSError as e:
