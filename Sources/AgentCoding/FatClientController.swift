@@ -413,7 +413,9 @@ final class RemoteHostController {
             if let run = resp?.json["registration"] as? String {
                 self.awaitRegistration(run, ended)
             } else if resp.map({ $0.status >= 400 }) ?? true {
-                ended(false, NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in"))
+                // The host's refusal says why (no proxy, one in flight).
+                let why = (resp?.json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ended(false, why ?? NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in"))
             }
         }
     }

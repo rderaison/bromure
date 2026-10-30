@@ -352,7 +352,8 @@ final class ACAutomationServer {
     var onEndedRegistrations: (() -> [[String: Any]])?
     /// Start a subscription registration on this host for a remote client.
     /// (provider, optional profile id) -> ok.
-    var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> Bool)?
+    /// Nil when the run is under way, else why it was refused.
+    var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> String?)?
     /// Log a subscription out on this host for a remote client: the
     /// workspace's own sign-in if it has one, else the shared one.
     /// (provider, optional profile id) -> ok.
@@ -883,14 +884,19 @@ final class ACAutomationServer {
             }
             // The run's id: the client finds how it ended under it in
             // /state's `registrationEnded`.
-            let (ok, run) = DispatchQueue.main.sync {
+            // A refusal says why (no proxy, one already in flight): the
+            // client shows it rather than a retry that can't succeed.
+            let (refused, run) = DispatchQueue.main.sync {
                 MainActor.assumeIsolated {
-                    let ok = self.onBeginRegistration?(provider, profileID) ?? false
-                    return (ok, ok ? RemoteRegistrationBroker.shared.pending?.id.uuidString : nil)
+                    // Spelled out: `?.` would flatten "no handler" into "started".
+                    let refused: String?
+                    if let begin = self.onBeginRegistration { refused = begin(provider, profileID) }
+                    else { refused = "registration unavailable" }
+                    return (refused, refused == nil ? RemoteRegistrationBroker.shared.pending?.id.uuidString : nil)
                 }
             }
-            var reply: [String: Any] = ["ok": ok,
-                                        "error": ok ? "" : "couldn't start registration (one may be in flight)"]
+            let ok = refused == nil
+            var reply: [String: Any] = ["ok": ok, "error": refused ?? ""]
             if let run { reply["registration"] = run }
             sendResponse(fd: fd, status: ok ? 202 : 409, body: reply)
 
