@@ -238,7 +238,7 @@ public actor QEMUMachine {
         state = .starting
         do {
             try FileManager.default.createDirectory(atPath: config.runDirectory, withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: config.overlay) {
+            if !config.writeBaseInPlace, !FileManager.default.fileExists(atPath: config.overlay) {
                 try await ChildProcess.run(config.qemuImg, [
                     "create", "-q", "-f", "qcow2", "-F", config.baseFormat.rawValue,
                     "-b", config.baseImage, config.overlay])

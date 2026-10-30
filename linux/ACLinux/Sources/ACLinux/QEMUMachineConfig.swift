@@ -59,15 +59,23 @@ public struct QEMUMachineConfig: Sendable {
     public var baseImage: String
     public var baseFormat: ImageFormat = .raw
     public var overlay: String
+    /// The image bake writes `baseImage` itself (read-write, no overlay).
+    public var writeBaseInPlace = false
     public var shares: [Share] = []
     public var network: Network = .none
     public var macAddress: String?
     public var vsockCID: UInt32
+    /// No vhost-vsock device (the bake's installer has no agentd to dial).
+    public var vsock = true
     /// Holds the QMP and virtiofs sockets and the logs. Keep it short:
     /// Unix socket paths are limited to 107 bytes.
     public var runDirectory: String
     public var qmpSocketPath: String
     public var serialLog: String?
+    /// The serial console as a Unix socket QEMU listens on, for a host that
+    /// types into it (the bake's console dialogue). `serialLog` still records
+    /// the guest's output.
+    public var serialSocketPath: String?
     public var qemuBinary = "/usr/bin/qemu-system-x86_64"
     public var qemuImg = "/usr/bin/qemu-img"
     public var virtiofsd = "/usr/libexec/virtiofsd"
@@ -112,7 +120,7 @@ public struct QEMUMachineConfig: Sendable {
     /// Unix socket paths this config needs, each checked against sun_path.
     // @port-skip linux-only: QEMU config validation
     public func validate() throws {
-        var socks = [qmpSocketPath] + shares.indices.map(shareSocketPath)
+        var socks = [qmpSocketPath] + shares.indices.map(shareSocketPath) + [serialSocketPath].compactMap { $0 }
         if case .stream(let p) = network { socks.append(p) }
         for s in socks where s.utf8.count > 107 {
             throw MachineError.socketPathTooLong(s)
@@ -138,7 +146,9 @@ public struct QEMUMachineConfig: Sendable {
               "-numa", "node,memdev=mem",
               "-kernel", kernel, "-append", cmdline]
         if let initrd { a += ["-initrd", initrd] }
-        a += ["-drive", "if=none,id=d0,file=\(Self.optValue(overlay)),format=qcow2,cache=none,aio=io_uring,discard=unmap",
+        let disk = writeBaseInPlace ? "file=\(Self.optValue(baseImage)),format=\(baseFormat.rawValue)"
+                                    : "file=\(Self.optValue(overlay)),format=qcow2"
+        a += ["-drive", "if=none,id=d0,\(disk),cache=none,aio=io_uring,discard=unmap",
               "-device", "\(dev("virtio-blk")),drive=d0"]
         for (i, s) in shares.enumerated() {
             a += ["-chardev", "socket,id=fs\(i),path=\(Self.optValue(shareSocketPath(i)))",
@@ -153,10 +163,14 @@ public struct QEMUMachineConfig: Sendable {
         case .user:
             a += ["-netdev", "user,id=n0", "-device", "\(dev("virtio-net")),netdev=n0\(mac)"]
         }
-        a += ["-device", "\(dev("vhost-vsock")),guest-cid=\(vsockCID)",
-              "-chardev", "socket,id=qmp,path=\(Self.optValue(qmpSocketPath)),server=on,wait=off",
+        if vsock { a += ["-device", "\(dev("vhost-vsock")),guest-cid=\(vsockCID)"] }
+        a += ["-chardev", "socket,id=qmp,path=\(Self.optValue(qmpSocketPath)),server=on,wait=off",
               "-mon", "chardev=qmp,mode=control"]
-        if let serialLog {
+        if let serialSocketPath {
+            let log = serialLog.map { ",logfile=\(Self.optValue($0)),logappend=on" } ?? ""
+            a += ["-chardev", "socket,id=ser0,path=\(Self.optValue(serialSocketPath)),server=on,wait=off\(log)",
+                  "-serial", "chardev:ser0"]
+        } else if let serialLog {
             a += ["-chardev", "file,id=ser0,path=\(Self.optValue(serialLog))", "-serial", "chardev:ser0"]
         } else {
             a += ["-serial", "null"]

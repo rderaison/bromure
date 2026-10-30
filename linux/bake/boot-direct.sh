@@ -1,7 +1,7 @@
 #!/bin/bash
 # boot-direct.sh <image-dir> [q35|microvm] [runs]
 # Boots a qcow2 overlay of <image-dir>/base.img by direct kernel boot (vmlinuz/initrd.img/cmdline
-# from bake-amd64.sh), with the bromure-meta virtiofs share holding bromure-agentd.py, and times
+# from `bromure-ac image bake`), with the bromure-meta virtiofs share holding bromure-agentd.py, and times
 # QEMU exec -> bromure-agentd's first vsock connection to host port 5800. The NIC is QEMU user-mode
 # NAT: without a NIC, agentd's docker restart waits out network-online (120 s) before the shell starts.
 set -euo pipefail

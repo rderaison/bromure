@@ -1,24 +1,27 @@
-# amd64 guest image bake (QEMU/KVM) — prototype
+# amd64 guest image bake (QEMU/KVM)
 
-A port of `UbuntuImageManager.createBaseImage` to QEMU, for an **amd64** guest.
+`bromure-ac image bake` (`linux/ACLinux/Sources/ACLinux/InterimBake.swift`) ports `UbuntuImageManager.createBaseImage` to QEMU for an **amd64** guest. It is an interim stand-in until the bake logic moves to ACCore behind a `ProvisionerVM` protocol. The helpers that port 1:1 carry `@port` lines: `InitrdShim`, `ConsoleBuffer`, `createSparseDisk`, `sha256`, `downloadFile` and `downloadAlpineNetboot`.
 
 | step | macOS (VZ) | here |
 |---|---|---|
 | installer kernel | Alpine 3.22.3 netboot **aarch64**, gzip Image pulled out of the PE (`extractRawKernel`) | Alpine 3.22.3 netboot **x86_64**, sha256-checked; the bzImage goes to `-kernel` as-is |
-| DHCP/MTU shim | `InitrdShim` appends `/init.bromure` | the same script, appended as a second cpio |
-| console | virtio-console `hvc0` on pipes | `ttyS0` on a unix-socket chardev, driven by `serial-driver.py` (same markers and timeouts as `runProvisioner`) |
+| DHCP/MTU shim | `InitrdShim` appends `/init.bromure` | the same code (ported unchanged) |
+| VM | `VZVirtualMachine` | `QEMUMachine`: `writeBaseInPlace` (the raw target disk, no overlay), `vsock = false`, user-mode NAT |
+| console | virtio-console `hvc0` on pipes | `ttyS0` on a Unix-socket chardev (`serialSocketPath`, logged with `logfile=`), the same dialogue, markers and timeouts as `runProvisioner` |
 | files in | virtiofs `setup` | virtiofsd `--readonly`, tag `setup`; plus tag `out` for the kernel/initrd |
 | network | vmnet NAT + `AlpinePackageProxy` | QEMU user-mode NAT; `ALPINE_REPO_BASE` is the CDN over http (apk checks signatures) |
-| guest script | `setup.sh` | the same `setup.sh`, staged by `stage-amd64.sh` with the arm64 lines rewritten (asserted) |
-| artefacts | `base.img` (GRUB inside, EFI boot), `efivars.bin`, `base.version` | `base.img` (same layout, GRUB x86_64-efi inside), **`vmlinuz`, `initrd.img`, `cmdline`** for direct kernel boot, `kernel-release`, `base.version`, `bake.log` |
+| guest script | `setup.sh` | the same `setup.sh`, which now takes the arch from `uname -m`. One staged rewrite: the `BROMURE_PROXY` workaround (see the bug below) |
+| artefacts | `base.img` (GRUB inside, EFI boot), `efivars.bin`, `base.version` | `base.img` (same layout, GRUB x86_64-efi inside, boots under OVMF as well), **`vmlinuz`, `initrd.img`, `cmdline`** for direct kernel boot, `kernel-release`, `base.version`, `bake.log` |
 
 ```bash
-sudo -g kvm linux/bake/bake-amd64.sh [out-dir]       # default ~/.local/share/bromure-ac/image-amd64
+# From the repository root. sudo -g kvm only until the vhost udev rule is in.
+sudo -g kvm env PATH="$PATH" HOME="$HOME" linux/ACLinux/.build/debug/bromure-ac image bake [--out DIR] [--verbose]
 sudo -g kvm linux/bake/boot-direct.sh <out-dir> q35 3       # times exec -> agentd's vsock dial to host :5800
-sudo -g kvm linux/bake/boot-direct.sh <out-dir> microvm 3
 ```
 
-`sudo -g kvm` is only needed until the vhost udev rule is installed. `imageVersion` is copied, not changed.
+The default output is the daemon's image directory (`~/.local/share/bromure-ac/image-amd64`, or `$BROMURE_AC_IMAGE`). `base.version` is copied from `UbuntuImageManager.imageVersion`, which is not changed.
+
+**Console waits consume their match** (`ConsoleBuffer.wait`), and the markers the bake types are split (`echo SANDBOX_NETWORK_"OK"`). The macOS `ConsoleBuffer` searches the whole log on every wait. As a result, every `localhost:~#` wait after the first returns at once. Worse, the terminal echoes the typed `echo SANDBOX_NETWORK_OK`, which satisfies the network check before the command has run, so `SANDBOX_NO_NETWORK` can't be detected.
 
 ## arm64 assumptions found (not edited; proposals below)
 
@@ -47,12 +50,7 @@ Host-side labels that assume an arm64 guest: `SecurityTimeline.swift:480-483`, `
 
 ## Proposed changes (for the macOS session to land)
 
-1. **setup.sh: derive the arch** instead of hard-coding it. The Alpine installer's `uname -m` maps `aarch64` to `arm64` and `x86_64` to `amd64`. From that:
-   - `DEB_ARCH` drives `--arch=$DEB_ARCH`.
-   - `grub-efi-$DEB_ARCH grub-efi-$DEB_ARCH-bin`.
-   - `--target=$GRUB_TARGET` (`arm64-efi` or `x86_64-efi`) and `--bootloader-id=$BOOT_ID` (`BOOTAA64` or `BOOTX64`).
-   - The mirror default comes from the arch: arm64 uses `ports.ubuntu.com/ubuntu-ports`, amd64 uses `archive.ubuntu.com/ubuntu`.
-   - The GRUB cmdline: `console=hvc0 … arm64.nosme` on arm64. On amd64 it needs a console that exists on both VMMs. Proposal: `console=${GUEST_CONSOLE:-hvc0}`, and the Linux bake passes `ttyS0`. It could also list both (`console=ttyS0 console=hvc0`), since the last one listed becomes /dev/console.
+1. **setup.sh: derive the arch.** This is in the separate commit "setup.sh: take the guest arch from the installer". It maps `uname -m` to the debootstrap arch, the grub-efi packages, the grub-install target and boot id, the mirror default, and the console (`hvc0` on arm64, `ttyS0` on amd64, overridable with `GUEST_CONSOLE`). On arm64 the output is unchanged.
 2. **UbuntuImageManager: make the Alpine arch a parameter.** That covers the URLs at :106, :495 and :834. `extractRawKernel` becomes arm64-only, and `arm64.nosme` is added only on arm64. This is needed for the shared-core bake logic anyway.
 3. **Image catalog: add an `arch` key** (or a per-arch path, `images/<v>/<arch>/`). Also publish `vmlinuz` and `initrd.img` next to `base.img.gz`, so Linux hosts can direct-boot a downloaded image.
 4. **Sentry: per-arch syscall-argument accessors** (`regs_get_kernel_argument()` exists on both arm64 and x86_64 since 5.x). Also an amd64 job in `Jenkinsfile.sentry`.
@@ -60,7 +58,9 @@ Host-side labels that assume an arm64 guest: `SecurityTimeline.swift:480-483`, `
 
 ## Results (lnx-ntv, 2026-10-30)
 
-- Bake: Alpine boot to `localhost login:` takes 9 s. `setup.sh` runs in 203 s (debootstrap + chroot); the whole bake is about 3.6 min. Kernel: `6.8.0-147-generic` (linux-image-virtual).
+- Bake (`bromure-ac image bake`, 4 vCPU and 4 GiB installer, user-mode NAT): 203 s in total, of which `setup.sh` (debootstrap + chroot) takes 185 s. Kernel: `6.8.0-147-generic` (linux-image-virtual).
+- `base.img`: 24 GiB apparent, **3.7 GiB allocated**. setup.sh's `fstrim` reaches the host: `discard=unmap` on virtio-blk punches holes in the raw file ("/: 19.5 GiB trimmed"), so the zero-fill fallback never runs. `pigz -6` makes it 1476 MiB (the size of a `base.img.gz` download).
+- The same image boots both ways: direct kernel boot (below), and UEFI under OVMF through its own GRUB (`BOOTX64.EFI`, removable path) to `bromure-ac login:` on ttyS0.
 - Direct kernel boot, from QEMU exec to bromure-agentd's first vsock connection to host :5800. Each VM has 2 vCPU, 2 GiB memfd RAM, a qcow2 overlay on the raw base, virtiofs `bromure-meta` + `bromure-outbox`, and a user-mode NIC.
 
 | machine | run 1 | run 2 | run 3 | QEMU RSS |
@@ -70,4 +70,4 @@ Host-side labels that assume an arm64 guest: `SecurityTimeline.swift:480-483`, `
 
   (The spike's BIOS + GRUB boot of a cloud image took 5.0–6.6 s.)
 - **Without a NIC, the time to :5800 is 122 s.** agentd's `task_apt_and_docker_proxy` restarts docker synchronously before `shell_agent_service` starts. docker.service waits for network-online, which times out at 120 s with no link. That will bite whenever the guest's link comes up late, for example while the L2 switch is not yet answering DHCP. Proposal: start the shell service before that task, or restart docker with `--no-block`.
-- **setup.sh bug, not arch-specific:** `setup.sh:235` writes `BROMURE_PROXY=$ALPINE_REPO_BASE` for the chroot even when it is the plain CDN default, which `setup.sh:79` deliberately does not treat as a proxy. apt then uses dl-cdn.alpinelinux.org as a forward proxy and every fetch fails (Fastly "500 Domain Not Found"). On the Mac this happens whenever AlpinePackageProxy isn't up. The bake stages the same condition as :79 (see `stage-amd64.sh`).
+- **setup.sh bug, not arch-specific:** `setup.sh:235` writes `BROMURE_PROXY=$ALPINE_REPO_BASE` for the chroot even when it is the plain CDN default, which `setup.sh:79` deliberately does not treat as a proxy. apt then uses dl-cdn.alpinelinux.org as a forward proxy and every fetch fails (Fastly "500 Domain Not Found"). On the Mac this happens whenever AlpinePackageProxy isn't up. The bake stages the same condition as :79 (`InterimBake.stageSetup`, asserted, and unit-tested against the real setup.sh).

@@ -13,7 +13,7 @@
 # Prerequisites it doesn't change:
 #   - /dev/kvm, /dev/vhost-vsock and /dev/vhost-net usable by this user (the vhost udev rule,
 #     or kvm group membership). A user unit can't add groups.
-#   - the baked image in ~/.local/share/bromure-ac/image-amd64 (linux/bake/bake-amd64.sh) or
+#   - the baked image in ~/.local/share/bromure-ac/image-amd64 (`bromure-ac image bake`) or
 #     --image DIR, and passt.
 #
 # Usage: install-user-service.sh [--image DIR] [--no-start] [--uninstall]
@@ -50,7 +50,7 @@ sed -e "s|@BIN@|$BIN|" -e "s|@IMAGE@|$IMAGE|" -e "s|@AGENTD@|$AGENTD|" \
 systemctl --user daemon-reload
 if [ $START = 1 ]; then systemctl --user enable --now bromure-ac.service; else systemctl --user enable bromure-ac.service; fi
 echo "installed: $UNIT_DIR/bromure-ac.service -> $BIN"
-[ -d "$IMAGE" ] || echo "note: no image at $IMAGE yet (linux/bake/bake-amd64.sh)"
+[ -d "$IMAGE" ] || echo "note: no image at $IMAGE yet (bromure-ac image bake)"
 [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] \
   || echo "note: lingering is off: the service stops when you log out (root: loginctl enable-linger $(id -un))"
 [ -w /dev/vhost-vsock ] || echo "note: /dev/vhost-vsock isn't writable by $(id -un): VMs won't start until the vhost udev rule is in place"

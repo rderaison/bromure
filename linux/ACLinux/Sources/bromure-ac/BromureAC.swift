@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self])
+        subcommands: [Daemon.self, VM.self, Image.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -188,3 +188,59 @@ extension VM {
     }
 }
 
+
+// @port-skip linux-only: Linux CLI group for the guest image (macOS: the app's Rebuild Base Image)
+struct Image: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Manage the guest image.", subcommands: [Bake.self])
+
+    // @port-skip linux-only: interim image bake CLI
+    struct Bake: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Bake the amd64 guest image under QEMU/KVM from vm-setup (needs /dev/kvm and network).")
+        @Option(help: "Output directory. Default: the daemon's image directory.") var out: String?
+        @Option(name: .customLong("vm-setup"), help: "vm-setup directory (setup.sh and the agents).")
+        var vmSetup = "Sources/AgentCoding/Resources/vm-setup"
+        @Option(name: .customLong("image-version"), help: "Stamp for base.version. Default: UbuntuImageManager.imageVersion from the repo.")
+        var imageVersion: String?
+        @Option(help: "Download cache.") var cache: String?
+        @Option(help: "Installer vCPUs.") var cpus = 4
+        @Option(help: "Installer NIC MTU.") var mtu = 1500
+        @Option(name: .customLong("ubuntu-mirror"), help: "Ubuntu mirror. Default: setup.sh's for the arch.") var ubuntuMirror: String?
+        @Flag(help: "Echo the installer's serial console.") var verbose = false
+
+        // @port-skip linux-only: interim image bake CLI
+        func run() async throws {
+            _ = acl_unblock_term_signals()
+            let env = ProcessInfo.processInfo.environment
+            let home = env["HOME"] ?? NSHomeDirectory()
+            let setup = (vmSetup as NSString).standardizingPath
+            guard FileManager.default.fileExists(atPath: setup + "/setup.sh") else {
+                throw ValidationError("no setup.sh in \(setup) (run from the repository root, or pass --vm-setup)")
+            }
+            var version = imageVersion
+            if version == nil {
+                // vm-setup lives in Sources/AgentCoding/Resources/; the stamp in Sources/AgentCoding/.
+                let manager = ((setup as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+                    + "/UbuntuImageManager.swift"
+                let src = (try? String(contentsOfFile: manager, encoding: .utf8)) ?? ""
+                if let r = src.range(of: #"imageVersion = "[^"]+""#, options: .regularExpression) {
+                    version = String(src[r].split(separator: "\"")[1])
+                }
+            }
+            guard let version else { throw ValidationError("no --image-version and no UbuntuImageManager.swift next to vm-setup") }
+            var o = InterimBake.Options(outputDir: out ?? DaemonConfig.fromEnvironment().imageDir,
+                                        cacheDir: cache ?? (env["XDG_CACHE_HOME"] ?? home + "/.cache") + "/bromure-ac/bake",
+                                        vmSetupDir: setup, imageVersion: version)
+            o.cpus = cpus
+            o.mtu = mtu
+            o.ubuntuMirror = ubuntuMirror
+            let verbose = verbose
+            let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },
+                                               output: { if verbose { FileHandle.standardError.write($0) } })
+            func mib(_ b: UInt64) -> String { String(format: "%.0f MiB", Double(b) / 1_048_576) }
+            func secs(_ d: Duration) -> String { String(format: "%.0f s", Double(d.components.seconds)) }
+            print("baked \(o.outputDir): kernel \(r.kernelRelease), setup.sh \(secs(r.setup)), total \(secs(r.total)); "
+                  + "base.img \(mib(r.imageBytes)) apparent, \(mib(r.imageAllocatedBytes)) allocated")
+        }
+    }
+}

@@ -887,3 +887,85 @@ final class ManagedAtomicFlag: @unchecked Sendable {
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     func set() { lock.lock(); value = true; lock.unlock() }
 }
+
+@Suite("Interim bake")
+struct InterimBakeTests {
+    @Test("the bake VM's argv: the target disk written in place, no vsock, the serial console on a socket with a log")
+    func bakeArgv() throws {
+        var c = QEMUMachineConfig(name: "bromure-bake", kernel: "/c/vmlinuz", initrd: "/w/initrd", cmdline: "console=ttyS0",
+                                  baseImage: "/o/base.img.partial", overlay: "", vsockCID: 0, runDirectory: "/run/b")
+        c.writeBaseInPlace = true
+        c.vsock = false
+        c.network = .user
+        c.serialSocketPath = "/run/b/serial.sock"
+        c.serialLog = "/w/serial.log"
+        try c.validate()
+        let a = c.arguments().joined(separator: " ")
+        #expect(a.contains("-drive if=none,id=d0,file=/o/base.img.partial,format=raw,cache=none,aio=io_uring,discard=unmap"))
+        #expect(!a.contains("vhost-vsock"))
+        #expect(a.contains("-chardev socket,id=ser0,path=/run/b/serial.sock,server=on,wait=off,logfile=/w/serial.log,logappend=on -serial chardev:ser0"))
+        #expect(a.contains("-netdev user,id=n0"))
+    }
+
+    @Test("a console wait consumes its match: the next wait for the same prompt needs a new one; echoed commands don't match split markers")
+    func consoleBuffer() async throws {
+        let b = ConsoleBuffer()
+        b.append(Data("localhost login: root\nlocalhost:~# ".utf8))
+        try await b.wait(for: "localhost:~#", timeout: 1, failures: [])
+        await #expect(throws: BakeError.self) { try await b.wait(for: "localhost:~#", timeout: 0.3, failures: []) }
+        b.append(Data("echo SANDBOX_NETWORK_\"OK\"\r\n".utf8))     // the terminal's echo
+        await #expect(throws: BakeError.self) { try await b.wait(for: "SANDBOX_NETWORK_OK", timeout: 0.3, failures: []) }
+        b.append(Data("SANDBOX_NETWORK_OK\nlocalhost:~# ".utf8))
+        try await b.wait(for: "SANDBOX_NETWORK_OK", timeout: 1, failures: ["SANDBOX_NO_NETWORK"])
+        try await b.wait(for: "localhost:~#", timeout: 1, failures: [])
+        b.append(Data("[ac-setup] x\nSANDBOX_SETUP_FAILED: debootstrap\n".utf8))
+        do {
+            try await b.wait(for: "SANDBOX_SETUP_DONE", timeout: 1, failures: ["SANDBOX_SETUP_FAILED:"])
+            Issue.record("no failure")
+        } catch BakeError.installerReportedFailure(let line) {
+            #expect(line == "SANDBOX_SETUP_FAILED: debootstrap")
+        }
+    }
+
+    @Test("staging rewrites setup.sh's BROMURE_PROXY line only without a proxy, and fails loudly if the line moved")
+    func staging() throws {
+        let fm = FileManager.default
+        let d = fm.temporaryDirectory.appendingPathComponent("acl-stage-\(UUID().uuidString)").path
+        defer { try? fm.removeItem(atPath: d) }
+        try fm.createDirectory(atPath: d + "/src", withIntermediateDirectories: true)
+        let line = "    echo \"BROMURE_PROXY=$ALPINE_REPO_BASE\"\n"
+        try "{\n\(line)} > env\n".write(toFile: d + "/src/setup.sh", atomically: true, encoding: .utf8)
+        try InterimBake.stageSetup(from: d + "/src", to: d + "/a", alpineRepoBase: "http://dl-cdn.alpinelinux.org")
+        let a = try String(contentsOfFile: d + "/a/setup.sh", encoding: .utf8)
+        #expect(a.contains("if [ \"$ALPINE_REPO_BASE\" != \"http://dl-cdn.alpinelinux.org\" ]; then echo \"BROMURE_PROXY=$ALPINE_REPO_BASE\"; fi"))
+        try InterimBake.stageSetup(from: d + "/src", to: d + "/b", alpineRepoBase: "http://192.168.64.1:3128")
+        #expect(try String(contentsOfFile: d + "/b/setup.sh", encoding: .utf8).contains(line))
+        try "echo moved\n".write(toFile: d + "/src/setup.sh", atomically: true, encoding: .utf8)
+        #expect(throws: BakeError.self) { try InterimBake.stageSetup(from: d + "/src", to: d + "/c", alpineRepoBase: "http://dl-cdn.alpinelinux.org") }
+    }
+
+    @Test("the real setup.sh still has the BROMURE_PROXY line the staging rewrites")
+    func realSetup() throws {
+        let fm = FileManager.default
+        let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../Sources/AgentCoding/Resources/vm-setup").standardized.path
+        let d = fm.temporaryDirectory.appendingPathComponent("acl-stage-\(UUID().uuidString)").path
+        defer { try? fm.removeItem(atPath: d) }
+        try InterimBake.stageSetup(from: src, to: d, alpineRepoBase: "http://dl-cdn.alpinelinux.org")
+    }
+
+    @Test("the shimmed initrd: original, NUL padding to 4 bytes, then a newc cpio with init.bromure and the MTU")
+    func shim() throws {
+        let fm = FileManager.default
+        let d = fm.temporaryDirectory.appendingPathComponent("acl-shim-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: d) }
+        try fm.createDirectory(at: d, withIntermediateDirectories: true)
+        try Data([1, 2, 3, 4, 5]).write(to: d.appendingPathComponent("orig"))
+        try InitrdShim.writeShimmedInitrd(original: d.appendingPathComponent("orig"), mtu: 1400, to: d.appendingPathComponent("out"))
+        let out = try Data(contentsOf: d.appendingPathComponent("out"))
+        #expect(Array(out.prefix(8)) == [1, 2, 3, 4, 5, 0, 0, 0])
+        #expect(String(decoding: out[8..<14], as: UTF8.self) == "070701")
+        let text = String(decoding: out, as: UTF8.self)
+        #expect(text.contains("init.bromure") && text.contains("echo 1400 >") && text.contains("TRAILER!!!"))
+    }
+}
