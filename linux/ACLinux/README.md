@@ -18,21 +18,14 @@ The Linux implementations behind Bromure AC's platform protocols: QEMU/KVM VMs (
   - each VM's reader `sendWaiting`s to the uplink, so pressure goes back to that VM;
   - the shared uplink reader only `send`s, so a VM that stops draining (paused, slow) drops at its own limit and the other VMs don't slow down (`StallTests`).
 
-## Known issue: passt stops ACKing a flow at MTU 1500
+## Known issue: passt stops ACKing a flow when its tap writes hit EAGAIN
 
-**Symptom:** occasionally, under sustained guest→host TCP at MTU 1500, passt (0.0~git20260120) stops answering one flow for good.
+**Symptom:** occasionally, under sustained guest→host TCP, passt (0.0~git20260120) stops answering one flow for good. It shows up mostly at MTU 1500.
 
-**From a `--pcap` capture:**
-- passt's last ACK opens a window of about 1 MB, and the guest fills it;
-- every segment shows up in passt's capture;
-- after that, passt never ACKs or sends anything on the flow again. The guest retransmits the first unacknowledged segment with exponential backoff, and passt receives each retransmit;
-- other flows keep working.
+**Cause** (reproduced without Bromure; see `linux/PASST_STALL_REPORT.md`, a draft for upstream, not filed):
+- The trigger is backpressure on passt's output. PasstUplink stops reading passt while the switch's consumer lags, so passt's writes to its tap fd hit EAGAIN.
+- At the stall, passt has forwarded hundreds of KB of guest data to the host that it never acknowledged to the guest. It then never answers the guest's retransmissions of that data.
+- The plain QEMU + passt reproduction (`linux/passt-repro/repro.sh`) stalls 0/140 runs with QEMU reading promptly, and 5/20 with a relay that pauses reading passt for 5–50 ms.
+- passt's `--pcap` hides it (0/32).
 
-**What rules out our side:**
-- Our ports show no drops, no queued frames and no inbound pauses during the stall.
-- The host side of the connection has everything acknowledged and nothing queued.
-- The kernel tap path and passt at MTU 65520 have never shown it.
-
-passt's own warnings can't be seen here: Ubuntu's AppArmor profile for passt denies its syslog socket and the read `--log-file` needs.
-
-**Mitigation:** the default guest MTU behind passt is 65520 (see `PasstUplink.Config.mtu`). The tests retry or median over it and print `PASST-STALL` with the port counters. This should be reported upstream with the pcap; `PasstUplink.Config.pcapPath` turns the capture on.
+**Mitigation:** the default guest MTU behind passt is 65520 (see `PasstUplink.Config.mtu`): fewer frames, so it's rarer. The tests retry or take medians, and print `PASST-STALL` with the port counters. The real fix on our side is to read passt eagerly and drop at the VM's own port, which the switch already does toward a slow VM. Not done yet.
