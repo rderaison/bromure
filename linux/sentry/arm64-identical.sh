@@ -59,6 +59,10 @@ open(p, "w").write(s.replace(a, a + "\n" * n))
 PY
 build "$W/old" "$W/old.ko"; build "$W/new" "$W/new.ko"
 OD=aarch64-linux-gnu-objdump
-diff <($OD -dr "$W/old.ko" | sed 1,3d) <($OD -dr "$W/new.ko" | sed 1,3d) > /dev/null && echo "code + relocations: identical"
+if diff <($OD -dr "$W/old.ko" | sed 1,3d) <($OD -dr "$W/new.ko" | sed 1,3d) > "$W/code.diff"; then
+  echo "code + relocations: identical"
+else
+  echo "code + relocations: DIFFER (see $W/code.diff)"; exit 1
+fi
 diff <($OD -s "$W/old.ko" | sed 1,3d) <($OD -s "$W/new.ko" | sed 1,3d) | grep '^[<>]' | cut -c1-60 || true
 echo "(expected above: only .modinfo's srcversion and .note.gnu.build-id)"

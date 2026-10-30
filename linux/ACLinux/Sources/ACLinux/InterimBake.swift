@@ -37,7 +37,14 @@ public enum InterimBake {
         public var mtu = 1500
         /// setup.sh's DISPLAY_SCALE argument (kitty's font size). Headless: 1.
         public var displayScale = 1
+        /// apk's repository and the modloop: plain HTTP is fine, apk checks
+        /// signatures (and setup.sh treats this exact value as "no proxy").
         public var alpineCDN = "http://dl-cdn.alpinelinux.org"
+        /// Where the netboot tarball and its .sha256 come from, macOS's
+        /// releasesBase: HTTPS, since a checksum fetched beside its file over
+        /// plain HTTP catches corruption but not tampering. A mirror goes here.
+        public var alpineReleasesBase =
+            "https://dl-cdn.alpinelinux.org/alpine/v\(InterimBake.alpineVersion)/releases/\(InterimBake.alpineArch)"
         public var ubuntuMirror: String?
         public var setupTimeout: Duration = .seconds(2700)
         // @port-skip linux-only: interim bake options
@@ -88,7 +95,8 @@ public enum InterimBake {
         let initrd = o.cacheDir + "/alpine-initramfs-\(alpineArch)"
         if !fm.fileExists(atPath: kernel) || !fm.fileExists(atPath: initrd) {
             progress("Downloading the Alpine \(alpineRelease) netboot installer…")
-            try await downloadAlpineNetboot(cacheDir: o.cacheDir, cdn: o.alpineCDN, kernel: kernel, initrd: initrd)
+            try await downloadAlpineNetboot(cacheDir: o.cacheDir, releasesBase: o.alpineReleasesBase,
+                                            kernel: kernel, initrd: initrd)
         }
         // 2. The DHCP/MTU shim.
         let shimmed = work + "/alpine-initramfs-shimmed"
@@ -241,13 +249,8 @@ public enum InterimBake {
     }
 
     // @port UbuntuImageManager.downloadAlpineNetboot(progress: @escaping(String)->Void) h=896d7225fec08f0a @84e171b8
-    static func downloadAlpineNetboot(cacheDir: String, cdn: String, kernel: String, initrd: String) async throws {
-        // HTTPS for the installer itself and its checksum, as macOS's
-        // releasesBase: both come from the same CDN, so over plain HTTP the
-        // sha256 would catch corruption but not tampering. (`cdn`, plain HTTP,
-        // stays for apk and the modloop, which apk's signatures cover.)
-        _ = cdn
-        let base = "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/\(alpineArch)"
+    static func downloadAlpineNetboot(cacheDir: String, releasesBase base: String,
+                                      kernel: String, initrd: String) async throws {
         let tarballName = "alpine-netboot-\(alpineRelease)-\(alpineArch).tar.gz"
         let tarball = URL(fileURLWithPath: cacheDir + "/" + tarballName)
         let checksum = URL(fileURLWithPath: cacheDir + "/" + tarballName + ".sha256")

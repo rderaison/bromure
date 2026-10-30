@@ -206,6 +206,8 @@ struct Image: AsyncParsableCommand {
         @Option(help: "Installer vCPUs.") var cpus = 4
         @Option(help: "Installer NIC MTU.") var mtu = 1500
         @Option(name: .customLong("ubuntu-mirror"), help: "Ubuntu mirror. Default: setup.sh's for the arch.") var ubuntuMirror: String?
+        @Option(name: .customLong("alpine-releases"), help: "Alpine netboot releases URL (HTTPS). Default: dl-cdn's.")
+        var alpineReleases: String?
         @Flag(help: "Echo the installer's serial console.") var verbose = false
 
         // @port-skip linux-only: interim image bake CLI
@@ -234,6 +236,7 @@ struct Image: AsyncParsableCommand {
             o.cpus = cpus
             o.mtu = mtu
             o.ubuntuMirror = ubuntuMirror
+            if let alpineReleases { o.alpineReleasesBase = alpineReleases }
             let verbose = verbose
             let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },
                                                output: { if verbose { FileHandle.standardError.write($0) } })
