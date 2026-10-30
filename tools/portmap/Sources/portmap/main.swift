@@ -93,6 +93,10 @@ struct Check: ParsableCommand {
                 print("STALE   \(e.mac.id)\n        macOS \(e.mac.file):\(e.mac.line) now h=\(e.mac.hash)\n        Linux \(c.file):\(c.line) ported h=\(c.portedHash)\(c.portedCommit.map { " @\($0)" } ?? "")")
             }
         }
+        for c in r.collisions {
+            failed = true
+            print("COLLIDE \(c) is declared more than once; portmap's id scheme needs a tiebreak for it")
+        }
         for o in r.orphans {
             failed = true
             print("ORPHAN  \(o.file):\(o.line) \(o.id) claims a macOS function that no longer exists")

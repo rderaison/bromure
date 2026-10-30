@@ -69,7 +69,11 @@ public enum Inventory {
         for (_, idx) in byID where idx.count > 1 {
             let files = Set(idx.map { records[$0].file })
             guard files.count > 1 else { continue }
-            for i in idx { out[i].id = records[i].id + "@" + (records[i].file as NSString).lastPathComponent }
+            // The path below Sources/: two modules can both have a Profile.swift.
+            for i in idx {
+                let f = records[i].file
+                out[i].id = records[i].id + "@" + (f.hasPrefix("Sources/") ? String(f.dropFirst(8)) : f)
+            }
         }
         return out
     }
@@ -257,8 +261,15 @@ private final class Collector: SyntaxVisitor {
         }
     }
 
+    /// `static ` / `class ` members are other declarations than the
+    /// instance ones they often forward to.
+    private func staticPrefix(_ mods: DeclModifierListSyntax) -> String {
+        mods.contains { $0.name.text == "static" || $0.name.text == "class" } ? "static " : ""
+    }
+
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
-        record("\(node.name.text)(\(params(node.signature.parameterClause)))", decl: node, body: node.body)
+        record("\(staticPrefix(node.modifiers))\(node.name.text)(\(params(node.signature.parameterClause)))",
+               decl: node, body: node.body)
         return .skipChildren
     }
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -279,7 +290,9 @@ private final class Collector: SyntaxVisitor {
         // when they're a closure call — rare enough to leave out).
         for b in node.bindings {
             guard let accessors = b.accessorBlock else { continue }
-            record("var \(b.pattern.trimmedDescription)", decl: node, body: accessors)
+            // A protocol requirement (`{ get }`, `{ get set }`) has no code.
+            if case .accessors(let list) = accessors.accessors, list.allSatisfy({ $0.body == nil }) { continue }
+            record("\(staticPrefix(node.modifiers))var \(b.pattern.trimmedDescription)", decl: node, body: accessors)
         }
         return .skipChildren
     }

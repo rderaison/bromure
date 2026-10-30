@@ -125,4 +125,17 @@ struct PortMapCoreTests {
         #expect(ha["S.wire(server: Server) / server.onA"] != hb["S.wire(server: Server) / server.onA"])
         #expect(ha["S.wire(server: Server) / server.onB"] == hb["S.wire(server: Server) / server.onB"])
     }
+
+    @Test("protocol requirements aren't functions; static members and same-named files in two modules stay apart")
+    func collisions() {
+        let r = Inventory.scan(source: """
+            protocol P { var x: Int { get } ; var y: Int { get set } }
+            extension P { var x: Int { 1 } }
+            struct S { func f() { Self.f() } ; static func f() {} }
+            """, file: "Sources/A/p.swift", fileInLinuxBuild: false)
+        #expect(r.map(\.id) == ["P.var x", "S.f()", "S.static f()"])
+        let a = Inventory.scan(source: "struct Q { func g() {} }", file: "Sources/A/Profile.swift", fileInLinuxBuild: false)
+        let b = Inventory.scan(source: "struct Q { func g() { _ = 1 } }", file: "Sources/B/Profile.swift", fileInLinuxBuild: false)
+        #expect(Inventory.disambiguate(a + b).map(\.id) == ["Q.g()@A/Profile.swift", "Q.g()@B/Profile.swift"])
+    }
 }

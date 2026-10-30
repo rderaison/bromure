@@ -63,6 +63,9 @@ public struct Report: Codable, Sendable {
     /// Linux-only declarations with no `@port` line: new Linux code that
     /// corresponds to nothing, or a port someone forgot to stamp.
     public let unclaimedLinux: [FunctionRecord]
+    /// macOS ids declared more than once (a `@port` line naming one would be
+    /// ambiguous): the id scheme needs a tiebreak for them.
+    public let collisions: [String]
 
     public func count(_ s: Status) -> Int { entries.lazy.filter { $0.status == s }.count }
 }
@@ -136,7 +139,10 @@ public enum Ledger {
         let orphans = claims.filter { !macIDs.contains($0.key) }.flatMap(\.value)
             .sorted { ($0.file, $0.line) < ($1.file, $1.line) }
         let unclaimed = linuxImpls.filter { $0.ports.isEmpty && $0.skipReason == nil }
-        return Report(entries: entries, orphans: orphans, unclaimedLinux: unclaimed)
+        var seen = Set<String>(), dup = Set<String>()
+        for r in macSide where !seen.insert(r.id).inserted { dup.insert(r.id) }
+        return Report(entries: entries, orphans: orphans, unclaimedLinux: unclaimed,
+                      collisions: dup.sorted())
     }
 }
 
