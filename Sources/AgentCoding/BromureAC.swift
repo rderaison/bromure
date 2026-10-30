@@ -6512,6 +6512,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onEndedRegistration = {
             MainActor.assumeIsolated { RemoteRegistrationBroker.shared.endedDict() }
         }
+        server.onEndedRegistrations = {
+            MainActor.assumeIsolated { RemoteRegistrationBroker.shared.endedList() }
+        }
         server.onBeginRegistration = { [weak self] provider, profileID in
             MainActor.assumeIsolated {
                 guard let self, let p = SubscriptionProvider(rawValue: provider) else { return false }

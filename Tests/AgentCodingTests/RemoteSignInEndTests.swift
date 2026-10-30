@@ -82,7 +82,7 @@ struct RemoteSignInEndTests {
         #expect(route.contains("guard case .finished(let ok, let message) = event else { return }"))
         #expect(route.contains("return [\"ok\": true, \"registration\": run.uuidString]"))
         let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("applyRegistrationEnded(snapshot[\"registrationEnded\"] as? [String: Any])"))
+        #expect(fc.contains("applyRegistrationSnapshot(pending: snapshot[\"pendingRegistration\"] as? [String: Any],"))
         let card = try #require(fc.range(of: "events(.status(NSLocalizedString(\"Sign-in started — your browser will open shortly…\""))
         let after = fc[card.upperBound...].prefix(1200)
         #expect(after.contains("self?.controller.sessionRequest(s.id, \"signin\")"))
@@ -90,5 +90,50 @@ struct RemoteSignInEndTests {
         #expect(!fc.contains("self.controller.sessionCommand(s.id, \"signin\")"))
         let button = try #require(fc.range(of: "guard a.runModal() == .alertFirstButtonReturn else { return }"))
         #expect(fc[button.upperBound...].prefix(1000).contains("failed.beginSheetModal(for: self)"))
+    }
+
+    /// Finding (CWE-670): "A missed sign-in result leaves the fat-client card
+    /// stuck on 'browser will open'". The host kept one end for 120 s, the
+    /// next run's end replaced it, and a client waiter had no deadline: a
+    /// client asleep or offline through that window waited for ever.
+    @Test("the host keeps every recent end, not one slot")
+    func brokerKeepsRecentEnds() {
+        let b = RemoteRegistrationBroker()
+        let t0 = Date()
+        let first = b.begin(provider: "Claude")
+        b.finish(success: false, message: "refused", now: t0)
+        let second = b.begin(provider: "Codex")
+        b.finish(success: true, now: t0.addingTimeInterval(10))
+        let ids = b.endedList(now: t0.addingTimeInterval(20)).compactMap { $0["id"] as? String }
+        #expect(ids == [first.uuidString, second.uuidString])
+        // Kept past the client's whole wait, then dropped.
+        #expect(RemoteRegistrationBroker.endedKeptFor > RemoteHostController.registrationWaitBudget)
+        #expect(b.endedList(now: t0.addingTimeInterval(RemoteRegistrationBroker.endedKeptFor + 11)).isEmpty)
+        for _ in 0..<(RemoteRegistrationBroker.endedKeptMax + 4) { b.begin(provider: "Claude"); b.finish(now: t0) }
+        #expect(b.endedList(now: t0).count == RemoteRegistrationBroker.endedKeptMax)
+    }
+
+    @Test("a waiter hears its end from the list, or that it was missed once its run is gone")
+    func clientNeverWaitsForever() async throws {
+        let c = RemoteHostController(host: RemoteHost(name: "t", address: "127.0.0.1", port: 1, user: "nobody"))
+        var heard: [String: (Bool, String?)] = [:]
+        c.awaitRegistration("A") { heard["A"] = ($0, $1) }
+        c.awaitRegistration("B") { heard["B"] = ($0, $1) }
+        c.awaitRegistration("C") { heard["C"] = ($0, $1) }
+        // A is in flight; B's end is listed but no longer the latest.
+        c.applyRegistrationSnapshot(pending: ["id": "A"], ended: ["id": "Z", "success": true],
+                                    endedList: [["id": "B", "success": false, "message": "refused"], ["id": "Z", "success": true]])
+        #expect(heard["B"]?.0 == false && heard["B"]?.1 == "refused")
+        #expect(heard["A"] == nil)
+        // A is gone and its end was forgotten: told it's over, once.
+        c.applyRegistrationSnapshot(pending: nil, ended: nil, endedList: nil)
+        #expect(heard["A"]?.0 == false && !(heard["A"]?.1 ?? "").isEmpty)
+        // C was never seen in flight: a snapshot from before it began proves nothing.
+        #expect(heard["C"] == nil)
+        // The deadline ends a wait no snapshot ever settles.
+        var late: (Bool, String?)?
+        c.awaitRegistration("D", budget: 0.05) { late = ($0, $1) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(late?.0 == false && !(late?.1 ?? "").isEmpty)
     }
 }

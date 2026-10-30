@@ -349,6 +349,7 @@ final class ACAutomationServer {
     /// The last client-initiated registration's outcome, kept a while after
     /// it ended (`RemoteRegistrationBroker.endedDict`).
     var onEndedRegistration: (() -> [String: Any]?)?
+    var onEndedRegistrations: (() -> [[String: Any]])?
     /// Start a subscription registration on this host for a remote client.
     /// (provider, optional profile id) -> ok.
     var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> Bool)?
@@ -2556,6 +2557,7 @@ final class ACAutomationServer {
             // Only present while a client-initiated registration is in flight.
             if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }
             if let ended = self.onEndedRegistration?() { d["registrationEnded"] = ended }
+            if let ended = self.onEndedRegistrations?(), !ended.isEmpty { d["registrationsEnded"] = ended }
             // Only present on a server with the sessions-first home: an older
             // client ignores it, a newer client falls back to the classic
             // layout when it's missing.

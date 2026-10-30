@@ -314,9 +314,19 @@ final class RemoteHostController {
     /// Sign-ins this client started, by the host's run id, each told how it
     /// ended (/state's `registrationEnded`): a refused or failed run
     /// otherwise just left /state, its reason shown only on the host.
-    private var registrationWaiters: [String: (_ success: Bool, _ message: String?) -> Void] = [:]
-    /// The last `registrationEnded` seen, for a waiter whose reply came late.
-    private var lastRegistrationEnd: (id: String, success: Bool, message: String?)?
+    private var registrationWaiters: [String: RegistrationWaiter] = [:]
+    private struct RegistrationWaiter {
+        let ended: (_ success: Bool, _ message: String?) -> Void
+        /// A snapshot showed the run in flight: once it's gone with no end
+        /// listed, the end was missed (the host forgot it), not yet to come.
+        var seenPending = false
+    }
+    /// The ends seen, by run id, for a waiter whose reply came late.
+    private var registrationEnds: [String: (success: Bool, message: String?)] = [:]
+    /// How long a sign-in card waits for its run at most: longer than the
+    /// host's own budget (VM boot, agent start, a four-minute credential
+    /// wait), so the card never stays on "browser will open" for good.
+    static let registrationWaitBudget: TimeInterval = 10 * 60
     /// The scratch login session we've opened a terminal for (nil = none).
     private var registrationTerminalID: UUID?
 
@@ -410,22 +420,53 @@ final class RemoteHostController {
 
     /// Tell `ended` how the host's sign-in run `id` ends — at once if it
     /// already has.
-    func awaitRegistration(_ id: String, _ ended: @escaping (_ success: Bool, _ message: String?) -> Void) {
-        if let last = lastRegistrationEnd, last.id == id {
-            ended(last.success, last.message)
-        } else {
-            registrationWaiters[id] = ended
+    func awaitRegistration(_ id: String, budget: TimeInterval = registrationWaitBudget,
+                           _ ended: @escaping (_ success: Bool, _ message: String?) -> Void) {
+        if let end = registrationEnds[id] {
+            ended(end.success, end.message)
+            return
+        }
+        registrationWaiters[id] = RegistrationWaiter(ended: ended)
+        // The deadline: a link down (or a Mac asleep) past the host's memory
+        // of the end must not leave the card waiting for ever.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+            self?.registrationWaiters.removeValue(forKey: id)?.ended(false, Self.missedRegistrationEnd)
         }
     }
 
-    /// /state's `registrationEnded`: the host's last client-started run and
-    /// how it ended, kept a couple of minutes.
+    private static var missedRegistrationEnd: String {
+        NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
+    }
+
+    /// One /state snapshot's sign-in runs: the ends it lists (every recent
+    /// one, or only the last from an older host), then a waiter whose run
+    /// was seen in flight and is now neither in flight nor listed — its end
+    /// was missed, so it's told the run is over rather than left waiting.
+    func applyRegistrationSnapshot(pending: [String: Any]?, ended: [String: Any]?, endedList: [[String: Any]]?) {
+        for d in endedList ?? [] { applyRegistrationEnded(d) }
+        applyRegistrationEnded(ended)
+        let inFlight = pending?["id"] as? String
+        for (id, var w) in registrationWaiters {
+            if id == inFlight {
+                if !w.seenPending { w.seenPending = true; registrationWaiters[id] = w }
+            } else if w.seenPending {
+                registrationWaiters.removeValue(forKey: id)
+                w.ended(false, Self.missedRegistrationEnd)
+            }
+        }
+    }
+
+    /// One end from /state: the run's id and how it ended.
     func applyRegistrationEnded(_ d: [String: Any]?) {
-        guard let d, let id = d["id"] as? String, lastRegistrationEnd?.id != id else { return }
+        guard let d, let id = d["id"] as? String, registrationEnds[id] == nil else { return }
         let success = d["success"] as? Bool ?? false
         let message = d["message"] as? String
-        lastRegistrationEnd = (id, success, message)
-        registrationWaiters.removeValue(forKey: id)?(success, message)
+        registrationEnds[id] = (success, message)
+        if registrationEnds.count > 64, let any = registrationEnds.keys.first(where: { registrationWaiters[$0] == nil }) {
+            registrationEnds.removeValue(forKey: any)
+        }
+        registrationWaiters.removeValue(forKey: id)?.ended(success, message)
     }
 
     /// Ask the remote to log a subscription out (its store, its scope rules);
@@ -1001,7 +1042,9 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
-        applyRegistrationEnded(snapshot["registrationEnded"] as? [String: Any])
+        applyRegistrationSnapshot(pending: snapshot["pendingRegistration"] as? [String: Any],
+                                  ended: snapshot["registrationEnded"] as? [String: Any],
+                                  endedList: snapshot["registrationsEnded"] as? [[String: Any]])
 #if os(macOS)
         applyLocalModels(snapshot["localModels"] as? [String: Any])
         // Mirror the host's security-engine decisions so the Security Timeline

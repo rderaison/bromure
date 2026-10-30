@@ -138,8 +138,14 @@ final class RemoteRegistrationBroker {
         let message: String?
         let at: Date
     }
-    private(set) var ended: Ended?
-    static let endedKeptFor: TimeInterval = 120
+    /// The recent ends, oldest first: one slot let the next run's end
+    /// overwrite one a client hadn't read yet (asleep, link down).
+    private(set) var endedRuns: [Ended] = []
+    var ended: Ended? { endedRuns.last }
+    /// Longer than a fat client's whole wait for a run
+    /// (`RemoteHostController.registrationWaitBudget`).
+    static let endedKeptFor: TimeInterval = 15 * 60
+    static let endedKeptMax = 16
 
     @discardableResult
     func begin(provider: String) -> UUID {
@@ -153,7 +159,11 @@ final class RemoteRegistrationBroker {
     }
     func publish(vmIP: String) { pending?.vmIP = vmIP }
     func finish(success: Bool = false, message: String? = nil, now: Date = Date()) {
-        if let p = pending { ended = Ended(id: p.id, success: success, message: message, at: now) }
+        if let p = pending {
+            endedRuns.removeAll { now.timeIntervalSince($0.at) >= Self.endedKeptFor }
+            endedRuns.append(Ended(id: p.id, success: success, message: message, at: now))
+            if endedRuns.count > Self.endedKeptMax { endedRuns.removeFirst(endedRuns.count - Self.endedKeptMax) }
+        }
         pending = nil
     }
 
@@ -170,6 +180,16 @@ final class RemoteRegistrationBroker {
     /// `/state`'s `registrationEnded`: the last run's outcome, for a while.
     func endedDict(now: Date = Date()) -> [String: Any]? {
         guard let e = ended, now.timeIntervalSince(e.at) < Self.endedKeptFor else { return nil }
+        return Self.dict(e)
+    }
+
+    /// `/state`'s `registrationsEnded`: every recent run's outcome, so a
+    /// client that missed a few polls still finds its own.
+    func endedList(now: Date = Date()) -> [[String: Any]] {
+        endedRuns.filter { now.timeIntervalSince($0.at) < Self.endedKeptFor }.map(Self.dict)
+    }
+
+    private static func dict(_ e: Ended) -> [String: Any] {
         var d: [String: Any] = ["id": e.id.uuidString, "success": e.success]
         if let m = e.message { d["message"] = m }
         return d
