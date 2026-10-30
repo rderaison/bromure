@@ -138,4 +138,26 @@ struct PortMapCoreTests {
         let b = Inventory.scan(source: "struct Q { func g() { _ = 1 } }", file: "Sources/B/Profile.swift", fileInLinuxBuild: false)
         #expect(Inventory.disambiguate(a + b).map(\.id) == ["Q.g()@A/Profile.swift", "Q.g()@B/Profile.swift"])
     }
+
+    @Test("an inheritance rule skips a UI type, its subclasses, and its extensions in other files")
+    func inheritanceSkip() {
+        let a = Inventory.scanFile(source: """
+            struct Card: View { var body: some View { Text("") } }
+            class Base: NSViewController { func load() {} }
+            class Sub: Base { func more() {} }
+            struct Model { func compute() {} }
+            """, file: "Sources/A/a.swift", fileInLinuxBuild: false)
+        let b = Inventory.scanFile(source: "extension Card { func helper() {} }",
+                                   file: "Sources/A/b.swift", fileInLinuxBuild: false)
+        var cfg = Self.config
+        cfg.skipInheriting = [.init(bases: ["View", "NSViewController"], reason: "ui")]
+        let r = Ledger.assemble(mac: a.records + b.records, linuxOnly: [], config: cfg,
+                                inherits: a.inherits.merging(b.inherits) { $0.union($1) })
+        let s = Dictionary(uniqueKeysWithValues: r.entries.map { ($0.mac.id, $0.status) })
+        #expect(s["Card.var body"] == .skipped)
+        #expect(s["Card.helper()"] == .skipped)
+        #expect(s["Base.load()"] == .skipped)
+        #expect(s["Sub.more()"] == .skipped)
+        #expect(s["Model.compute()"] == .todo)
+    }
 }

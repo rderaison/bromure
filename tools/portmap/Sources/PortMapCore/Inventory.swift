@@ -25,6 +25,9 @@ public struct FunctionRecord: Codable, Equatable, Sendable {
     /// `// @port-skip <reason>` in its leading trivia: deliberately not
     /// needed on Linux (only meaningful on a macOS-only declaration).
     public let skipReason: String?
+    /// The enclosing types, outermost first (extensions name the extended
+    /// type): what an inheritance skip rule matches.
+    public var container: [String] = []
 }
 
 /// `// @port <macOS id> h=<hash> @<commit>`: this Linux declaration
@@ -40,23 +43,54 @@ public enum Inventory {
     /// Every function-like declaration in `files`. `linuxBuild(file)` says
     /// whether a file is compiled into the Linux build at all.
     public static func scan(files: [String], root: URL, linuxBuild: (String) -> Bool) throws -> [FunctionRecord] {
+        try scanWithTypes(files: files, root: root, linuxBuild: linuxBuild).records
+    }
+
+    /// The records, plus what each type (or extension of it) inherits from
+    /// or conforms to, across all the files.
+    public static func scanWithTypes(files: [String], root: URL, linuxBuild: (String) -> Bool) throws
+        -> (records: [FunctionRecord], inherits: [String: Set<String>]) {
         var all: [FunctionRecord] = []
+        var inherits: [String: Set<String>] = [:]
         for rel in files {
             let url = root.appendingPathComponent(rel)
             let text = try String(contentsOf: url, encoding: .utf8)
-            all += scan(source: text, file: rel, fileInLinuxBuild: linuxBuild(rel))
+            let (r, i) = scanFile(source: text, file: rel, fileInLinuxBuild: linuxBuild(rel))
+            all += r
+            inherits.merge(i) { $0.union($1) }
         }
-        return disambiguate(all)
+        return (disambiguate(all), inherits)
     }
 
     public static func scan(source: String, file: String, fileInLinuxBuild: Bool,
                             fileInMacOSBuild: Bool = true) -> [FunctionRecord] {
+        scanFile(source: source, file: file, fileInLinuxBuild: fileInLinuxBuild,
+                 fileInMacOSBuild: fileInMacOSBuild).records
+    }
+
+    public static func scanFile(source: String, file: String, fileInLinuxBuild: Bool,
+                                fileInMacOSBuild: Bool = true)
+        -> (records: [FunctionRecord], inherits: [String: Set<String>]) {
         let tree = Parser.parse(source: source)
         let converter = SourceLocationConverter(fileName: file, tree: tree)
         let v = Collector(file: file, converter: converter,
                           fileIn: [.macOS: fileInMacOSBuild, .linux: fileInLinuxBuild])
         v.walk(tree)
-        return v.records
+        return (v.records, v.inherits)
+    }
+
+    /// The types that inherit (directly, or through another type in the
+    /// scan) from one of `bases`.
+    public static func descendants(of bases: Set<String>, in inherits: [String: Set<String>]) -> Set<String> {
+        var out = Set<String>()
+        var changed = true
+        while changed {
+            changed = false
+            for (t, sup) in inherits where !out.contains(t) {
+                if !sup.isDisjoint(with: bases) || !sup.isDisjoint(with: out) { out.insert(t); changed = true }
+            }
+        }
+        return out
     }
 
     /// Same id twice: keep the first plain only when the two are the two
@@ -172,6 +206,8 @@ private final class Collector: SyntaxVisitor {
     let file: String
     let converter: SourceLocationConverter
     var records: [FunctionRecord] = []
+    /// Type → what its declaration and extensions inherit from.
+    var inherits: [String: Set<String>] = [:]
     /// Enclosing type names (extensions contribute their extended type).
     var typeStack: [String] = []
     /// Whether every enclosing `#if` clause is active, per platform.
@@ -205,19 +241,26 @@ private final class Collector: SyntaxVisitor {
     }
 
     // MARK: types
-    private func enter(_ name: String) { typeStack.append(name) }
-    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text); return .visitChildren }
+    private func enter(_ name: String, _ clause: InheritanceClauseSyntax? = nil) {
+        typeStack.append(name)
+        // Generic arguments and module qualifiers aside: `SwiftUI.View`, `NSViewRepresentable`.
+        let sup = (clause?.inheritedTypes ?? []).map {
+            $0.type.trimmedDescription.components(separatedBy: "<")[0].components(separatedBy: ".").last ?? ""
+        }
+        inherits[name, default: []].formUnion(sup)
+    }
+    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text, node.inheritanceClause); return .visitChildren }
     override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast() }
-    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text); return .visitChildren }
+    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text, node.inheritanceClause); return .visitChildren }
     override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast() }
-    override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text); return .visitChildren }
+    override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text, node.inheritanceClause); return .visitChildren }
     override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text); return .visitChildren }
     override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind { enter(node.name.text); return .visitChildren }
     override func visitPost(_ node: ProtocolDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
-        enter(node.extendedType.trimmedDescription); return .visitChildren
+        enter(node.extendedType.trimmedDescription, node.inheritanceClause); return .visitChildren
     }
     override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast() }
 
@@ -247,7 +290,7 @@ private final class Collector: SyntaxVisitor {
             hash: Inventory.bodyHash(body, excluding: segments),
             lines: lineCount - segments.reduce(0) { $0 + Self.lines($1.node) },
             inMacOS: isIn(.macOS), inLinux: isIn(.linux),
-            ports: ann.ports, skipReason: ann.skip))
+            ports: ann.ports, skipReason: ann.skip, container: typeStack))
         // Each segment: its own entry, `<parent id> / <label>`. A Linux
         // port annotates the code that implements it the same way.
         for seg in segments {
@@ -257,7 +300,7 @@ private final class Collector: SyntaxVisitor {
                 line: converter.location(for: seg.node.positionAfterSkippingLeadingTrivia).line,
                 hash: Inventory.bodyHash(seg.node), lines: Self.lines(seg.node),
                 inMacOS: isIn(.macOS), inLinux: isIn(.linux),
-                ports: segAnn.ports, skipReason: segAnn.skip ?? ann.skip))
+                ports: segAnn.ports, skipReason: segAnn.skip ?? ann.skip, container: typeStack))
         }
     }
 

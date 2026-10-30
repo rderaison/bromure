@@ -13,6 +13,14 @@ public struct PortConfig: Codable, Sendable {
     public var linuxRoots: [String]
     /// Whole files or ids not needed on Linux, with why ("ui", "apple-only"…).
     public var skip: [SkipRule]
+    /// Everything inside a type that inherits from one of `bases` (directly
+    /// or through another scanned type), its extensions included.
+    public var skipInheriting: [InheritanceRule]? = nil
+
+    public struct InheritanceRule: Codable, Sendable {
+        public var bases: [String]
+        public var reason: String
+    }
 
     public struct SkipRule: Codable, Sendable {
         public var path: String?
@@ -89,19 +97,26 @@ public enum Ledger {
         let macFiles = sourceFiles(under: config.macosRoots, root: root)
         let linuxOnlyFiles = sourceFiles(under: config.linuxRoots, root: root)
         let linuxGlobs = config.linuxBuild.map(Glob.init)
-        let mac = try Inventory.scan(files: macFiles, root: root,
+        let (mac, inherits) = try Inventory.scanWithTypes(files: macFiles, root: root,
                                      linuxBuild: { f in linuxGlobs.contains { $0.matches(f) } })
         var linuxOnly: [FunctionRecord] = []
         for f in linuxOnlyFiles {
             let text = try String(contentsOf: root.appendingPathComponent(f), encoding: .utf8)
             linuxOnly += Inventory.scan(source: text, file: f, fileInLinuxBuild: true, fileInMacOSBuild: false)
         }
-        return assemble(mac: mac, linuxOnly: linuxOnly, config: config)
+        return assemble(mac: mac, linuxOnly: linuxOnly, config: config, inherits: inherits)
     }
 
     /// Pure: the report from scanned records (unit-tested).
     public static func assemble(mac all: [FunctionRecord], linuxOnly: [FunctionRecord],
-                                config: PortConfig) -> Report {
+                                config: PortConfig, inherits: [String: Set<String>] = [:]) -> Report {
+        // Type → why everything in it is skipped.
+        var typeRules: [String: String] = [:]
+        for rule in config.skipInheriting ?? [] {
+            for t in Inventory.descendants(of: Set(rule.bases), in: inherits) where typeRules[t] == nil {
+                typeRules[t] = rule.reason
+            }
+        }
         let macSide = all.filter { $0.inMacOS }
         // Linux implementations: Linux-only files plus `#if os(Linux)`
         // branches of shared files.
@@ -128,7 +143,9 @@ public enum Ledger {
                 status = .shared
             } else if !mine.isEmpty {
                 status = mine.allSatisfy { $0.portedHash == r.hash } ? .ported : .stale
-            } else if let why = r.skipReason ?? idRules[r.id] ?? pathRules.first(where: { $0.0.matches(r.file) })?.1 {
+            } else if let why = r.skipReason ?? idRules[r.id]
+                        ?? r.container.lazy.compactMap({ typeRules[$0] }).first
+                        ?? pathRules.first(where: { $0.0.matches(r.file) })?.1 {
                 status = .skipped
                 reason = why
             } else {

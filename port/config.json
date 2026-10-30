@@ -1,6 +1,324 @@
 {
-  "macosRoots": ["Sources/AgentCoding", "Sources/SandboxEngine", "Sources/BrowserBridges"],
+  "macosRoots": [
+    "Sources/AgentCoding",
+    "Sources/SandboxEngine",
+    "Sources/BrowserBridges"
+  ],
   "linuxBuild": [],
-  "linuxRoots": ["Sources/ACLinux"],
-  "skip": []
+  "linuxRoots": [
+    "Sources/ACLinux"
+  ],
+  "skip": [
+    {
+      "path": "Sources/AgentCoding/FatClientConnect.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientController.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientFleet.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientForward.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientLinkHealth.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientPAC.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientSSHDial.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientNIOSSH.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientTunnel.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientTunnelDaemon.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientTunnelDiagnosis.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientTunnelHelper.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatForward.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/UtunForwarder.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/UtunPacket.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/UtunUDP.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/Inference/MLX*.swift",
+      "reason": "apple-gpu: MLX in-process engine"
+    },
+    {
+      "path": "Sources/SandboxEngine/HostGPUFrameView.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/MacOS27GPUSession.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/MacOS27RendererClient.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/MetalRendererPreference.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/MultiGPUInputBridge.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/RendererCommandProcessor.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/SharedWindowControllerBridge.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/GuestPointerBridge.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/PointerWireQueue.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/KeyboardBridge.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/SandboxEngine/ScrollBridge.swift",
+      "reason": "apple-gpu: host display and input bridges"
+    },
+    {
+      "path": "Sources/AgentCoding/ScriptCommands.swift",
+      "reason": "applescript"
+    },
+    {
+      "path": "Sources/AgentCoding/*View.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/*Views.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/*Window.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Inference/*View.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Vendor/**",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/BeautifiedSessionView.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/ClaudeTranscriptView.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/CommandPalette.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/ComposerTextView.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/DemoMode.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Icons.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/NativeTabBarView.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/OnboardingWizard.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/PolicyDrawer.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/RoomStage.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/ScratchTerminalDrawer.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/ScrollBench.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/SessionPane.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/SessionStageViews.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/UndoToast.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/WindowFrost.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/WorkspaceBrowserController.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/FlameGraph.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/BromureApplication.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Mitm/PromptInjectionModelDownloadUI.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Terminal/GhosttyRuntime.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Terminal/TerminalImagePaste.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Terminal/TerminalSessionController.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Terminal/GridLayoutStore.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/Terminal/TerminalPaneHistory.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/TerminalAppDefaults.swift",
+      "reason": "ui"
+    }
+  ],
+  "skipInheriting": [
+    {
+      "reason": "ui",
+      "bases": [
+        "View",
+        "ViewModifier",
+        "ButtonStyle",
+        "PrimitiveButtonStyle",
+        "LabelStyle",
+        "ToggleStyle",
+        "TextFieldStyle",
+        "MenuStyle",
+        "Shape",
+        "InsettableShape",
+        "ShapeStyle",
+        "Layout",
+        "PreferenceKey",
+        "EnvironmentKey",
+        "FocusedValueKey",
+        "App",
+        "Scene",
+        "Commands",
+        "TableColumnContent",
+        "ToolbarContent",
+        "ChartContent",
+        "NSViewRepresentable",
+        "NSViewControllerRepresentable",
+        "UIViewRepresentable",
+        "UIViewControllerRepresentable",
+        "NSView",
+        "NSViewController",
+        "NSWindowController",
+        "NSWindow",
+        "NSPanel",
+        "NSHostingView",
+        "NSHostingController",
+        "NSTextView",
+        "NSScrollView",
+        "NSTableView",
+        "NSOutlineView",
+        "NSControl",
+        "NSButton",
+        "NSTextField",
+        "NSTableCellView",
+        "NSCollectionViewItem",
+        "NSSplitViewController",
+        "NSTabViewController",
+        "NSVisualEffectView",
+        "NSStackView",
+        "NSImageView",
+        "NSClipView",
+        "NSRulerView",
+        "NSMenu",
+        "NSMenuItem",
+        "NSPopover",
+        "NSTitlebarAccessoryViewController",
+        "NSToolbar",
+        "NSCell",
+        "NSTextFieldCell",
+        "NSLayoutManager",
+        "NSTextStorage",
+        "NSTextContainer",
+        "UIView",
+        "UIViewController",
+        "UIWindow",
+        "UIScene",
+        "UIResponder",
+        "UIHostingController"
+      ]
+    }
+  ]
 }

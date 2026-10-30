@@ -38,7 +38,9 @@ cd tools/portmap && swift build -c release
 tools/portmap/.build/release/portmap status --root .
 ```
 
-On 2026-10-30 the baseline is **12,285 entries and 200K body lines, all `todo`**. The first job is to sort that pile: classify UI as `skipped`, then move what's already portable into `shared`.
+On 2026-10-30 the baseline is 12,262 entries (195K body lines). The `skipInheriting` rule skips everything in types that inherit from SwiftUI/AppKit/UIKit view bases, along with their subclasses and extensions. The `skip` path rules cover the fat client's client side, MLX, GPU and display bridges, AppleScript, and UI-only files. After both, **4,107 entries are skipped and 8,155 (124K lines) are the port**.
+
+A wrong skip is harmless: as soon as a file joins the Linux build, its functions count as `shared` whatever the rule says.
 
 ## The shape of the code
 
@@ -76,6 +78,7 @@ Today's measure:
 | Agent features | sessions engine, automations, kanban, delegation, repo watch, rooms, switchboard, launch restore | Shared (server-side logic); only the UI half is skipped. | 7 |
 | Terminals | Ghostty surfaces; `__attach-window` PTY relay over vsock 5800 | No local terminal. `__attach-window` (the fat client's path) is shared. | 5 |
 | Guest image | `UbuntuImageManager` bakes noble **arm64** with `setup.sh` and the vm-setup agents | The same scripts bake an **amd64** image (and arm64 for arm64 Linux hosts), versioned like `imageVersion` and published per architecture. Guest agents are unchanged. | 2 |
+| Kernel sentry (OpenShell) | `sentry-dist/src/bromure_sentry.c`, arm64 only: `#error` unless `CONFIG_ARM64`, it reads `regs->regs[0..2]`, and its build and `Jenkinsfile.sentry` use aarch64 gcc | An x86_64 build: `regs->di/si/dx`, an amd64 cross-compiler, and a module per architecture. | 8 |
 | Kubernetes, registries, LAN load balancer | `KubeClusterEngine`, `KubeRegistryEngine`, `KubeLANAnnouncer` | Shared engines on the Linux VM backend. | 8 |
 | Local models | MLX in-process engine | Skipped: Apple GPU only. The external engine (vLLM/Ollama) path is shared. | — |
 | Lifecycle, updates | LaunchAgents, `SMAppService`, Sparkle | systemd user units; updates from the package repo, like the Linux Sidecar. | 5 |
