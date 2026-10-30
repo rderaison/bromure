@@ -64,7 +64,7 @@ struct RemoteSignInEndTests {
         let fail = try #require(r.range(of: "func failClaudeRegistration(_ message: String) {"))
         let failBody = r[fail.upperBound...].prefix(500)
         #expect(failBody.contains("teardownClaudeRegistration(reason: .failure, message: message)"))
-        #expect(r.contains("RemoteRegistrationBroker.shared.finish(success: reason == .success, message: message)"))
+        #expect(r.contains("RemoteRegistrationBroker.shared.finish(success: ended == .success, message: message)"))
         // VM start, CLI launch and timeout failures too.
         #expect(r.contains("self.teardownClaudeRegistration(reason: .failure, message: message)\n                return"))
         #expect(r.contains("teardownClaudeRegistration(reason: .failure, message: message)\n            return"))
@@ -106,7 +106,10 @@ struct RemoteSignInEndTests {
         let r = try Self.src("Sources/AgentCoding/ClaudeRegistrationCoordinator.swift")
         let teardown = try #require(r.range(of: "func teardownClaudeRegistration(reason:"))
         let body = r[teardown.upperBound...].prefix(1400)
-        #expect(body.contains("let message = reason == .success ? nil : (message ?? reason.endedMessage)"))
+        #expect(body.contains("let message = ended == .success ? nil : (message ?? ended.endedMessage)"))
+        // An end during the linger after the credential is saved is a success.
+        #expect(body.contains("let ended = state.captured ? .success : reason"))
+        #expect(r.contains("state.captured = true\n        // The sign-in card: done"))
         #expect(body.contains("ev(.finished(success: false, message: message))"))
         // The VM stopping on its own, no vsock device, the proxy gone.
         #expect(r.contains("\"The sign-in machine stopped.\""))
