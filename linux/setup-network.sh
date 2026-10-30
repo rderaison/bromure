@@ -5,8 +5,9 @@
 #     without privileges; it is the switch's uplink, ACLinux's TapUplink.
 #   - Gives the tap the host's address on the VM subnet. The default is 192.168.64.1/24, as the
 #     macOS vmnet gateway.
-#   - Adds an nftables table `ip bromure` that masquerades the subnet out of the uplink interface
-#     and accepts that forwarded traffic in its own forward chain.
+#   - Adds an nftables table `ip bromure` that masquerades the subnet out of the uplink interface,
+#     accepts that forwarded traffic in its own forward chain, and drops any other forwarded traffic
+#     toward the VMs (only replies get in).
 #   - Turns on net.ipv4.ip_forward (runtime only).
 #
 # It is idempotent: running it again converges, and the table is replaced atomically. It never
@@ -36,6 +37,10 @@ done
 log() { echo "setup-network: $*"; }
 die() { echo "setup-network: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run as root"
+# Interface names go into ip(8) and the nft script: IFNAMSIZ-1 chars, nothing nft would parse.
+valid_ifname() { [[ "$1" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; }
+valid_ifname "$DEV" || die "--dev must be 1-15 characters from [A-Za-z0-9_.-]"
+[ -z "$UPLINK" ] || valid_ifname "$UPLINK" || die "--uplink must be 1-15 characters from [A-Za-z0-9_.-]"
 command -v nft >/dev/null || die "nft (nftables) is required"
 
 if [ $UNINSTALL = 1 ]; then
@@ -74,6 +79,7 @@ NET=$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]
 if [ -z "$UPLINK" ]; then
   UPLINK=$(ip -4 route show default | awk '/default/ { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit } }')
   [ -n "$UPLINK" ] || die "no IPv4 default route; pass --uplink IFACE"
+  valid_ifname "$UPLINK" || die "default-route interface '$UPLINK' is not a plain interface name; pass --uplink"
 fi
 [ "$UPLINK" != "$DEV" ] || die "the uplink can't be $DEV itself"
 
@@ -102,7 +108,10 @@ table ip bromure {
   chain forward {
     type filter hook forward priority filter; policy accept;
     iifname "$DEV" oifname "$UPLINK" ip saddr $NET accept
-    iifname "$UPLINK" oifname "$DEV" ct state established,related accept
+    oifname "$DEV" ct state established,related accept
+    # Nothing else is forwarded to the VMs: a LAN machine routing the VM
+    # subnet through this host must not open connections to them.
+    oifname "$DEV" drop
   }
 }
 NFT

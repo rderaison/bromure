@@ -27,15 +27,56 @@ func ms(_ d: Duration) -> String {
     String(format: "%.0f ms", Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15)
 }
 
-/// The next connection from `stream`, or nil after `timeout`.
-func next(_ stream: AsyncStream<VsockConnection>, timeout: Duration) async -> VsockConnection? {
-    await withTaskGroup(of: VsockConnection?.self) { g in
-        g.addTask { var it = stream.makeAsyncIterator(); return await it.next() }
-        g.addTask { try? await Task.sleep(for: timeout); return nil }
-        let r = await g.next() ?? nil
-        g.cancelAll()
-        return r
+/// Connections from one CID, drained by a single long-lived consumer.
+/// Waiting with a timeout must not cancel a task blocked in the stream's
+/// iterator: cancelling a pending `next()` finishes an AsyncStream for good,
+/// and every later wait would come back empty.
+actor ConnQueue {
+    private var buffer: [VsockConnection] = []
+    private var waiters: [Int: CheckedContinuation<VsockConnection?, Never>] = [:]
+    private var nextWaiter = 0
+    private var finished = false
+
+    init(_ stream: AsyncStream<VsockConnection>) {
+        Task { [weak self] in
+            for await c in stream { await self?.push(c) }
+            await self?.finish()
+        }
     }
+
+    private func push(_ c: VsockConnection) {
+        if let (id, w) = waiters.min(by: { $0.key < $1.key }) {
+            waiters.removeValue(forKey: id)
+            w.resume(returning: c)
+        } else {
+            buffer.append(c)
+        }
+    }
+
+    private func finish() {
+        finished = true
+        for w in waiters.values { w.resume(returning: nil) }
+        waiters = [:]
+    }
+
+    private func expire(_ id: Int) { waiters.removeValue(forKey: id)?.resume(returning: nil) }
+
+    /// The next connection, or nil after `timeout` (or once the stream ended).
+    func take(timeout: Duration) async -> VsockConnection? {
+        if !buffer.isEmpty { return buffer.removeFirst() }
+        if finished { return nil }
+        nextWaiter += 1
+        let id = nextWaiter
+        Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            await self?.expire(id)
+        }
+        return await withCheckedContinuation { waiters[id] = $0 }
+    }
+}
+
+func next(_ q: ConnQueue, timeout: Duration) async -> VsockConnection? {
+    await q.take(timeout: timeout)
 }
 
 @Suite("QEMUMachine boots the baked image", .serialized, .enabled(if: Env.ready))
@@ -80,11 +121,10 @@ struct BootTests {
         let ws = try Workspace(machine: machine)
         defer { ws.cleanUp() }
         let listener = try await VsockListener.shared(port: agentPort)
-        defer { Task { await listener.forget(cid: ws.cid) } }
         let label = "[\(machine.rawValue) cid \(ws.cid)]"
 
         // 1. Cold boot until agentd's first dial.
-        var conns = await listener.connections(from: ws.cid)
+        var conns = ConnQueue(await listener.connections(from: ws.cid))
         let vm = QEMUMachine(config: ws.config)
         let stopped = StopRecorder()
         await vm.setOnStopped { stopped.record($0) }
@@ -125,7 +165,7 @@ struct BootTests {
 
         // 4. Restore into a fresh QEMUMachine; agentd re-dials (the vsock
         // transport resets on migration, so its pool reconnects).
-        conns = await listener.connections(from: ws.cid)
+        conns = ConnQueue(await listener.connections(from: ws.cid))
         let vm2 = QEMUMachine(config: ws.config)
         let t1 = ContinuousClock.now
         let r = try await vm2.restore(from: state)
@@ -155,6 +195,8 @@ struct BootTests {
         await #expect(throws: MachineError.snapshotMismatch(state: state, overlay: ws.config.overlay)) {
             try await vm3.restore(from: state)
         }
+        // Before the defer releases the CID, which another test may get next.
+        await listener.forget(cid: ws.cid)
     }
 
     @Test("kill() reports .killed, and a CID clash fails start with QEMU's error")

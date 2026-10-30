@@ -308,7 +308,9 @@ public actor QEMUMachine {
     private func daemonExited(_ tag: String) {
         // Expected once QEMU is gone; otherwise the guest just lost a
         // filesystem it can't get back (vhost-user-fs has no reconnect).
-        guard state == .running || state == .starting, let qemu else { return }
+        // A stop/kill/suspend in progress already explains it: QEMU going away
+        // is what makes virtiofsd exit, and its exit may be reaped first.
+        guard state == .running || state == .starting, pendingReason == nil, let qemu else { return }
         pendingReason = .virtiofsdExited(tag: tag)
         qemu.signal(SIGKILL)
     }

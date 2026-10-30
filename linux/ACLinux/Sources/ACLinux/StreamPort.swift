@@ -64,10 +64,16 @@ public final class StreamPort: Sendable {
     public func send(_ frame: Data) {
         guard frame.count >= Self.minFrame, frame.count <= Self.maxFrame,
               let ch = peer.withLockedValue({ $0 }) else { return }
-        var buf = ch.allocator.buffer(capacity: frame.count + 4)
+        ch.writeAndFlush(Self.encode(frame, allocator: ch.allocator), promise: nil)
+    }
+
+    /// `u32 length (big-endian) + frame`, the stream netdev's (and passt's) wire format.
+    // @port-skip linux-only: QEMU stream netdev framing
+    static func encode(_ frame: Data, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buf = allocator.buffer(capacity: frame.count + 4)
         buf.writeInteger(UInt32(frame.count))
         buf.writeBytes(frame)
-        ch.writeAndFlush(buf, promise: nil)
+        return buf
     }
 
     // @port-skip linux-only: QEMU stream netdev
@@ -147,9 +153,9 @@ struct LengthPrefixedFrameDecoder: ByteToMessageDecoder {
     }
 }
 
-/// Inbound frames into the port's stream.
+/// Inbound frames into an AsyncStream (StreamPort, PasstUplink).
 // @port-skip linux-only: QEMU stream netdev
-private final class FrameSink: ChannelInboundHandler, Sendable {
+final class FrameSink: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
     let sink: AsyncStream<Data>.Continuation
 

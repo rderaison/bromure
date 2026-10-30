@@ -14,4 +14,13 @@ int acl_vhost_vsock_cid_in_use(uint64_t cid);
 /// Returns the fd (O_CLOEXEC), or -errno.
 int acl_tap_open(const char *name);
 
+/// posix_spawn `path` with `argv` (NULL-terminated) and the current
+/// environment; the child's stdin/stdout/stderr are `in_fd`/`out_fd`/`err_fd`
+/// (-1: /dev/null), every other descriptor is closed, the signal mask and
+/// dispositions are reset. Returns 0 and the pid, or an errno.
+int acl_spawn(const char *path, char *const argv[], int in_fd, int out_fd, int err_fd, int *pid_out);
+
+/// waitpid() for `pid`, blocking; returns the exit status, or 128 + signal.
+int acl_wait(int pid);
+
 #endif

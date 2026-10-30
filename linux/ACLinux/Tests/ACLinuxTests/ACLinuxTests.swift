@@ -303,3 +303,32 @@ struct StreamPortTests {
         await port.close()
     }
 }
+
+@Suite("passt uplink", .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/passt")))
+struct PasstUplinkTests {
+    @Test("passt answers ARP for the gateway on its MAC, and exits when we close")
+    func arp() async throws {
+        let up = try await PasstUplink.start(.init())
+        let pid = try #require(up.pid)
+        // who-has 192.168.64.1 tell 192.168.64.2, from 52:54:00:00:00:01
+        let me: [UInt8] = [0x52, 0x54, 0, 0, 0, 1]
+        let arp = Data([UInt8](repeating: 0xFF, count: 6) + me + [0x08, 0x06, 0, 1, 0x08, 0, 6, 4, 0, 1]
+                       + me + [192, 168, 64, 2] + [UInt8](repeating: 0, count: 6) + [192, 168, 64, 1]
+                       + [UInt8](repeating: 0, count: 18))
+        up.send(arp)
+        var it = up.frames.makeAsyncIterator()
+        var reply: [UInt8] = []
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            guard let f = await it.next() else { break }
+            let b = [UInt8](f)
+            if b.count >= 42, b[12] == 0x08, b[13] == 0x06, b[21] == 2 { reply = b; break }
+        }
+        #expect(reply.count >= 42, "no ARP reply from passt")
+        #expect(Array(reply[22..<28]) == [0x9a, 0x55, 0x9a, 0x55, 0x9a, 0x55])
+        #expect(Array(reply[28..<32]) == [192, 168, 64, 1])
+        await up.close()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(kill(pid, 0) != 0, "passt still running after close")
+    }
+}

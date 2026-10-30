@@ -23,9 +23,9 @@ step "ACLinux: KVM integration"
 # Until the vhost udev rule is installed, /dev/vhost-vsock is kvm-group only:
 # run as this user with the kvm group added (not as root).
 if [ -w /dev/vhost-vsock ] || ! sudo -n -g kvm true 2>/dev/null; then
-  swift test --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
+  swift test --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 else
-  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" swift test --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
+  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" swift test --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 fi
 step "network: netns bridge test"
 if sudo -n true 2>/dev/null; then
