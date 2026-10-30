@@ -31,25 +31,38 @@ public struct SnapshotIdentity: Codable, Sendable, Equatable {
     // @port-skip linux-only: snapshot identity
     public static func sidecarPath(forState state: String) -> String { state + ".identity.json" }
 
+    /// The sidecar for a further disk of the snapshot (the home image).
     // @port-skip linux-only: snapshot identity
-    public func write(forState state: String) throws {
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(self).write(to: URL(fileURLWithPath: Self.sidecarPath(forState: state)), options: .atomic)
+    public static func sidecarPath(forState state: String, disk index: Int) -> String {
+        state + ".identity.disk\(index).json"
     }
 
     // @port-skip linux-only: snapshot identity
-    public static func read(forState state: String) throws -> SnapshotIdentity {
-        let p = sidecarPath(forState: state)
+    public func write(forState state: String, disk index: Int? = nil) throws {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let p = index.map { Self.sidecarPath(forState: state, disk: $0) } ?? Self.sidecarPath(forState: state)
+        try enc.encode(self).write(to: URL(fileURLWithPath: p), options: .atomic)
+    }
+
+    // @port-skip linux-only: snapshot identity
+    public static func read(forState state: String, disk index: Int? = nil) throws -> SnapshotIdentity {
+        let p = index.map { sidecarPath(forState: state, disk: $0) } ?? sidecarPath(forState: state)
         guard let d = FileManager.default.contents(atPath: p) else { throw MachineError.snapshotMissing(p) }
         return try JSONDecoder().decode(SnapshotIdentity.self, from: d)
     }
 
     /// Throws unless `overlay` is the very file `state` was saved with.
     // @port-skip linux-only: snapshot identity
-    public static func verify(state: String, overlay: String) throws {
-        let saved = try read(forState: state)
+    public static func verify(state: String, overlay: String, disk index: Int? = nil) throws {
+        let saved = try read(forState: state, disk: index)
         let now = try of(overlay: overlay)
         guard saved == now else { throw MachineError.snapshotMismatch(state: state, overlay: overlay) }
+    }
+
+    /// Every sidecar a state may have (cleanup after a restore or a removal).
+    // @port-skip linux-only: snapshot identity
+    public static func sidecars(forState state: String, disks: Int) -> [String] {
+        [sidecarPath(forState: state)] + (0..<disks).map { sidecarPath(forState: state, disk: $0) }
     }
 }

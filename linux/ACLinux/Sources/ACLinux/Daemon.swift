@@ -11,6 +11,9 @@ public struct DaemonConfig: Sendable {
     public var imageDir: String
     /// bromure-agentd.py, staged into each VM's meta share.
     public var agentdPath: String
+    /// A new VM's home image, GiB (sparse: costs nothing up front). macOS:
+    /// SessionDisk.defaultHomeImageGB. Env: BROMURE_AC_HOME_GB.
+    public var homeImageGB = 16
 
     // @port-skip linux-only: Linux daemon configuration
     public init(stateDir: String, runtimeDir: String, imageDir: String, agentdPath: String) {
@@ -31,6 +34,14 @@ public struct DaemonConfig: Sendable {
             runtimeDir: xdg("XDG_RUNTIME_DIR", "/tmp/bromure-ac-\(getuid())") + "/bromure-ac",
             imageDir: env["BROMURE_AC_IMAGE"] ?? data + "/bromure-ac/image-amd64",
             agentdPath: env["BROMURE_AGENTD"] ?? data + "/bromure-ac/vm-setup/bromure-agentd.py")
+            .with { c in if let gb = env["BROMURE_AC_HOME_GB"].flatMap(Int.init) { c.homeImageGB = min(1024, max(8, gb)) } }
+    }
+
+    // @port-skip linux-only: Linux daemon configuration
+    func with(_ f: (inout DaemonConfig) -> Void) -> DaemonConfig {
+        var c = self
+        f(&c)
+        return c
     }
 
     // @port-skip linux-only: Linux daemon configuration
@@ -180,6 +191,8 @@ public actor Daemon {
         case ("DELETE", ""): return await deleteVM(rec, action: body["action"]?.stringValue ?? "shutdown")
         case ("POST", "exec"): return await exec(rec, body)
         case ("POST", "resume"): return await resume(rec)
+        case ("POST", "start"): return await start(rec)
+        case ("POST", "remove"): return remove(rec)
         default: return .error(405, "Method not allowed")
         }
     }
@@ -242,6 +255,47 @@ public actor Daemon {
         }
     }
 
+    /// `POST /vms/{id}/start` (Linux): boot a stopped VM again, on its own
+    /// overlay and home image.
+    // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
+    func start(_ rec: VMRecord) async -> ControlResponse {
+        guard rec.state == .stopped else {
+            let hint = rec.state == .suspended ? " (resume it)" : ""
+            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)\(hint)", ["state": .string(rec.state.rawValue)])
+        }
+        var r = rec
+        if !CIDAllocator.shared.claim(rec.cid) {
+            guard let fresh = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
+            r.cid = fresh
+        }
+        do {
+            try await launch(&r, restoreFrom: nil)
+            return ControlResponse(200, ["status": "running"])
+        } catch {
+            CIDAllocator.shared.release(r.cid)
+            return .error(500, "Start failed: \(error)")
+        }
+    }
+
+    /// `POST /vms/{id}/remove` (Linux): forget a stopped or suspended VM and
+    /// delete everything it had: overlay, home image, meta, outbox, saved state.
+    // @port-skip linux-only: macOS deletes a workspace from its profile store; Linux VMs are the workspaces for now
+    func remove(_ rec: VMRecord) -> ControlResponse {
+        guard rec.state == .stopped || rec.state == .suspended, live[rec.id] == nil else {
+            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue); stop it first", ["state": .string(rec.state.rawValue)])
+        }
+        if reservedCIDs.remove(rec.cid) != nil { CIDAllocator.shared.release(rec.cid) }
+        do {
+            try registry.remove(id: rec.id)
+        } catch {
+            return .error(500, "Remove failed: \(error)")
+        }
+        // The id is a UUID we made: vmDir can't name anything but this VM's directory.
+        try? FileManager.default.removeItem(atPath: vmDir(rec.id))
+        try? FileManager.default.removeItem(atPath: config.runtimeDir + "/vms/" + rec.shortId)
+        return ControlResponse(200, ["status": "removed"])
+    }
+
     /// `POST /vms/{id}/exec` `{command, argv?, timeout?}` →
     /// `{stdout, stderr, exitCode}`; 409 when the VM isn't running, 502 when
     /// its shell agent doesn't come up within 10 s.
@@ -298,6 +352,13 @@ public actor Daemon {
         // The guest MTU rule (PasstUplink.Config.mtu): 65520 behind passt;
         // VPN profiles keep the macOS 1280/1400 (no profiles on Linux yet).
         try "\(passt.mtu)\n".write(toFile: dir + "/meta/mtu", atomically: true, encoding: .utf8)
+        // The home: a sparse raw image as the second disk (vdb), kept across
+        // stop/start and suspend/resume, deleted with the VM. agentd sees
+        // `home.mode` ext4, mkfs's the blank disk on first boot (label
+        // bromure-home) and mounts it over /home/ubuntu, as on macOS.
+        let home = dir + "/home.img"
+        try Self.ensureHomeImage(atPath: home, gib: config.homeImageGB)
+        try "ext4\n".write(toFile: dir + "/meta/home.mode", atomically: true, encoding: .utf8)
 
         var qc = try QEMUMachineConfig(name: "bromure-\(rec.shortId)", bakedImage: config.imageDir,
                                        overlay: dir + "/disk.qcow2", vsockCID: rec.cid, runDirectory: run)
@@ -308,6 +369,7 @@ public actor Daemon {
                      .init(tag: "bromure-outbox", hostPath: dir + "/outbox")]
         qc.network = .stream(socketPath: run + "/net.sock")
         qc.macAddress = rec.mac
+        qc.extraDisks = [.init(path: home)]
 
         let port = try await StreamPort.listen(path: run + "/net.sock")
         sw.attach(port, mac: rec.mac)
@@ -327,10 +389,26 @@ public actor Daemon {
         rec.bootedAt = statePath == nil ? Date() : (rec.bootedAt ?? Date())
         if statePath != nil {
             try? fm.removeItem(atPath: statePath!)
-            try? fm.removeItem(atPath: SnapshotIdentity.sidecarPath(forState: statePath!))
+            for p in SnapshotIdentity.sidecars(forState: statePath!, disks: qc.extraDisks.count) { try? fm.removeItem(atPath: p) }
             rec.statePath = nil
         }
         try registry.upsert(rec)
+    }
+
+    /// Creates the sparse home image if missing (ftruncate: all holes). An
+    /// existing one is left alone: it's the VM's home.
+    // partial: no free-space check (EphemeralDisk.checkDiskSpace) and no ProfileStore change notice; size from DaemonConfig
+    // @port SessionDisk.ensureHomeImageExists() h=83d4fac81b0747d2 @25ad3a88
+    static func ensureHomeImage(atPath path: String, gib: Int) throws {
+        guard !FileManager.default.fileExists(atPath: path) else { return }
+        let fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw MachineError.io("create \(path)", errno) }
+        defer { close(fd) }
+        guard ftruncate(fd, off_t(gib) << 30) == 0 else {
+            let e = errno
+            unlink(path)
+            throw MachineError.io("ftruncate \(path)", e)
+        }
     }
 
     /// QEMU went away (any reason): unplug it, and record what it is now.

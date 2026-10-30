@@ -57,7 +57,8 @@ enum Signals {
 // @port-skip linux-only: Linux CLI group (macOS: `workspaces`, alias `vm`)
 struct VM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Manage VMs.", subcommands: [Run.self, Ls.self, Exec.self, Kill.self, Suspend.self, Resume.self])
+        abstract: "Manage VMs.", subcommands: [Run.self, Ls.self, Exec.self, Kill.self, Suspend.self, Resume.self,
+                                                 Start.self, Rm.self])
 }
 
 // @port-skip linux-only: CLI plumbing
@@ -184,6 +185,30 @@ extension VM {
             let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/resume")
             try check(r, "resume")
             print("Resumed \(vm).")
+        }
+    }
+
+    // @port-skip linux-only: start a stopped VM (macOS starts the workspace)
+    struct Start: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Start a stopped VM again (its disk and home are kept).")
+        @Argument(help: "VM id or name.") var vm: String
+        // @port-skip linux-only: start a stopped VM
+        func run() async throws {
+            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/start")
+            try check(r, "start")
+            print("Started \(vm).")
+        }
+    }
+
+    // @port-skip linux-only: remove a VM and its disks (macOS deletes the workspace)
+    struct Rm: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Remove a stopped or suspended VM with its disk, home and state.")
+        @Argument(help: "VM id or name.") var vm: String
+        // @port-skip linux-only: remove a VM
+        func run() async throws {
+            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/remove")
+            try check(r, "rm")
+            print("Removed \(vm).")
         }
     }
 }

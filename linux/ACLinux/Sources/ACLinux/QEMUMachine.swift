@@ -162,7 +162,9 @@ public actor QEMUMachine {
         guard state == .running, let qmp, let qemu else { throw MachineError.notRunning }
         let t0 = ContinuousClock.now
         try? FileManager.default.removeItem(atPath: statePath)
-        try? FileManager.default.removeItem(atPath: SnapshotIdentity.sidecarPath(forState: statePath))
+        for p in SnapshotIdentity.sidecars(forState: statePath, disks: config.extraDisks.count) {
+            try? FileManager.default.removeItem(atPath: p)
+        }
         try await qmp.execute("migrate-set-capabilities", arguments: Self.mappedRam)
         // QEMU's default cap (128 MiB/s) makes a 2 GiB save take ~3.5 s.
         try await qmp.execute("migrate-set-parameters", arguments: ["max-bandwidth": .number(100e9)])
@@ -180,8 +182,13 @@ public actor QEMUMachine {
         _ = try? await qmp.execute("quit", timeout: .seconds(5))
         if await qemu.waitForExit(timeout: .seconds(10)) == nil { qemu.signal(SIGKILL) }
         _ = await waitUntilStopped()
-        // After QEMU's exit: it flushes the overlay on close.
+        // After QEMU's exit: it flushes the disks on close. The home image is
+        // as much a part of the snapshot as the overlay (the guest's page
+        // cache has its blocks).
         try SnapshotIdentity.of(overlay: config.overlay).write(forState: statePath)
+        for (i, d) in config.extraDisks.enumerated() {
+            try SnapshotIdentity.of(overlay: d.path).write(forState: statePath, disk: i)
+        }
         let bytes = (try? FileManager.default.attributesOfItem(atPath: statePath)[.size] as? UInt64) ?? 0
         return SuspendTimings(save: saved - t0, total: ContinuousClock.now - t0, stateBytes: bytes)
     }
@@ -192,6 +199,9 @@ public actor QEMUMachine {
     @discardableResult
     public func restore(from statePath: String) async throws -> RestoreTimings {
         try SnapshotIdentity.verify(state: statePath, overlay: config.overlay)
+        for (i, d) in config.extraDisks.enumerated() {
+            try SnapshotIdentity.verify(state: statePath, overlay: d.path, disk: i)
+        }
         let t0 = ContinuousClock.now
         try await launch(incoming: true)
         guard let qmp else { throw MachineError.notRunning }

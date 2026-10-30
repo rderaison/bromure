@@ -46,6 +46,19 @@ public struct QEMUMachineConfig: Sendable {
     // @port-skip linux-only: disk image formats
     public enum ImageFormat: String, Sendable { case raw, qcow2 }
 
+    /// A further virtio-blk disk after the system disk (vdb, vdc, …): the
+    /// workspace's home image (macOS: SessionDisk's second VZ block device).
+    // @port-skip linux-only: QEMU block devices
+    public struct Disk: Sendable {
+        public var path: String
+        public var format: ImageFormat
+        // @port-skip linux-only: QEMU block devices
+        public init(path: String, format: ImageFormat = .raw) {
+            self.path = path
+            self.format = format
+        }
+    }
+
     public var name: String
     public var machine: MachineType = .q35
     public var cpus: Int = 2
@@ -61,6 +74,9 @@ public struct QEMUMachineConfig: Sendable {
     public var overlay: String
     /// The image bake writes `baseImage` itself (read-write, no overlay).
     public var writeBaseInPlace = false
+    /// Attached read-write after the system disk, in order. Part of a
+    /// snapshot: suspend records each one's identity next to the state.
+    public var extraDisks: [Disk] = []
     public var shares: [Share] = []
     public var network: Network = .none
     public var macAddress: String?
@@ -150,6 +166,11 @@ public struct QEMUMachineConfig: Sendable {
                                     : "file=\(Self.optValue(overlay)),format=qcow2"
         a += ["-drive", "if=none,id=d0,\(disk),cache=none,aio=io_uring,discard=unmap",
               "-device", "\(dev("virtio-blk")),drive=d0"]
+        for (i, d) in extraDisks.enumerated() {
+            a += ["-drive", "if=none,id=d\(i + 1),file=\(Self.optValue(d.path)),format=\(d.format.rawValue),"
+                    + "cache=none,aio=io_uring,discard=unmap",
+                  "-device", "\(dev("virtio-blk")),drive=d\(i + 1)"]
+        }
         for (i, s) in shares.enumerated() {
             a += ["-chardev", "socket,id=fs\(i),path=\(Self.optValue(shareSocketPath(i)))",
                   "-device", "\(dev("vhost-user-fs")),chardev=fs\(i),tag=\(Self.optValue(s.tag))"]

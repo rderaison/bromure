@@ -186,4 +186,70 @@ struct DaemonTests {
         kill(daemon.processIdentifier, SIGTERM)
         daemon.waitUntilExit()
     }
+
+    @Test("the home image: ext4 on vdb at /home/ubuntu; kept across kill/start and suspend/resume; gone with rm")
+    func homeImage() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        await VsockListener.closeShared(port: agentPort)
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+
+        #expect(try w.cli("vm", "run", "--name", "h1").0 == 0)
+        let id = try #require(try w.vm("h1")?["id"]?.stringValue)
+        let dir = w.root + "/state/bromure-ac/vms/" + id
+        var st = stat()
+        #expect(stat(dir + "/home.img", &st) == 0 && st.st_size == 16 << 30 && st.st_blocks < 1024,
+                "a sparse 16 GiB home.img")
+        // agentd formats and mounts it as it boots (task_home_setup), after the
+        // shell may already answer: wait for the mount.
+        func homeMount() throws -> String {
+            try w.cli("vm", "exec", "h1", "--", "findmnt", "-no", "FSTYPE,SOURCE,LABEL", "/home/ubuntu").1
+        }
+        var mount = ""
+        for _ in 0..<60 {
+            mount = try homeMount()
+            if mount.contains("ext4") { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        print("HOME [daemon] /home/ubuntu: \(mount.split(separator: "\n").last ?? "")")
+        #expect(mount.contains("ext4") && mount.contains("/dev/vdb") && mount.contains("bromure-home"), "home: \(mount)")
+        #expect(try w.cli("vm", "exec", "h1", "--", "sh", "-c", "echo kept > /home/ubuntu/marker && sync").0 == 0)
+
+        // Stop and start: same overlay, same home.
+        #expect(try w.cli("vm", "kill", "h1").0 == 0)
+        #expect(try w.state(of: "h1") == "stopped")
+        #expect(try w.cli("vm", "start", "h1").0 == 0)
+        var marker = ""
+        for _ in 0..<60 {
+            marker = try w.cli("vm", "exec", "h1", "--", "cat", "/home/ubuntu/marker").1
+            if marker.contains("kept") { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        #expect(marker.contains("kept"), "the home survived kill/start: \(marker)")
+
+        // Suspend and resume: the home is part of the snapshot.
+        #expect(try w.cli("vm", "suspend", "h1").0 == 0)
+        #expect(FileManager.default.fileExists(atPath: dir + "/vm.state.identity.disk0.json"), "home identity saved")
+        #expect(try w.cli("vm", "resume", "h1").0 == 0)
+        #expect(try w.cli("vm", "exec", "h1", "--", "cat", "/home/ubuntu/marker").1.contains("kept"))
+        #expect(try w.cli("vm", "exec", "h1", "--", "sh", "-c", "echo again >> /home/ubuntu/marker && sync").0 == 0)
+
+        // A home changed while suspended is refused at resume.
+        #expect(try w.cli("vm", "suspend", "h1").0 == 0)
+        let fh = try #require(FileHandle(forWritingAtPath: dir + "/home.img"))
+        try fh.seek(toOffset: 8 << 30)
+        try fh.write(contentsOf: Data("x".utf8))
+        try fh.close()
+        #expect(try w.cli("vm", "resume", "h1").0 != 0, "resume refuses a home changed since the save")
+
+        // rm: only when not running; then the VM and its files are gone.
+        #expect(try w.cli("vm", "rm", "h1").0 == 0)
+        #expect(try w.vm("h1") == nil)
+        #expect(!FileManager.default.fileExists(atPath: dir), "the VM's directory is deleted")
+        #expect(try w.cli("vm", "run", "--name", "h2").0 == 0)
+        #expect(try w.cli("vm", "rm", "h2").0 != 0, "a running VM is not removed")
+        #expect(try w.cli("vm", "kill", "--force", "h2").0 == 0)
+        #expect(try w.cli("vm", "rm", "h2").0 == 0)
+    }
 }

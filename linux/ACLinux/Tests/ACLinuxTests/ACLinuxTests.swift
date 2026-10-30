@@ -890,6 +890,17 @@ final class ManagedAtomicFlag: @unchecked Sendable {
 
 @Suite("Interim bake")
 struct InterimBakeTests {
+    @Test("an extra disk is a second virtio-blk after the system disk, raw, with discard")
+    func extraDisk() throws {
+        var c = QEMUMachineConfig(name: "ws", kernel: "/k", initrd: nil, cmdline: "", baseImage: "/b.img",
+                                  overlay: "/vm/disk.qcow2", vsockCID: 9, runDirectory: "/run/x")
+        c.extraDisks = [.init(path: "/vm/home,1.img")]
+        let a = c.arguments().joined(separator: " ")
+        let sys = try #require(a.range(of: "file=/vm/disk.qcow2"))
+        let home = try #require(a.range(of: "-drive if=none,id=d1,file=/vm/home,,1.img,format=raw,cache=none,aio=io_uring,discard=unmap -device virtio-blk-pci,drive=d1"))
+        #expect(sys.lowerBound < home.lowerBound)
+    }
+
     @Test("the bake VM's argv: the target disk written in place, no vsock, the serial console on a socket with a log")
     func bakeArgv() throws {
         var c = QEMUMachineConfig(name: "bromure-bake", kernel: "/c/vmlinuz", initrd: "/w/initrd", cmdline: "console=ttyS0",
