@@ -9,12 +9,14 @@ import NIOTLS
 /// proxy (agentd bridges http_proxy to it).
 ///
 /// Per CONNECT host:port:
-/// 1. connect upstream and handshake TLS first, offering h2 + http/1.1 and
-///    verifying against the system trust store (plus `extraTrustRoots`, or a
-///    per-host pinned root); this learns the ALPN upstream picked;
-/// 2. answer `200 Connection Established` and terminate the client's TLS with
-///    a leaf minted for `host`, advertising exactly that ALPN;
-/// 3. relay bytes both ways (the hook where the real proxy inspects/rewrites).
+/// 1. answer `200 Connection Established`;
+/// 2. read the client's ClientHello: its SNI and offered ALPN;
+/// 3. connect upstream to the SNI (else the CONNECT host), offering exactly
+///    the client's ALPN, and verify against the system trust store (plus
+///    `extraTrustRoots`, or a per-host pinned root);
+/// 4. terminate the client's TLS with a leaf minted for the SNI, advertising
+///    the ALPN upstream picked;
+/// 5. relay bytes both ways (the hook where the real proxy inspects/rewrites).
 public final class InterceptingProxy: @unchecked Sendable {
     public struct Config {
         public var ca: CertificateAuthority

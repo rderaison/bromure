@@ -59,6 +59,14 @@ From the guest, behind passt, through the proxy:
 | System trust store | **yes** | `/etc/ssl/certs`; enterprise roots arrive through `update-ca-certificates`. |
 | Encrypted ClientHello | missing on both | — |
 
+## Carry into the real proxy (review notes)
+
+1. **The policy and the dial must use the same name.** The spike dials and verifies the **SNI** (`hello.serverName ?? host`), not the CONNECT target. That is consistent on its own, but the egress firewall, the secret swaps and the guardrails all key on a host. They must key on the name that was **dialed and verified**, never on the CONNECT line. Otherwise `CONNECT allowed.com` with an SNI of `api.anthropic.com` slips past the policy while a real token is swapped in.
+   - **Rule: when the SNI and the CONNECT host differ, refuse.** Domain fronting can become an explicit per-host exception later.
+   - The real proxy needs a negative test for it.
+2. **The LRU evicts with a linear scan** (`LRU.put`). That's fine at 1,024 entries; the real certificate cache needs an O(1) linked LRU.
+3. **Inspected connections advertise `http/1.1` only** (see the ALPN row above), until there's an h2 parser.
+
 ## Not done in the spike
 
 - HTTP parsing: no token swaps or guardrails yet; that's the shared MitmEngine.
