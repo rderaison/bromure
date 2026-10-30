@@ -30,3 +30,10 @@ Tests/node_modules/
 manual/_site/
 bromure-agentic-coding-manual.tgz
 .build-ios/
+
+# Per-developer build settings (team ID, bundle ID, signing cert); see
+# BUILD_INSTRUCTIONS.md. Sourced by build.sh and package.sh, never committed.
+/.env.local
+
+# Build worktrees of scripts/devbuild.sh (one per named build; never committed).
+/.worktrees/

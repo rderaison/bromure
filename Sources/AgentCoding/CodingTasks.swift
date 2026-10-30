@@ -665,21 +665,21 @@ struct TaskAssignment: Codable, Equatable, Sendable, Hashable {
     /// work comes back for review, and the approved task lands the way its
     /// finish preference says (`TaskFinish`).
     static var finishWithPullRequest: Bool {
-        get { UserDefaults.standard.object(forKey: "codingTasks.finishWithPR") as? Bool ?? false }
-        set { UserDefaults.standard.set(newValue, forKey: "codingTasks.finishWithPR") }
+        get { ACDefaults.standard.object(forKey: "codingTasks.finishWithPR") as? Bool ?? false }
+        set { ACDefaults.standard.set(newValue, forKey: "codingTasks.finishWithPR") }
     }
 
     /// The board's standing choice for NEW backlog items (per Mac).
     static var autoAssign: TaskAssignment? {
         get {
-            guard let data = UserDefaults.standard.data(forKey: "codingTasks.autoAssign") else { return nil }
+            guard let data = ACDefaults.standard.data(forKey: "codingTasks.autoAssign") else { return nil }
             return try? JSONDecoder().decode(TaskAssignment.self, from: data)
         }
         set {
             if let newValue, let data = try? JSONEncoder().encode(newValue) {
-                UserDefaults.standard.set(data, forKey: "codingTasks.autoAssign")
+                ACDefaults.standard.set(data, forKey: "codingTasks.autoAssign")
             } else {
-                UserDefaults.standard.removeObject(forKey: "codingTasks.autoAssign")
+                ACDefaults.standard.removeObject(forKey: "codingTasks.autoAssign")
             }
         }
     }
@@ -763,11 +763,7 @@ final class CodingTaskStore {
         if let fileURL {
             self.fileURL = fileURL
         } else {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            ).first!
-            self.fileURL = appSupport
-                .appendingPathComponent("BromureAC", isDirectory: true)
+            self.fileURL = ACSupportDir.url
                 .appendingPathComponent("tasks.json")
         }
         load()

@@ -34,7 +34,7 @@ public enum ClaudeStandIn {
     /// The switch (Preferences, later): off, Claude runs in API-key mode on
     /// the subscription, as before.
     public static let enabledDefaultsKey = "claude.accountFeatures"
-    public static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledDefaultsKey) }
+    public static var isEnabled: Bool { ACDefaults.standard.bool(forKey: enabledDefaultsKey) }
 
     static let accessPrefix = "sk-ant-oat01-brmCLA-"
     static let refreshPrefix = "sk-ant-ort01-brmCLA-"
@@ -139,9 +139,7 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     /// `claude-subscription.enc` next to `fake-salt.bin` under app support.
     /// Tests pass their own `fileURL` — never the user's real store.
     public init(fileURL: URL? = nil) {
-        let supportDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!.appendingPathComponent("BromureAC", isDirectory: true)
+        let supportDir = ACSupportDir.url
         backing = SubscriptionStoreFile(
             fileURL: fileURL ?? supportDir.appendingPathComponent("claude-subscription.enc"),
             tag: "claude-sub", empty: { ClaudeSubscriptionFile(shared: nil, perProfile: [:]) })

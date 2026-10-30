@@ -254,7 +254,7 @@ final class RoomStageController {
     /// Ended sessions leave the grid and the tabs (per room, remembered).
     var hideEnded: Bool {
         didSet {
-            UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID))
+            ACDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID))
             noteShown()
         }
     }
@@ -263,7 +263,7 @@ final class RoomStageController {
     init(roomID: UUID, backend: RoomStageBackend, listModel: SessionListModel) {
         self.roomID = roomID
         self.backend = backend
-        self.hideEnded = UserDefaults.standard.bool(forKey: Self.hideEndedKey(roomID))
+        self.hideEnded = ACDefaults.standard.bool(forKey: Self.hideEndedKey(roomID))
         self.listModel = listModel
         // What the stage opens on, until its view says otherwise: at 1×1 the
         // Switchboard's tab (the composer aims there first), else the grid

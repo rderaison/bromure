@@ -220,6 +220,6 @@ struct RoomFocusTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/RoomStage.swift"), encoding: .utf8)
         #expect(src.contains("noteShown()   // same page, different cells"))
-        #expect(src.contains("UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID))\n            noteShown()"))
+        #expect(src.contains("ACDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID))\n            noteShown()"))
     }
 }

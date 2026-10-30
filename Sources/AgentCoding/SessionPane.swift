@@ -303,7 +303,7 @@ final class SessionPane {
     /// container; the tmux session keeps running behind it, so flipping is
     /// lossless. `beautifiedModel` drives the live poll + composer.
     private(set) var viewMode: SessionViewMode =
-        UserDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
+        ACDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
     /// Pins the pane to the raw terminal: the beautified transcript is never
     /// mounted and `setViewMode(.beautified)` is ignored. Set for the
     /// "Register with …" throwaway VM, whose interactive OAuth login (the
@@ -551,7 +551,7 @@ final class SessionPane {
         if beautifierLocked, mode == .beautified { return }   // registration VM: terminal only
         viewMode = mode
         if persist {
-            UserDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
+            ACDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
         }
         updateNativeTerminalMount()
     }

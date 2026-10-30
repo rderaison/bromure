@@ -37,7 +37,7 @@ struct PassthroughList {
 
     /// Built-ins plus the operator's Preferences list.
     static func current() -> PassthroughList {
-        PassthroughList(extra: UserDefaults.standard.stringArray(forKey: "proxy.noMitmDomains") ?? [])
+        PassthroughList(extra: ACDefaults.standard.stringArray(forKey: "proxy.noMitmDomains") ?? [])
     }
 }
 

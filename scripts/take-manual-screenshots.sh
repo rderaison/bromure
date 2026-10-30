@@ -6,47 +6,52 @@
 # Usage: ./scripts/take-manual-screenshots.sh [locale-suffix …]   (default: all)
 #        SHOTS="sessions-home room-stage" ./scripts/take-manual-screenshots.sh en
 #
-# How: the app is launched with an isolated home (CFFIXED_USER_HOME) and the
-# debug routes on (BROMURE_DEBUG_CLAUDE=1), then driven over its loopback
-# control server; each window renders itself offscreen (/debug/ui-shot), so
-# no Screen Recording / Accessibility permission is involved.
+# How: the app is launched on its own state (BROMURE_STATE_DIR: data,
+# settings and logs of its own, an ephemeral loopback control port) with an
+# isolated home (CFFIXED_USER_HOME, for the credentials the wizard scans) and
+# the debug routes on (BROMURE_DEBUG_CLAUDE=1), then driven over its control
+# server; each window renders itself offscreen (/debug/ui-shot), so no Screen
+# Recording / Accessibility permission is involved. A Bromure Agentic Coding
+# you are working in can stay open: the shots run as a second instance.
 #   1. a fresh home: the first-run wizard's steps (BROMURE_DEBUG_WIZARD);
 #   2. the demo fixture (scripts/manual-demo/make-fixture.py → seed-demo):
 #      the main window — sessions, chat, room, Switchboard — plus the
 #      machines list, sheets, connector, security timeline and the boards;
 #   3. the settings: every workspace-editor pane and Preferences › Models.
 #
-# CAUTION: CFFIXED_USER_HOME does not relocate UserDefaults — the real
-# io.bromure.agentic-coding preferences are backed up first and restored at
-# the end. Quit any running Bromure Agentic Coding before running this.
-
 set -u
 cd "$(dirname "$0")/.."
 
 BIN="$(pwd)/.build/arm64-apple-macosx/release/Bromure Agentic Coding.app/Contents/MacOS/bromure-ac"
-BASE="http://127.0.0.1:9223"
 OUT="$(pwd)/manual/images"
 H=/tmp/bromure-manual-home
 FIXTURE=/tmp/bromure-manual-demo
 TMP=/tmp/bromure-manual-shots
-PREFS="$HOME/Library/Preferences/io.bromure.agentic-coding.plist"
-SOCK="$H/Library/Application Support/BromureAC/control.sock"
+# The instance's state: its data folder, with its control socket; its
+# settings live in the suite <bundle id>.state.<folder name>, wiped with it.
+SUPPORT="$H/manual-state"
+SOCK="$SUPPORT/control.sock"
+BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$(dirname "$BIN")/../Info.plist")
+SUITE="$BUNDLE_ID.state.$(basename "$SUPPORT")"
+BASE=""          # http://127.0.0.1:<ephemeral port>, learnt from /health at each launch
+APP_PID=""
 
 [ -x "$BIN" ] || { echo "Build first: ./build.sh bromure-ac" >&2; exit 1; }
-if pgrep -x bromure-ac >/dev/null; then
-    echo "Quit Bromure Agentic Coding first (the shots run their own instance)." >&2; exit 1
-fi
 mkdir -p "$OUT" "$TMP"
 python3 scripts/manual-demo/make-fixture.py "$FIXTURE" >/dev/null || exit 1
 
-# Preferences are shared with the isolated instance: restore them on exit.
-PREFS_BACKUP="$TMP/prefs-backup.plist"
-[ -f "$PREFS" ] && cp "$PREFS" "$PREFS_BACKUP"
-restore_prefs() {
-    pkill -x bromure-ac 2>/dev/null; sleep 1
-    if [ -f "$PREFS_BACKUP" ]; then cp "$PREFS_BACKUP" "$PREFS"; defaults read io.bromure.agentic-coding >/dev/null 2>&1; fi
+# Stop our instance (and only ours) through its control socket: the menu's
+# drain without the dialog. Never a signal, never pkill — another Bromure AC
+# may be running on its own state.
+stop_app() {
+    [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null || { APP_PID=""; return 0; }
+    curl -fsS -m 5 --unix-socket "$SOCK" -X POST -d '{"vms":"shutdown"}' "http://x/app/quit" >/dev/null 2>&1
+    for _ in $(seq 1 60); do kill -0 "$APP_PID" 2>/dev/null || break; sleep 0.5; done
+    APP_PID=""
 }
-trap restore_prefs EXIT
+cleanup() { stop_app; defaults delete "$SUITE" >/dev/null 2>&1; }
+trap cleanup EXIT
+defaults delete "$SUITE" >/dev/null 2>&1
 
 ALL_LOCALES=("en en" "fr fr" "de de" "es es" "pt pt" "ja ja" "zh-Hans zh-CN" "zh-Hant zh-TW")
 WANT_SUFFIXES=("$@")
@@ -60,18 +65,27 @@ want() {   # want SHOT-BASE — honours $SHOTS
 
 # ── App control ─────────────────────────────────────────────────────────
 
-launch() {   # launch LOCALE [ENV=VAL …] — fresh isolated home
+launch() {   # launch LOCALE [ENV=VAL …] — fresh isolated home + state
     local loc="$1"; shift
-    pkill -x bromure-ac 2>/dev/null
-    for _ in $(seq 1 20); do pgrep -x bromure-ac >/dev/null || break; sleep 0.5; done
-    rm -rf "$H"; mkdir -p "$H"
+    stop_app
+    defaults delete "$SUITE" >/dev/null 2>&1
+    rm -rf "$H"; mkdir -p "$H" "$SUPPORT"
     # Credentials for the wizard's import step to find (all fake).
     mkdir -p "$H/.aws" "$H/.config/gh"
     printf '[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nregion = us-east-1\n' > "$H/.aws/credentials"
     printf 'github.com:\n    oauth_token: gho_demo0000000000000000000000000000\n    user: example-dev\n    git_protocol: https\n' > "$H/.config/gh/hosts.yml"
     env "$@" BROMURE_DEBUG_CLAUDE=1 BROMURE_AC_APPEARANCE="${APPEARANCE:-light}" CFFIXED_USER_HOME="$H" \
+        BROMURE_STATE_DIR="$SUPPORT" BROMURE_AC_AUTOMATION_PORT=0 \
         "$BIN" -AppleLanguages "($loc)" > "$TMP/app.log" 2>&1 &
-    for _ in $(seq 1 60); do curl -fsS -m 2 "$BASE/health" >/dev/null 2>&1 && return 0; sleep 0.5; done
+    APP_PID=$!
+    # Up when the control socket answers; /health names the TCP port it bound.
+    local port
+    for _ in $(seq 1 60); do
+        port=$(curl -fsS -m 2 --unix-socket "$SOCK" "http://x/health" 2>/dev/null \
+               | python3 -c 'import json,sys; print(json.load(sys.stdin).get("automationPort", ""))' 2>/dev/null)
+        if [ -n "$port" ]; then BASE="http://127.0.0.1:$port"; return 0; fi
+        sleep 0.5
+    done
     echo "  app did not come up" >&2; return 1
 }
 
@@ -152,7 +166,7 @@ for entry in "${ALL_LOCALES[@]}"; do
     shoot "session:$(session_id 'Stream the nightly CSV export')"  session-rest     "$sfx" 4
     shoot "session:$(session_id 'Switchboard')"                    switchboard      "$sfx" 4
     if want room-stage || want room-zoom; then
-        rid=$(python3 -c "import json; print(json.load(open('$H/Library/Application Support/BromureAC/rooms.json'))[0]['id'])")
+        rid=$(python3 -c "import json; print(json.load(open('$SUPPORT/rooms.json'))[0]['id'])")
         fatclient room-show "\"room\":\"$rid\"" >/dev/null; sleep 5
         shoot default room-stage "$sfx" 4
         fatclient room-zoom "\"session\":\"$(session_id 'Add Apple Pay to checkout')\"" >/dev/null; sleep 2

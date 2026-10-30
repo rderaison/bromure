@@ -1744,7 +1744,7 @@ struct NewSessionView: View {
 
     /// The agent last started on a machine (nil: never).
     static func rememberedTool(for machine: UUID) -> Profile.Tool? {
-        UserDefaults.standard.string(forKey: lastToolKey + "." + machine.uuidString).flatMap(Profile.Tool.init(rawValue:))
+        ACDefaults.standard.string(forKey: lastToolKey + "." + machine.uuidString).flatMap(Profile.Tool.init(rawValue:))
     }
 
     /// A wide stage gets a wide margin; a phone keeps every point.
@@ -1786,7 +1786,7 @@ struct NewSessionView: View {
         self.readyTools = readyTools
         self.peerMentions = peerMentions
         self.assignNickname = assignNickname
-        let remembered = UserDefaults.standard.string(forKey: Self.lastProfileKey)
+        let remembered = ACDefaults.standard.string(forKey: Self.lastProfileKey)
             .flatMap { UUID(uuidString: $0) }
         let pid = remembered.flatMap { id in profiles.first { $0.id == id }?.id }
             ?? profiles.first { runningIDs.contains($0.id) }?.id
@@ -1800,7 +1800,7 @@ struct NewSessionView: View {
         // Any agent can be picked on any machine (see `configuredTools`), so
         // the last choice stands whatever the machine has set up.
         _tool = State(initialValue: rememberedTool ?? profile?.tool
-                      ?? UserDefaults.standard.string(forKey: Self.lastToolKey).flatMap(Profile.Tool.init(rawValue:))
+                      ?? ACDefaults.standard.string(forKey: Self.lastToolKey).flatMap(Profile.Tool.init(rawValue:))
                       ?? .claude)
         _place = State(initialValue: .home)
         _folder = State(initialValue: "")
@@ -1859,9 +1859,9 @@ struct NewSessionView: View {
 
     private func start() {
         guard canStart else { return }
-        UserDefaults.standard.set(profileID.uuidString, forKey: Self.lastProfileKey)
-        UserDefaults.standard.set(tool.rawValue, forKey: Self.lastToolKey)
-        UserDefaults.standard.set(tool.rawValue, forKey: Self.lastToolKey + "." + profileID.uuidString)
+        ACDefaults.standard.set(profileID.uuidString, forKey: Self.lastProfileKey)
+        ACDefaults.standard.set(tool.rawValue, forKey: Self.lastToolKey)
+        ACDefaults.standard.set(tool.rawValue, forKey: Self.lastToolKey + "." + profileID.uuidString)
         onStart(AgentSessionRequest(
             profileID: profileID, tool: tool, cwd: effectiveFolder,
             cloneURL: place == .repository ? repoURL.trimmingCharacters(in: .whitespaces) : nil,

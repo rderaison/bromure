@@ -268,7 +268,7 @@ struct LinkSimulation: Equatable {
         func value(_ envKey: String, _ defaultsKey: String) -> Int {
             if let s = env[envKey], let v = Int(s.trimmingCharacters(in: .whitespaces)) { return max(0, v) }
             #if DEBUG
-            let d = defaults ?? UserDefaults.standard
+            let d = defaults ?? ACDefaults.standard
             if d.object(forKey: defaultsKey) != nil { return max(0, d.integer(forKey: defaultsKey)) }
             #endif
             return 0

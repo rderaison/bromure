@@ -24,7 +24,7 @@ import Foundation
 /// mapping `RemoteConsent` uses.
 enum ConsentPrompt {
     static var defaultTimeout: TimeInterval {
-        let v = UserDefaults.standard.double(forKey: "consent.timeoutSeconds")
+        let v = ACDefaults.standard.double(forKey: "consent.timeoutSeconds")
         return v >= 10 ? v : 120
     }
 

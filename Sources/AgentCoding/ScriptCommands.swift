@@ -37,7 +37,7 @@ final class BromureACGetAppStateCommand: NSScriptCommand {
         onMain {
             let d = NSApp.delegate as? ACAppDelegate
             let state: [String: Any] = [
-                "locale":          (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
+                "locale":          (ACDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
                 // The unified window is the app's main window now (the old
                 // profile picker was folded into it); `mainWindow` only ever
                 // holds the transient setup/onboarding window.
@@ -408,14 +408,14 @@ final class BromureACListSessionsCommand: NSScriptCommand {
 // covers the keys the test suite actually needs.
 
 private let acAppSettingDefaults: [String: () -> String] = [
-    "automation.enabled":     { String(UserDefaults.standard.bool(forKey: "automation.enabled")) },
-    "automation.port":        { String(UserDefaults.standard.integer(forKey: "automation.port")) },
-    "automation.bindAddress": { UserDefaults.standard.string(forKey: "automation.bindAddress") ?? "127.0.0.1" },
-    "managed.serverURL":      { UserDefaults.standard.string(forKey: "managed.serverURL") ?? "" },
-    "managed.acIngestURL":    { UserDefaults.standard.string(forKey: "managed.acIngestURL") ?? "" },
-    "remoteAccess.enabled":   { String(UserDefaults.standard.bool(forKey: "remoteAccess.enabled")) },
-    "remoteAccess.port":      { String(UserDefaults.standard.integer(forKey: "remoteAccess.port")) },
-    "remoteAccess.bindAddress": { UserDefaults.standard.string(forKey: "remoteAccess.bindAddress") ?? "0.0.0.0" },
+    "automation.enabled":     { String(ACDefaults.standard.bool(forKey: "automation.enabled")) },
+    "automation.port":        { String(ACDefaults.standard.integer(forKey: "automation.port")) },
+    "automation.bindAddress": { ACDefaults.standard.string(forKey: "automation.bindAddress") ?? "127.0.0.1" },
+    "managed.serverURL":      { ACDefaults.standard.string(forKey: "managed.serverURL") ?? "" },
+    "managed.acIngestURL":    { ACDefaults.standard.string(forKey: "managed.acIngestURL") ?? "" },
+    "remoteAccess.enabled":   { String(ACDefaults.standard.bool(forKey: "remoteAccess.enabled")) },
+    "remoteAccess.port":      { String(ACDefaults.standard.integer(forKey: "remoteAccess.port")) },
+    "remoteAccess.bindAddress": { ACDefaults.standard.string(forKey: "remoteAccess.bindAddress") ?? "0.0.0.0" },
 ]
 
 @objc(BromureACGetAppSettingCommand)
@@ -436,7 +436,7 @@ final class BromureACSetAppSettingCommand: NSScriptCommand {
             guard let d = NSApp.delegate as? ACAppDelegate else { return "error: app not ready" as Any }
             let key = directParameter as? String ?? ""
             let v = evaluatedArguments?["toValue"] as? String ?? ""
-            let std = UserDefaults.standard
+            let std = ACDefaults.standard
 
             switch key {
             case "automation.enabled":

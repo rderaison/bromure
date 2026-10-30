@@ -46,15 +46,15 @@ public final class OpenShellGovernance: @unchecked Sendable {
     // MARK: Sources
 
     public var managed: Managed? {
-        guard let d = UserDefaults.standard.data(forKey: Self.managedKey) else { return nil }
+        guard let d = ACDefaults.standard.data(forKey: Self.managedKey) else { return nil }
         return try? JSONDecoder().decode(Managed.self, from: d)
     }
 
     public func setManaged(_ m: Managed?) {
         if let m, let d = try? JSONEncoder().encode(m) {
-            UserDefaults.standard.set(d, forKey: Self.managedKey)
+            ACDefaults.standard.set(d, forKey: Self.managedKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: Self.managedKey)
+            ACDefaults.standard.removeObject(forKey: Self.managedKey)
         }
         lock.lock(); cache.removeAll(); lock.unlock()
         DispatchQueue.main.async { NotificationCenter.default.post(name: Self.changedNotification, object: nil) }
@@ -63,7 +63,7 @@ public final class OpenShellGovernance: @unchecked Sendable {
     /// The boundary in force: the organization's (managed) wins over a local one.
     public var boundaryYAML: String? {
         if let m = managed?.boundaryYAML, !m.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return m }
-        let local = UserDefaults.standard.string(forKey: Self.localBoundaryKey) ?? ""
+        let local = ACDefaults.standard.string(forKey: Self.localBoundaryKey) ?? ""
         return local.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : local
     }
 
@@ -72,7 +72,7 @@ public final class OpenShellGovernance: @unchecked Sendable {
     }
 
     public func setLocalBoundary(_ yaml: String?) {
-        UserDefaults.standard.set(yaml ?? "", forKey: Self.localBoundaryKey)
+        ACDefaults.standard.set(yaml ?? "", forKey: Self.localBoundaryKey)
         lock.lock(); cache.removeAll(); lock.unlock()
         DispatchQueue.main.async { NotificationCenter.default.post(name: Self.changedNotification, object: nil) }
     }

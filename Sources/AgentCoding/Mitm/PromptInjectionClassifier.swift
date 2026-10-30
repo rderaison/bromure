@@ -80,10 +80,7 @@ actor PromptInjectionClassifier {
     // MARK: - Asset locations
 
     var modelDirectory: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent(
-            "BromureAC/Models/\(modelDirName)", isDirectory: true)
+        return ACSupportDir.url.appendingPathComponent("Models/\(modelDirName)", isDirectory: true)
     }
     private static let modelName = "model.onnx"
     private static let configName = "bromure-injection.json"

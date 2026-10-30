@@ -1184,8 +1184,7 @@ public final class KubeClusterStore {
     }
 
     public static var defaultDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        ACSupportDir.url
             .appendingPathComponent("kube", isDirectory: true)
     }
 

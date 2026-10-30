@@ -44,8 +44,7 @@ final class InstructionPresetStore: ObservableObject {
 
     init(fileURL: URL? = nil) {
         push = nil
-        let url = fileURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!.appendingPathComponent("BromureAC", isDirectory: true)
+        let url = fileURL ?? ACSupportDir.url
             .appendingPathComponent("instruction-presets.json")
         self.fileURL = url
         if let data = try? Data(contentsOf: url),

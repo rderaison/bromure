@@ -49,8 +49,7 @@ enum SecretFingerprint {
         let testing = Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
             || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         if testing { return SymmetricKey(size: .bits256) }
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let dir = ACSupportDir.url
         let file = dir.appendingPathComponent("fingerprint.key")
         if let d = try? Data(contentsOf: file), d.count == 32 { return SymmetricKey(data: d) }
         let k = SymmetricKey(size: .bits256)

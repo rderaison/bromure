@@ -64,9 +64,7 @@ public enum SecretsVault {
     /// Master key in a 0600 file under Application Support — the fallback when
     /// the keychain is unavailable.
     private static func fileFallbackKey() throws -> SymmetricKey {
-        let url = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let url = ACSupportDir.url
             .appendingPathComponent("secrets-master.key")
         if let data = try? Data(contentsOf: url), data.count == 32 {
             return SymmetricKey(data: data)

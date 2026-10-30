@@ -233,11 +233,11 @@ struct RemoteAccessSettingsView: View {
     }
 
     private func loadNoMitmDomains() {
-        noMitmDomains = UserDefaults.standard.stringArray(forKey: "proxy.noMitmDomains") ?? []
+        noMitmDomains = ACDefaults.standard.stringArray(forKey: "proxy.noMitmDomains") ?? []
     }
 
     private func saveNoMitmDomains() {
-        UserDefaults.standard.set(noMitmDomains, forKey: "proxy.noMitmDomains")
+        ACDefaults.standard.set(noMitmDomains, forKey: "proxy.noMitmDomains")
     }
 
     private func addNoMitmDomain() {

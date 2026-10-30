@@ -23,6 +23,28 @@ import AppKit
 /// it, so there the app carries on and may still crash later. An exception
 /// that didn't cross a Swift job (plain event handling) is survived, as before.
 final class BromureApplication: NSApplication {
+    /// `run --hidden`: an instance that must never come forward. Every
+    /// "show this window" path in the app promotes the activation policy to
+    /// `.regular` and activates; here both are no-ops, so its windows can
+    /// exist (and render for /debug/ui-shot) without a Dock icon or a stolen
+    /// focus. Set once, before the delegate is installed.
+    nonisolated(unsafe) static var stayHidden = false
+
+    override func setActivationPolicy(_ activationPolicy: NSApplication.ActivationPolicy) -> Bool {
+        if Self.stayHidden, activationPolicy == .regular { return false }
+        return super.setActivationPolicy(activationPolicy)
+    }
+
+    override func activate(ignoringOtherApps flag: Bool) {
+        if Self.stayHidden { return }
+        super.activate(ignoringOtherApps: flag)
+    }
+
+    override func activate() {
+        if Self.stayHidden { return }
+        super.activate()
+    }
+
     override func reportException(_ exception: NSException) {
         let stack = exception.callStackSymbols
         FileHandle.standardError.write(Data((

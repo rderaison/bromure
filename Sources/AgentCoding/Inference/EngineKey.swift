@@ -42,8 +42,7 @@ enum EngineKey {
     static var masterHex: String { master.hexString }
 
     private static var masterURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        ACSupportDir.url
             .appendingPathComponent("engine-master.key")
     }
 

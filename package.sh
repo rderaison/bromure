@@ -3,6 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Per-developer settings, never committed (.env.local is gitignored); the same
+# file build.sh reads. Variables already set in the environment win over it.
+if [ -f "$SCRIPT_DIR/.env.local" ]; then
+    _env_pre=$(declare -p DEVELOPER_ID CODESIGN_IDENTITY APPLE_ID TEAM_ID APP_PASSWORD \
+        NOTARY_PROFILE BROMURE_TEAM_ID BROMURE_BUNDLE_ID 2>/dev/null || true)
+    set -a; . "$SCRIPT_DIR/.env.local"; set +a
+    eval "$_env_pre"
+fi
+
 # Per-target config — same dispatch idea as build.sh. Add a new case
 # here when a third sibling app gets a release pipeline.
 TARGET="${1:-bromure}"
@@ -148,6 +157,14 @@ echo "SDK stamp: $SDK_STAMP (min macOS $MINOS_STAMP)"
 
 echo "Binary: $BINARY"
 
+# Build-dir copies of the tracked entitlements and Info.plist, with
+# BROMURE_TEAM_ID / BROMURE_BUNDLE_ID written in for a release signed under
+# another team (verbatim copies otherwise). See scripts/stamp-identity.sh.
+STAMPED_ENTITLEMENTS="$BUILD_DIR/$PRODUCT_NAME.entitlements"
+STAMPED_INFO_PLIST="$BUILD_DIR/$PRODUCT_NAME.Info.plist"
+"$SCRIPT_DIR/scripts/stamp-identity.sh" "$ENTITLEMENTS" "$INFO_PLIST" \
+    "$STAMPED_ENTITLEMENTS" "$STAMPED_INFO_PLIST"
+
 # --- Create app bundle ---
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
@@ -159,7 +176,7 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
-cp "$INFO_PLIST" "$CONTENTS/Info.plist"
+cp "$STAMPED_INFO_PLIST" "$CONTENTS/Info.plist"
 "$SCRIPT_DIR/scripts/stamp-build-info.sh" "$CONTENTS/Info.plist"
 
 # SPM omits the standard app rpath; add it so dyld can resolve
@@ -364,7 +381,7 @@ fi
 
 # Finally sign the outer app with entitlements.
 codesign --force --options runtime \
-    --entitlements "$ENTITLEMENTS" \
+    --entitlements "$STAMPED_ENTITLEMENTS" \
     --sign "$DEVELOPER_ID" \
     "$APP_BUNDLE"
 

@@ -316,7 +316,7 @@ final class GhosttyRuntime: @unchecked Sendable {
             // Agents ring the bell at the end of every turn; the sidebar's
             // status already says so. Silent unless asked for
             // (`defaults write io.bromure.ac ui.terminalBell -bool YES`).
-            if UserDefaults.standard.bool(forKey: "ui.terminalBell") {
+            if ACDefaults.standard.bool(forKey: "ui.terminalBell") {
                 DispatchQueue.main.async { NSSound.beep() }
             }
             return true
@@ -407,9 +407,7 @@ final class GhosttyRuntime: @unchecked Sendable {
     }
 
     private static func writeConfigFile(named name: String, contents: String) -> String {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory,
-                                           in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/ghostty", isDirectory: true)
+        let dir = ACSupportDir.url.appendingPathComponent("ghostty", isDirectory: true)
         let url = dir.appendingPathComponent(name)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

@@ -28,7 +28,7 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
     public static var defaultHTTPIngestURL: URL {
         if let env = ProcessInfo.processInfo.environment["BROMURE_AC_HTTP_INGEST_URL"],
            let u = URL(string: env) { return u }
-        if let s = UserDefaults.standard.string(forKey: "managed.acHttpIngestURL"),
+        if let s = ACDefaults.standard.string(forKey: "managed.acHttpIngestURL"),
            let u = URL(string: s) { return u }
         let base = BACEnrollment.defaultAnalyticsURL   // …/ac-ingest
         return base.deletingLastPathComponent().appendingPathComponent("ac-http-ingest")

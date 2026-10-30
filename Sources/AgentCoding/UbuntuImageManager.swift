@@ -40,8 +40,7 @@ public final class UbuntuImageManager {
     /// Where the last customize run's output is kept (the whole postinstall
     /// phase, the script's `bash -x` trace included).
     public static var customizeLogURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/BromureAC/base-image-customize.log")
+        ACSupportDir.logsURL.appendingPathComponent("base-image-customize.log")
     }
 
     /// The step file for `script`: traced (`set -x`, each line tagged), so
@@ -116,12 +115,7 @@ public final class UbuntuImageManager {
         self.setupDir = setupDir
     }
 
-    public static var defaultStorageDirectory: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!
-        return appSupport.appendingPathComponent("BromureAC", isDirectory: true)
-    }
+    public static var defaultStorageDirectory: URL { ACSupportDir.url }
 
     // MARK: - On-disk paths
 

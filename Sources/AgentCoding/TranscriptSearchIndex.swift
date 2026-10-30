@@ -59,8 +59,7 @@ final class TranscriptSearchIndex {
     @ObservationIgnored private let dir: URL
 
     private init() {
-        dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/transcripts", isDirectory: true)
+        dir = ACSupportDir.url.appendingPathComponent("transcripts", isDirectory: true)
     }
 
     /// Start keeping up (idempotent).

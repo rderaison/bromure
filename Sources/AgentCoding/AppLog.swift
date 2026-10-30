@@ -17,8 +17,7 @@ enum AppLog {
     static let maxBytes: UInt64 = 8 << 20
 
     static var url: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/BromureAC/bromure-ac.log")
+        ACSupportDir.logsURL.appendingPathComponent("bromure-ac.log")
     }
 
     private static var fileFD: Int32 = -1

@@ -543,7 +543,7 @@ struct VMDashboardView: View {
     /// One-time consent covering the cloudflared download and Cloudflare's
     /// service terms.
     private static func confirmTunnelConsent() -> Bool {
-        let d = UserDefaults.standard
+        let d = ACDefaults.standard
         if d.bool(forKey: "cloudflareTunnel.consented") { return true }
         let a = NSAlert()
         a.messageText = NSLocalizedString("Expose services to the internet via Cloudflare Tunnel?",

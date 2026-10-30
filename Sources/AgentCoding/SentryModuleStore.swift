@@ -153,8 +153,7 @@ public final class SentryModuleStore: @unchecked Sendable {
     public init(root: URL? = nil, base: URL? = nil, requireSignature: Bool? = nil,
                 publicKeyBase64: String = ImageCatalogStore.pinnedPublicKeyBase64,
                 session: URLSession = .shared) {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let support = ACSupportDir.url
         self.root = root ?? support.appendingPathComponent("sentry-modules", isDirectory: true)
         self.base = base ?? Self.overrideBase ?? Self.defaultBase
         self.requireSignature = requireSignature ?? (Self.overrideBase == nil)

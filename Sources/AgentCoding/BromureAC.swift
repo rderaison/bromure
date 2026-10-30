@@ -54,6 +54,12 @@ struct BromureAC: ParsableCommand {
                                                      VerifyImage.self]))
         }
         groups.append(ArgumentParser.CommandGroup(name: "Workspaces", subcommands: [Profiles.self]))
+        if !asCLI {
+            groups.append(ArgumentParser.CommandGroup(name: "States (the data a build runs on; --state <name> picks one)",
+                                       subcommands: [StateCommand.self]))
+            groups.append(ArgumentParser.CommandGroup(name: "Builds and instances (immutable builds; a build running on a state)",
+                                       subcommands: [InstanceCommand.self, BuildCommand.self]))
+        }
         groups.append(ArgumentParser.CommandGroup(name: "Tracing", subcommands: [Trace.self]))
         groups.append(ArgumentParser.CommandGroup(name: "Local inference", subcommands: [Model.self]))
         groups.append(ArgumentParser.CommandGroup(name: "Enterprise features",
@@ -85,6 +91,10 @@ struct BromureAC: ParsableCommand {
     /// this, `bromure-ac -AppleLanguages "(fr)"` exits with "Unknown option"
     /// before NSApplication starts. Mirrors the browser entry point.
     static func main() {
+        // Through a symlink outside the bundle (~/.local/bin/bromure-ac,
+        // /usr/local/bin/bromure-cli) there is no Info.plist to read: become
+        // the real binary before anything looks at Bundle.main.
+        ACSupportDir.reexecIfInvokedThroughSymlink()
         // Ignore SIGPIPE process-wide. Our hand-rolled loopback servers (the
         // MITM repair proxy + inference bridge, the automation server, the MLX
         // engine) use raw BSD-socket write()s. Writing to a peer that already
@@ -105,6 +115,15 @@ struct BromureAC: ParsableCommand {
             if skipNext { skipNext = false; continue }
             if arg.hasPrefix("-Apple") { skipNext = true; continue }
             filtered.append(arg)
+        }
+        // `--state <name|path>` anywhere on the line picks the state this
+        // process (and every child it starts) runs on: it becomes
+        // BROMURE_STATE / BROMURE_STATE_DIR before anything reads them.
+        switch ACSupportDir.applyStateArgument(filtered) {
+        case .success(let rest): filtered = rest
+        case .failure(let message):
+            FileHandle.standardError.write(Data("error: \(message)\n".utf8))
+            Darwin.exit(64)
         }
         // Invoked as `bromure-cli` (the /usr/local/bin symlink → this binary)
         // with no subcommand: print help instead of falling through to the GUI
@@ -610,7 +629,7 @@ struct Init: ParsableCommand {
     var storageDir: String?
 
     @Option(name: .long,
-            help: "A shell script to run as root inside the image after Bromure's setup (traced; log in ~/Library/Logs/BromureAC/base-image-customize.log). Default: the one set in Rebuild Base Image, if any.")
+            help: "A shell script to run as root inside the image after Bromure's setup (traced; log in \(UbuntuImageManager.customizeLogURL.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))). Default: the one set in Rebuild Base Image, if any.")
     var customizeScript: String?
 
     func run() throws {
@@ -912,12 +931,30 @@ struct Run: ParsableCommand {
           help: "Run as a background agent (no window). Used by the CLI to autostart the VM service.")
     var headless = false
 
+    @Flag(name: .long,
+          help: "Like --headless, but the app never comes forward: no Dock icon, no activation, even when it opens a window (an agent's instance rendering /debug/ui-shot next to the one you type in).")
+    var hidden = false
+
     func run() throws {
-        // First: a durable copy of stderr + launch/quit/fatal-signal stamps
-        // (~/Library/Logs/BromureAC/bromure-ac.log), so a quit that leaves
-        // no crash report is still explained when we weren't started
-        // from a terminal.
+        // First of all: one instance per state. A second launch on a state
+        // that is already served exits here, before it can touch the control
+        // socket, the lease DB or a disk image.
+        do {
+            try ACInstance.acquire(mode: hidden ? .hidden : headless ? .headless : .gui)
+        } catch {
+            FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+            Darwin.exit(75)   // EX_TEMPFAIL: try again once that instance has quit
+        }
+        // Then a durable copy of stderr + launch/quit/fatal-signal stamps
+        // (<logs>/bromure-ac.log), so a quit that leaves no crash report is
+        // still explained when we weren't started from a terminal.
         AppLog.install()
+        AppLog.stamp("state '\(ACSupportDir.stateName)' at \(ACSupportDir.url.path) (\(ACSupportDir.state.source.rawValue)); build \(ACInstance.buildName)")
+        // The two SandboxEngine stores a state must own: the persisted VM
+        // subnet (two instances on two states, two subnets) and the
+        // per-workspace remembered decisions. Before any VM boots.
+        VMNetSwitch.subnetDefaults = ACDefaults.standard
+        ProfilePrefs.defaults = ACDefaults.standard
         let imageManager = try makeImageManager()
         // No base-image gate here. `ACAppDelegate.applicationDidFinishLaunching`
         // checks `imageManager.hasBaseImage` and routes to the in-app
@@ -929,10 +966,12 @@ struct Run: ParsableCommand {
         // pattern. NSApplication.run() needs to drive the main RunLoop
         // directly; running it inside an async context (`AsyncParsableCommand`
         // + `MainActor.run`) wedges the run loop and the app never appears.
-        let headless = self.headless
+        let headless = self.headless || self.hidden
+        let hidden = self.hidden
         MainActor.assumeIsolated {
             FileHandle.standardError.write(Data(
-                "[run] launching NSApplication\(headless ? " (headless agent)" : "")…\n".utf8))
+                "[run] launching NSApplication\(hidden ? " (hidden agent)" : headless ? " (headless agent)" : "")…\n".utf8))
+            BromureApplication.stayHidden = hidden
             // The first touch makes the app's class ours (an exception that
             // crossed a Swift job stops the app at once — BromureApplication).
             let app = BromureApplication.shared
@@ -2785,9 +2824,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func watchAttachedMachines() {
         guard machineLinksObserver == nil else { return }
         // The user's answers to machines asking to join, kept across launches.
-        MachineLinkHub.shared.storeURL = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/machines.json")
+        MachineLinkHub.shared.storeURL = ACSupportDir.url.appendingPathComponent("machines.json")
         // A session a remote client starts on a machine straight into a room
         // ("Add to Room"): the room is recorded here.
         MachineLinkHub.shared.onSessionStarted = { [weak self] sid, body in
@@ -3865,7 +3902,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Sessions-first UI + the beautified transcript are the defaults; a
         // user who flipped either off before keeps their choice (register
         // only fills in missing keys).
-        UserDefaults.standard.register(defaults: [
+        ACDefaults.standard.register(defaults: [
             "ui.beautifiedTranscript": true,
             "ui.sessionsFirst": true,
         ])
@@ -3922,9 +3959,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Persist the in-process DHCP server's leases so a profile's VM — which
         // already has a stable per-profile MAC (MACBindings) — keeps the same IP
         // across agent restarts, as often as the address stays free.
-        let acSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let acSupport = ACSupportDir.url
         VMNetSwitch.shared.enablePersistentLeases(
             at: acSupport.appendingPathComponent("dhcp-leases.sqlite"))
 
@@ -3935,12 +3970,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Resources toggle, or the old migration prompt's "Don't Ask Again")
         // is kept. Synchronous + before any VM boots, so the switch starts on
         // the right network. AC-only; Bromure Web never calls this.
-        if UserDefaults.standard.object(forKey: "vmnet.useRandom172") == nil {
-            let declined = UserDefaults.standard.bool(forKey: "vmnet.migrateSubnet.declined")
-            UserDefaults.standard.set(!declined, forKey: "vmnet.useRandom172")
+        if ACDefaults.standard.object(forKey: "vmnet.useRandom172") == nil {
+            let declined = ACDefaults.standard.bool(forKey: "vmnet.migrateSubnet.declined")
+            ACDefaults.standard.set(!declined, forKey: "vmnet.useRandom172")
             if !declined { VMNetSwitch.ensureRandom172Base() }
         }
-        if UserDefaults.standard.bool(forKey: "vmnet.useRandom172") {
+        if ACDefaults.standard.bool(forKey: "vmnet.useRandom172") {
             VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)
         }
 
@@ -4375,7 +4410,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// UserDefaults-backed remote config. Defaults: disabled, port 2222,
     /// bind 0.0.0.0, both auth methods on.
     func remoteAccessConfig() -> RemoteAccessServer.Config {
-        let d = UserDefaults.standard
+        let d = ACDefaults.standard
         var c = RemoteAccessServer.Config()
         let p = ProcessInfo.processInfo.environment["BROMURE_AC_REMOTE_PORT"]
             .flatMap(Int.init) ?? d.integer(forKey: "remoteAccess.port")
@@ -4396,7 +4431,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `startInit`/`startPostinstall` stop the server up front and call
     /// this again from their completion path.
     @MainActor func startRemoteAccessIfNeeded() {
-        guard UserDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
+        guard ACDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
         // A side-by-side test instance shares this Mac's device identity and
         // preferences: it must not answer for the Mac (SSH front door, P2P).
         guard !Self.remoteAccessSuppressed else {
@@ -4529,7 +4564,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Persists to UserDefaults, then (re)starts or stops sshd. Returns a
     /// status dict (same shape as `remoteAccessStatus`).
     @MainActor func remoteAccessApply(_ spec: [String: Any]) -> [String: Any] {
-        let d = UserDefaults.standard
+        let d = ACDefaults.standard
         if let port = spec["port"] as? Int {
             guard port > 0, port < 65536 else { return ["error": "port must be in 1..65535"] }
             guard port >= 1024 else { return ["error": "port must be ≥ 1024 (non-root can't bind privileged ports)"] }
@@ -4591,7 +4626,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @MainActor func remoteAccessStatus() -> [String: Any] {
-        let d = UserDefaults.standard
+        let d = ACDefaults.standard
         let cfg = remoteAccessConfig()
         let server = RemoteAccessServer.shared
         let user = NSUserName()
@@ -4630,7 +4665,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - Automation server
 
     @MainActor func startAutomationServerIfNeeded() {
-        let defaults = UserDefaults.standard
+        let defaults = ACDefaults.standard
         // Default OFF — opt-in to keep the loopback HTTP API hidden
         // until the user enables it (Bromure → Preferences → Automation,
         // or `defaults write io.bromure.agentic-coding automation.enabled
@@ -4639,18 +4674,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // isolated instance (CFFIXED_USER_HOME relocates the support dir but
         // NOT UserDefaults, so a defaults-based port would collide with the
         // main instance's 9223 — a double-bind that round-robins its clients).
-        let envPort = ProcessInfo.processInfo.environment["BROMURE_AC_AUTOMATION_PORT"]
+        // Port 0 binds an ephemeral port (reported in /health and
+        // instance.json); a state chosen at launch defaults to exactly that,
+        // on loopback, so an agent's instance is scriptable out of the box
+        // and never collides with the one on the default state.
+        var envPort = ProcessInfo.processInfo.environment["BROMURE_AC_AUTOMATION_PORT"]
             .flatMap { UInt16($0) }
+        if envPort == nil, !ACSupportDir.isDefault { envPort = 0 }
         guard defaults.bool(forKey: "automation.enabled") || envPort != nil else { return }
 
         if automationServer != nil { stopAutomationServer() }
 
-        let port = envPort ?? UInt16(defaults.integer(forKey: "automation.port"))
-        let bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
-        let server = ACAutomationServer(port: port > 0 ? port : 9223, bindAddress: bindAddr)
+        let port: UInt16
+        let bindAddr: String
+        if let envPort {
+            port = envPort
+            bindAddr = ACSupportDir.isDefault
+                ? (defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1") : "127.0.0.1"
+        } else {
+            let configured = UInt16(defaults.integer(forKey: "automation.port"))
+            port = configured > 0 ? configured : 9223
+            bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
+        }
+        let server = ACAutomationServer(port: port, bindAddress: bindAddr)
         wireAutomationCallbacks(into: server)
         server.start()
         automationServer = server
+        ACInstance.recordAutomationPort(server.boundPort.map(Int.init))
     }
 
     /// Always-on owner-only Unix control socket for the `bromure-ac` CLI.
@@ -4677,6 +4727,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Wire the shared control-plane callbacks into a server instance (used by
     /// both the opt-in TCP API and the always-on Unix control socket).
     @MainActor private func wireAutomationCallbacks(into server: ACAutomationServer) {
+        server.onQuit = { [weak self] vms in
+            MainActor.assumeIsolated { self?.quitFromControl(vms: vms) ?? false }
+        }
+        server.onAutomationPort = { [weak self] in
+            MainActor.assumeIsolated { self?.automationServer?.boundPort }
+        }
+        server.onSyncHostStores = {
+            SquelchLedger.shared.flush()
+            ACDefaults.standard.synchronize()
+        }
         server.onListProfiles = { [weak self] in
             guard let self else { return [] }
             return self.profiles.map { p in
@@ -4736,7 +4796,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onGetAppState = { [weak self] in
             guard let self else { return [:] }
             return [
-                "locale": (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
+                "locale": (ACDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system",
                 "mainWindowOpen": self.mainWindow?.isVisible ?? false,
                 "editorOpen": self.editorWindow?.isVisible ?? false,
                 "profileCount": self.profiles.count,
@@ -8086,6 +8146,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `.terminateNow` path (no `.terminateLater` nested-runloop wait, hence no
     /// deadlock against this same actor).
     @MainActor
+    /// `POST /app/quit`: a script's quit. Every workspace closes per `vms`
+    /// ("suspend" | "shutdown") or, with none, per its own close action, as
+    /// the menu Quit would; nobody is asked anything. Returns false when a
+    /// quit is already in progress (that one continues).
+    func quitFromControl(vms: String?) -> Bool {
+        guard quitPhase == .idle else {
+            AppLog.stamp("quit: requested over the control socket while \(quitPhase) — the quit in progress continues")
+            return false
+        }
+        quitCloseActionOverride = vms == "suspend" ? .suspend : vms == "shutdown" ? .shutdown : nil
+        AppLog.stamp("quit: requested over the control socket (vms: \(vms ?? "per workspace"))")
+        Task { @MainActor in await self.performControlQuit() }
+        return true
+    }
+
+    /// Close-action override for the quit in progress (`quitFromControl`).
+    private var quitCloseActionOverride: Profile.CloseAction?
+
+    private func performControlQuit() async {
+        quitPhase = .draining
+        await drainRunningVMs()
+        await teardownAllBrowserVMs()
+        quitPhase = .idle
+        let dismissed = dismissAttachedSheets()
+        if dismissed > 0 { AppLog.stamp("quit: dismissed \(dismissed) sheet(s) blocking termination") }
+        quitPreconfirmed = true
+        NSApp.terminate(nil)
+        // Still here: AppKit refused.
+        quitPreconfirmed = false
+        quitCloseActionOverride = nil
+        AppLog.stamp("quit: terminate returned after the control-socket drain — \(attachedSheetCount()) sheet(s) attached")
+    }
+
     private func performBouncedQuit() async {
         let sheets = attachedSheetCount()
         let decision = QuitFlow.request(phase: quitPhase, attachedSheets: sheets)
@@ -8139,7 +8232,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .map { $0.profileID }
         await withTaskGroup(of: Void.self) { group in
             for id in ids {
-                let action = runningSessions[id]?.profile.closeAction ?? .suspend
+                let action = quitCloseActionOverride ?? runningSessions[id]?.profile.closeAction ?? .suspend
                 group.addTask { @MainActor in await self.stopSession(id, action: action) }
             }
         }
@@ -8167,6 +8260,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
         SquelchLedger.shared.flush()
+        ACInstance.release()
         // `vm run --rm` workspaces whose VM is off (a reboot's relaunch
         // waiting, a boot that gave up): over with the app.
         sweepStoppedEphemeral()
@@ -8592,7 +8686,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false
         )
-        window.title = "Bromure Agentic Coding"
+        window.title = ACSupportDir.badged("Bromure Agentic Coding")
         window.delegate = self
         window.titlebarAppearsTransparent = false
         // See TabbedSessionWindow for the same fix: AppKit's window
@@ -8614,7 +8708,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private func renderSetup() {
         guard let win = mainWindow else { return }
-        win.title = "Bromure Agentic Coding"
+        win.title = ACSupportDir.badged("Bromure Agentic Coding")
         // Same ordering trap as renderPicker: must swap content view
         // first, otherwise the InitializingView's autolayout
         // constraints + contentMinSize=560 (set in renderInitializing)
@@ -8657,7 +8751,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         subtitle: String = "This is the one-time install. Don't close the window."
     ) {
         guard let win = mainWindow else { return }
-        win.title = "Bromure Agentic Coding — Setup"
+        win.title = ACSupportDir.badged("Bromure Agentic Coding — Setup")
         // Sized to the InitializingView's intrinsic layout (header +
         // status pill + 280pt fixed console + footer + paddings). The
         // user can collapse the console disclosure to shrink further.
@@ -9166,9 +9260,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = []          // raw disk images have no canonical UTI
-        if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("BromureAC", isDirectory: true),
-           FileManager.default.fileExists(atPath: dir.path) {
+        let dir = ACSupportDir.url
+        if FileManager.default.fileExists(atPath: dir.path) {
             panel.directoryURL = dir
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -9358,7 +9451,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Help → Manual.
     @objc func openManualAction(_ sender: Any?) {
-        let raw = UserDefaults.standard.string(forKey: "help.manualURL") ?? Self.defaultManualURL
+        let raw = ACDefaults.standard.string(forKey: "help.manualURL") ?? Self.defaultManualURL
         if let url = URL(string: raw) { NSWorkspace.shared.open(url) }
     }
 
@@ -9512,8 +9605,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }()
 
     private var machineSessionRoomsURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/machine-session-rooms.json")
+        ACSupportDir.url.appendingPathComponent("machine-session-rooms.json")
     }
 
     private func saveMachineSessionRooms() {
@@ -9811,7 +9903,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false
         )
-        win.title = "Bromure Agentic Coding"
+        win.title = ACSupportDir.badged("Bromure Agentic Coding")
         win.delegate = self
         win.titlebarAppearsTransparent = false
         win.animationBehavior = .none
@@ -11116,7 +11208,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // A machine made on the spot is the one the new-session screen
         // selects when it rebuilds ("New machine…" in its picker).
         if editing == nil {
-            UserDefaults.standard.set(profile.id.uuidString, forKey: NewSessionView.lastProfileKey)
+            ACDefaults.standard.set(profile.id.uuidString, forKey: NewSessionView.lastProfileKey)
         }
         // Show the SSH key viewer right after a brand-new generation so the
         // user can paste it into GitHub before forgetting.
@@ -16720,6 +16812,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                        accessibilityDescription: "Bromure Agentic Coding")
                 button.image?.isTemplate = true
             }
+            // A state chosen at launch shows its name next to the mark, so
+            // two instances' menu-bar items — and the one being worked in —
+            // tell apart at a glance.
+            if !ACSupportDir.isDefault {
+                button.title = " \(ACSupportDir.stateName)"
+                button.imagePosition = .imageLeading
+                button.font = NSFont.menuBarFont(ofSize: 0)
+            }
         }
         statusItem = item
         updateStatusMenu()
@@ -18061,9 +18161,9 @@ struct RebuildBaseImageView: View {
 
     @State private var method: RebuildBaseImageWindow.Method = .download
     @State private var fresh = false
-    @AppStorage(BaseImageCustomize.enabledKey) private var customize = false
-    @AppStorage(BaseImageCustomize.pathKey) private var path = ""
-    @State private var showCustomize = UserDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
+    @AppStorage(BaseImageCustomize.enabledKey, store: ACDefaults.standard) private var customize = false
+    @AppStorage(BaseImageCustomize.pathKey, store: ACDefaults.standard) private var path = ""
+    @State private var showCustomize = ACDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

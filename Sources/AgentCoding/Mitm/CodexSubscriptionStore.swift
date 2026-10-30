@@ -101,9 +101,7 @@ public final class CodexSubscriptionStore: @unchecked Sendable {
 
     /// Tests pass their own `fileURL` — never the user's real store.
     public init(fileURL: URL? = nil) {
-        let supportDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!.appendingPathComponent("BromureAC", isDirectory: true)
+        let supportDir = ACSupportDir.url
         backing = SubscriptionStoreFile(
             fileURL: fileURL ?? supportDir.appendingPathComponent("codex-subscription.enc"),
             tag: "codex-sub", empty: { CodexSubscriptionFile(shared: nil, perProfile: [:]) })

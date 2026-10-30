@@ -19,7 +19,7 @@ enum P2PRelayConfig {
             let v = e.lowercased()
             return v == "1" || v == "true" || v == "y" || v == "yes"
         }
-        return UserDefaults.standard.bool(forKey: "p2p.udpRelay.enabled")
+        return ACDefaults.standard.bool(forKey: "p2p.udpRelay.enabled")
     }
 }
 

@@ -2,10 +2,11 @@
 # take-ac-board-screenshots.sh — Capture the two kanban boards (Automations,
 # Coding Tasks) for the manual, across all 8 locales.
 #
-# Mechanics are identical to take-ac-screenshots.sh: relaunch the app per
-# locale with -AppleLanguages and BROMURE_DEBUG_CLAUDE=1, drive the loopback
-# control server, and let the app render its own windows offscreen via
-# /debug/ui-shot. The boards are populated with a demo fixture
+# Mechanics are identical to take-manual-screenshots.sh: relaunch the app per
+# locale with -AppleLanguages and BROMURE_DEBUG_CLAUDE=1 on a scratch state
+# (BROMURE_STATE_DIR: its own data, settings and an ephemeral control port, so
+# a Bromure AC you work in can stay open), drive the control server, and let
+# the app render its own windows offscreen via /debug/ui-shot. The boards are populated with a demo fixture
 # (/debug/editor seed-board-demo) and cleaned up afterwards — no VM, no
 # agent, no network is involved.
 #
@@ -15,7 +16,7 @@
 set -u
 
 BIN="$(pwd)/.build/arm64-apple-macosx/release/Bromure Agentic Coding.app/Contents/MacOS/bromure-ac"
-BASE="http://127.0.0.1:9223"
+BASE=""          # http://127.0.0.1:<ephemeral port>, learnt from /health at each launch
 PROFILE="Screenshot"
 OUTPUT_DIR="$(pwd)/manual/images"
 
@@ -27,6 +28,24 @@ mkdir -p "$OUTPUT_DIR"
 SHOT_HOME="/tmp/bromure-ac-board-shots-home"
 rm -rf "$SHOT_HOME"
 mkdir -p "$SHOT_HOME"
+# The instance's state (data + control socket); its settings are the suite
+# <bundle id>.state.<folder name>, wiped with it.
+STATE="$SHOT_HOME/board-state"
+SOCK="$STATE/control.sock"
+BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$(dirname "$BIN")/../Info.plist")
+SUITE="$BUNDLE_ID.state.$(basename "$STATE")"
+APP_PID=""
+
+# Stop our instance through its control socket (the menu's drain, no dialog).
+# Never pkill: another Bromure AC may be running on its own state.
+stop_app() {
+    [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null || { APP_PID=""; return 0; }
+    curl -fsS -m 5 --unix-socket "$SOCK" -X POST -d '{"vms":"shutdown"}' "http://x/app/quit" >/dev/null 2>&1
+    for _ in $(seq 1 60); do kill -0 "$APP_PID" 2>/dev/null || break; sleep 0.5; done
+    APP_PID=""
+}
+trap 'stop_app; defaults delete "$SUITE" >/dev/null 2>&1' EXIT
+defaults delete "$SUITE" >/dev/null 2>&1
 
 LOCALES=(
     "en       en"
@@ -79,25 +98,25 @@ for entry in "${LOCALES[@]}"; do
     locale="$1"; suffix="$2"
 
     echo "--- Locale: $locale ---"
-    pkill -x bromure-ac 2>/dev/null || true
-    sleep 1
+    stop_app
+    defaults delete "$SUITE" >/dev/null 2>&1
 
-    # Isolated home: the capture instance must never show the user's real
-    # workspaces, tasks, or automations — CFFIXED_USER_HOME relocates the
-    # support dir and defaults to a scratch home holding only the demo
-    # fixture. The control server is opt-in via defaults, and the scratch
-    # defaults start empty — seed the plist before launch (the CLI parser
-    # rejects extra launch arguments).
-    mkdir -p "$SHOT_HOME/Library/Preferences"
-    defaults write "$SHOT_HOME/Library/Preferences/io.bromure.agentic-coding.plist" \
-        automation.enabled -bool true
+    # A scratch state: the capture instance must never show the user's real
+    # workspaces, tasks, or automations. BROMURE_STATE_DIR gives it its own
+    # data folder and settings; port 0 turns the control server on, on an
+    # ephemeral loopback port, without touching anyone's defaults.
+    rm -rf "$STATE"; mkdir -p "$STATE"
     BROMURE_DEBUG_CLAUDE=1 CFFIXED_USER_HOME="$SHOT_HOME" \
+        BROMURE_STATE_DIR="$STATE" BROMURE_AC_AUTOMATION_PORT=0 \
         "$BIN" -AppleLanguages "($locale)" >/dev/null 2>&1 &
+    APP_PID=$!
 
     ready=false
     for _ in $(seq 1 60); do
         sleep 0.5
-        if curl -fsS -m 2 "${BASE}/health" >/dev/null 2>&1; then ready=true; break; fi
+        port=$(curl -fsS -m 2 --unix-socket "$SOCK" "http://x/health" 2>/dev/null \
+               | python3 -c 'import json,sys; print(json.load(sys.stdin).get("automationPort", ""))' 2>/dev/null)
+        if [ -n "$port" ]; then BASE="http://127.0.0.1:$port"; ready=true; break; fi
     done
     if ! $ready; then echo "  ERROR: app not ready after 30s" >&2; continue; fi
     sleep 0.5
@@ -118,7 +137,7 @@ for entry in "${LOCALES[@]}"; do
     sleep 0.3
 done
 
-pkill -x bromure-ac 2>/dev/null || true
+stop_app
 
 echo ""
 echo "=== Done ==="

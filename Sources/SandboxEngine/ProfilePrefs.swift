@@ -7,6 +7,10 @@ import Foundation
 /// decisions without invalidating the signature. The same store backs
 /// unmanaged profiles for symmetry.
 public enum ProfilePrefs {
+    /// The store. Bromure AC points it at its per-state settings (a decision
+    /// remembered for a workspace belongs to the state the workspace is in).
+    public static var defaults: UserDefaults = .standard
+
     public enum RestoreDecision: String {
         case restore
         case fresh
@@ -17,7 +21,7 @@ public enum ProfilePrefs {
     }
 
     public static func restoreTabsDecision(for id: UUID) -> RestoreDecision? {
-        guard let raw = UserDefaults.standard.string(forKey: key(id, "restoreTabs")) else {
+        guard let raw = defaults.string(forKey: key(id, "restoreTabs")) else {
             return nil
         }
         return RestoreDecision(rawValue: raw)
@@ -26,29 +30,29 @@ public enum ProfilePrefs {
     public static func setRestoreTabsDecision(_ decision: RestoreDecision?, for id: UUID) {
         let k = key(id, "restoreTabs")
         if let decision {
-            UserDefaults.standard.set(decision.rawValue, forKey: k)
+            defaults.set(decision.rawValue, forKey: k)
         } else {
-            UserDefaults.standard.removeObject(forKey: k)
+            defaults.removeObject(forKey: k)
         }
     }
 
     public static func skipCloseConfirm(for id: UUID) -> Bool {
-        UserDefaults.standard.bool(forKey: key(id, "skipCloseConfirm"))
+        defaults.bool(forKey: key(id, "skipCloseConfirm"))
     }
 
     public static func setSkipCloseConfirm(_ skip: Bool, for id: UUID) {
         let k = key(id, "skipCloseConfirm")
         if skip {
-            UserDefaults.standard.set(true, forKey: k)
+            defaults.set(true, forKey: k)
         } else {
-            UserDefaults.standard.removeObject(forKey: k)
+            defaults.removeObject(forKey: k)
         }
     }
 
     /// Drop every remembered decision for a profile. Called when a profile
     /// is deleted (unmanaged) or revoked by the control plane (managed).
     public static func clear(for id: UUID) {
-        UserDefaults.standard.removeObject(forKey: key(id, "restoreTabs"))
-        UserDefaults.standard.removeObject(forKey: key(id, "skipCloseConfirm"))
+        defaults.removeObject(forKey: key(id, "restoreTabs"))
+        defaults.removeObject(forKey: key(id, "skipCloseConfirm"))
     }
 }

@@ -121,8 +121,8 @@ struct SecurityTimelineView: View {
 
     private enum Tab: String { case overview, timeline }
     @State private var tab: Tab = .overview
-    @AppStorage(OCSFExporter.enabledKey) private var ocsfEnabled = false
-    @AppStorage(OCSFExporter.schemaVersionKey) private var ocsfSchema = OCSFExporter.currentSchema
+    @AppStorage(OCSFExporter.enabledKey, store: ACDefaults.standard) private var ocsfEnabled = false
+    @AppStorage(OCSFExporter.schemaVersionKey, store: ACDefaults.standard) private var ocsfSchema = OCSFExporter.currentSchema
 
     @State private var query = ""
     @State private var engineFilter: String?

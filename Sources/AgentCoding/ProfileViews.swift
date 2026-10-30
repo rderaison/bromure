@@ -5343,7 +5343,7 @@ struct ProfileEditorView: View {
     }
 
     private var profileDirHint: String {
-        "~/Library/Application Support/BromureAC/profiles/\(draft.id.uuidString.prefix(8))…/"
+        "\(ACSupportDir.url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))/profiles/\(draft.id.uuidString.prefix(8))…/"
     }
 
     private var isValid: Bool {
@@ -7396,7 +7396,7 @@ struct SSHKeyView: View {
 /// (or immediately if no workspace VM has booted yet this session).
 @MainActor
 private struct SubnetSettingsView: View {
-    @AppStorage("vmnet.useRandom172") private var useRandom = false
+    @AppStorage("vmnet.useRandom172", store: ACDefaults.standard) private var useRandom = false
     @State private var subnet = VMNetSwitch.savedRandom172BaseString()
 
     var body: some View {
@@ -7437,7 +7437,7 @@ private struct SubnetSettingsView: View {
 /// bound to the same `p2p.udpRelay.enabled` key `P2PRelayConfig` reads, so the
 /// dialer offers UDP relay candidates only while this is on.
 private struct RelayTransportSettingsView: View {
-    @AppStorage("p2p.udpRelay.enabled") private var udpRelayEnabled = false
+    @AppStorage("p2p.udpRelay.enabled", store: ACDefaults.standard) private var udpRelayEnabled = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -7459,7 +7459,7 @@ private struct RelayTransportSettingsView: View {
 /// the switch. Used only by the Preferences "Automation" pane.
 @MainActor
 private struct AutomationDefaultsStore {
-    private let std = UserDefaults.standard
+    private let std = ACDefaults.standard
 
     var enabled: Bool {
         // Defaults to false (opt-in). Matches the delegate's

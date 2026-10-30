@@ -125,9 +125,7 @@ final class ChatQueueStore: ObservableObject {
         let testing = Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
             || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         guard !testing else { return nil }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("BromureAC", isDirectory: true)
-            .appendingPathComponent("chat-queue.json")
+        return ACSupportDir.url.appendingPathComponent("chat-queue.json")
     }
 
     // MARK: The lists

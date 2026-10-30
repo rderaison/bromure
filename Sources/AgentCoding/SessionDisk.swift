@@ -152,7 +152,7 @@ public final class SessionDisk {
     /// later is an online truncate + resize2fs, shrinking is not supported.
     /// Override: defaults write io.bromure.agentic-coding vm.homeImageGB -int 128
     public static func resolvedHomeImageGB() -> Int {
-        let raw = UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int ?? defaultHomeImageGB
+        let raw = ACDefaults.standard.object(forKey: "vm.homeImageGB") as? Int ?? defaultHomeImageGB
         return min(1024, max(8, raw))
     }
 

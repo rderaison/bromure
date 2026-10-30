@@ -980,9 +980,9 @@ public enum TaskFinish: String, Codable, CaseIterable, Sendable {
     /// The app-wide default (Preferences). Merge unless set otherwise.
     public static var appDefault: TaskFinish {
         get {
-            (UserDefaults.standard.string(forKey: appDefaultKey)).flatMap(TaskFinish.init(rawValue:)) ?? .merge
+            (ACDefaults.standard.string(forKey: appDefaultKey)).flatMap(TaskFinish.init(rawValue:)) ?? .merge
         }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: appDefaultKey) }
+        set { ACDefaults.standard.set(newValue.rawValue, forKey: appDefaultKey) }
     }
 
     /// The effective choice: the task's own, else its workspace's, else the
@@ -3482,9 +3482,7 @@ public final class MACBindings: @unchecked Sendable {
     private var loaded = false
 
     private init() {
-        let dir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let dir = ACSupportDir.url
         self.fileURL = dir.appendingPathComponent("profile-macs.json")
     }
 
@@ -3561,11 +3559,7 @@ public final class ProfileStore {
         if let rootDir {
             self.rootDir = rootDir
         } else {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            ).first!
-            self.rootDir = appSupport
-                .appendingPathComponent("BromureAC", isDirectory: true)
+            self.rootDir = ACSupportDir.url
                 .appendingPathComponent("profiles", isDirectory: true)
         }
     }

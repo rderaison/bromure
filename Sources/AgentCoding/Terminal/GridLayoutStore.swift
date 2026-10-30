@@ -43,9 +43,7 @@ final class GridLayoutStore {
     private let saveURL: URL
 
     init(saveURL: URL? = nil) {
-        self.saveURL = saveURL ?? FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/grid-layout.json")
+        self.saveURL = saveURL ?? ACSupportDir.url.appendingPathComponent("grid-layout.json")
         load()
     }
 

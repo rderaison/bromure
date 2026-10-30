@@ -15,10 +15,7 @@ enum TaskTranscriptArchive {
 
     static var directory: URL {
         if let directoryOverride { return directoryOverride }
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        return ACSupportDir.url
             .appendingPathComponent("task-transcripts", isDirectory: true)
     }
 

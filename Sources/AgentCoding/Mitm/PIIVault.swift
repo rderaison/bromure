@@ -30,8 +30,7 @@ final class PIIVault: @unchecked Sendable {
     }
 
     private static func loadSecret(for id: UUID) -> Data {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/pii", isDirectory: true)
+        let dir = ACSupportDir.url.appendingPathComponent("pii", isDirectory: true)
         let file = dir.appendingPathComponent("\(id.uuidString).key")
         if let d = try? Data(contentsOf: file), d.count == 32 { return d }
         var bytes = [UInt8](repeating: 0, count: 32)

@@ -645,7 +645,7 @@ final class RemoteHostController {
     }
     /// Persisted per-host opt-in for the system-wide tunnel.
     var tunnelEnabled: Bool {
-        UserDefaults.standard.bool(forKey: tunnelDefaultsKey)
+        ACDefaults.standard.bool(forKey: tunnelDefaultsKey)
             || ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_UTUN"] != nil
     }
 #endif
@@ -2036,14 +2036,14 @@ final class RemoteHostController {
     /// approval toggle → start automatically); disabling stops the tunnel and
     /// unregisters the root daemon once no host wants the feature.
     func setTunnelEnabled(_ on: Bool) {
-        UserDefaults.standard.set(on, forKey: tunnelDefaultsKey)
+        ACDefaults.standard.set(on, forKey: tunnelDefaultsKey)
         if on {
             startTunnelIfNeeded(interactive: true)
         } else {
             approvalPollTimer?.invalidate(); approvalPollTimer = nil
             tunnel?.stop(); tunnel = nil
             tunnelState = "off"
-            let anyEnabled = UserDefaults.standard.dictionaryRepresentation().contains {
+            let anyEnabled = ACDefaults.standard.dictionaryRepresentation().contains {
                 $0.key.hasPrefix("fatclient.tunnel.") && ($0.value as? Bool) == true
             }
             if !anyEnabled { FatClientTunnelInstaller.unregister() }
@@ -2125,7 +2125,7 @@ final class RemoteHostController {
                 FatClientTunnelInstaller.openApprovalSettings()
                 self.watchForApproval()
             } else {
-                UserDefaults.standard.set(false, forKey: self.tunnelDefaultsKey)
+                ACDefaults.standard.set(false, forKey: self.tunnelDefaultsKey)
                 self.tunnelState = "off"
             }
         }
@@ -3415,7 +3415,7 @@ final class RemoteHostWindow: NSWindow {
     /// place of the terminal for the shown workspace. Same feature as the local
     /// window; fed over the tunnel via `RemoteTranscriptProvider`.
     private var viewMode: SessionViewMode =
-        UserDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
+        ACDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
     private var beautifiedModel: BeautifiedSessionModel?
     private var beautifiedWorkspace: Profile.ID?
@@ -3988,7 +3988,7 @@ final class RemoteHostWindow: NSWindow {
             }
         }
         // Restore the persisted expanded width (used when the pane opens).
-        let fpStored = UserDefaults.standard.double(forKey: Self.filePaneWidthKey)
+        let fpStored = ACDefaults.standard.double(forKey: Self.filePaneWidthKey)
         if fpStored >= Self.filePaneMinWidth { expandedFilePaneWidth = fpStored }
         // 8pt drag strip over the file pane's leading edge (browser↔file, or
         // terminal↔file when the browser is closed). Hidden while the pane is
@@ -4012,7 +4012,7 @@ final class RemoteHostWindow: NSWindow {
             let w = self.filePaneWidthConstraint.constant
             guard w >= Self.filePaneMinWidth else { return }
             self.expandedFilePaneWidth = w
-            UserDefaults.standard.set(w, forKey: Self.filePaneWidthKey)
+            ACDefaults.standard.set(w, forKey: Self.filePaneWidthKey)
         }
         // Pane order (left→right, matching the local window): terminal | web
         // browser | file explorer. The browser is the middle split; both right
@@ -4074,7 +4074,7 @@ final class RemoteHostWindow: NSWindow {
             // the way to a collapse.
             guard let self, !self.sidebarCollapsed else { return }
             self.expandedSidebarWidth = self.sidebarWidthConstraint.constant
-            UserDefaults.standard.set(
+            ACDefaults.standard.set(
                 self.sidebarWidthConstraint.constant, forKey: Self.sidebarWidthKey)
         }
         // Connection-status overlay covers the stage until we're connected.
@@ -4099,7 +4099,7 @@ final class RemoteHostWindow: NSWindow {
         // Keep the drag strips topmost so an open pane host never intercepts the
         // half of a handle that overlaps it (re-adding moves them to the front).
         for h in [sidebarHandle, fileHandle, browserHandle] { content.addSubview(h) }
-        let storedSidebar = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        let storedSidebar = ACDefaults.standard.double(forKey: Self.sidebarWidthKey)
         let sidebarInitial = storedSidebar >= Self.sidebarMinWidth
             ? min(storedSidebar, Self.sidebarMaxWidth) : Self.sidebarDefaultWidth
         expandedSidebarWidth = sidebarInitial
@@ -4625,7 +4625,7 @@ final class RemoteHostWindow: NSWindow {
                 self?.closeNewWorkspaceWindow()
                 // The machine the new-session screen selects on its rebuild.
                 if let id = resp["id"] as? String, UUID(uuidString: id) != nil {
-                    UserDefaults.standard.set(id, forKey: NewSessionView.lastProfileKey)
+                    ACDefaults.standard.set(id, forKey: NewSessionView.lastProfileKey)
                 }
                 if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
                     let a = NSAlert()
@@ -5539,7 +5539,7 @@ final class RemoteHostWindow: NSWindow {
     private static let remoteSelectedSessionKey = "sessions.remote.selected"
 
     private func selectInitialSession() {
-        let remembered = UserDefaults.standard.string(forKey: Self.remoteSelectedSessionKey)
+        let remembered = ACDefaults.standard.string(forKey: Self.remoteSelectedSessionKey)
             .flatMap(UUID.init(uuidString:))
         if let s = SessionHome.initialSession(in: controller.sessionStore, model: controller.listModel,
                                               remembered: remembered) {
@@ -5868,7 +5868,7 @@ final class RemoteHostWindow: NSWindow {
         model.selectedSessionID = id
         model.selectedSessionProfileID = s.profileID
         model.selectedSessionCwd = s.cwd
-        UserDefaults.standard.set(id.uuidString, forKey: Self.remoteSelectedSessionKey)
+        ACDefaults.standard.set(id.uuidString, forKey: Self.remoteSelectedSessionKey)
         sessionPresentationKey = nil
         presentSession(s)
         controller.markRead(id)
@@ -8217,7 +8217,7 @@ final class RemoteHostWindow: NSWindow {
         viewMode = viewMode == .beautified ? .terminal : .beautified
         // Asked for by hand: a tab held to its terminal follows the toggle.
         if sessionViewMode == .terminal { sessionViewMode = nil }
-        UserDefaults.standard.set(viewMode == .beautified, forKey: "ui.beautifiedTranscript")
+        ACDefaults.standard.set(viewMode == .beautified, forKey: "ui.beautifiedTranscript")
         controller.listModel.beautifiedActive = viewMode == .beautified
         showWorkspace(id)
     }

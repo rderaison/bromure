@@ -31,7 +31,7 @@ extension ImageDistribution {
         catalogPrefix: "images/\(UbuntuImageManager.imageVersion)",
         signingMagic: "bromure-img-catalog-v1",
         cacheFileName: "img-catalog.json",
-        defaultSupportDirName: "BromureAC",
+        defaultSupportDirName: ACSupportDir.name,
         loadBaseline: {
             ImageCatalog.loadBaseline(bundle: acResourceBundle, resource: "img-catalog")
         }
@@ -42,7 +42,7 @@ extension ImageCatalogStore {
     /// The AC-channel store — same role (and name) as before the shared
     /// refactor, so call sites and the `downloadBaseImage` default
     /// parameter read unchanged.
-    public static let shared = ImageCatalogStore(distribution: .agentCoding)
+    public static let shared = ImageCatalogStore(distribution: .agentCoding, supportDir: ACSupportDir.url)
 }
 
 extension ImageCatalog {

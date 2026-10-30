@@ -232,14 +232,14 @@ final class P2PBroker: @unchecked Sendable {
     /// access front door uses (default 2222). Read directly so callers without
     /// a `RemoteAccessServer.Config` in hand (the enroll UI) stay consistent.
     static func configuredSSHPort() -> Int {
-        let p = UserDefaults.standard.integer(forKey: "remoteAccess.port")
+        let p = ACDefaults.standard.integer(forKey: "remoteAccess.port")
         return p > 0 ? p : 2222
     }
 
     /// Whether the SSH front door is enabled — the P2P listener only makes sense
     /// when there's an sshd for candidates to reach.
     static var remoteAccessEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "remoteAccess.enabled")
+        ACDefaults.standard.bool(forKey: "remoteAccess.enabled")
     }
 
     // MARK: Shared device channel

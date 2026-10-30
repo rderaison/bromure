@@ -61,9 +61,7 @@ public final class TraceStore {
         if let rootDir {
             self.rootDir = rootDir
         } else {
-            let support = FileManager.default.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            ).first!.appendingPathComponent("BromureAC", isDirectory: true)
+            let support = ACSupportDir.url
             self.rootDir = support.appendingPathComponent("traces", isDirectory: true)
         }
         try? FileManager.default.createDirectory(at: self.rootDir,

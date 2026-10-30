@@ -39,8 +39,7 @@ actor PIIDetector {
     /// The bundled model, else a downloaded one in Application Support (dev
     /// builds run outside an app bundle).
     var modelDirectory: URL {
-        Self.bundledDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/Models/\(Self.dirName)", isDirectory: true)
+        Self.bundledDirectory ?? ACSupportDir.url.appendingPathComponent("Models/\(Self.dirName)", isDirectory: true)
     }
 
     private struct Loaded {

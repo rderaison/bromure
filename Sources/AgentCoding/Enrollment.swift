@@ -75,9 +75,7 @@ public enum BACEnrollmentStore {
 
     /// Path: ~/Library/Application Support/BromureAC/managed/install.json
     private static var managedDir: URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let base = ACSupportDir.url
             .appendingPathComponent("managed", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
@@ -288,7 +286,7 @@ public final class BACEnrollment {
     public static var defaultServerURL: URL {
         if let env = ProcessInfo.processInfo.environment["BROMURE_MANAGED_URL"],
            let url = URL(string: env) { return url }
-        if let s = UserDefaults.standard.string(forKey: "managed.serverURL"),
+        if let s = ACDefaults.standard.string(forKey: "managed.serverURL"),
            let url = URL(string: s) { return url }
         return URL(string: "https://bromure.io/api")!
     }
@@ -300,7 +298,7 @@ public final class BACEnrollment {
     public static var defaultAnalyticsURL: URL {
         if let env = ProcessInfo.processInfo.environment["BROMURE_AC_INGEST_URL"],
            let url = URL(string: env) { return url }
-        if let s = UserDefaults.standard.string(forKey: "managed.acIngestURL"),
+        if let s = ACDefaults.standard.string(forKey: "managed.acIngestURL"),
            let url = URL(string: s) { return url }
         return URL(string: "https://analytics.bromure.io/ac-ingest")!
     }
@@ -571,7 +569,7 @@ public final class BACIPRegister {
     public static var endpoint: URL {
         if let env = ProcessInfo.processInfo.environment["BROMURE_AC_REGISTER_IP_URL"],
            let url = URL(string: env) { return url }
-        if let s = UserDefaults.standard.string(forKey: "managed.acRegisterIPURL"),
+        if let s = ACDefaults.standard.string(forKey: "managed.acRegisterIPURL"),
            let url = URL(string: s) { return url }
         // Sibling of `defaultAnalyticsURL`'s `/ac-ingest` — same host,
         // different path. Hard-code the swap so a custom analytics

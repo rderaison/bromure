@@ -5,8 +5,8 @@ import SwiftUI
 /// Timeline keeps its history on disk, and the time range the Security window
 /// opens on. App-wide, like the subnet settings beside it.
 struct SecurityHistorySettingsView: View {
-    @AppStorage(SecurityTimeline.retentionKey) private var retentionDays = 90
-    @AppStorage(SecurityTimeline.defaultRangeKey) private var rangeHours = 24
+    @AppStorage(SecurityTimeline.retentionKey, store: ACDefaults.standard) private var retentionDays = 90
+    @AppStorage(SecurityTimeline.defaultRangeKey, store: ACDefaults.standard) private var rangeHours = 24
 
     private static let retentionChoices = [7, 30, 90, 180, 365, 0]
 

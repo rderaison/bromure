@@ -202,13 +202,13 @@ public final class SecurityTimeline {
     /// history): 0 = forever. Unset = 90.
     nonisolated static let retentionKey = "securityTimeline.retentionDays"
     nonisolated static var retentionDays: Int {
-        UserDefaults.standard.object(forKey: retentionKey) == nil ? 90 : UserDefaults.standard.integer(forKey: retentionKey)
+        ACDefaults.standard.object(forKey: retentionKey) == nil ? 90 : ACDefaults.standard.integer(forKey: retentionKey)
     }
     /// The time range the Overview counts and the Timeline opens on, in hours:
     /// 0 = all history. Unset = 24.
     nonisolated static let defaultRangeKey = "securityTimeline.defaultRangeHours"
     nonisolated static var defaultRangeHours: Int {
-        UserDefaults.standard.object(forKey: defaultRangeKey) == nil ? 24 : UserDefaults.standard.integer(forKey: defaultRangeKey)
+        ACDefaults.standard.object(forKey: defaultRangeKey) == nil ? 24 : ACDefaults.standard.integer(forKey: defaultRangeKey)
     }
     /// The ranges offered, in hours (0 = all).
     nonisolated static let rangeChoices = [1, 24, 168, 720, 0]
@@ -248,7 +248,7 @@ public final class SecurityTimeline {
         self.directory = directory
         guard let directory else { return }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let clearedAt = UserDefaults.standard.double(forKey: Self.clearedAtKey)
+        let clearedAt = ACDefaults.standard.double(forKey: Self.clearedAtKey)
         events = Self.load(from: directory, limit: Self.cap, after: clearedAt)
         let dir = directory
         io.async { Self.prune(dir); Self.redactLegacyPreviews(in: dir) }
@@ -260,8 +260,7 @@ public final class SecurityTimeline {
         let testing = Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
             || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         guard !testing else { return nil }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("BromureAC/security-timeline", isDirectory: true)
+        return ACSupportDir.url.appendingPathComponent("security-timeline", isDirectory: true)
     }
 
     /// Record a raw `BACEventEmitter` event. Callable from any thread (the
@@ -298,7 +297,7 @@ public final class SecurityTimeline {
         events.removeAll()
         remote.removeAll()
         if directory != nil {
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.clearedAtKey)
+            ACDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.clearedAtKey)
         }
     }
 

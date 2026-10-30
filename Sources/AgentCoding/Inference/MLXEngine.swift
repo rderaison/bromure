@@ -352,8 +352,7 @@ actor MLXEngine {
     func snapshotDirectory(repo: String) -> URL? {
         let fm = FileManager.default
         let slug = repo.replacingOccurrences(of: "/", with: "--")
-        let local = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BromureAC/models/\(slug)", isDirectory: true)
+        let local = ACSupportDir.url.appendingPathComponent("models/\(slug)", isDirectory: true)
         return fm.fileExists(atPath: local.appendingPathComponent("config.json").path) ? local : nil
     }
 

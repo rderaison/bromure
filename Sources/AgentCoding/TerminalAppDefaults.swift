@@ -200,7 +200,7 @@ extension TerminalAppDefaults {
     /// matching guest marker that flips tmux allow-passthrough, so both
     /// layers follow the one setting.
     static func terminalGraphicsAllowed() -> Bool {
-        UserDefaults.standard.bool(forKey: "terminal.allowGraphics")
+        ACDefaults.standard.bool(forKey: "terminal.allowGraphics")
     }
 
     private static func terminalGraphicsConfigLines() -> String {

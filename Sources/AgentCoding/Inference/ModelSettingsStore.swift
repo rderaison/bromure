@@ -35,19 +35,16 @@ public final class ModelSettingsStore: ObservableObject {
         // `dropNativeCloudAgentRefs`), so the pane shows "<agent> default"
         // and an upgrade doesn't suddenly pin Claude to a pre-filled model.
         let migratedKey = "models.nativeAgentRefsDropped.v1"
-        if url == nil, !UserDefaults.standard.bool(forKey: migratedKey) {
+        if url == nil, !ACDefaults.standard.bool(forKey: migratedKey) {
             var s = settings
             s.dropNativeCloudAgentRefs()
             if s != settings { settings = s; save() }
-            UserDefaults.standard.set(true, forKey: migratedKey)
+            ACDefaults.standard.set(true, forKey: migratedKey)
         }
     }
 
     static var defaultURL: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        return ACSupportDir.url
             .appendingPathComponent("models.enc")
     }
 

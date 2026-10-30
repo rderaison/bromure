@@ -15,8 +15,7 @@ enum EngineModelMeta {
     private static var loaded: [String: ExternalEngine.ModelMeta]?
 
     private static var fileURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        ACSupportDir.url
             .appendingPathComponent("engine-model-meta.json")
     }
 

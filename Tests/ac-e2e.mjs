@@ -110,11 +110,27 @@ async function api(method, path, body, { timeoutMs = 60000 } = {}) {
 // Control socket (owner-only Unix socket) — the routes the HTTP API refuses
 // ("Local only"), e.g. GET /state with the raw AgentSession records. Same
 // response shape as api(). The path follows CFFIXED_USER_HOME like the app's
-// own support dir, so an isolated instance is reached, not the user's.
+// own support dir, so an isolated instance is reached, not the user's. The
+// folder name is the tested bundle's (ACSupportDir): BromureSupportDirName in
+// its Info.plist, else "BromureAC".
 // ---------------------------------------------------------------------------
 
+function acSupportDirName() {
+  const plist = resolveACBin().replace(/\/MacOS\/[^/]+$/, "/Info.plist");
+  try {
+    const name = execFileSync("/usr/libexec/PlistBuddy", ["-c", "Print :BromureSupportDirName", plist],
+                              { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (name && name !== "." && name !== ".." && !/[/:]/.test(name)) return name;
+  } catch {}
+  return "BromureAC";
+}
+const AC_SUPPORT_DIR = acSupportDirName();
+
+// BROMURE_STATE_DIR (a state chosen at launch) puts the socket in that
+// directory, whatever the home.
 const CTL_SOCK = process.env.BROMURE_AC_CONTROL_SOCK ||
-  `${process.env.CFFIXED_USER_HOME || os.homedir()}/Library/Application Support/BromureAC/control.sock`;
+  (process.env.BROMURE_STATE_DIR ? `${process.env.BROMURE_STATE_DIR}/control.sock` :
+  `${process.env.CFFIXED_USER_HOME || os.homedir()}/Library/Application Support/${AC_SUPPORT_DIR}/control.sock`);
 
 function ctl(method, path, body, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve) => {
@@ -2389,7 +2405,7 @@ async function main() {
   if (sectionActive("25.")) {
     console.log("\n--- 25. Rich client (self-mirror) ---");
 
-    const SUP = `${os.homedir()}/Library/Application Support/BromureAC`;
+    const SUP = `${os.homedir()}/Library/Application Support/${AC_SUPPORT_DIR}`;
     const KDIR = `${SUP}/remote-client`;
     const HOST_ADDR = "127.0.0.1";
     const HOST_PORT = 2222;
@@ -3296,7 +3312,7 @@ echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
     // Resolve the dir the browser VM actually boots from — shared Bromure dir
     // first, else AC's own copy (WorkspaceBrowserController.resolveStorageDir).
     const sharedDir = `${HOME}/Library/Application Support/Bromure`;
-    const acBrowserDir = `${HOME}/Library/Application Support/BromureAC/browser`;
+    const acBrowserDir = `${HOME}/Library/Application Support/${AC_SUPPORT_DIR}/browser`;
     const imageDir = dirHasImage(sharedDir) ? sharedDir
       : dirHasImage(acBrowserDir) ? acBrowserDir : null;
     // AC boots whatever image is in that dir (requireImageVersion:false) and
@@ -3326,7 +3342,7 @@ echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
     if (!canExec) {
       console.log("  \x1b[33mSKIP\x1b[0m  browser-VM tests (no code base image — run `bromure-ac init`)");
     } else if (!imageDir) {
-      console.log("  \x1b[33mSKIP\x1b[0m  browser-VM tests (no browser base image in ~/…/Bromure or …/BromureAC/browser)");
+      console.log(`  \x1b[33mSKIP\x1b[0m  browser-VM tests (no browser base image in ~/…/Bromure or …/${AC_SUPPORT_DIR}/browser)`);
     } else if (!imageHasForwarder) {
       console.log("  \x1b[33mSKIP\x1b[0m  browser-VM tests (browser image predates cdp-lan-forwarder — rebuild/publish the browser image)");
     } else {

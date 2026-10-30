@@ -29,27 +29,26 @@ public final class OCSFExporter: @unchecked Sendable {
     private let io = DispatchQueue(label: "io.bromure.ocsf-export", qos: .utility)
     private var lastPrunedDay: String?
 
-    public var isEnabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
+    public var isEnabled: Bool { ACDefaults.standard.bool(forKey: Self.enabledKey) }
 
     public var directory: URL {
-        if let p = UserDefaults.standard.string(forKey: Self.directoryKey), !p.isEmpty {
+        if let p = ACDefaults.standard.string(forKey: Self.directoryKey), !p.isEmpty {
             return URL(fileURLWithPath: (p as NSString).expandingTildeInPath, isDirectory: true)
         }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/ocsf", isDirectory: true)
+        return ACSupportDir.url.appendingPathComponent("ocsf", isDirectory: true)
     }
 
     /// Record one emitter event. Cheap no-op while the export is off.
     public func record(profileID: UUID, workspace: String?, eventType: String,
                        eventData: [String: AnyJSON], time: Date = Date()) {
         guard isEnabled else { return }
-        let version = UserDefaults.standard.string(forKey: Self.schemaVersionKey) ?? Self.currentSchema
+        let version = ACDefaults.standard.string(forKey: Self.schemaVersionKey) ?? Self.currentSchema
         guard var obj = Self.event(profileID: profileID, workspace: workspace, eventType: eventType,
                                    eventData: eventData, time: time) else { return }
         if version != Self.currentSchema { Self.downgrade(&obj, to: version) }
         guard let line = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
         let dir = directory
-        let retention = max(1, UserDefaults.standard.object(forKey: Self.retentionDaysKey) as? Int ?? 7)
+        let retention = max(1, ACDefaults.standard.object(forKey: Self.retentionDaysKey) as? Int ?? 7)
         io.async { [self] in
             let day = Self.dayString(time)
             let url = dir.appendingPathComponent("bromure-ocsf.\(day).jsonl")

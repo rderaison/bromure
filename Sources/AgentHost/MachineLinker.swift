@@ -45,7 +45,7 @@ final class MachineLinker: @unchecked Sendable {
 
     static var localControlSocket: String {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/BromureAC/control.sock").path
+            .appendingPathComponent("Library/Application Support/\(ACSupportDir.name)/control.sock").path
     }
 
     // MARK: Lifecycle

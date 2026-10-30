@@ -3504,20 +3504,20 @@ enum TaskDraftDefaults {
     private static let foldersKey = "codingTasks.lastFolders"
 
     static var lastWorkspace: UUID? {
-        UserDefaults.standard.string(forKey: workspaceKey).flatMap(UUID.init(uuidString:))
+        ACDefaults.standard.string(forKey: workspaceKey).flatMap(UUID.init(uuidString:))
     }
 
     static func lastFolder(for workspace: UUID) -> String? {
-        let map = UserDefaults.standard.dictionary(forKey: foldersKey) as? [String: String]
+        let map = ACDefaults.standard.dictionary(forKey: foldersKey) as? [String: String]
         return map?[workspace.uuidString]
     }
 
     static func remember(_ t: CodingTask) {
-        UserDefaults.standard.set(t.profileID.uuidString, forKey: workspaceKey)
+        ACDefaults.standard.set(t.profileID.uuidString, forKey: workspaceKey)
         let folder = t.repoPath.trimmingCharacters(in: .whitespaces)
         guard !folder.isEmpty, folder != "~" else { return }
-        var map = (UserDefaults.standard.dictionary(forKey: foldersKey) as? [String: String]) ?? [:]
+        var map = (ACDefaults.standard.dictionary(forKey: foldersKey) as? [String: String]) ?? [:]
         map[t.profileID.uuidString] = folder
-        UserDefaults.standard.set(map, forKey: foldersKey)
+        ACDefaults.standard.set(map, forKey: foldersKey)
     }
 }

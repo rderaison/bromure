@@ -30,9 +30,7 @@ enum SquelchSettings {
 /// Persisted in Application Support; a cloud report is a delta since the
 /// last one (`pendingCloudReport`, `SquelchCloud`).
 final class SquelchLedger: @unchecked Sendable {
-    static let shared = SquelchLedger(file: FileManager.default
-        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("BromureAC/squelch/ledger.json"))
+    static let shared = SquelchLedger(file: ACSupportDir.url.appendingPathComponent("squelch/ledger.json"))
 
     struct Workspace: Codable, Equatable {
         var total = SquelchTally()

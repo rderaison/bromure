@@ -15,7 +15,7 @@ struct ScratchTerminalDrawer: View {
     let maxHeight: CGFloat
     let onHide: () -> Void
 
-    @AppStorage("chat.scratchTerminalHeight") private var storedHeight: Double = 280
+    @AppStorage("chat.scratchTerminalHeight", store: ACDefaults.standard) private var storedHeight: Double = 280
     @State private var dragBase: Double?
     @State private var grabHover = false
     @State private var surface: NSView?

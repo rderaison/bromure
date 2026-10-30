@@ -414,16 +414,16 @@ final class RemoteConnectModel {
     /// lives. The local NSUserName() default is only a first guess — the two
     /// Macs' short names routinely differ.
     private static func rememberedUser(forPeer id: String) -> String? {
-        if let v = UserDefaults.standard.string(forKey: "p2p.remoteUser.\(id)"),
+        if let v = ACDefaults.standard.string(forKey: "p2p.remoteUser.\(id)"),
            !v.isEmpty { return v }
         // Fall back to the key this branch used before it adopted the one
         // above, so an upgrade doesn't re-prompt for a username the app has
         // already been told once.
-        let legacy = UserDefaults.standard.string(forKey: "fatclient.peer.user.\(id)")
+        let legacy = ACDefaults.standard.string(forKey: "fatclient.peer.user.\(id)")
         return (legacy?.isEmpty == false) ? legacy : nil
     }
     static func rememberUser(_ user: String, forPeer id: String) {
-        UserDefaults.standard.set(user, forKey: "p2p.remoteUser.\(id)")
+        ACDefaults.standard.set(user, forKey: "p2p.remoteUser.\(id)")
     }
 
     /// The RemoteHost a directory server dial produces. Not saved to the

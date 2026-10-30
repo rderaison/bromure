@@ -636,6 +636,11 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// of the app's defaults, so two isolated instances get independent subnets.
     public static let subnetBase172DefaultsKey = "vmnet.switch.subnetBase172"
 
+    /// Where the chosen subnet is persisted. Bromure AC points this at its
+    /// per-state store before any VM boots, so two instances on two states
+    /// never share a subnet; Bromure Web leaves it at `.standard`.
+    public static var subnetDefaults: UserDefaults = .standard
+
     /// 172.16/12 second octets we'll pick from — 16, then 21…31, skipping
     /// Docker's default bridge range (172.17–172.20).
     private static let allowed172SecondOctets: [UInt32] = [16] + Array(21...31)
@@ -645,7 +650,7 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Docker bridge moved onto it) — which is exactly the collision this feature
     /// exists to avoid. Persists the choice on first pick.
     public static func persistedRandom172Base(hostUsed: Set<UInt32>) -> UInt32 {
-        let d = UserDefaults.standard
+        let d = subnetDefaults
         if d.object(forKey: subnetBase172DefaultsKey) != nil {
             let saved = UInt32(bitPattern: Int32(truncatingIfNeeded: d.integer(forKey: subnetBase172DefaultsKey)))
             if isEligible172(saved, hostUsed: hostUsed) { return saved }
@@ -668,14 +673,14 @@ public final class VMNetSwitch: @unchecked Sendable {
     @discardableResult
     public static func rerollRandom172Base() -> UInt32 {
         let base = randomEligible172(hostUsed: HostNetworkInfo.localPrivate172Slash24s())
-        UserDefaults.standard.set(Int(base), forKey: subnetBase172DefaultsKey)
+        subnetDefaults.set(Int(base), forKey: subnetBase172DefaultsKey)
         return base
     }
 
     /// The persisted `/24` network base formatted as dotted-decimal (e.g.
     /// "172.23.181.0"), or nil if none has been chosen yet. For the Settings UI.
     public static func savedRandom172BaseString() -> String? {
-        let d = UserDefaults.standard
+        let d = subnetDefaults
         guard d.object(forKey: subnetBase172DefaultsKey) != nil else { return nil }
         let base = UInt32(bitPattern: Int32(truncatingIfNeeded: d.integer(forKey: subnetBase172DefaultsKey)))
         return ipString(base)

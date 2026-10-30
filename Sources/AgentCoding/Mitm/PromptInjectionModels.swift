@@ -88,8 +88,7 @@ public enum PromptInjectionModels {
     }
 
     public static var modelsRoot: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/Models", isDirectory: true)
+        ACSupportDir.url.appendingPathComponent("Models", isDirectory: true)
     }
     public static func directory(for kind: Kind) -> URL {
         modelsRoot.appendingPathComponent(kind.dirName, isDirectory: true)

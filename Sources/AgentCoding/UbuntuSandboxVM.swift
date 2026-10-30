@@ -945,8 +945,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// ~/Library/Logs/BromureAC/console/, rotating it to `.1` past 2 MB.
     nonisolated static func openConsoleLog(name: String, id: String?) -> FileHandle? {
         let fm = FileManager.default
-        let dir = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/BromureAC/console", isDirectory: true)
+        let dir = ACSupportDir.logsURL.appendingPathComponent("console", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let safe = String(name.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-" })
         let stem = id.map { "\(safe)-\($0.prefix(8))" } ?? safe

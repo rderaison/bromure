@@ -3,8 +3,33 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Per-developer build settings, never committed (.env.local is gitignored):
+#   CODESIGN_IDENTITY  Developer ID cert (name or SHA-1 hash); default ad-hoc
+#   BROMURE_TEAM_ID    sign under your own Apple team (scripts/stamp-identity.sh)
+#   BROMURE_BUNDLE_ID  …with your own bundle identifier
+#   BROMURE_DEV        1 = the dev flavor (below)
+# Variables already set in the environment win over the file.
+if [ -f "$SCRIPT_DIR/.env.local" ]; then
+    _env_pre=$(declare -p CODESIGN_IDENTITY BROMURE_TEAM_ID BROMURE_BUNDLE_ID BROMURE_DEV 2>/dev/null || true)
+    set -a; . "$SCRIPT_DIR/.env.local"; set +a
+    eval "$_env_pre"
+fi
+
 # Per-target config. Add a new case here to support a new app bundle.
+#
+# BROMURE_DEV=1 (from .env.local, like the identity) builds the "dev flavor":
+# a build that can live next to an installed release without touching it.
+# It is renamed in the menu bar and Dock, keeps its data in its own folder
+# (BromureSupportDirName — a build signed by another team can't read the
+# release's keychain-encrypted files anyway), and never lets Sparkle check
+# for or install a release over itself. The bundle's file name stays the
+# same. Identity (team, bundle ID, cert) is separate: see .env.local above.
+BROMURE_DEV="${BROMURE_DEV:-0}"
+if [ $# -gt 1 ] || [[ "${1:-}" == -* ]]; then
+    echo "Usage: $0 [bromure|bromure-ac|sidecar]" >&2; exit 2
+fi
 TARGET="${1:-bromure}"
+DEV_SUPPORT_DIR_KEY=""
 case "$TARGET" in
     bromure)
         PRODUCT_NAME="bromure"
@@ -16,6 +41,7 @@ case "$TARGET" in
         RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
         ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
         ICON_COMPOSER="$SCRIPT_DIR/Resources/Bromure.icon"
+        DEV_NAME="Bromure Dev"
         ;;
     bromure-ac)
         PRODUCT_NAME="bromure-ac"
@@ -27,6 +53,8 @@ case "$TARGET" in
         RESOURCE_BUNDLE_NAME="bromure_bromure-ac.bundle"
         ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
         ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureAC.icon"
+        DEV_NAME="Bromure AC Dev"
+        DEV_SUPPORT_DIR_KEY="BromureSupportDirName"
         ;;
     sidecar|native|agent-host)
         TARGET="sidecar"
@@ -39,6 +67,9 @@ case "$TARGET" in
         RESOURCE_BUNDLE_NAME="bromure_bromure-sidecar.bundle"
         ICON_FILE="$SCRIPT_DIR/Resources/BromureSidecarIcon.icns"
         ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureSidecar.icon"
+        DEV_NAME="Bromure Sidecar Dev"
+        # A dev Sidecar attaches to the dev Bromure AC on this Mac.
+        DEV_SUPPORT_DIR_KEY="BromureACSupportDirName"
         ;;
     *)
         echo "Usage: $0 [bromure|bromure-ac|sidecar]" >&2
@@ -46,7 +77,11 @@ case "$TARGET" in
         ;;
 esac
 
-echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
+if [ "$BROMURE_DEV" = 1 ]; then
+    echo "=== Building $APP_NAME ($PRODUCT_NAME) — dev flavor \"$DEV_NAME\" ==="
+else
+    echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
+fi
 
 # GhosttyKit is an SPM binaryTarget at vendor/GhosttyKit.xcframework (never
 # committed). Needed by every target because SPM resolves the whole manifest.
@@ -118,9 +153,17 @@ echo "Binary built at: $BINARY (SDK $SDK_STAMP, min macOS $MINOS_STAMP)"
 # Signing identity: use CODESIGN_IDENTITY env var, or fall back to ad-hoc (-)
 SIGN_ID="${CODESIGN_IDENTITY:--}"
 
+# The entitlements and Info.plist actually used are build-dir copies of the
+# tracked files, with BROMURE_TEAM_ID / BROMURE_BUNDLE_ID written in when a
+# contributor signs under their own team (verbatim copies otherwise).
+STAMPED_ENTITLEMENTS="$BUILD_DIR/$PRODUCT_NAME.entitlements"
+STAMPED_INFO_PLIST="$BUILD_DIR/$PRODUCT_NAME.Info.plist"
+"$SCRIPT_DIR/scripts/stamp-identity.sh" "$ENTITLEMENTS" "$INFO_PLIST" \
+    "$STAMPED_ENTITLEMENTS" "$STAMPED_INFO_PLIST"
+
 # Sign the standalone binary too (for direct invocation without the app bundle).
 echo "Code signing standalone binary..."
-codesign --force --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" "$BINARY"
+codesign --force --sign "$SIGN_ID" --entitlements "$STAMPED_ENTITLEMENTS" "$BINARY"
 
 # Create a minimal .app bundle so macOS treats this as a GUI application.
 # Required for Dock icon, NSApplication, and window focus to work properly.
@@ -133,8 +176,26 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
-cp "$INFO_PLIST" "$CONTENTS/Info.plist"
+cp "$STAMPED_INFO_PLIST" "$CONTENTS/Info.plist"
 "$SCRIPT_DIR/scripts/stamp-build-info.sh" "$CONTENTS/Info.plist"
+
+if [ "$BROMURE_DEV" = 1 ]; then
+    PB=/usr/libexec/PlistBuddy
+    plist_set() {  # <key> <type> <value>: add or replace
+        $PB -c "Delete :$1" "$CONTENTS/Info.plist" 2>/dev/null || true
+        $PB -c "Add :$1 $2 $3" "$CONTENTS/Info.plist"
+    }
+    plist_set CFBundleName string "$DEV_NAME"
+    plist_set CFBundleDisplayName string "$DEV_NAME"
+    if [ -n "$DEV_SUPPORT_DIR_KEY" ]; then
+        plist_set "$DEV_SUPPORT_DIR_KEY" string BromureACDev
+    fi
+    # Never check for, or install, a release over the dev build.
+    if $PB -c "Print :SUFeedURL" "$CONTENTS/Info.plist" >/dev/null 2>&1; then
+        plist_set SUEnableAutomaticChecks bool false
+        plist_set SUAllowsAutomaticUpdates bool false
+    fi
+fi
 
 # SPM only sets @loader_path / /usr/lib/swift / Xcode rpaths on the binary;
 # none resolve to Contents/Frameworks. Add the standard macOS app rpath so
@@ -351,7 +412,7 @@ fi
 # Set CODESIGN_IDENTITY for Developer ID signing (required for iCloud,
 # ASAuthorization/passkeys).
 echo "Code signing with entitlements (identity: $SIGN_ID)..."
-codesign --force --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" --options runtime "$APP_BUNDLE"
+codesign --force --sign "$SIGN_ID" --entitlements "$STAMPED_ENTITLEMENTS" --options runtime "$APP_BUNDLE"
 
 echo ""
 echo "=== Build Complete ==="

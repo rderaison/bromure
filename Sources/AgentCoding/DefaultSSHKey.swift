@@ -26,11 +26,7 @@ public enum DefaultSSHKey {
 
     /// `~/Library/Application Support/BromureAC/default-ssh/`.
     public static var directoryURL: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!
-        return appSupport
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        return ACSupportDir.url
             .appendingPathComponent("default-ssh", isDirectory: true)
     }
 

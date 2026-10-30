@@ -483,9 +483,7 @@ enum GuestDrop {
 /// carry a per-send stamp, so a path names one picture for good.
 enum DropImageStore {
     private static let dir: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("BromureAC/drop-images", isDirectory: true)
+        return ACSupportDir.url.appendingPathComponent("drop-images", isDirectory: true)
     }()
 
     private static func file(for path: String) -> URL {
@@ -5515,8 +5513,8 @@ struct DelegationPanel: View {
     let open: (UUID) -> Void
     /// nil = read-only (a fat client's mirror).
     let answer: ((UUID, UUID, String) -> Void)?
-    @AppStorage("sessions.delegationsExpanded") private var expanded = true
-    @AppStorage("sessions.requestsExpanded") private var requestsExpanded = false
+    @AppStorage("sessions.delegationsExpanded", store: ACDefaults.standard) private var expanded = true
+    @AppStorage("sessions.requestsExpanded", store: ACDefaults.standard) private var requestsExpanded = false
     @State private var drafts: [UUID: String] = [:]
 
     private var remoteHosts: [UUID: String] {

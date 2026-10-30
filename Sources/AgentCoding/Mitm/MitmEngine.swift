@@ -354,9 +354,7 @@ public final class MitmEngine {
     private let sshAgentLock = NSLock()
 
     public init() throws {
-        let supportDir = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!.appendingPathComponent("BromureAC", isDirectory: true)
+        let supportDir = ACSupportDir.url
         let caDir = supportDir.appendingPathComponent("ca", isDirectory: true)
         self.ca = try BromureCA.loadOrCreate(at: caDir)
         self.certCache = CertCache(ca: ca)

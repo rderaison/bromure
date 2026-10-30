@@ -149,10 +149,7 @@ final class WorkspaceBrowserController {
     /// Chromium's user-data-dir when `persistent`):
     /// `~/Library/Application Support/BromureAC/browser-profiles/<id>/image/`.
     static func browserProfileImageDir(for id: UUID) -> URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        return ACSupportDir.url
             .appendingPathComponent("browser-profiles", isDirectory: true)
             .appendingPathComponent(id.uuidString, isDirectory: true)
             .appendingPathComponent("image", isDirectory: true)
@@ -168,10 +165,7 @@ final class WorkspaceBrowserController {
     /// Used when AC downloads its own image (phase 2b). Ephemeral CoW clones
     /// live in the temp dir regardless, so we never write into the shared dir.
     static var browserStorageDir: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        return ACSupportDir.url
             .appendingPathComponent("browser", isDirectory: true)
     }
 

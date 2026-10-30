@@ -428,7 +428,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         )
         title = "Bromure"
         titleVisibility = .hidden
-        listModel.sessionsFirst = UserDefaults.standard.bool(forKey: "ui.sessionsFirst")
+        listModel.sessionsFirst = ACDefaults.standard.bool(forKey: "ui.sessionsFirst")
         // Browser parity for window dragging: a transparent unified titlebar +
         // movable-by-background means clicks on the toolbar's empty areas (the
         // grey capsule, gaps) drag the window, while the pills/buttons still
@@ -692,10 +692,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // File-pane sizing: restore the persisted width; closed = 0pt + hidden.
         // High-but-not-required priority so the framebuffer's minimum width
         // wins over the pane on narrow windows.
-        let fpStored = UserDefaults.standard.double(forKey: Self.filePaneWidthKey)
+        let fpStored = ACDefaults.standard.double(forKey: Self.filePaneWidthKey)
         expandedFilePaneWidth = fpStored >= Self.filePaneMinWidth
             ? fpStored : Self.filePaneDefaultWidth
-        filePaneOpen = UserDefaults.standard.bool(forKey: Self.filePaneOpenKey)
+        filePaneOpen = ACDefaults.standard.bool(forKey: Self.filePaneOpenKey)
         listModel.filePaneOpen = filePaneOpen
         filePaneHost.isHidden = !filePaneOpen
         filePaneHandle.isHidden = !filePaneOpen
@@ -719,11 +719,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                   let w = self.filePaneWidthConstraint?.constant,
                   w >= Self.filePaneMinWidth else { return }
             self.expandedFilePaneWidth = w
-            UserDefaults.standard.set(w, forKey: Self.filePaneWidthKey)
+            ACDefaults.standard.set(w, forKey: Self.filePaneWidthKey)
         }
         // Browser-pane sizing: closed = 0pt + hidden (opened on demand, not
         // persisted — the ephemeral browser doesn't survive a restart).
-        let bpStored = UserDefaults.standard.double(forKey: Self.browserPaneWidthKey)
+        let bpStored = ACDefaults.standard.double(forKey: Self.browserPaneWidthKey)
         expandedBrowserPaneWidth = bpStored >= Self.browserPaneMinWidth
             ? bpStored : Self.browserPaneDefaultWidth
         let browserPaneWidth = browserPaneHost.widthAnchor.constraint(equalToConstant: 0)
@@ -747,7 +747,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                   let w = self.browserPaneWidthConstraint?.constant,
                   w >= Self.browserPaneMinWidth else { return }
             self.expandedBrowserPaneWidth = w
-            UserDefaults.standard.set(w, forKey: Self.browserPaneWidthKey)
+            ACDefaults.standard.set(w, forKey: Self.browserPaneWidthKey)
         }
         let paneSlotMin = StageSplit.chatFloor(paneSlot)   // beats the pane width, yields last
         NSLayoutConstraint.activate([
@@ -841,21 +841,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         root.addSubview(divider)
         root.addSubview(stage)
         root.addSubview(resizeHandle)   // above the divider so it gets the drag
-        var stored = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        var stored = ACDefaults.standard.double(forKey: Self.sidebarWidthKey)
         // Once: rows now give the title the room, so a sidebar sized for
         // the old layout widens to the new default.
-        if !UserDefaults.standard.bool(forKey: "ac.sidebarWidth.v2") {
-            UserDefaults.standard.set(true, forKey: "ac.sidebarWidth.v2")
+        if !ACDefaults.standard.bool(forKey: "ac.sidebarWidth.v2") {
+            ACDefaults.standard.set(true, forKey: "ac.sidebarWidth.v2")
             if stored >= Self.sidebarMinWidth, stored < Self.sidebarDefaultWidth {
                 stored = Self.sidebarDefaultWidth
-                UserDefaults.standard.set(stored, forKey: Self.sidebarWidthKey)
+                ACDefaults.standard.set(stored, forKey: Self.sidebarWidthKey)
             }
         }
         // Once: the Archived fold used to stay open after revealing one
         // selection; start closed again.
-        if !UserDefaults.standard.bool(forKey: "sessions.archivedFold.v3") {
-            UserDefaults.standard.set(true, forKey: "sessions.archivedFold.v3")
-            UserDefaults.standard.set(false, forKey: "sessions.archivedExpanded")
+        if !ACDefaults.standard.bool(forKey: "sessions.archivedFold.v3") {
+            ACDefaults.standard.set(true, forKey: "sessions.archivedFold.v3")
+            ACDefaults.standard.set(false, forKey: "sessions.archivedExpanded")
         }
         let initialWidth = stored >= Self.sidebarMinWidth ? stored : Self.sidebarDefaultWidth
         expandedSidebarWidth = initialWidth
@@ -880,7 +880,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             guard let self, !self.sidebarCollapsed,
                   let w = self.sidebarWidthConstraint?.constant else { return }
             self.expandedSidebarWidth = w
-            UserDefaults.standard.set(w, forKey: Self.sidebarWidthKey)
+            ACDefaults.standard.set(w, forKey: Self.sidebarWidthKey)
         }
         NSLayoutConstraint.activate([
             sidebarHost.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -1057,7 +1057,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard open != filePaneOpen else { return }
         filePaneOpen = open
         listModel.filePaneOpen = open
-        UserDefaults.standard.set(open, forKey: Self.filePaneOpenKey)
+        ACDefaults.standard.set(open, forKey: Self.filePaneOpenKey)
         filePaneResizeHandle?.isHidden = !open
         if open { filePaneHost.isHidden = false }
         let target = open ? (width ?? expandedFilePaneWidth) : 0
@@ -1306,7 +1306,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if foldFiles {
             filePaneOpen = false
             listModel.filePaneOpen = false
-            UserDefaults.standard.set(false, forKey: Self.filePaneOpenKey)
+            ACDefaults.standard.set(false, forKey: Self.filePaneOpenKey)
             filePaneResizeHandle?.isHidden = true
         }
         let target = open ? clampedBrowserPaneWidth(expandedBrowserPaneWidth, fileWidth: foldFiles ? 0 : nil) : 0
@@ -1991,7 +1991,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     private var rememberedSessionID: UUID? {
-        UserDefaults.standard.string(forKey: Self.selectedSessionKey).flatMap { UUID(uuidString: $0) }
+        ACDefaults.standard.string(forKey: Self.selectedSessionKey).flatMap { UUID(uuidString: $0) }
     }
 
     /// Home: the last session looked at, else the most pressing one, else
@@ -2166,7 +2166,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         listModel.selectedSessionID = id
         listModel.selectedSessionProfileID = s.profileID
         listModel.selectedSessionCwd = s.cwd
-        UserDefaults.standard.set(id.uuidString, forKey: Self.selectedSessionKey)
+        ACDefaults.standard.set(id.uuidString, forKey: Self.selectedSessionKey)
         sessionPresentationKey = nil   // a fresh surface on an explicit pick
         presentSession(s)
         makeKeyAndOrderFront(nil)

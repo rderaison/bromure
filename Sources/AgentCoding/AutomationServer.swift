@@ -83,6 +83,10 @@ final class ACAutomationServer {
         return id.removingPercentEncoding ?? id
     }
     let port: UInt16
+    /// The TCP port actually bound: `port`, or the ephemeral one the kernel
+    /// picked for `port` 0 (a second instance that must not collide). 0 until
+    /// `start()` listens; nil for the Unix control socket.
+    private(set) var boundPort: UInt16?
     let bindAddress: String
     /// When non-nil, bind an AF_UNIX socket at this path instead of TCP — the
     /// owner-only local control socket used by the `bromure-ac` CLI.
@@ -362,6 +366,14 @@ final class ACAutomationServer {
     /// the provider rejected the credential (sign-in expired).
     var onSubscriptionStatus: ((_ profileID: String?) -> [String: Any])?
     var onAnswerPrompt: ((_ id: String, _ choice: Int) -> Bool)?
+    /// `POST /app/quit`: start the drain-and-terminate; false if one is
+    /// already in progress. `vms` is the close-action override, if any.
+    var onQuit: ((_ vms: String?) -> Bool)?
+    /// The TCP automation server's bound port, for `/health` on either server.
+    var onAutomationPort: (() -> UInt16?)?
+    /// `POST /app/sync`: flush the host-side stores (the guests are synced
+    /// by the route itself, over their shell connections).
+    var onSyncHostStores: (() -> Void)?
 
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
         // 9223 (one off from the browser's 9222) so both apps can run side
@@ -415,13 +427,28 @@ final class ACAutomationServer {
             return
         }
 
+        var bound = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(sock, $0, &len) }
+        }
+        boundPort = UInt16(bigEndian: bound.sin_port)
+
         Darwin.listen(sock, 32)
         beginAccepting(on: sock)
-        print("[ACAutomation] listening on \(bindAddress):\(port)\(debugEnabled ? " (debug endpoints enabled)" : "")")
+        print("[ACAutomation] listening on \(bindAddress):\(boundPort ?? port)\(debugEnabled ? " (debug endpoints enabled)" : "")")
     }
 
     private func startUnix(path: String) {
-        unlink(path)   // clear any stale socket from a previous run
+        // Clear a stale socket from a previous run — but never a live one:
+        // another process on this state (one that got past the instance lock
+        // somehow, or a run of this code without it) would lose its CLI to us
+        // without a word. The lock holder is the only legitimate owner.
+        if !ACInstance.isHolder, ControlClient(socketPath: path).isAgentRunning() {
+            print("[ACAutomation] ERROR: control socket \(path) is served by another process; not taking it over")
+            return
+        }
+        unlink(path)
         let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else {
             print("[ACAutomation] ERROR: failed to create unix socket")
@@ -728,11 +755,65 @@ final class ACAutomationServer {
         }
         switch (method, path) {
         case ("GET", "/health"):
-            sendResponse(fd: fd, status: 200, body: [
+            var health: [String: Any] = [
                 "status": "ok",
                 "service": "bromure-ac-automation",
                 "debugEnabled": debugEnabled,
-            ])
+                "pid": Int(getpid()),
+                "state": ACSupportDir.stateName,
+                "statePath": ACSupportDir.url.path,
+                "build": ACInstance.buildName,
+            ]
+            if let v = ACInstance.bundleVersion { health["version"] = v }
+            if let c = ACInstance.bundleCommit { health["commit"] = c }
+            if let p = DispatchQueue.main.sync(execute: { self.onAutomationPort?() }) { health["automationPort"] = Int(p) }
+            sendResponse(fd: fd, status: 200, body: health)
+
+        // Flush before a snapshot: `sync` in every running guest (over its
+        // shell connection, bounded), then the host-side stores. Best effort;
+        // the reply says which guests answered. Trusted callers only.
+        case ("POST", "/app/sync"):
+            guard isTrustedLocal || debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let rows = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
+            var synced: [String] = [], failed: [String] = []
+            for row in rows where (row["state"] as? String) == "running" {
+                guard let id = row["id"] as? String else { continue }
+                guard let conn = DispatchQueue.main.sync(execute: { self.onGetShellConnection?(id) }) else {
+                    failed.append(id); continue
+                }
+                if case .success(let r) = Self.executeShellCommand(fd: conn.fd, command: "sync", timeout: 20), r.exitCode == 0 {
+                    synced.append(id)
+                } else {
+                    failed.append(id)
+                }
+                _ = conn.conn   // keep alive until the command has answered
+            }
+            DispatchQueue.main.sync { self.onSyncHostStores?() }
+            sendResponse(fd: fd, status: 200, body: ["ok": failed.isEmpty, "synced": synced, "failed": failed])
+
+        // Quit the app the way the menu does — drain the VMs, then terminate —
+        // but without the confirmation dialog: the caller is a script
+        // (an instance stop, a promote). Trusted callers only.
+        // `vms`: "suspend" | "shutdown" to override every workspace's close
+        // action for this quit; omitted, each closes per its own action.
+        // Answers before the drain starts; the socket goes away with the app.
+        case ("POST", "/app/quit"):
+            guard isTrustedLocal || debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let vms = bodyJSON["vms"] as? String
+            guard vms == nil || vms == "suspend" || vms == "shutdown" else {
+                sendResponse(fd: fd, status: 400, body: ["error": "vms must be \"suspend\" or \"shutdown\""])
+                return
+            }
+            let accepted = DispatchQueue.main.sync { self.onQuit?(vms) ?? false }
+            sendResponse(fd: fd, status: accepted ? 202 : 409,
+                         body: accepted ? ["ok": true, "pid": Int(getpid())]
+                                        : ["ok": false, "error": "no quit handler, or a quit is already in progress"])
 
         case ("GET", "/profiles"):
             let profiles = DispatchQueue.main.sync { self.onListProfiles?() ?? [] }
@@ -961,13 +1042,19 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 403, body: ["error": "Local only"])
                 return
             }
-            var pathParam = "/tmp/bromure-ui-shot.png"
+            // Default output: /tmp for the default state (the historical
+            // path scripts know), the state's logs/ for one chosen at
+            // launch, so two instances never overwrite each other's shot.
+            var pathParam = ACSupportDir.isDefault
+                ? "/tmp/bromure-ui-shot.png"
+                : ACSupportDir.logsURL.appendingPathComponent("ui-shot.png").path
             var whichParam = "unified"
             if let q = p.split(separator: "?", maxSplits: 1).dropFirst().first {
                 for pair in q.split(separator: "&") {
                     let kv = pair.split(separator: "=", maxSplits: 1)
                     guard kv.count == 2 else { continue }
-                    let v = kv[1].removingPercentEncoding ?? String(kv[1])
+                    // Form encoding too: curl --data-urlencode sends a space as "+".
+                    let v = kv[1].replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[1])
                     if kv.first == "path" { pathParam = v }
                     if kv.first == "which" { whichParam = v }
                 }

@@ -977,7 +977,7 @@ struct LandingConfirmSheet: View {
     @State private var target = ""
     @State private var keepBranch = false
     /// Push the target afterwards — remembered between landings.
-    @AppStorage("tasks.landing.push") private var push = false
+    @AppStorage("tasks.landing.push", store: ACDefaults.standard) private var push = false
 
     /// The remote a merge can push to (none known: no option).
     private var pushRemote: String? { confirm.mode == .pr ? nil : summary?.remote }

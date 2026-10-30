@@ -21,9 +21,7 @@ public final class CatalogStore: @unchecked Sendable {
     private var cachedRemote: ModelCatalog?
 
     public init(supportDir: URL? = nil, hubCacheDir: URL? = nil) {
-        let support = supportDir ?? FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        let support = supportDir ?? ACSupportDir.url
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         self.cacheURL = support.appendingPathComponent("catalog.json")
         self.hubCacheURL = hubCacheDir ?? FileManager.default
@@ -49,7 +47,7 @@ public final class CatalogStore: @unchecked Sendable {
     /// when the *bundled* `Resources/catalog.json` should be authoritative.
     /// Delete the key to go back to normal.
     public static var refreshDisabled: Bool {
-        UserDefaults.standard.bool(forKey: "catalog.refreshDisabled")
+        ACDefaults.standard.bool(forKey: "catalog.refreshDisabled")
     }
 
     private func adoptRemote(_ parsed: ModelCatalog) {

@@ -21,10 +21,7 @@ enum AutomationRunArchive {
 
     static var runsDirectory: URL {
         if let directoryOverride { return directoryOverride }
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("BromureAC", isDirectory: true)
+        return ACSupportDir.url
             .appendingPathComponent("runs", isDirectory: true)
     }
 
