@@ -6514,14 +6514,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onBeginRegistration = { [weak self] provider, profileID in
             MainActor.assumeIsolated {
-                guard let self, let p = SubscriptionProvider(rawValue: provider) else { return false }
-                guard self.claudeRegistration == nil else { return false }   // one at a time
+                guard let self else { return "registration unavailable" }
+                guard let p = SubscriptionProvider(rawValue: provider) else { return "unknown provider \(provider)" }
+                guard self.claudeRegistration == nil else {   // one at a time
+                    return NSLocalizedString("Another sign-in is already in progress.", comment: "sign-in")
+                }
                 let scope: SubscriptionRegistrationScope = profileID
                     .flatMap(UUID.init(uuidString:)).map { .askPerSession($0) } ?? .alwaysShared
-                self.beginSubscriptionRegistration(provider: p, scope: scope,
-                                                   remoteInitiated: true)
-                // Under way (not refused before it began, e.g. no proxy).
-                return RemoteRegistrationBroker.shared.pending != nil
+                // A start refused at once (no proxy) says why here, for the
+                // reply; a later end reaches the client through /state.
+                var refused: String?
+                self.beginSubscriptionRegistration(
+                    provider: p, scope: scope, remoteInitiated: true,
+                    events: { event in
+                        if case .finished(false, let message) = event { refused = message }
+                    })
+                // Only the synchronous refusal: once under way, a failure
+                // still posts the host notice an older client relies on.
+                self.claudeRegistration?.onEvent = nil
+                guard RemoteRegistrationBroker.shared.pending != nil else {
+                    return refused ?? RemoteRegistrationBroker.shared.ended?.message
+                        ?? NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
+                }
+                return nil
             }
         }
         server.onForgetSubscription = { [weak self] provider, profileID in
