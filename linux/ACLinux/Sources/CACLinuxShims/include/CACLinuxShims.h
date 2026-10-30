@@ -20,7 +20,12 @@ int acl_tap_open(const char *name);
 /// dispositions are reset. Returns 0 and the pid, or an errno.
 int acl_spawn(const char *path, char *const argv[], int in_fd, int out_fd, int err_fd, int *pid_out);
 
-/// waitpid() for `pid`, blocking; returns the exit status, or 128 + signal.
-int acl_wait(int pid);
+/// Blocks until `pid` has exited, WITHOUT reaping it (waitid WNOWAIT): the
+/// zombie keeps the pid reserved, so it can't be recycled until acl_reap.
+/// Returns the exit status, or 128 + signal, or -1.
+int acl_wait_exited(int pid);
+
+/// Reaps an exited child (after acl_wait_exited).
+void acl_reap(int pid);
 
 #endif

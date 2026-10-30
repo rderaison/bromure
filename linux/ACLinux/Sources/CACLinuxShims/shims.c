@@ -36,14 +36,24 @@ int acl_spawn(const char *path, char *const argv[], int in_fd, int out_fd, int e
     return r;
 }
 
-int acl_wait(int pid) {
-    int st = 0;
-    while (waitpid(pid, &st, 0) < 0) {
+int acl_wait_exited(int pid) {
+    siginfo_t info;
+    for (;;) {
+        info.si_pid = 0;
+        if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT) == 0) break;
         if (errno != EINTR) return -1;
     }
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
-    return -1;
+    switch (info.si_code) {
+    case CLD_EXITED: return info.si_status;
+    case CLD_KILLED:
+    case CLD_DUMPED: return 128 + info.si_status;
+    default: return -1;
+    }
+}
+
+void acl_reap(int pid) {
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 }
 
 #ifdef __linux__

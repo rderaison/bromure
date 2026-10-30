@@ -47,17 +47,28 @@ final class ChildProcess: Sendable {
         let child = pid
         state.withLockedValue { $0.pid = child }
         let t = Thread { [state] in
-            let status = acl_wait(child)
+            // Exited but not reaped: the zombie still holds the pid, so a
+            // signal() racing this can't hit a recycled pid. The status is
+            // recorded under the lock (from then on signal() is a no-op) and
+            // only then is the child reaped.
+            let status = acl_wait_exited(child)
+            if let pause = ChildProcess.reapPauseForTesting.withLockedValue({ $0 }) {
+                Thread.sleep(forTimeInterval: pause)
+            }
             let waiters = state.withLockedValue { s -> [CheckedContinuation<Int32, Never>] in
                 s.status = status
                 defer { s.waiters = [] }
                 return s.waiters
             }
+            acl_reap(child)
             for w in waiters { w.resume(returning: status) }
         }
         t.name = "wait-\(name)-\(child)"
         t.start()
     }
+
+    /// Tests only: a pause between the child's exit and recording it.
+    static let reapPauseForTesting = NIOLockedValueBox<Double?>(nil)
 
     // @port-skip linux-only: process supervision
     var pid: Int32 { state.withLockedValue { $0.pid } }
@@ -92,11 +103,15 @@ final class ChildProcess: Sendable {
         }
     }
 
-    /// Signals the child unless it has been reaped (so never a recycled pid).
+    /// Signals the child while it can't have been reaped: its exit status is
+    /// recorded (under this lock) before the reaper reaps, so the pid is
+    /// never a recycled one. Returns whether kill() delivered it.
     // @port-skip linux-only: process supervision
-    func signal(_ sig: Int32) {
+    @discardableResult
+    func signal(_ sig: Int32) -> Bool {
         state.withLockedValue { s in
-            if s.pid != 0, s.status == nil { kill(s.pid, sig) }
+            guard s.pid != 0, s.status == nil else { return false }
+            return kill(s.pid, sig) == 0
         }
     }
 

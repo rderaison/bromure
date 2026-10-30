@@ -332,3 +332,70 @@ struct PasstUplinkTests {
         #expect(kill(pid, 0) != 0, "passt still running after close")
     }
 }
+
+@Suite("Child process supervision")
+struct ChildProcessTests {
+    @Test("between a child's exit and its reaping, signal() only ever hits the zombie")
+    func signalVersusReap() async throws {
+        // Widen the window between "exited" and "recorded": if the pid were
+        // reaped first (the old order), kill() in that window would find no
+        // such process (ESRCH) -- or, worse, a recycled pid.
+        ChildProcess.reapPauseForTesting.withLockedValue { $0 = 0.05 }
+        defer { ChildProcess.reapPauseForTesting.withLockedValue { $0 = nil } }
+        for _ in 0..<20 {
+            let p = try ChildProcess(name: "true", executable: "/bin/true", arguments: [], logPath: nil)
+            try p.start()
+            let hammer = Task.detached { () -> (sent: Int, missed: Int) in
+                var sent = 0, missed = 0
+                while p.exitStatus == nil {
+                    // SIGCONT is harmless to /bin/true, a zombie, or anyone else.
+                    let attempted = p.isRunning
+                    if p.signal(SIGCONT) { sent += 1 } else if attempted && p.exitStatus == nil { missed += 1 }
+                }
+                return (sent, missed)
+            }
+            #expect(await p.waitForExit() == 0)
+            let r = await hammer.value
+            #expect(r.missed == 0, "kill() found no process \(r.missed) times before the exit was recorded")
+            #expect(r.sent > 0)
+            #expect(!p.signal(SIGCONT))
+        }
+    }
+}
+
+extension PasstUplinkTests {
+    /// passt processes whose parent is this test process.
+    static func ourPassts() -> [Int32] {
+        let me = getpid()
+        return ((try? FileManager.default.contentsOfDirectory(atPath: "/proc")) ?? []).compactMap { d in
+            guard let pid = Int32(d), let st = try? String(contentsOfFile: "/proc/\(d)/stat", encoding: .utf8),
+                  let open = st.firstIndex(of: "("), let close = st.lastIndex(of: ")") else { return nil }
+            let comm = st[st.index(after: open)..<close]
+            let rest = st[st.index(after: close)...].split(separator: " ")
+            guard comm.hasPrefix("passt"), rest.count > 2, rest[0] != "Z", Int32(rest[1]) == me else { return nil }
+            return pid
+        }
+    }
+
+    @Test("close() while passt is being restarted leaves no passt running")
+    func closeDuringRestart() async throws {
+        let up = try await PasstUplink.start(.init())
+        let pid = try #require(up.pid)
+        // Hold the relaunch between spawning the new passt and installing its
+        // channel, then close() inside that window.
+        PasstUplink.launchPauseForTesting.withLockedValue { $0 = .milliseconds(500) }
+        defer { PasstUplink.launchPauseForTesting.withLockedValue { $0 = nil } }
+        kill(pid, SIGKILL)
+        for _ in 0..<100 where up.restarts == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(up.restarts == 1)
+        try await Task.sleep(for: .milliseconds(100))   // the new passt is spawned, launch() is paused
+        #expect(Self.ourPassts().count == 1)
+        await up.close()
+        var left = Self.ourPassts()
+        for _ in 0..<60 where !left.isEmpty {
+            try await Task.sleep(for: .milliseconds(50))
+            left = Self.ourPassts()
+        }
+        #expect(left.isEmpty, "passt still running after close(): \(left)")
+    }
+}

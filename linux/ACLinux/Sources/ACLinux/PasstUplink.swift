@@ -33,10 +33,21 @@ public final class PasstUplink: Uplink {
         public var dnsForward: String? = "192.168.64.1"
         public var dnsHost: String?
         public var mac = "9a:55:9a:55:9a:55"
-        /// MTU the switch should advertise. passt terminates TCP in userspace
-        /// and re-segments for the real path, so the guest MTU needn't fit the
-        /// path MTU (the macOS 1280/1400 VPN clamp isn't needed for TCP); a
-        /// bigger one means fewer frames through the switch and passt.
+        /// The guest MTU the daemon writes to `meta/mtu` (agentd applies it to
+        /// eth0; DHCP option 26 is overridden by it). The rule:
+        ///
+        /// - **65520 by default.** passt terminates TCP in userspace and
+        ///   re-segments for the real path, so guest TCP needn't fit the path
+        ///   MTU, and big frames are what make the switch + passt cheap
+        ///   (0.2 CPU-s/GiB at 65520 vs 1.6 at 1500).
+        /// - **VPN profiles keep the macOS value** (1280, raised to 1400 by
+        ///   config-agent for VPN profiles). A WireGuard/IKEv2/OpenVPN tunnel in
+        ///   the guest sizes its packets from eth0's MTU; at 65520 it would
+        ///   emit ~64 KB UDP datagrams that the host fragments and the
+        ///   Internet drops.
+        /// - **UDP gets no re-segmentation through passt**: each guest datagram
+        ///   leaves as one host datagram (fragmented by the host if it's over
+        ///   the path MTU). Only TCP benefits from the big MTU.
         public var mtu = 65_520
         /// Host interface for outbound sockets (default: the default route's).
         public var outboundInterface: String?
@@ -74,6 +85,10 @@ public final class PasstUplink: Uplink {
     private let group: EventLoopGroup
     private let state = NIOLockedValueBox<(channel: Channel?, process: ChildProcess?,
                                            closing: Bool, restarts: Int)>((nil, nil, false, 0))
+
+    /// Tests only: a pause inside launch(), between spawning passt and
+    /// installing its channel, to land a close() in that window.
+    static let launchPauseForTesting = NIOLockedValueBox<Duration?>(nil)
 
     // @port-skip linux-only: rootless uplink
     public var gatewayMAC: String? { config.mac }
@@ -119,6 +134,7 @@ public final class PasstUplink: Uplink {
             throw error
         }
         Glibc.close(fds[1])
+        if let pause = Self.launchPauseForTesting.withLockedValue({ $0 }) { try? await Task.sleep(for: pause) }
         let sink = self.sink
         let ch: Channel
         do {
@@ -136,7 +152,19 @@ public final class PasstUplink: Uplink {
             p.signal(SIGKILL)
             throw error
         }
-        state.withLockedValue { $0.channel = ch; $0.process = p }
+        // close() may have run while this (re)launch was in flight: it saw
+        // the old (or no) channel, so this one is ours to tear down.
+        let wanted = state.withLockedValue { s -> Bool in
+            guard !s.closing else { return false }
+            s.channel = ch
+            s.process = p
+            return true
+        }
+        guard wanted else {
+            ch.close(promise: nil)                    // one-off passt exits on EOF
+            if await p.waitForExit(timeout: .seconds(2)) == nil { p.signal(SIGKILL) }
+            throw ChannelError.alreadyClosed
+        }
         Task { [weak self] in
             _ = await p.waitForExit()
             await self?.processExited(p)

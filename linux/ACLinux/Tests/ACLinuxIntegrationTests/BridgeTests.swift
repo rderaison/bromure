@@ -37,6 +37,8 @@ struct SwitchedVM {
 
     /// `mtu`: what the host tells agentd to set on the guest NIC
     /// (/mnt/bromure-meta/mtu; agentd's default is macOS's 1280 VPN clamp).
+    /// The daemon's rule (PasstUplink.Config.mtu): 65520 behind passt, except
+    /// VPN profiles, which keep the macOS value; UDP isn't re-segmented.
     static func make(_ machine: QEMUMachineConfig.MachineType, mac: String, on sw: TestSwitch,
                      listener: VsockListener, tag: String, mtu: Int? = nil) async throws -> SwitchedVM {
         var ws = try BootTests.Workspace(machine: machine)
