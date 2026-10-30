@@ -65,8 +65,45 @@
 
 #include "bromure_sentry.h"
 
-#ifndef CONFIG_ARM64
-#error "bromure_sentry reads syscall arguments through arm64's pt_regs wrapper convention"
+/*
+ * The two arch-specific facts the probes depend on. Both arches enter syscalls
+ * through wrappers that take the user's saved `struct pt_regs *`
+ * (CONFIG_ARCH_HAS_SYSCALL_WRAPPER); they differ in the wrappers' names and in
+ * which register holds which argument.
+ *
+ *   SENTRY_SYS(name)          the syscall wrapper's symbol
+ *   SENTRY_ARG(regs, n)       argument n of the probed function, at its entry
+ *   SENTRY_USER_ARG(user, n)  syscall argument n in the user's saved registers
+ *
+ * arm64 expands to exactly what this file used before the x86_64 port (the
+ * wrapper names and the register reads), so its object code is unchanged.
+ */
+#if defined(CONFIG_ARM64)
+#define SENTRY_SYS(name)		"__arm64_sys_" name
+#define SENTRY_ARG(regs, n)		((regs)->regs[n])
+#define SENTRY_USER_ARG(user, n)	((user)->regs[n])
+#elif defined(CONFIG_X86_64)
+#define SENTRY_SYS(name)		"__x64_sys_" name
+/* di, si, dx, cx, r8, r9: the C calling convention of the probed function. */
+#define SENTRY_ARG(regs, n)		regs_get_kernel_argument((regs), (n))
+#define SENTRY_USER_ARG(user, n)	sentry_x64_syscall_arg((user), (n))
+/* The syscall ABI: di, si, dx, r10, r8, r9 (r10, not cx, which `syscall`
+ * clobbers). Only the 64-bit entry: 32-bit `int 0x80` / compat syscalls go
+ * through `__ia32_sys_*`, which this module does not probe; the image boots
+ * with `ia32_emulation=0` so that entry is closed instead. */
+static inline unsigned long sentry_x64_syscall_arg(const struct pt_regs *user, int n)
+{
+	switch (n) {
+	case 0: return user->di;
+	case 1: return user->si;
+	case 2: return user->dx;
+	case 3: return user->r10;
+	case 4: return user->r8;
+	default: return user->r9;
+	}
+}
+#else
+#error "bromure_sentry supports arm64 and x86_64 (syscall wrapper names, pt_regs layout)"
 #endif
 
 #define SENTRY_NAME    "bromure_sentry"
@@ -1097,15 +1134,15 @@ static int sentry_thread(void *unused)
  * partial stream for no stream.
  */
 
-/* arm64 syscall wrappers take `const struct pt_regs *` holding the user's
- * saved registers; the real arguments are regs->regs[0..5]. */
+/* Syscall wrappers take `const struct pt_regs *` holding the user's saved
+ * registers; the real arguments are in there (SENTRY_USER_ARG). */
 static unsigned long sentry_syscall_arg(struct pt_regs *regs, int index)
 {
-	struct pt_regs *user = (struct pt_regs *)regs->regs[0];
+	struct pt_regs *user = (struct pt_regs *)SENTRY_ARG(regs, 0);
 
 	if (!user || index < 0 || index > 5)
 		return 0;
-	return user->regs[index];
+	return SENTRY_USER_ARG(user, index);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1320,7 +1357,7 @@ static void sentry_read_argv(struct bromure_sentry_event *event,
 
 static int sentry_kp_exec(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct linux_binprm *bprm = (struct linux_binprm *)regs->regs[0];
+	struct linux_binprm *bprm = (struct linux_binprm *)SENTRY_ARG(regs, 0);
 	struct bromure_sentry_event *event = sentry_probe_event();
 
 	sentry_fill_common(event, BSK_EXEC);
@@ -1372,7 +1409,7 @@ static int sentry_kp_capset(struct kprobe *probe, struct pt_regs *regs)
 
 static int sentry_kp_commit_creds(struct kprobe *probe, struct pt_regs *regs)
 {
-	const struct cred *new = (const struct cred *)regs->regs[0];
+	const struct cred *new = (const struct cred *)SENTRY_ARG(regs, 0);
 	const struct cred *old = current_cred();
 	struct bromure_sentry_event *event = sentry_probe_event();
 	kernel_cap_t gained_permitted;
@@ -1489,7 +1526,7 @@ static int sentry_kp_ptrace(struct kprobe *probe, struct pt_regs *regs)
  */
 static int sentry_kp_do_init_module(struct kprobe *probe, struct pt_regs *regs)
 {
-	struct module *mod = (struct module *)regs->regs[0];
+	struct module *mod = (struct module *)SENTRY_ARG(regs, 0);
 	struct bromure_sentry_event *event = sentry_probe_event();
 
 	sentry_fill_common(event, BSK_MODULE_LOAD);
@@ -2272,12 +2309,12 @@ static int sentry_kp_tc(struct kprobe *probe, struct pt_regs *regs)
 	 * netlink skb without a socket is not expected on these paths, and
 	 * dereferencing one would be an oops inside a kprobe -- so the
 	 * previous behaviour is kept for that case rather than guessed at. */
-	struct sk_buff *skb = (struct sk_buff *)regs->regs[0];
+	struct sk_buff *skb = (struct sk_buff *)SENTRY_ARG(regs, 0);
 	struct net *net = (skb && skb->sk) ? sock_net(skb->sk) : &init_net;
 
 	sentry_fill_common(event, BSK_TC_CHANGE);
 	sentry_fill_exe(event);
-	sentry_tc_describe(event, net, (struct nlmsghdr *)regs->regs[1],
+	sentry_tc_describe(event, net, (struct nlmsghdr *)SENTRY_ARG(regs, 1),
 			   entry->op);
 	/* Unfolded and immediate: these are rare, and the host acts on the
 	 * first one. Folding would delay the very event it revokes on. */
@@ -2344,15 +2381,15 @@ static int sentry_krp_denial_entry(struct kretprobe_instance *instance,
 	}
 	switch (probe->src) {
 	case SPS_LINK:
-		ctx->a = (void *)regs->regs[1];
-		ctx->b = (void *)regs->regs[2];
+		ctx->a = (void *)SENTRY_ARG(regs, 1);
+		ctx->b = (void *)SENTRY_ARG(regs, 2);
 		break;
 	case SPS_DIR_DENTRY:
-		ctx->a = (void *)regs->regs[0];
-		ctx->b = (void *)regs->regs[1];
+		ctx->a = (void *)SENTRY_ARG(regs, 0);
+		ctx->b = (void *)SENTRY_ARG(regs, 1);
 		break;
 	default:
-		ctx->a = (void *)regs->regs[0];
+		ctx->a = (void *)SENTRY_ARG(regs, 0);
 		break;
 	}
 	return 0;
@@ -2485,9 +2522,9 @@ static int sentry_kp_seccomp(struct kprobe *probe, struct pt_regs *regs)
 	/* The syscall NUMBER, not a name: a name table in the module would be a
 	 * second copy of something the host already has, and the two would
 	 * eventually disagree. */
-	event->aux1 = (u32)regs->regs[0];
-	event->aux2 = (u32)regs->regs[2];
-	strscpy(event->arg, sentry_seccomp_action((u32)regs->regs[2]),
+	event->aux1 = (u32)SENTRY_ARG(regs, 0);
+	event->aux2 = (u32)SENTRY_ARG(regs, 2);
+	strscpy(event->arg, sentry_seccomp_action((u32)SENTRY_ARG(regs, 2)),
 		sizeof(event->arg));
 	{
 		struct file *exe;
@@ -2710,8 +2747,8 @@ static void sentry_fill_icmp_type(struct bromure_sentry_event *event,
 static int sentry_flow_packet(struct pt_regs *regs,
 			      struct bromure_sentry_event *event)
 {
-	struct socket *sock = (struct socket *)regs->regs[0];
-	struct msghdr *msg = (struct msghdr *)regs->regs[1];
+	struct socket *sock = (struct socket *)SENTRY_ARG(regs, 0);
+	struct msghdr *msg = (struct msghdr *)SENTRY_ARG(regs, 1);
 
 	if (!sock || !sock->sk || sock->sk->sk_family != AF_PACKET)
 		return 0;
@@ -2816,7 +2853,7 @@ static int sentry_kp_flow(struct kprobe *probe, struct pt_regs *regs)
 	/* Before the cast: arg0 is not a `struct sock *` for this one. */
 	if (entry->src == SFS_PACKET_MSG)
 		return sentry_flow_packet(regs, event);
-	sk = (struct sock *)regs->regs[0];
+	sk = (struct sock *)SENTRY_ARG(regs, 0);
 
 	if (!sk)
 		return 0;
@@ -2840,7 +2877,7 @@ static int sentry_kp_flow(struct kprobe *probe, struct pt_regs *regs)
 
 	switch (entry->src) {
 	case SFS_SOCK_MSG: {
-		struct msghdr *msg = (struct msghdr *)regs->regs[1];
+		struct msghdr *msg = (struct msghdr *)SENTRY_ARG(regs, 1);
 
 		/* An unconnected send names its destination in the message; a
 		 * connected one leaves it NULL and the socket already has it. */
@@ -2977,23 +3014,23 @@ struct sentry_kprobe {
 
 static struct sentry_kprobe sentry_kprobes[] = {
 	{ "audit_seccomp",		sentry_kp_seccomp },
-	{ "__arm64_sys_setuid",		sentry_kp_setuid },
-	{ "__arm64_sys_setreuid",	sentry_kp_setuid },
-	{ "__arm64_sys_setresuid",	sentry_kp_setuid },
-	{ "__arm64_sys_setgid",		sentry_kp_setgid },
-	{ "__arm64_sys_setregid",	sentry_kp_setgid },
-	{ "__arm64_sys_setresgid",	sentry_kp_setgid },
-	{ "__arm64_sys_capset",		sentry_kp_capset },
+	{ SENTRY_SYS("setuid"),		sentry_kp_setuid },
+	{ SENTRY_SYS("setreuid"),	sentry_kp_setuid },
+	{ SENTRY_SYS("setresuid"),	sentry_kp_setuid },
+	{ SENTRY_SYS("setgid"),		sentry_kp_setgid },
+	{ SENTRY_SYS("setregid"),	sentry_kp_setgid },
+	{ SENTRY_SYS("setresgid"),	sentry_kp_setgid },
+	{ SENTRY_SYS("capset"),		sentry_kp_capset },
 	{ "commit_creds",		sentry_kp_commit_creds },
-	{ "__arm64_sys_ptrace",		sentry_kp_ptrace },
+	{ SENTRY_SYS("ptrace"),		sentry_kp_ptrace },
 	{ "do_init_module",		sentry_kp_do_init_module },
-	{ "__arm64_sys_delete_module",	sentry_kp_delete_module },
-	{ "__arm64_sys_bpf",		sentry_kp_bpf },
-	{ "__arm64_sys_kexec_load",	sentry_kp_kexec },
-	{ "__arm64_sys_kexec_file_load", sentry_kp_kexec },
-	{ "__arm64_sys_mount",		sentry_kp_mount },
-	{ "__arm64_sys_unshare",	sentry_kp_unshare },
-	{ "__arm64_sys_setns",		sentry_kp_setns },
+	{ SENTRY_SYS("delete_module"),	sentry_kp_delete_module },
+	{ SENTRY_SYS("bpf"),		sentry_kp_bpf },
+	{ SENTRY_SYS("kexec_load"),	sentry_kp_kexec },
+	{ SENTRY_SYS("kexec_file_load"), sentry_kp_kexec },
+	{ SENTRY_SYS("mount"),		sentry_kp_mount },
+	{ SENTRY_SYS("unshare"),	sentry_kp_unshare },
+	{ SENTRY_SYS("setns"),		sentry_kp_setns },
 	{ "security_bprm_committed_creds", sentry_kp_exec },
 };
 

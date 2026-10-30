@@ -132,8 +132,9 @@ say "drive the remaining alarm-class syscalls"
 # turned out to be incapable of firing, so "registered" earns no benefit of the
 # doubt: each of these is now driven for real.
 #
-# Every one of them is an ENTRY kprobe on `__arm64_sys_*`, so the ATTEMPT is what
-# fires it -- EINVAL from setns and EPERM from mount are expected and fine.
+# Every one of them is an ENTRY kprobe on the syscall wrapper (`__arm64_sys_*`,
+# `__x64_sys_*`), so the ATTEMPT is what fires it -- EINVAL from setns and EPERM
+# from mount are expected and fine.
 # Verified with tracefs first: 1 unshare, 1 setns, 1 mount and 2 ptrace calls
 # reach those entry points from this script.
 python3 - <<'PY'
@@ -141,7 +142,9 @@ import ctypes, ctypes.util, os, signal, time
 
 libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
 libc.syscall.restype = ctypes.c_long
-SYS_mount, SYS_ptrace, SYS_setns = 40, 117, 268
+# Per arch: these are raw syscall(2) numbers, and x86_64's differ.
+SYS_mount, SYS_ptrace, SYS_setns = {"aarch64": (40, 117, 268),
+                                    "x86_64": (165, 101, 308)}[os.uname().machine]
 CLONE_NEWUSER = 0x10000000
 PTRACE_ATTACH, PTRACE_DETACH = 16, 17
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the sentry module for every Ubuntu kernel that doesn't have one yet.
-# Runs inside the container from ./Dockerfile (ubuntu:24.04, arm64), started by
-# Jenkinsfile.sentry; results are copied out of /out with `docker cp`.
+# Runs inside the container from ./Dockerfile (ubuntu:24.04, arm64 or amd64),
+# started by Jenkinsfile.sentry; results are copied out of /out with `docker cp`.
 #
 #   1. Hash the source (./source-hash.sh): modules are published per source.
 #   2. Fetch the published catalog for that hash, if any: its kernels are done.
@@ -18,6 +18,10 @@
 #   MAX_BUILDS         cap per run (default 12); the rest go next run
 #   FORCE_KERNELS      space-separated kernels to (re)build even if published
 #   SOURCE_DATE_EPOCH  from the repository (the container has no git history)
+#   SENTRY_ARCH        the container's Debian arch (default: dpkg's). arm64's
+#                      catalog is sentry/<hash>/catalog.json; another arch's is
+#                      sentry/<hash>/<arch>/catalog.json, since kernel names
+#                      (6.8.0-NNN-generic) are the same on both.
 set -euo pipefail
 
 SRC=/src
@@ -26,17 +30,22 @@ PUBLIC_BASE="${PUBLIC_BASE:-https://dl.bromure.io}"
 KERNEL_PATTERN="${KERNEL_PATTERN:-^linux-headers-6\.8\.0-[0-9]+-generic$}"
 MAX_BUILDS="${MAX_BUILDS:-12}"
 FORCE_KERNELS="${FORCE_KERNELS:-}"
+SENTRY_ARCH="${SENTRY_ARCH:-$(dpkg --print-architecture)}"
 : "${SOURCE_DATE_EPOCH:?set SOURCE_DATE_EPOCH from the repository}"
 export SOURCE_DATE_EPOCH DEBIAN_FRONTEND=noninteractive
 
 mkdir -p "$OUT/modules"
 HASH=$(sh "$SRC/source-hash.sh" "$SRC")
-echo "source hash: $HASH"
+echo "source hash: $HASH ($SENTRY_ARCH)"
+case "$SENTRY_ARCH" in
+    arm64) CATALOG_URL="$PUBLIC_BASE/sentry/$HASH/catalog.json" ;;
+    *)     CATALOG_URL="$PUBLIC_BASE/sentry/$HASH/$SENTRY_ARCH/catalog.json" ;;
+esac
 
 # --- 2. What's already published --------------------------------------------
 PUBLISHED=""
 code=$(curl -sS -o "$OUT/previous-catalog.json" -w '%{http_code}' \
-            -H 'Cache-Control: no-cache' "$PUBLIC_BASE/sentry/$HASH/catalog.json") || true
+            -H 'Cache-Control: no-cache' "$CATALOG_URL") || true
 code=${code:-000}
 case "$code" in
     200) PUBLISHED=$(python3 -c 'import json,sys
@@ -85,11 +94,11 @@ done
 LEFT=$(( ${#TODO[@]} > MAX_BUILDS ? ${#TODO[@]} - MAX_BUILDS : 0 ))
 
 python3 - "$OUT/manifest.json" "$HASH" "$SOURCE_DATE_EPOCH" "$LEFT" \
-    "${BUILT[*]:-}" "${FAILED[*]:-}" <<'PY'
+    "${BUILT[*]:-}" "${FAILED[*]:-}" "$SENTRY_ARCH" <<'PY'
 import json, sys
-out, h, epoch, left, built, failed = sys.argv[1:7]
+out, h, epoch, left, built, failed, arch = sys.argv[1:8]
 json.dump({"sourceHash": h, "sourceDateEpoch": int(epoch), "deferred": int(left),
-           "built": built.split(), "failed": failed.split()}, open(out, "w"))
+           "built": built.split(), "failed": failed.split(), "arch": arch}, open(out, "w"))
 PY
 echo
 echo "built: ${BUILT[*]:-none}; failed: ${FAILED[*]:-none}; deferred to next run: $LEFT"
