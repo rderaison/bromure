@@ -6,7 +6,7 @@
   ],
   "linuxBuild": [],
   "linuxRoots": [
-    "Sources/ACLinux"
+    "linux/ACLinux/Sources"
   ],
   "skip": [
     {
