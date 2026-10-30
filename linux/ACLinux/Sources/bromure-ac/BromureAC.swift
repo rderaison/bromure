@@ -1,0 +1,187 @@
+import ACLinux
+import ArgumentParser
+import CACLinuxShims
+import Foundation
+
+// bromure-ac on Linux: the headless daemon and the CLI that talks to it over
+// $XDG_RUNTIME_DIR/bromure-ac/control.sock (macOS: the app + its control.sock).
+
+// @port-skip linux-only: Linux CLI root (macOS: BromureAC's ParsableCommand)
+@main
+struct BromureAC: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
+        subcommands: [Daemon.self, VM.self])
+}
+
+// @port-skip linux-only: the daemon entry point (macOS runs as an app)
+struct Daemon: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Run the daemon (systemd: bromure-ac.service).")
+
+    // @port-skip linux-only: daemon main
+    func run() async throws {
+        let config = DaemonConfig.fromEnvironment()
+        let daemon = try await ACLinux.Daemon.start(config)
+        let server = try await ControlServer.start(path: config.controlSocketPath) { req in await daemon.handle(req) }
+        FileHandle.standardError.write(Data("bromure-ac daemon: \(config.controlSocketPath)\n".utf8))
+        _ = acl_sd_notify("READY=1\nSTATUS=serving \(config.controlSocketPath)")
+        // SIGTERM (systemctl stop) / SIGINT: stop the VMs and passt, then exit.
+        // (A parent that spawned us with signals blocked still gets SIGKILL;
+        // QEMU and passt follow us then via PDEATHSIG and the socketpair.)
+        let stop = AsyncStream<Int32> { cont in
+            for sig in [SIGTERM, SIGINT] {
+                signal(sig, SIG_IGN)
+                let src = DispatchSource.makeSignalSource(signal: sig)
+                src.setEventHandler { cont.yield(sig) }
+                src.resume()
+                Signals.keep(src)
+            }
+        }
+        var it = stop.makeAsyncIterator()
+        _ = await it.next()
+        _ = acl_sd_notify("STOPPING=1")
+        await server.close()
+        await daemon.shutdown()
+    }
+}
+
+// @port-skip linux-only: keeps signal sources alive
+enum Signals {
+    nonisolated(unsafe) static var sources: [any DispatchSourceSignal] = []
+    // @port-skip linux-only: keeps signal sources alive
+    static func keep(_ s: any DispatchSourceSignal) { sources.append(s) }
+}
+
+// @port-skip linux-only: Linux CLI group (macOS: `workspaces`, alias `vm`)
+struct VM: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Manage VMs.", subcommands: [Run.self, Ls.self, Exec.self, Kill.self, Suspend.self, Resume.self])
+}
+
+// @port-skip linux-only: CLI plumbing
+func client() throws -> ControlClient {
+    let c = ControlClient(socketPath: DaemonConfig.fromEnvironment().controlSocketPath)
+    guard c.isAgentRunning() else {
+        throw ValidationError("No bromure-ac daemon running (start it: systemctl --user start bromure-ac, or bromure-ac daemon).")
+    }
+    return c
+}
+
+// @port-skip linux-only: CLI plumbing
+func check(_ r: ControlClient.Response, _ what: String) throws {
+    guard (200..<300).contains(r.status) else { throw ValidationError(r.json["error"]?.stringValue ?? "\(what) failed (\(r.status)).") }
+}
+
+extension VM {
+    // @port-skip linux-only: detached run (macOS's VMRun also attaches a terminal; no terminals on Linux yet)
+    struct Run: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Create and start a VM (detached).")
+        @Option(help: "VM name.") var name: String?
+        @Option(help: "q35 or microvm.") var machine = "microvm"
+        @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB = 2.0
+        @Option(help: "vCPUs.") var cpus = 2
+
+        // @port-skip linux-only: detached run
+        func run() async throws {
+            var body: [String: JSONValue] = ["machine": .string(machine), "memoryGB": .number(memoryGB),
+                                             "cpus": .number(Double(cpus)), "detach": true]
+            if let name { body["name"] = .string(name) }
+            let r = try client().request("POST", "/vms", body: .object(body))
+            try check(r, "run")
+            print(r.json["id"]?.stringValue ?? "")
+        }
+    }
+
+    // @port-skip linux-only: lists /vms (macOS's `ls` lists workspaces + VMs; no workspaces on Linux yet)
+    struct Ls: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "List VMs.")
+        @Flag(help: "JSON output.") var json = false
+
+        // @port-skip linux-only: lists /vms
+        func run() async throws {
+            let r = try client().request("GET", "/vms")
+            try check(r, "ls")
+            if json {
+                let enc = JSONEncoder()
+                enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+                print(String(decoding: try enc.encode(r.json), as: UTF8.self))
+                return
+            }
+            print("ID        NAME                 STATE      MACHINE  IP")
+            if case .array(let vms) = r.json["vms"] ?? .null {
+                for v in vms {
+                    func s(_ k: String) -> String { v[k]?.stringValue ?? "-" }
+                    print(s("shortId").padding(toLength: 10, withPad: " ", startingAt: 0)
+                          + s("name").padding(toLength: 21, withPad: " ", startingAt: 0)
+                          + s("state").padding(toLength: 11, withPad: " ", startingAt: 0)
+                          + s("machine").padding(toLength: 9, withPad: " ", startingAt: 0) + s("ip"))
+                }
+            }
+        }
+    }
+
+    // @port-skip linux-only: the type; run() carries the @port
+    struct Exec: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Run a command in a VM.")
+        @Option(help: "Timeout in seconds. Default 600.") var timeout = 600
+        @Argument(help: "VM id or name.") var vm: String
+        @Argument(parsing: .postTerminator, help: "Command and arguments.") var command: [String] = []
+
+        /// Non-interactive exec: stdout/stderr echoed, exit status propagated.
+        // @port Exec.run() h=78c76b556399f4ba @94eb37f3
+        func run() async throws {
+            guard !command.isEmpty else { throw ValidationError("Usage: bromure-ac vm exec VM -- command…") }
+            let body: JSONValue = .object(["command": .string(command.joined(separator: " ")),
+                                           "argv": .array(command.map { .string($0) }),
+                                           "timeout": .number(Double(timeout))])
+            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/exec", body: body)
+            try check(r, "exec")
+            FileHandle.standardOutput.write(Data((r.json["stdout"]?.stringValue ?? "").utf8))
+            FileHandle.standardError.write(Data((r.json["stderr"]?.stringValue ?? "").utf8))
+            let code = Int32(r.json["exitCode"]?.numberValue ?? 0)
+            if code != 0 { throw ExitCode(code) }
+        }
+    }
+
+    // @port-skip linux-only: the type; run() carries the @port
+    struct Kill: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Stop a VM (shut down, suspend with --suspend, or --force).")
+        @Argument(help: "VM id or name.") var vm: String
+        @Flag(help: "Suspend (save RAM to disk) instead of powering off.") var suspend = false
+        @Flag(help: "Kill QEMU at once instead of an ACPI shutdown (Linux).") var force = false
+
+        // @port VMKill.run() h=f36d4145132d9df1 @94eb37f3
+        func run() async throws {
+            let action = suspend ? "suspend" : (force ? "kill" : "shutdown")
+            let r = try client().request("DELETE", "/vms/\(ControlClient.encodeSegment(vm))",
+                                         body: ["action": .string(action)])
+            try check(r, "kill")
+            print("\(suspend ? "Suspended" : "Stopped") \(vm).")
+        }
+    }
+
+    // @port-skip linux-only: shorthand for `kill --suspend`
+    struct Suspend: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Suspend a VM (save its RAM to disk).")
+        @Argument(help: "VM id or name.") var vm: String
+        // @port-skip linux-only: shorthand for `kill --suspend`
+        func run() async throws {
+            let r = try client().request("DELETE", "/vms/\(ControlClient.encodeSegment(vm))", body: ["action": "suspend"])
+            try check(r, "suspend")
+            print("Suspended \(vm).")
+        }
+    }
+
+    // @port-skip linux-only: explicit resume (macOS restores when the workspace starts again)
+    struct Resume: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Resume a suspended VM.")
+        @Argument(help: "VM id or name.") var vm: String
+        // @port-skip linux-only: explicit resume
+        func run() async throws {
+            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/resume")
+            try check(r, "resume")
+            print("Resumed \(vm).")
+        }
+    }
+}
+

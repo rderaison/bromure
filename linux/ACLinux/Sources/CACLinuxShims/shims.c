@@ -56,6 +56,7 @@ void acl_reap(int pid) {
     while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 }
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -85,6 +86,28 @@ void acl_secure_free(void *p, size_t len) {
     explicit_bzero(p, n);
     munlock(p, n);
     free(p);
+}
+
+#include <sys/socket.h>
+#include <sys/un.h>
+
+int acl_sd_notify(const char *state) {
+    const char *path = getenv("NOTIFY_SOCKET");
+    if (!path || !*path) return 0;
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    size_t n = strlen(path);
+    if (n >= sizeof sa.sun_path) return -ENAMETOOLONG;
+    memcpy(sa.sun_path, path, n);
+    if (sa.sun_path[0] == '@') sa.sun_path[0] = 0;          /* abstract namespace */
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    ssize_t r = sendto(fd, state, strlen(state), MSG_NOSIGNAL, (struct sockaddr *)&sa,
+                       (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n));
+    int e = errno;
+    close(fd);
+    return r < 0 ? -e : 1;
 }
 
 #ifdef __linux__

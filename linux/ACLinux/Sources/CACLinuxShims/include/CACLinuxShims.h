@@ -30,6 +30,9 @@ void acl_reap(int pid);
 
 #include <stddef.h>
 
+/// struct ucred's layout (SO_PEERCRED), without needing _GNU_SOURCE in Swift.
+typedef struct { int32_t pid; uint32_t uid; uint32_t gid; } acl_ucred;
+
 /// Page-aligned, zeroed memory for key material: mlock'ed (best effort; see
 /// *locked) and excluded from core dumps (MADV_DONTDUMP). NULL on failure.
 void *acl_secure_alloc(size_t len, int *locked);
@@ -43,6 +46,11 @@ int acl_set_nondumpable(void);
 
 /// pipe2(fds, O_CLOEXEC). Returns 0, or -errno.
 int acl_pipe_cloexec(int fds[2]);
+
+/// sd_notify(3) without libsystemd: sends `state` (e.g. "READY=1") as one
+/// datagram to $NOTIFY_SOCKET (path or @abstract). 1 if sent, 0 if there's
+/// no NOTIFY_SOCKET (not under systemd), or -errno.
+int acl_sd_notify(const char *state);
 
 /// prctl(PR_GET_DUMPABLE).
 int acl_get_dumpable(void);

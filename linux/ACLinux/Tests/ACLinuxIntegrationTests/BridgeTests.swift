@@ -236,7 +236,10 @@ struct PasstBridgeTests {
 
         for (v, mtu) in [(a, bigMTU), (b, 1500)] {
             let p0 = cpuSeconds(pid: passtPID), s0 = selfCPUSeconds()
-            let p = try await shell(v.conns, probeScript(host: lan, base: base), timeout: 120)
+            // 1 GiB at the big MTU; 256 MiB at 1500, where a debug build's
+            // interim switch (drop-oldest frame buffers, no backpressure) is
+            // the bottleneck and a long transfer can stall TCP.
+            let p = try await shell(v.conns, probeScript(host: lan, base: base, mib: mtu == 1500 ? 256 : 1024), timeout: 180)
             let pc = cpuSeconds(pid: passtPID) - p0, sc = selfCPUSeconds() - s0
             #expect(p.exitCode == 0, "\(v.label) probe: \(p.output)")
             if p.exitCode != 0 {

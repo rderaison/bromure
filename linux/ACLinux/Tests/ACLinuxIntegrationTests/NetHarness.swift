@@ -10,126 +10,8 @@ func ipv4(_ s: String) -> [UInt8] { s.split(separator: ".").map { UInt8($0)! } }
 func ipString(_ b: [UInt8]) -> String { b.map(String.init).joined(separator: ".") }
 func macBytes(_ s: String) -> [UInt8] { s.split(separator: ":").map { UInt8($0, radix: 16)! } }
 
-/// DHCP for the test subnet: a lease per client MAC (.2, .3, …), broadcast
-/// replies, router = the gateway, a DNS server, and an MTU (option 26).
-final class TestDHCP: Sendable {
-    let server: [UInt8], dns: [UInt8], serverMAC: [UInt8]
-    let mtu: @Sendable ([UInt8]) -> Int?
-    private let leases = NIOLockedValueBoxShim<[[UInt8]: [UInt8]]>([:])
-    private let acked = NIOLockedValueBoxShim<[[UInt8]: ContinuousClock.Instant]>([:])
-
-    init(server: [UInt8], dns: [UInt8], serverMAC: [UInt8], mtu: @escaping @Sendable ([UInt8]) -> Int? = { _ in nil }) {
-        self.server = server; self.dns = dns; self.serverMAC = serverMAC; self.mtu = mtu
-    }
-
-    func lease(for mac: [UInt8]) -> [UInt8] {
-        var out: [UInt8] = []
-        leases.mutate { l in
-            if let ip = l[mac] { out = ip; return }
-            let ip = Array(server[0..<3]) + [UInt8(2 + l.count)]
-            l[mac] = ip
-            out = ip
-        }
-        return out
-    }
-    /// MAC -> IP of everyone leased so far.
-    var table: [[UInt8]: [UInt8]] { leases.value }
-    func ackedAt(_ mac: [UInt8]) -> ContinuousClock.Instant? { acked.value[mac] }
-
-    /// The reply to `frame` if it's a DHCP request from a client, else nil.
-    func handle(_ f: Data) -> Data? {
-        let b = [UInt8](f)
-        guard b.count >= 14 + 20 + 8 + 240, b[12] == 0x08, b[13] == 0x00, b[23] == 17 else { return nil }
-        let udp = 14 + Int(b[14] & 0x0F) * 4
-        guard b.count >= udp + 8 + 240, b[udp] == 0, b[udp + 1] == 68, b[udp + 2] == 0, b[udp + 3] == 67 else { return nil }
-        let bootp = udp + 8
-        guard b[bootp] == 1, Array(b[bootp + 236..<bootp + 240]) == [99, 130, 83, 99] else { return nil }
-        var type: UInt8 = 0
-        var i = bootp + 240
-        while i + 1 < b.count, b[i] != 255 {
-            if b[i] == 0 { i += 1; continue }
-            if b[i] == 53, i + 2 < b.count { type = b[i + 2] }
-            i += 2 + Int(b[i + 1])
-        }
-        let chaddr = Array(b[bootp + 28..<bootp + 34])
-        let yiaddr = lease(for: chaddr)
-        let reply: UInt8
-        switch type {
-        case 1: reply = 2                                     // DISCOVER -> OFFER
-        case 3: reply = 5                                     // REQUEST -> ACK
-            acked.mutate { if $0[chaddr] == nil { $0[chaddr] = .now } }
-        default: return nil
-        }
-        var p = [UInt8](repeating: 0, count: 236)
-        p[0] = 2; p[1] = 1; p[2] = 6
-        p[4..<8] = b[bootp + 4..<bootp + 8]                   // xid
-        p[10..<12] = b[bootp + 10..<bootp + 12]               // flags
-        p[16..<20] = yiaddr[0..<4]
-        p[20..<24] = server[0..<4]
-        p[28..<44] = b[bootp + 28..<bootp + 44]               // chaddr
-        p += [99, 130, 83, 99, 53, 1, reply, 54, 4] + server + [51, 4, 0, 0, 0x0E, 0x10,
-              1, 4, 255, 255, 255, 0, 3, 4] + server + [6, 4] + dns
-        if let m = mtu(chaddr) { p += [26, 2, UInt8(m >> 8), UInt8(m & 0xFF)] }
-        p += [255]
-        if p.count < 300 { p += [UInt8](repeating: 0, count: 300 - p.count) }
-        let udpLen = 8 + p.count
-        var ip: [UInt8] = [0x45, 0, UInt8((20 + udpLen) >> 8), UInt8((20 + udpLen) & 0xFF), 0, 0, 0, 0, 64, 17, 0, 0]
-            + server + [255, 255, 255, 255]
-        var sum = 0
-        for k in stride(from: 0, to: 20, by: 2) { sum += Int(ip[k]) << 8 | Int(ip[k + 1]) }
-        while sum > 0xFFFF { sum = (sum & 0xFFFF) + (sum >> 16) }
-        ip[10] = UInt8((~sum >> 8) & 0xFF); ip[11] = UInt8(~sum & 0xFF)
-        let u: [UInt8] = [0, 67, 0, 68, UInt8(udpLen >> 8), UInt8(udpLen & 0xFF), 0, 0]
-        return Data([255, 255, 255, 255, 255, 255] + serverMAC + [0x08, 0x00] + ip + u + p)
-    }
-}
-
-/// N VM ports and one uplink. VM -> uplink as is (DHCP answered locally);
-/// uplink -> VM by destination IP (the uplink sees one "guest" MAC at most,
-/// e.g. passt keeps only the last one it saw), ARP by target IP, broadcast to all.
-final class TestSwitch: Sendable {
-    let dhcp: TestDHCP
-    let uplink: any Uplink
-    private let ports = NIOLockedValueBoxShim<[(mac: [UInt8], port: StreamPort)]>([])
-    private let tasks = NIOLockedValueBoxShim<[Task<Void, Never>]>([])
-
-    init(uplink: any Uplink, gateway: String, dns: String, mtu: @escaping @Sendable ([UInt8]) -> Int? = { _ in nil }) {
-        self.uplink = uplink
-        dhcp = TestDHCP(server: ipv4(gateway), dns: ipv4(dns),
-                        serverMAC: macBytes(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"), mtu: mtu)
-        let t = Task { [ports, dhcp] in
-            for await f in uplink.frames {
-                let b = [UInt8](f)
-                guard b.count >= 14 else { continue }
-                let all = ports.value
-                var target: [UInt8]?
-                if b[12] == 0x08, b[13] == 0x00, b.count >= 34 { target = Array(b[30..<34]) }
-                else if b[12] == 0x08, b[13] == 0x06, b.count >= 42 { target = Array(b[38..<42]) }
-                if let target, let mac = dhcp.table.first(where: { $0.value == target })?.key,
-                   let p = all.first(where: { $0.mac == mac }) {
-                    var out = b
-                    if b[0] & 1 == 0 { out.replaceSubrange(0..<6, with: mac) }
-                    p.port.send(Data(out))
-                } else {
-                    for p in all { p.port.send(f) }
-                }
-            }
-        }
-        tasks.mutate { $0.append(t) }
-    }
-
-    func attach(_ port: StreamPort, mac: String) {
-        ports.mutate { $0.append((macBytes(mac), port)) }
-        let t = Task { [dhcp, uplink] in
-            for await f in port.frames {
-                if let r = dhcp.handle(f) { port.send(r) } else { uplink.send(f) }
-            }
-        }
-        tasks.mutate { $0.append(t) }
-    }
-
-    func stop() { for t in tasks.value { t.cancel() } }
-}
+/// The tests use the library's interim switch (a stand-in for VMNetSwitch).
+typealias TestSwitch = InterimSwitch
 
 /// Runs `cmd` in the guest over one of agentd's 5800 pool connections (the
 /// ShellBridge protocol: u32 big-endian length + JSON each way).
@@ -182,7 +64,7 @@ func probeScript(host: String, base: Int, mib: Int = 1024) -> String {
     import socket, time
     H, B = "\(host)", \(base)
     print("HELLO", socket.create_connection((H, B + 2), timeout=5).recv(100).decode().strip())
-    s = socket.create_connection((H, B), timeout=30); buf = bytes(1 << 20); t = time.time()
+    s = socket.create_connection((H, B), timeout=120); buf = bytes(1 << 20); t = time.time()
     for _ in range(\(mib)): s.sendall(buf)
     s.shutdown(socket.SHUT_WR); got = int(s.recv(64)); dt = time.time() - t
     print("THROUGHPUT_MBPS %.0f (%d bytes in %.2fs)" % (got / dt / 1e6, got, dt))

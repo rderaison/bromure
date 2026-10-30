@@ -1,0 +1,25 @@
+# bromure-ac: the headless Bromure Agentic Coding host, as a systemd *user* service.
+# Installed by linux/install-user-service.sh into ~/.config/systemd/user/.
+[Unit]
+Description=Bromure Agentic Coding (headless host)
+Documentation=https://github.com/rderaison/bromure
+After=default.target
+
+[Service]
+# READY=1 comes from the daemon (sd_notify through the C shim) once
+# control.sock is listening; NotifyAccess=main ignores notifications from children.
+Type=notify
+NotifyAccess=main
+ExecStart=@BIN@ daemon
+Environment=BROMURE_AC_IMAGE=@IMAGE@
+Environment=BROMURE_AGENTD=@AGENTD@
+# The service lasts as long as anything in its cgroup does, and stop kills
+# the whole cgroup: QEMU, passt and virtiofsd go with the daemon.
+ExitType=cgroup
+KillMode=control-group
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -100,6 +100,24 @@ public actor VsockListener {
         }
     }
 
+    /// Unbinds the process-wide listener for `port`, if any (another process,
+    /// e.g. a daemon, can then take the port). The next `shared(port:)` binds again.
+    // @port-skip linux-only: host AF_VSOCK
+    public static func closeShared(port: UInt32) async {
+        guard let task = registry.withLockedValue({ $0.removeValue(forKey: port) }),
+              let l = try? await task.value else { return }
+        await l.close()
+    }
+
+    // @port-skip linux-only: host AF_VSOCK
+    func close() async {
+        for (_, s) in subscribers { s.sink.finish() }
+        subscribers = [:]
+        backlog = [:]
+        try? await server?.channel.close()
+        server = nil
+    }
+
     // @port-skip linux-only: host AF_VSOCK
     private static func bind(port: UInt32, group: EventLoopGroup) async throws -> VsockListener {
         let server = try await ServerBootstrap(group: group)

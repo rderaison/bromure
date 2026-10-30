@@ -63,6 +63,16 @@ public final class CIDAllocator: Sendable {
         }
     }
 
+    /// Leases `cid` specifically (a resumed VM keeps its CID), if it's free.
+    // @port-skip linux-only: CID allocation
+    public func claim(_ cid: UInt32) -> Bool {
+        state.withLockedValue { s in
+            guard range.contains(cid), !s.leased.contains(cid), probe(cid) != .inUse else { return false }
+            s.leased.insert(cid)
+            return true
+        }
+    }
+
     // @port-skip linux-only: CID allocation
     public func release(_ cid: UInt32) {
         _ = state.withLockedValue { $0.leased.remove(cid) }

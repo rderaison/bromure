@@ -9,10 +9,12 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "ACLinux", targets: ["ACLinux"]),
+        .executable(name: "bromure-ac", targets: ["bromure-ac"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.10.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     ],
     targets: [
         .target(name: "CACLinuxShims"),
@@ -24,6 +26,14 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
+            ]),
+        // The headless Linux daemon and its CLI.
+        .executableTarget(
+            name: "bromure-ac",
+            dependencies: [
+                "ACLinux",
+                "CACLinuxShims",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
         .testTarget(
             name: "ACLinuxTests",
