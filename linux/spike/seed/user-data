@@ -1,0 +1,57 @@
+#cloud-config
+hostname: bspike
+users:
+  - name: spike
+    plain_text_passwd: spike
+    lock_passwd: false
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+ssh_pwauth: false
+mounts:
+  - [ share, /mnt/shared, virtiofs, "defaults,nofail", "0", "0" ]
+write_files:
+  - path: /usr/local/bin/vsockd.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/python3
+      # Spike guest agent: :5800 line-command server; dials host CID 2 :5801 on start.
+      import socket, subprocess, threading, time
+      def serve():
+          s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+          s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          s.bind((socket.VMADDR_CID_ANY, 5800)); s.listen(8)
+          while True:
+              c, _ = s.accept()
+              try:
+                  cmd = c.makefile().readline().strip()
+                  out = subprocess.run(cmd or "echo ready", shell=True, capture_output=True, timeout=20)
+                  c.sendall(out.stdout + out.stderr)
+              except Exception as e:
+                  c.sendall(repr(e).encode())
+              c.close()
+      def dial():
+          for _ in range(600):
+              try:
+                  c = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+                  c.connect((2, 5801))
+                  c.sendall(f"guest-hello uptime={open('/proc/uptime').read().split()[0]}\n".encode())
+                  c.close(); return
+              except OSError:
+                  time.sleep(1)
+      threading.Thread(target=dial, daemon=True).start()
+      serve()
+  - path: /etc/systemd/system/vsockd.service
+    content: |
+      [Unit]
+      Description=spike vsock agent
+      DefaultDependencies=no
+      After=local-fs.target
+      [Service]
+      ExecStart=/usr/local/bin/vsockd.py
+      Restart=always
+      [Install]
+      WantedBy=sysinit.target
+runcmd:
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, --now, vsockd.service ]
+  - [ systemctl, mask, systemd-networkd-wait-online.service ]

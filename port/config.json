@@ -1,0 +1,6 @@
+{
+  "macosRoots": ["Sources/AgentCoding", "Sources/SandboxEngine", "Sources/BrowserBridges"],
+  "linuxBuild": [],
+  "linuxRoots": ["Sources/ACLinux"],
+  "skip": []
+}
