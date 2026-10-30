@@ -1862,6 +1862,9 @@
 "Another sign-in is already in progress." = "Eine andere Anmeldung läuft bereits.";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "Der Bromure-Proxy läuft nicht, die Anmeldung kann also nicht erfasst werden.";
 "Couldn't start the sign-in machine." = "Die Anmeldemaschine konnte nicht gestartet werden.";
+"The sign-in was cancelled." = "Die Anmeldung wurde abgebrochen.";
+"The sign-in window was closed." = "Das Anmeldefenster wurde geschlossen.";
+"The sign-in machine stopped." = "Die Anmeldemaschine wurde beendet.";
 "Finish signing in in your browser…" = "Schließen Sie die Anmeldung in Ihrem Browser ab…";
 "Almost there — your browser will open in a moment…" = "Fast geschafft — Ihr Browser öffnet sich gleich…";
 "Sign in to %@…" = "Bei %@ anmelden…";

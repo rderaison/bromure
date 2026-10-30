@@ -4344,11 +4344,13 @@ final class RemoteHostWindow: NSWindow {
         // A run that ends without its credential says why here: the host's
         // own notice lands on a Mac nobody may be sitting at.
         controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID) { [weak self] ok, message in
-            guard !ok, let message, let self else { return }
+            guard !ok, let self else { return }
             let failed = NSAlert()
             failed.alertStyle = .warning
             failed.messageText = String(format: NSLocalizedString("Register with %@", comment: ""), provider.displayName)
-            failed.informativeText = message
+            // A host older than the reasons sends none: still say it failed.
+            failed.informativeText = message ?? NSLocalizedString(
+                "The sign-in didn't complete. You can try again.", comment: "sign-in")
             failed.beginSheetModal(for: self)
         }
     }

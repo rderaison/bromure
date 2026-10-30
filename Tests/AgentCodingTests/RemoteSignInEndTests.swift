@@ -91,4 +91,30 @@ struct RemoteSignInEndTests {
         let button = try #require(fc.range(of: "guard a.runModal() == .alertFirstButtonReturn else { return }"))
         #expect(fc[button.upperBound...].prefix(1000).contains("failed.beginSheetModal(for: self)"))
     }
+
+    /// Finding (CWE-670): "Register stays silent when the sign-in VM stops
+    /// without a message". Teardowns with no reason (the VM stopping on its
+    /// own, the window closed, no vsock device, the proxy gone) published
+    /// `success: false` with no message, and the Register button showed a
+    /// sheet only when there was one.
+    @Test("every failed end carries a reason, and Register shows one without it")
+    func noSilentEnd() throws {
+        #expect(ClaudeRegistrationTeardownReason.success.endedMessage == nil)
+        for r: ClaudeRegistrationTeardownReason in [.cancelled, .failure, .timeout, .windowClosed] {
+            #expect(!(r.endedMessage ?? "").isEmpty)
+        }
+        let r = try Self.src("Sources/AgentCoding/ClaudeRegistrationCoordinator.swift")
+        let teardown = try #require(r.range(of: "func teardownClaudeRegistration(reason:"))
+        let body = r[teardown.upperBound...].prefix(1400)
+        #expect(body.contains("let message = reason == .success ? nil : (message ?? reason.endedMessage)"))
+        #expect(body.contains("ev(.finished(success: false, message: message))"))
+        // The VM stopping on its own, no vsock device, the proxy gone.
+        #expect(r.contains("\"The sign-in machine stopped.\""))
+        #expect(!r.contains("teardownClaudeRegistration(reason: .failure)\n"))
+        let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
+        let button = try #require(fc.range(of: "guard a.runModal() == .alertFirstButtonReturn else { return }"))
+        let after = fc[button.upperBound...].prefix(1000)
+        #expect(after.contains("guard !ok, let self else { return }"))
+        #expect(after.contains("failed.informativeText = message ?? NSLocalizedString("))
+    }
 }

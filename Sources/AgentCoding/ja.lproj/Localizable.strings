@@ -1862,6 +1862,9 @@
 "Another sign-in is already in progress." = "別のサインインがすでに進行中です。";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "Bromure プロキシが動いていないため、サインインを取り込めません。";
 "Couldn't start the sign-in machine." = "サインイン用マシンを起動できませんでした。";
+"The sign-in was cancelled." = "サインインはキャンセルされました。";
+"The sign-in window was closed." = "サインインウインドウが閉じられました。";
+"The sign-in machine stopped." = "サインイン用マシンが停止しました。";
 "Finish signing in in your browser…" = "ブラウザでサインインを完了してください…";
 "Almost there — your browser will open in a moment…" = "もう少しです — まもなくブラウザが開きます…";
 "Sign in to %@…" = "%@ にサインイン…";
