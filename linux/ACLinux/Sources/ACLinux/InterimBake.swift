@@ -154,7 +154,9 @@ public enum InterimBake {
             try? fm.removeItem(atPath: o.outputDir + "/" + f)
             try fm.moveItem(atPath: work + "/out/" + f, toPath: o.outputDir + "/" + f)
         }
-        try "console=ttyS0 root=LABEL=root rootfstype=ext4 ro quiet\n"
+        // ia32_emulation=0 as setup.sh's GRUB line: no 32-bit syscall entry,
+        // which the kernel sentry (64-bit wrappers only) doesn't watch.
+        try "console=ttyS0 root=LABEL=root rootfstype=ext4 ro quiet ia32_emulation=0\n"
             .write(toFile: o.outputDir + "/cmdline", atomically: true, encoding: .utf8)
         try (o.imageVersion + "\n").write(toFile: o.outputDir + "/base.version", atomically: true, encoding: .utf8)
         try? fm.removeItem(atPath: o.outputDir + "/bake.log")
@@ -240,7 +242,12 @@ public enum InterimBake {
 
     // @port UbuntuImageManager.downloadAlpineNetboot(progress: @escaping(String)->Void) h=896d7225fec08f0a @84e171b8
     static func downloadAlpineNetboot(cacheDir: String, cdn: String, kernel: String, initrd: String) async throws {
-        let base = "\(cdn)/alpine/v\(alpineVersion)/releases/\(alpineArch)"
+        // HTTPS for the installer itself and its checksum, as macOS's
+        // releasesBase: both come from the same CDN, so over plain HTTP the
+        // sha256 would catch corruption but not tampering. (`cdn`, plain HTTP,
+        // stays for apk and the modloop, which apk's signatures cover.)
+        _ = cdn
+        let base = "https://dl-cdn.alpinelinux.org/alpine/v\(alpineVersion)/releases/\(alpineArch)"
         let tarballName = "alpine-netboot-\(alpineRelease)-\(alpineArch).tar.gz"
         let tarball = URL(fileURLWithPath: cacheDir + "/" + tarballName)
         let checksum = URL(fileURLWithPath: cacheDir + "/" + tarballName + ".sha256")
