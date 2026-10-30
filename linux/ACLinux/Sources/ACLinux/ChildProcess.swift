@@ -171,6 +171,10 @@ final class ChildProcess: Sendable {
     /// Runs a short-lived tool synchronously with `input` on its stdin;
     /// returns its stdout (stderr goes to a temp log, included in the error).
     /// Data travels over pipes only, never argv or a file.
+    ///
+    /// All of `input` is written before stdout is read: fine for a key's 32
+    /// bytes, but input or output larger than a pipe buffer (64 KiB) would
+    /// deadlock. Not for bulk data.
     // @port-skip linux-only: process supervision
     static func capture(_ executable: String, _ arguments: [String], input: Data?) throws -> Data {
         var inP: [Int32] = [-1, -1], outP: [Int32] = [-1, -1]

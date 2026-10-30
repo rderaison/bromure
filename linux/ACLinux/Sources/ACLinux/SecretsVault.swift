@@ -91,37 +91,62 @@ public enum SecretsVault {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
             let env = s.environment ?? ProcessInfo.processInfo.environment
-            let forceFile = env["BROMURE_VAULT_KEY_SOURCE"] == "file"
-            if !forceFile {
-                if let creds = env["CREDENTIALS_DIRECTORY"],
-                   let data = FileManager.default.contents(atPath: creds + "/" + credentialName), data.count == 32 {
+            let creds = Creds(env: env)
+            if env["BROMURE_VAULT_KEY_SOURCE"] != "file" {
+                // A system unit's credential. (A system unit adopting a vault
+                // that already has a user credential is a migration, not a
+                // fresh key: `bromure-ac secrets migrate`, not built yet.)
+                if let dirEnv = env["CREDENTIALS_DIRECTORY"],
+                   var data = FileManager.default.contents(atPath: dirEnv + "/" + credentialName), data.count == 32 {
+                    defer { wipe(&data) }
                     return install(&s, data, .credentialsDirectory)
                 }
                 let cred = dir + "/master-key.cred"
                 if FileManager.default.fileExists(atPath: cred) {
-                    // A sealed key we can't even try to open (no systemd-creds
-                    // here) is not a lost key: refuse rather than rotate it away.
-                    guard systemdCredsAvailable() else {
-                        throw VaultError.credentials("decrypt", "master-key.cred exists but systemd-creds is unavailable")
+                    // A sealed key we can't even try to open is not a lost key.
+                    guard creds.available else {
+                        throw VaultError.credentials("decrypt", "master-key.cred exists but \(creds.binary) is unavailable")
                     }
-                    do {
-                        return install(&s, try fetchFromCredential(cred), .systemdCreds)
-                    } catch {
-                        // Sealed to a TPM/host secret we no longer have (or
-                        // corrupt): the macOS "keychain entry wiped" case. Keep
-                        // the old credential aside and rotate; every blob under
-                        // the old key now reads as `unreadable` (re-enter).
+                    switch creds.unseal(cred) {
+                    case .key(var data):
+                        defer { wipe(&data) }
+                        return install(&s, data, .systemdCreds)
+                    case .cannotOpen(let why):
+                        // Positive "this credential can't be opened with this
+                        // host's keys" (corrupt, or sealed to another TPM/host
+                        // secret): the macOS "keychain entry wiped" case. Keep it
+                        // aside and rotate; blobs under it read as `unreadable`.
                         FileHandle.standardError.write(Data(
-                            "[secrets] master-key.cred unreadable (\(error)); rotating the master key\n".utf8))
-                        try? FileManager.default.moveItem(
+                            "[secrets] master-key.cred can't be opened (\(why)); rotating the master key\n".utf8))
+                        try FileManager.default.moveItem(
                             atPath: cred, toPath: cred + ".unreadable-\(Int(Date().timeIntervalSince1970))")
+                    case .failed(let why):
+                        // Anything else (no credential service under sudo/cron,
+                        // a timeout, EMFILE, a busy TPM) is transient: never
+                        // rotate on it. The credential stays as it is.
+                        throw VaultError.credentials("decrypt", why)
                     }
                 }
-                if systemdCredsAvailable() {
-                    let fresh = SymmetricKey(size: .bits256)
-                    let bytes = fresh.withUnsafeBytes { Data($0) }
+                if creds.available {
+                    // An existing file-fallback key is adopted, not replaced:
+                    // its blobs must stay readable. A fresh key otherwise.
+                    let keyFile = dir + "/secrets-master.key"
+                    let adopted = FileManager.default.contents(atPath: keyFile).flatMap { $0.count == 32 ? $0 : nil }
+                    var bytes = adopted ?? SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+                    defer { wipe(&bytes) }
                     do {
-                        try storeInCredential(bytes, at: cred)
+                        try creds.seal(bytes, at: cred)
+                        // Only drop the plaintext once the sealed copy reads back.
+                        if adopted != nil {
+                            guard case .key(var back) = creds.unseal(cred), back == bytes else {
+                                try? FileManager.default.removeItem(atPath: cred)
+                                throw VaultError.credentials("verify", "sealed key didn't read back")
+                            }
+                            wipe(&back)
+                            shred(keyFile)
+                            FileHandle.standardError.write(Data(
+                                "[secrets] moved the file-backed master key into systemd-creds\n".utf8))
+                        }
                         return install(&s, bytes, .systemdCreds)
                     } catch {
                         FileHandle.standardError.write(Data(
@@ -129,7 +154,8 @@ public enum SecretsVault {
                     }
                 }
             }
-            let key = try fileFallbackKey(directory: dir)
+            var key = try fileFallbackKey(directory: dir)
+            defer { wipe(&key) }
             FileHandle.standardError.write(Data(
                 "[secrets] systemd-creds unavailable — using file-backed master key (secret encryption is local-key only)\n".utf8))
             return install(&s, key, .fileFallback)
@@ -142,6 +168,29 @@ public enum SecretsVault {
         s.key = k
         s.source = source
         return k.symmetricKey
+    }
+
+    /// Zeroes a transient copy of key bytes (in place, when the buffer is
+    /// uniquely ours; Data is copy-on-write).
+    // @port-skip linux-only: key hygiene
+    static func wipe(_ d: inout Data) {
+        d.withUnsafeMutableBytes { b in if let p = b.baseAddress { memset(p, 0, b.count) } }
+    }
+
+    /// Overwrites a key file with zeros, flushes, then unlinks it.
+    // @port-skip linux-only: key hygiene
+    static func shred(_ path: String) {
+        let fd = open(path, O_WRONLY | O_CLOEXEC)
+        if fd >= 0 {
+            var st = stat()
+            if fstat(fd, &st) == 0 {
+                let zeros = [UInt8](repeating: 0, count: Int(st.st_size))
+                _ = zeros.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+                fsync(fd)
+            }
+            close(fd)
+        }
+        unlink(path)
     }
 
     /// Master key in a 0600 file in the vault directory: the fallback when
@@ -212,42 +261,79 @@ public enum SecretsVault {
 
     // MARK: systemd-creds plumbing (the Keychain's counterpart)
 
-    /// `--user` unless we're root (a system service seals with the system's
-    /// host key, for LoadCredentialEncrypted=).
+    /// systemd-creds as the vault uses it. The binary is injectable
+    /// (BROMURE_SYSTEMD_CREDS in the vault's environment) so tests can stand in
+    /// for every failure mode without depending on the host.
     // @port-skip linux-only: systemd-creds invocation
-    static var credsScope: [String] { geteuid() == 0 ? [] : ["--user"] }
+    struct Creds {
+        let binary: String
+        /// `--user` unless we're root (a system service seals with the
+        /// system's host key, for LoadCredentialEncrypted=).
+        let scope: [String]
 
-    // @port-skip linux-only: systemd-creds availability probe
-    static func systemdCredsAvailable() -> Bool {
-        FileManager.default.isExecutableFile(atPath: "/usr/bin/systemd-creds")
-    }
+        // @port-skip linux-only: systemd-creds invocation
+        init(env: [String: String]) {
+            binary = env["BROMURE_SYSTEMD_CREDS"] ?? "/usr/bin/systemd-creds"
+            scope = geteuid() == 0 ? [] : ["--user"]
+        }
 
-    /// Unseals the master key from `master-key.cred`.
-    // @port SecretsVault.static fetchFromKeychain() h=6ee726011c0be0fc @08d935d2
-    static func fetchFromCredential(_ path: String) throws -> Data {
-        let out = try runCreds(["decrypt"] + credsScope + ["--name=\(credentialName)", path, "-"], stdin: nil)
-        guard out.count == 32 else { throw VaultError.credentials("decrypt", "got \(out.count) bytes") }
-        return out
-    }
+        // @port-skip linux-only: systemd-creds availability probe
+        var available: Bool { FileManager.default.isExecutableFile(atPath: binary) }
 
-    /// Seals the master key into `master-key.cred` (0600, atomically).
-    // @port SecretsVault.static storeInKeychain(_: SymmetricKey) h=07a0ca756e929bb0 @08d935d2
-    static func storeInCredential(_ key: Data, at path: String) throws {
-        let tmp = path + ".tmp-\(getpid())"
-        defer { try? FileManager.default.removeItem(atPath: tmp) }
-        _ = try runCreds(["encrypt"] + credsScope + ["--name=\(credentialName)", "-", tmp], stdin: key)
-        try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: tmp)
-        guard rename(tmp, path) == 0 else { throw VaultError.io("rename \(tmp)") }
-    }
+        enum Unseal {
+            case key(Data)
+            /// Definitely can't be opened with this host's keys: rotate.
+            case cannotOpen(String)
+            /// Couldn't tell (didn't run, IPC, timeout, TPM busy…): don't touch.
+            case failed(String)
+        }
 
-    /// Runs systemd-creds with `stdin` piped in; returns stdout. Key bytes
-    /// travel over pipes only, never argv or a file in the clear.
-    // @port-skip linux-only: systemd-creds invocation
-    static func runCreds(_ args: [String], stdin: Data?) throws -> Data {
-        do {
-            return try ChildProcess.capture("/usr/bin/systemd-creds", args, input: stdin)
-        } catch MachineError.toolFailed(_, _, let err) {
-            throw VaultError.credentials(args.first ?? "", err)
+        /// Unseals; classifies failures conservatively. Observed on lnx-ntv
+        /// (systemd 259): a corrupted or foreign credential fails with
+        /// "Failed to read encrypted credential data: Invalid argument"
+        /// (authentication failed); truncation and garbage give "Broken pipe",
+        /// which an IPC failure could too, so those count only when the file
+        /// itself is structurally malformed (not base64, or too short).
+        // @port SecretsVault.static fetchFromKeychain() h=6ee726011c0be0fc @08d935d2
+        func unseal(_ path: String) -> Unseal {
+            do {
+                let out = try ChildProcess.capture(binary, ["decrypt"] + scope + ["--name=\(credentialName)", path, "-"],
+                                                   input: nil)
+                guard out.count == 32 else { return .cannotOpen("decrypted to \(out.count) bytes") }
+                return .key(out)
+            } catch MachineError.toolFailed(_, _, let err) {
+                if err.contains("Failed to read encrypted credential data: Invalid argument") {
+                    return .cannotOpen(err)
+                }
+                if Self.malformed(path) { return .cannotOpen("malformed credential file (\(err))") }
+                return .failed(err)
+            } catch {
+                return .failed("\(error)")
+            }
+        }
+
+        /// Seals `key` into `path` (0600, atomically). Key bytes go over a pipe.
+        // @port SecretsVault.static storeInKeychain(_: SymmetricKey) h=07a0ca756e929bb0 @08d935d2
+        func seal(_ key: Data, at path: String) throws {
+            let tmp = path + ".tmp-\(getpid())"
+            defer { try? FileManager.default.removeItem(atPath: tmp) }
+            do {
+                _ = try ChildProcess.capture(binary, ["encrypt"] + scope + ["--name=\(credentialName)", "-", tmp], input: key)
+            } catch MachineError.toolFailed(_, _, let err) {
+                throw VaultError.credentials("encrypt", err)
+            }
+            try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: tmp)
+            guard rename(tmp, path) == 0 else { throw VaultError.io("rename \(tmp)") }
+        }
+
+        /// A systemd credential file is base64 of a binary header + payload; a
+        /// file that isn't, or is shorter than any real one, is corrupt.
+        // @port-skip linux-only: credential sanity check
+        static func malformed(_ path: String) -> Bool {
+            guard let raw = FileManager.default.contents(atPath: path) else { return false }
+            let text = String(decoding: raw, as: UTF8.self).filter { !$0.isWhitespace }
+            guard let bin = Data(base64Encoded: text) else { return true }
+            return bin.count < 64
         }
     }
 }

@@ -412,9 +412,9 @@ struct SecretsVaultTests {
         (systemd ? [:] : ["BROMURE_VAULT_KEY_SOURCE": "file"]).merging(extra) { _, b in b }
     }
 
-    func withVault(systemd: Bool = false, _ body: (String) throws -> Void) rethrows {
+    func withVault(systemd: Bool = false, _ extra: [String: String] = [:], _ body: (String) throws -> Void) rethrows {
         let dir = "/tmp/acl-vault-\(UUID().uuidString.prefix(8))"
-        SecretsVault.configure(directory: dir, environment: env(systemd: systemd))
+        SecretsVault.configure(directory: dir, environment: env(systemd: systemd, extra))
         defer {
             SecretsVault.configure(directory: SecretsVault.defaultDirectory())
             try? FileManager.default.removeItem(atPath: dir)
@@ -588,4 +588,87 @@ final class NIOLockedValueBoxShim<T>: @unchecked Sendable {
     init(_ v: T) { self.v = v }
     func mutate(_ f: (inout T) -> Void) { lock.lock(); f(&v); lock.unlock() }
     var value: T { lock.lock(); defer { lock.unlock() }; return v }
+}
+
+
+extension SecretsVaultTests {
+    /// A stand-in systemd-creds: prints `stderr` and exits 1, or (`passThrough`)
+    /// defers to the real one.
+    static func fakeCreds(in dir: String, stderr: String) throws -> String {
+        let path = dir + "-fake-creds"
+        try "#!/bin/sh\necho '\(stderr)' >&2\nexit 1\n".write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        return path
+    }
+
+    @Test("an unseal that fails to run (no credential service, timeout, EMFILE…) throws and leaves the credential alone",
+          arguments: ["Failed to connect to io.systemd.Credentials: Connection refused",
+                      "Failed to read encrypted credential data: Connection timed out",
+                      "Failed to read encrypted credential data: Too many open files",
+                      "TPM2 operation failed: Device or resource busy",
+                      "Failed to read encrypted credential data: Broken pipe"])
+    func transientUnsealFailure(stderr: String) throws {
+        try withVault(systemd: true) { dir in
+            // A well-formed (base64, long enough) credential, as a real one is.
+            let cred = dir + "/master-key.cred"
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let original = Data(Data(repeating: 0xA5, count: 300).base64EncodedString().utf8)
+            try original.write(to: URL(fileURLWithPath: cred))
+            let fake = try Self.fakeCreds(in: dir, stderr: stderr)
+            defer { try? FileManager.default.removeItem(atPath: fake) }
+            SecretsVault.configure(directory: dir, environment: env(systemd: true, ["BROMURE_SYSTEMD_CREDS": fake]))
+            #expect(throws: VaultError.self) { try SecretsVault.encrypt(Data("x".utf8)) }
+            #expect(FileManager.default.contents(atPath: cred) == original, "the credential must stay byte-identical")
+            let rotated = try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.contains("unreadable") }
+            #expect(rotated.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: dir + "/secrets-master.key"), "no silent fallback key")
+        }
+    }
+
+    @Test("a credential whose binary is missing throws, untouched")
+    func missingBinary() throws {
+        try withVault(systemd: true) { dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let original = Data("not-really-sealed".utf8)
+            try original.write(to: URL(fileURLWithPath: dir + "/master-key.cred"))
+            SecretsVault.configure(directory: dir, environment: env(systemd: true, ["BROMURE_SYSTEMD_CREDS": "/nonexistent/systemd-creds"]))
+            #expect(throws: VaultError.self) { try SecretsVault.encrypt(Data("x".utf8)) }
+            #expect(FileManager.default.contents(atPath: dir + "/master-key.cred") == original)
+        }
+    }
+
+    @Test("a positive can't-open result (authentication failed) rotates, keeping the old credential aside")
+    func authFailureRotates() throws {
+        try withVault(systemd: true) { dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try Data(Data(repeating: 1, count: 300).base64EncodedString().utf8)
+                .write(to: URL(fileURLWithPath: dir + "/master-key.cred"))
+            let fake = try Self.fakeCreds(in: dir, stderr: "Failed to read encrypted credential data: Invalid argument")
+            defer { try? FileManager.default.removeItem(atPath: fake) }
+            SecretsVault.configure(directory: dir, environment: env(systemd: true, ["BROMURE_SYSTEMD_CREDS": fake]))
+            // The fake can't seal the new key either: rotation falls back to a
+            // file key (reported), with the old credential set aside.
+            _ = try SecretsVault.encrypt(Data("x".utf8))
+            let aside = try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.hasPrefix("master-key.cred.unreadable-") }
+            #expect(aside.count == 1)
+            #expect(SecretsVault.masterKeySource == .fileFallback)
+        }
+    }
+
+    @Test("file-fallback key -> systemd-creds: the same key is sealed, old secrets still open, no plaintext left",
+          .enabled(if: credsWork))
+    func adoptFileKey() throws {
+        try withVault { dir in
+            try VaultItems.set(Data("from-the-file-key-era".utf8), service: "svc", account: "old")
+            #expect(SecretsVault.masterKeySource == .fileFallback)
+            #expect(FileManager.default.fileExists(atPath: dir + "/secrets-master.key"))
+            SecretsVault.configure(directory: dir, environment: env(systemd: true))     // systemd-creds now available
+            #expect(try VaultItems.get(service: "svc", account: "old") == Data("from-the-file-key-era".utf8))
+            #expect(SecretsVault.masterKeySource == .systemdCreds)
+            #expect(FileManager.default.fileExists(atPath: dir + "/master-key.cred"))
+            #expect(!FileManager.default.fileExists(atPath: dir + "/secrets-master.key"), "plaintext key must be gone")
+            SecretsVault.configure(directory: dir, environment: env(systemd: true))     // and after a restart
+            #expect(try VaultItems.get(service: "svc", account: "old") == Data("from-the-file-key-era".utf8))
+        }
+    }
 }
