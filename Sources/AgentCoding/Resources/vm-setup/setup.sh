@@ -52,7 +52,11 @@ case "$(uname -m)" in
     x86_64)
         DEB_ARCH=amd64; GRUB_TARGET=x86_64-efi; EFI_BOOT_ID=BOOTX64
         GUEST_CONSOLE="${GUEST_CONSOLE:-ttyS0}"
-        ARCH_KERNEL_ARGS=""
+        # ia32_emulation=0: no 32-bit syscall entry (int 0x80, compat
+        # binaries). The kernel sentry probes the 64-bit wrappers
+        # (__x64_sys_*), not __ia32_sys_*, so this closes the entry it
+        # doesn't watch; nothing in the image is 32-bit.
+        ARCH_KERNEL_ARGS="ia32_emulation=0"
         UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}" ;;
     *) fail "unsupported installer arch $(uname -m)" ;;
 esac
