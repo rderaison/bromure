@@ -138,28 +138,41 @@ public struct QEMUMachineConfig: Sendable {
               "-numa", "node,memdev=mem",
               "-kernel", kernel, "-append", cmdline]
         if let initrd { a += ["-initrd", initrd] }
-        a += ["-drive", "if=none,id=d0,file=\(overlay),format=qcow2,cache=none,aio=io_uring,discard=unmap",
+        a += ["-drive", "if=none,id=d0,file=\(Self.optValue(overlay)),format=qcow2,cache=none,aio=io_uring,discard=unmap",
               "-device", "\(dev("virtio-blk")),drive=d0"]
         for (i, s) in shares.enumerated() {
-            a += ["-chardev", "socket,id=fs\(i),path=\(shareSocketPath(i))",
-                  "-device", "\(dev("vhost-user-fs")),chardev=fs\(i),tag=\(s.tag)"]
+            a += ["-chardev", "socket,id=fs\(i),path=\(Self.optValue(shareSocketPath(i)))",
+                  "-device", "\(dev("vhost-user-fs")),chardev=fs\(i),tag=\(Self.optValue(s.tag))"]
         }
         let mac = macAddress.map { ",mac=\($0)" } ?? ""
         switch network {
         case .none: break
         case .stream(let path):
-            a += ["-netdev", "stream,id=n0,server=off,addr.type=unix,addr.path=\(path)",
+            a += ["-netdev", "stream,id=n0,server=off,addr.type=unix,addr.path=\(Self.optValue(path))",
                   "-device", "\(dev("virtio-net")),netdev=n0\(mac)"]
         case .user:
             a += ["-netdev", "user,id=n0", "-device", "\(dev("virtio-net")),netdev=n0\(mac)"]
         }
         a += ["-device", "\(dev("vhost-vsock")),guest-cid=\(vsockCID)",
-              "-qmp", "unix:\(qmpSocketPath),server=on,wait=off",
-              "-serial", serialLog.map { "file:\($0)" } ?? "null",
-              "-display", "none", "-nodefaults", "-no-user-config"]
+              "-chardev", "socket,id=qmp,path=\(Self.optValue(qmpSocketPath)),server=on,wait=off",
+              "-mon", "chardev=qmp,mode=control"]
+        if let serialLog {
+            a += ["-chardev", "file,id=ser0,path=\(Self.optValue(serialLog))", "-serial", "chardev:ser0"]
+        } else {
+            a += ["-serial", "null"]
+        }
+        a += ["-display", "none", "-nodefaults", "-no-user-config"]
         if exitWithParent { a += ["-run-with", "exit-with-parent=on"] }
         if incoming { a += ["-incoming", "defer"] }
         return a + extraArguments
+    }
+
+    /// A value inside a QEMU `key=value,…` option list: QEMU reads a doubled
+    /// comma as a literal one. (`-kernel`, `-initrd` and `-append` take their
+    /// argument whole and need no escaping.)
+    // @port-skip linux-only: QEMU option syntax
+    public static func optValue(_ s: String) -> String {
+        s.replacingOccurrences(of: ",", with: ",,")
     }
 
     /// virtiofsd's argv for share `index`.

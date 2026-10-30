@@ -139,13 +139,36 @@ struct ConfigTests {
             "-netdev stream,id=n0,server=off,addr.type=unix,addr.path=/run/acl/ws1/net.sock",
             "-device virtio-net-pci,netdev=n0,mac=52:54:00:00:00:2a",
             "-device vhost-vsock-pci,guest-cid=42",
-            "-qmp unix:/run/acl/ws1/qmp.sock,server=on,wait=off",
+            "-chardev socket,id=qmp,path=/run/acl/ws1/qmp.sock,server=on,wait=off",
+            "-mon chardev=qmp,mode=control",
+            "-chardev file,id=ser0,path=/run/acl/ws1/serial.log", "-serial chardev:ser0",
             "-run-with exit-with-parent=on",
         ] { #expect(p.contains(expected), "missing: \(expected)") }
         #expect(!c.arguments().contains("-incoming"))
         #expect(pairs(c.arguments(incoming: true)).contains("-incoming defer"))
         #expect(c.virtiofsdArguments(0).contains("--readonly"))
         #expect(!c.virtiofsdArguments(1).contains("--readonly"))
+    }
+
+    @Test("commas in paths and tags are doubled inside option lists, not in -kernel/-append")
+    func commaEscaping() {
+        var c = QEMUMachineConfig(name: "ws", kernel: "/img,a/vmlinuz", initrd: nil,
+                                  cmdline: "console=ttyS0,115200", baseImage: "/img,a/base.img",
+                                  overlay: "/data,x/disk.qcow2", vsockCID: 3, runDirectory: "/run/a,b")
+        c.shares = [.init(tag: "t,1", hostPath: "/h,p")]
+        c.network = .stream(socketPath: "/run/a,b/net.sock")
+        let p = pairs(c.arguments())
+        for expected in [
+            "-drive if=none,id=d0,file=/data,,x/disk.qcow2,format=qcow2,cache=none,aio=io_uring,discard=unmap",
+            "-chardev socket,id=fs0,path=/run/a,,b/fs0.sock",
+            "-device vhost-user-fs-pci,chardev=fs0,tag=t,,1",
+            "-netdev stream,id=n0,server=off,addr.type=unix,addr.path=/run/a,,b/net.sock",
+            "-chardev socket,id=qmp,path=/run/a,,b/qmp.sock,server=on,wait=off",
+            "-chardev file,id=ser0,path=/run/a,,b/serial.log",
+            "-kernel /img,a/vmlinuz", "-append console=ttyS0,115200",
+        ] { #expect(p.contains(expected), "missing: \(expected)") }
+        // virtiofsd gets plain argv.
+        #expect(c.virtiofsdArguments(0).contains("/h,p"))
     }
 
     @Test("microvm uses virtio-mmio devices")

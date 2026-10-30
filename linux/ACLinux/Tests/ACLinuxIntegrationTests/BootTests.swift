@@ -47,7 +47,8 @@ struct BootTests {
         var config: QEMUMachineConfig
 
         init(machine: QEMUMachineConfig.MachineType) throws {
-            dir = "/tmp/acl-it-\(UUID().uuidString.prefix(8))"
+            // A comma in every path QEMU parses: proves the option escaping.
+            dir = "/tmp/acl-it,\(UUID().uuidString.prefix(8))"
             for sub in ["meta/virtiofs-tags", "outbox", "run"] {
                 try FileManager.default.createDirectory(atPath: "\(dir)/\(sub)", withIntermediateDirectories: true)
             }
@@ -60,7 +61,7 @@ struct BootTests {
                                            overlay: "\(dir)/disk.qcow2", vsockCID: cid,
                                            runDirectory: "\(dir)/run")
             config.machine = machine
-            config.shares = [.init(tag: "bromure-meta", hostPath: "\(dir)/meta"),
+            config.shares = [.init(tag: "bromure-meta", hostPath: "\(dir)/meta", readOnly: true),
                              .init(tag: "bromure-outbox", hostPath: "\(dir)/outbox")]
             // A link up front: without one, agentd's docker restart waits out
             // network-online (120 s) before the shell pool starts.
