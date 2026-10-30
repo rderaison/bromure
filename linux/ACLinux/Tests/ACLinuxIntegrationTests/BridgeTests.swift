@@ -40,13 +40,14 @@ struct SwitchedVM {
     /// The daemon's rule (PasstUplink.Config.mtu): 65520 behind passt, except
     /// VPN profiles, which keep the macOS value; UDP isn't re-segmented.
     static func make(_ machine: QEMUMachineConfig.MachineType, mac: String, on sw: TestSwitch,
-                     listener: VsockListener, tag: String, mtu: Int? = nil) async throws -> SwitchedVM {
+                     listener: VsockListener, tag: String, mtu: Int? = nil,
+                     queueFrames: Int = FramePortCore.defaultQueueFrames) async throws -> SwitchedVM {
         var ws = try BootTests.Workspace(machine: machine)
         if let mtu { try "\(mtu)\n".write(toFile: ws.dir + "/meta/mtu", atomically: true, encoding: .utf8) }
         let sock = ws.dir + "/run/net.sock"
         ws.config.network = .stream(socketPath: sock)
         ws.config.macAddress = mac
-        let port = try await StreamPort.listen(path: sock)
+        let port = try await StreamPort.listen(path: sock, queueFrames: queueFrames)
         sw.attach(port, mac: mac)
         let conns = ConnQueue(await listener.connections(from: ws.cid))
         return SwitchedVM(ws: ws, mac: mac, port: port, vm: QEMUMachine(config: ws.config), conns: conns,
@@ -236,10 +237,19 @@ struct PasstBridgeTests {
 
         for (v, mtu) in [(a, bigMTU), (b, 1500)] {
             let p0 = cpuSeconds(pid: passtPID), s0 = selfCPUSeconds()
-            // 1 GiB at the big MTU; 256 MiB at 1500, where a debug build's
-            // interim switch (drop-oldest frame buffers, no backpressure) is
-            // the bottleneck and a long transfer can stall TCP.
-            let p = try await shell(v.conns, probeScript(host: lan, base: base, mib: mtu == 1500 ? 256 : 1024), timeout: 180)
+            // 1 GiB at both MTUs, also through a debug build: with FramePort
+            // backpressure the switch slows TCP down instead of dropping.
+            // passt itself occasionally drops a flow at MTU 1500 (it stops
+            // ACKing; see linux/ACLinux README "passt stall"): retry once, and
+            // say so with our ports' counters, which show nothing lost here.
+            var p = try await shell(v.conns, probeScript(host: lan, base: base, timeout: 45), timeout: 300)
+            if p.exitCode != 0, p.output.contains("TimeoutError") {
+                let st = sw.portStats(mac: v.mac)
+                print("PASST-STALL \(v.label) MTU \(mtu): passt stopped ACKing a flow; our port: dropped \(st?.dropped ?? -1), "
+                      + "queued \(st?.queued ?? -1); uplink dropped \(passt.stats.dropped). Retrying once.")
+                #expect((st?.dropped ?? 1) == 0 && passt.stats.dropped == 0, "a stall with frames lost in the switch")
+                p = try await shell(v.conns, probeScript(host: lan, base: base, timeout: 45), timeout: 300)
+            }
             let pc = cpuSeconds(pid: passtPID) - p0, sc = selfCPUSeconds() - s0
             #expect(p.exitCode == 0, "\(v.label) probe: \(p.output)")
             if p.exitCode != 0 {
@@ -256,6 +266,111 @@ struct PasstBridgeTests {
         }
         #expect(passt.restarts == 0)
         #expect(a.port.dropped == 0 && b.port.dropped == 0)
+        await a.tearDown(listener)
+        await b.tearDown(listener)
+        sw.stop()
+        await passt.close()
+    }
+}
+
+
+@Suite("Interim switch backpressure (passt)", .serialized, .enabled(if: NetEnv.passtReady))
+struct StallTests {
+    /// Guest-side upload to the sink; prints THROUGHPUT_MBPS.
+    func upload(_ v: SwitchedVM, _ lan: String, _ base: Int, mib: Int) async throws -> Double {
+        let r = try await shell(v.conns, """
+            python3 - <<'PY'
+            import socket, time
+            s = socket.create_connection(("\(lan)", \(base)), timeout=30); buf = bytes(1 << 20); t = time.time()
+            for _ in range(\(mib)): s.sendall(buf)
+            s.shutdown(socket.SHUT_WR); got = int(s.recv(64)); print("MBPS %.1f" % (got / (time.time() - t) / 1e6))
+            PY
+            """, timeout: 300)
+        return Double(r.output.split(separator: " ").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+    }
+
+    @Test("a VM whose port stops draining doesn't slow another VM by more than ~10%; its own drop counter rises")
+    func stalledPort() async throws {
+        let dir = "/tmp/acl-st-\(UUID().uuidString.prefix(8))"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { if !FileManager.default.fileExists(atPath: dir + "/KEEP") { try? FileManager.default.removeItem(atPath: dir) } }
+        let lan = try #require(hostLANAddress())
+        let base = 46_000 + Int.random(in: 0..<400) * 8
+        let svc = try await startServices(ip: lan, base: base)
+        defer { stopHelper(svc) }
+        var pc = PasstUplink.Config(logPath: dir + "/passt.log")
+        if ProcessInfo.processInfo.environment["BROMURE_PASST_PCAP"] == "1" { pc.pcapPath = dir + "/passt.pcap" }
+        let passt = try await PasstUplink.start(pc)
+        let macA = "52:54:00:e0:00:01", macB = "52:54:00:e0:00:02"
+        let sw = TestSwitch(uplink: passt, gateway: "192.168.64.1", dns: "192.168.64.1", mtu: { _ in 1500 })
+        let listener = try await VsockListener.shared(port: agentPort)
+        let a = try await SwitchedVM.make(.q35, mac: macA, on: sw, listener: listener, tag: "stall", mtu: 1500)
+        // B's port queue is small, so one TCP window in flight toward the
+        // paused VM (~700 frames at 1500) overflows it.
+        let b = try await SwitchedVM.make(.microvm, mac: macB, on: sw, listener: listener, tag: "stall", mtu: 1500,
+                                          queueFrames: 256)
+        async let ba = a.boot()
+        async let bb = b.boot()
+        _ = try await (ba, bb)
+
+        // Single uploads vary a lot run to run (guest scheduling, CPU
+        // frequency), so compare medians of five.
+        let mib = 128, samples = 5
+        // Median of the transfers that completed: a 0 is passt dropping a flow
+        // at MTU 1500 (it stops ACKing; our ports lose nothing), not the switch.
+        func median(_ xs: [Double]) -> Double {
+            let ok = xs.filter { $0 > 0 }.sorted()
+            return ok.isEmpty ? 0 : ok[ok.count / 2]
+        }
+        // Diagnostics: the ports' counters every 5 s (a stuck transfer shows
+        // which side stopped moving).
+        let watch = Task {
+            let t0 = ContinuousClock.now
+            var lastOut = -1, dumped = false
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                let pa = sw.portStats(mac: macA), up = passt.stats
+                if let o = pa?.sent, o == lastOut, !dumped {
+                    dumped = true
+                    let ss = Process()
+                    ss.executableURL = URL(fileURLWithPath: "/usr/bin/ss")
+                    ss.arguments = ["-tnimp", "( sport = :\(base) or dport = :\(base) )"]
+                    let pipe = Pipe(); ss.standardOutput = pipe
+                    try? ss.run(); ss.waitUntilExit()
+                    print("DIAG ss:\n" + String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+                    if pc.pcapPath != nil { print("DIAG pcap: \(dir)/passt.pcap (kept)"); FileManager.default.createFile(atPath: dir + "/KEEP", contents: nil) }
+                }
+                lastOut = pa?.sent ?? -1
+                print("DIAG t+\(ms(ContinuousClock.now - t0)) A: in \(pa?.received ?? -1) out \(pa?.sent ?? -1) q \(pa?.queued ?? -1) drop \(pa?.dropped ?? -1) pauses \(pa?.inboundPauses ?? -1) | uplink: in \(up.received) out \(up.sent) q \(up.queued) drop \(up.dropped) pauses \(up.inboundPauses)")
+            }
+        }
+        defer { watch.cancel() }
+        var alone: [Double] = []
+        for _ in 0..<samples { alone.append(try await upload(a, lan, base, mib: mib)) }
+        let baseline = median(alone)
+
+        // B starts a big download, then is paused: its NIC stops taking frames,
+        // so its port stops draining while passt still has in-flight data for it.
+        _ = try await shell(b.conns, """
+            nohup python3 -c "import socket; s=socket.create_connection(('\(lan)', \(base + 3))); s.sendall(b'4294967296\\n'); [s.recv(1<<20) for _ in iter(int, 1)]" >/dev/null 2>&1 &
+            echo started
+            """)
+        try await Task.sleep(for: .seconds(1))
+        let qmpB = try #require(await b.vm.qmp)
+        try await qmpB.execute("stop")
+        let droppedBefore = sw.portStats(mac: macB)?.dropped ?? 0
+        var during: [Double] = []
+        for _ in 0..<samples { during.append(try await upload(a, lan, base, mib: mib)) }
+        let stalled = median(during)
+        let droppedAfter = sw.portStats(mac: macB)?.dropped ?? 0
+        let statsB = sw.portStats(mac: macB)
+        try await qmpB.execute("cont")
+        print("STALL A alone: median \(baseline) of \(alone) MB/s; with B paused: median \(stalled) of \(during) MB/s (\(String(format: "%.0f", stalled / baseline * 100))%); "
+              + "B's port: dropped \(droppedBefore) -> \(droppedAfter), queued \(statsB?.queued ?? -1); A's port dropped \(sw.portStats(mac: macA)?.dropped ?? -1)")
+        #expect(alone.filter { $0 > 0 }.count >= 3 && during.filter { $0 > 0 }.count >= 3, "too many passt stalls to compare")
+        #expect(stalled >= baseline * 0.9, "A slowed to \(stalled) from \(baseline) MB/s")
+        #expect(droppedAfter > droppedBefore, "B's drops should rise while it can't drain")
+        #expect((sw.portStats(mac: macA)?.dropped ?? 1) == 0)
         await a.tearDown(listener)
         await b.tearDown(listener)
         sw.stop()

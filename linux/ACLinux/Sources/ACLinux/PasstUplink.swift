@@ -53,6 +53,10 @@ public final class PasstUplink: Uplink {
         public var outboundInterface: String?
         public var logPath: String?
         public var binary = "/usr/bin/passt"
+        /// Diagnosis: write every frame passt sees to this pcap (`--pcap`).
+        /// (`--log-file` can't be used: Ubuntu's AppArmor profile for passt
+        /// denies the read it needs, and passt exits.)
+        public var pcapPath: String?
 
         // @port-skip linux-only: passt configuration
         public init(logPath: String? = nil) {
@@ -75,16 +79,18 @@ public final class PasstUplink: Uplink {
                 if let dnsHost { a += ["--dns-host", dnsHost] }
             }
             if let outboundInterface { a += ["--outbound-if4", outboundInterface] }
+            if let pcapPath { a += ["--pcap", pcapPath] }
             return a
         }
     }
 
     public let config: Config
-    public let frames: AsyncStream<Data>
-    private let sink: AsyncStream<Data>.Continuation
+    let core: FramePortCore
     private let group: EventLoopGroup
     private let state = NIOLockedValueBox<(channel: Channel?, process: ChildProcess?,
                                            closing: Bool, restarts: Int)>((nil, nil, false, 0))
+    /// The current passt connection's writer (nil between restarts).
+    private let writer = NIOLockedValueBox<NIOAsyncChannelOutboundWriter<ByteBuffer>?>(nil)
 
     /// Tests only: a pause inside launch(), between spawning passt and
     /// installing its channel, to land a close() in that window.
@@ -112,7 +118,11 @@ public final class PasstUplink: Uplink {
     private init(config: Config, group: EventLoopGroup) {
         self.config = config
         self.group = group
-        (frames, sink) = AsyncStream<Data>.makeStream(bufferingPolicy: .bufferingNewest(4096))
+        let writer = self.writer
+        core = FramePortCore(name: "passt") { frames in
+            guard let w = writer.withLockedValue({ $0 }) else { throw ChannelError.ioOnClosedChannel }
+            try await w.write(StreamPort.encode(frames))      // suspends while passt isn't reading
+        }
     }
 
     // @port-skip linux-only: rootless uplink
@@ -135,18 +145,18 @@ public final class PasstUplink: Uplink {
         }
         Glibc.close(fds[1])
         if let pause = Self.launchPauseForTesting.withLockedValue({ $0 }) { try? await Task.sleep(for: pause) }
-        let sink = self.sink
         let ch: Channel
+        let conn: NIOAsyncChannel<ByteBuffer, ByteBuffer>
         do {
-            ch = try await ClientBootstrap(group: group)
-                .channelInitializer { c in
+            (ch, conn) = try await ClientBootstrap(group: group)
+                .withConnectedSocket(fds[0]) { c in
                     c.eventLoop.makeCompletedFuture {
                         try c.pipeline.syncOperations.addHandler(ByteToMessageHandler(
                             LengthPrefixedFrameDecoder(onDrop: { _ in })))
-                        try c.pipeline.syncOperations.addHandler(FrameSink(sink))
+                        return (c, try NIOAsyncChannel<ByteBuffer, ByteBuffer>(wrappingChannelSynchronously: c,
+                            configuration: .init(backPressureStrategy: .init(lowWatermark: 64, highWatermark: 256))))
                     }
                 }
-                .withConnectedSocket(fds[0]).get()
         } catch {
             Glibc.close(fds[0])
             p.signal(SIGKILL)
@@ -161,9 +171,21 @@ public final class PasstUplink: Uplink {
             return true
         }
         guard wanted else {
-            ch.close(promise: nil)                    // one-off passt exits on EOF
+            try? await conn.executeThenClose { _, _ in }   // one-off passt exits on EOF
             if await p.waitForExit(timeout: .seconds(2)) == nil { p.signal(SIGKILL) }
             throw ChannelError.alreadyClosed
+        }
+        // Pump: passt's frames into the port, paced by the consumer (reading
+        // stops while the switch lags; passt holds them and its TCP slows).
+        let core = self.core, writer = self.writer
+        Task {
+            try? await conn.executeThenClose { inbound, outbound in
+                writer.withLockedValue { $0 = outbound }
+                for try await frame in inbound {
+                    guard await core.deliver(Data(frame.readableBytesView)) else { break }
+                }
+                writer.withLockedValue { $0 = nil }
+            }
         }
         Task { [weak self] in
             _ = await p.waitForExit()
@@ -188,12 +210,26 @@ public final class PasstUplink: Uplink {
         }
     }
 
+    // MARK: FramePort
+
     // @port-skip linux-only: rootless uplink
-    public func send(_ frame: Data) {
-        guard frame.count >= StreamPort.minFrame, frame.count <= StreamPort.maxFrame,
-              let ch = state.withLockedValue({ $0.channel }) else { return }
-        ch.writeAndFlush(StreamPort.encode(frame, allocator: ch.allocator), promise: nil)
+    public var name: String { "passt" }
+    // @port-skip linux-only: rootless uplink
+    public var inbound: FrameSequence { core.sequence }
+    // @port-skip linux-only: rootless uplink
+    @discardableResult public func send(_ frame: Data) -> FrameSendResult {
+        guard frame.count >= StreamPort.minFrame, frame.count <= StreamPort.maxFrame else { return .dropped }
+        return core.send(frame)
     }
+    // @port-skip linux-only: rootless uplink
+    public func sendWaiting(_ frame: Data) async {
+        guard frame.count >= StreamPort.minFrame, frame.count <= StreamPort.maxFrame else { return }
+        await core.sendWaiting(frame)
+    }
+    // @port-skip linux-only: rootless uplink
+    public var isWritable: Bool { core.isWritable }
+    // @port-skip linux-only: rootless uplink
+    public var stats: FramePortStats { core.stats }
 
     // @port-skip linux-only: rootless uplink
     public func close() async {
@@ -206,6 +242,6 @@ public final class PasstUplink: Uplink {
             p.signal(SIGTERM)
             if await p.waitForExit(timeout: .seconds(2)) == nil { p.signal(SIGKILL) }
         }
-        sink.finish()
+        core.finish()
     }
 }

@@ -3,7 +3,8 @@
 usage: net-test-services.py <bind-ip> <base-port> [ready-file]
   base+0  sink:  reads to EOF, answers the byte count, closes      (throughput)
   base+1  echo:  echoes everything back                            (latency)
-  base+2  hello: writes b"hello from <bind-ip>\\n", closes          (reachability)"""
+  base+2  hello: writes b"hello from <bind-ip>\\n", closes          (reachability)
+  base+3  source: reads a decimal byte count + newline, sends that many bytes, closes (downloads)"""
 import os, socket, sys, threading
 ip, base = sys.argv[1], int(sys.argv[2])
 
@@ -30,6 +31,16 @@ def echo(c):
 def hello(c):
     c.sendall(b"hello from %s\n" % ip.encode()); c.close()
 
-serve(base, sink); serve(base + 1, echo); serve(base + 2, hello)
+def source(c):
+    n = int(c.makefile().readline().strip() or 0)
+    buf = bytes(1 << 20)
+    try:
+        while n > 0:
+            k = min(n, len(buf)); c.sendall(buf[:k]); n -= k
+    except OSError:
+        pass
+    c.close()
+
+serve(base, sink); serve(base + 1, echo); serve(base + 2, hello); serve(base + 3, source)
 if len(sys.argv) > 3: open(sys.argv[3], "w").write("ready\n")
 threading.Event().wait()

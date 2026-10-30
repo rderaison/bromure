@@ -4,11 +4,7 @@ import Foundation
 /// to the rest of the world. PasstUplink (default: rootless userspace NAT)
 /// or TapUplink (a persistent tap the host routes and masquerades).
 // @port-skip linux-only: NetworkUplink protocol stand-in (macOS: VMNetSwitch's vmnet interface)
-public protocol Uplink: AnyObject, Sendable {
-    /// Frames from the uplink toward the VMs.
-    var frames: AsyncStream<Data> { get }
-    /// One frame toward the uplink.
-    func send(_ frame: Data)
+public protocol Uplink: FramePort {
     /// The gateway's MAC as the VMs should see it (aa:bb:…), if known.
     var gatewayMAC: String? { get }
     /// The largest frame payload (L3 MTU) the uplink carries well; the

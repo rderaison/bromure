@@ -269,7 +269,7 @@ struct StreamPortTests {
         let dir = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let port = try await StreamPort.listen(path: dir + "/net.sock")
-        var frames = port.frames.makeAsyncIterator()
+        var frames = port.inbound.makeAsyncIterator()
         let (ch, peer) = try await connect(port.path)
 
         // A good frame in two pieces; then a too-short one (10 bytes) and an
@@ -318,7 +318,7 @@ struct PasstUplinkTests {
                        + me + [192, 168, 64, 2] + [UInt8](repeating: 0, count: 6) + [192, 168, 64, 1]
                        + [UInt8](repeating: 0, count: 18))
         up.send(arp)
-        var it = up.frames.makeAsyncIterator()
+        var it = up.inbound.makeAsyncIterator()
         var reply: [UInt8] = []
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
@@ -752,5 +752,82 @@ struct GuestShellTests {
         let r = try await shell.exec("echo ok", wait: .seconds(2))
         #expect(r.stdout == "ok\n" && r.exitCode == 0)
         #expect(agent.count == 1)
+    }
+}
+
+@Suite("Frame port backpressure")
+struct FramePortTests {
+    @Test("a fast sender into a slow consumer: every frame arrives, in order; reading pauses instead of dropping")
+    func losslessInbound() async throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let port = try await StreamPort.listen(path: dir + "/net.sock")
+        let total = 20_000
+        // The QEMU side: a blocking writer thread, as fast as the socket takes it.
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in for (i, b) in (port.path.utf8).enumerated() { p[i] = b } }
+        let rc = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        #expect(rc == 0)
+        Thread {
+            var frame = [UInt8](repeating: 0xEE, count: 4 + 1500)
+            frame[0...3] = [0, 0, 0x05, 0xDC]
+            for i in 0..<total {
+                frame[4] = UInt8(i >> 24 & 0xFF); frame[5] = UInt8(i >> 16 & 0xFF); frame[6] = UInt8(i >> 8 & 0xFF); frame[7] = UInt8(i & 0xFF)
+                var off = 0
+                while off < frame.count {
+                    let n = frame.withUnsafeBytes { write(fd, $0.baseAddress! + off, $0.count - off) }
+                    if n <= 0 { return }
+                    off += n
+                }
+            }
+        }.start()
+        var expected = 0
+        for await f in port.inbound {
+            let seq = Int(f[f.startIndex]) << 24 | Int(f[f.startIndex + 1]) << 16 | Int(f[f.startIndex + 2]) << 8 | Int(f[f.startIndex + 3])
+            #expect(seq == expected, "frame \(seq) where \(expected) was expected")
+            if seq != expected { break }
+            expected += 1
+            if expected % 2000 == 0 { try await Task.sleep(for: .milliseconds(30)) }   // a slow switch
+            if expected == total { break }
+        }
+        #expect(expected == total)
+        #expect(port.stats.inboundPauses > 0, "the port never had to pause reading")
+        #expect(port.dropped == 0)
+        close(fd)
+        await port.close()
+    }
+
+    @Test("a stalled destination fills only its own queue: drops counted there; sendWaiting waits instead")
+    func perDestinationLimits() async throws {
+        let release = AsyncStream<Void>.makeStream()
+        // A destination whose wire never drains (a paused VM), until released.
+        let stalled = FramePortCore(name: "stalled", queueFrames: 64, maxBatch: 1) { _ in
+            var it = release.stream.makeAsyncIterator()
+            _ = await it.next()
+        }
+        let healthy = FramePortCore(name: "healthy", queueFrames: 64) { _ in }
+        var stalledResults: [FrameSendResult] = []
+        for _ in 0..<200 {
+            stalledResults.append(stalled.send(Data(count: 1500)))
+            #expect(healthy.send(Data(count: 1500)) == .queued)
+            await Task.yield()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(stalledResults.filter { $0 == .dropped }.count >= 200 - 64 - 1)
+        #expect(stalled.stats.dropped >= 200 - 64 - 1)
+        #expect(!stalled.isWritable)
+        #expect(healthy.stats.dropped == 0 && healthy.stats.sent == 200)
+        // sendWaiting doesn't drop: it completes once the destination drains.
+        let waiter = Task { await stalled.sendWaiting(Data(count: 1500)) }
+        try await Task.sleep(for: .milliseconds(100))
+        let droppedBefore = stalled.stats.dropped
+        for _ in 0..<70 { release.continuation.yield() }
+        await waiter.value
+        #expect(stalled.stats.dropped == droppedBefore, "sendWaiting must not count a drop")
+        release.continuation.finish()
+        stalled.finish()
+        healthy.finish()
     }
 }

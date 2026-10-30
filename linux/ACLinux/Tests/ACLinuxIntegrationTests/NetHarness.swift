@@ -61,13 +61,13 @@ func shell(_ stream: ConnQueue, _ cmd: String, timeout: Int = 60) async throws -
 
 /// Guest-side probe against net-test-services.py on host:base: throughput
 /// (MB/s over `mib` MiB), TCP request/response RTT (µs), reachability.
-func probeScript(host: String, base: Int, mib: Int = 1024) -> String {
+func probeScript(host: String, base: Int, mib: Int = 1024, timeout: Int = 120) -> String {
     """
     python3 - <<'PY'
     import socket, time
     H, B = "\(host)", \(base)
     print("HELLO", socket.create_connection((H, B + 2), timeout=5).recv(100).decode().strip())
-    s = socket.create_connection((H, B), timeout=120); buf = bytes(1 << 20); t = time.time()
+    s = socket.create_connection((H, B), timeout=\(timeout)); buf = bytes(1 << 20); t = time.time()
     for _ in range(\(mib)): s.sendall(buf)
     s.shutdown(socket.SHUT_WR); got = int(s.recv(64)); dt = time.time() - t
     print("THROUGHPUT_MBPS %.0f (%d bytes in %.2fs)" % (got / dt / 1e6, got, dt))
