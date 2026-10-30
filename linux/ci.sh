@@ -19,13 +19,17 @@ step "portmap: test";            swift test  --package-path "$ROOT/tools/portmap
 step "portmap: check";           "$ROOT/tools/portmap/.build/release/portmap" check --root "$ROOT" --allow-unclaimed
 step "ACLinux: build";          swift build --package-path "$ROOT/linux/ACLinux" --build-tests
 step "ACLinux: unit tests";     swift test  --package-path "$ROOT/linux/ACLinux" --skip ACLinuxIntegrationTests
+step "spike: TLS interception (linux/spike/mitm)"
+swift build --package-path "$ROOT/linux/spike/mitm" -c release
+# The KVM integration step drives it from a guest behind passt (needs Internet).
+export BROMURE_MITM_PROXY="$ROOT/linux/spike/mitm/.build/release/mitm-proxy"
 step "ACLinux: KVM integration"
 # Until the vhost udev rule is installed, /dev/vhost-vsock is kvm-group only:
 # run as this user with the kvm group added (not as root).
 if [ -w /dev/vhost-vsock ] || ! sudo -n -g kvm true 2>/dev/null; then
   swift test --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 else
-  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" swift test --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
+  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" BROMURE_MITM_PROXY="$BROMURE_MITM_PROXY" swift test --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 fi
 step "network: netns bridge test"
 if sudo -n true 2>/dev/null; then
