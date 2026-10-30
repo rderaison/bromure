@@ -54,6 +54,11 @@ pipeline {
             description: 'Space-separated kernels to rebuild even if published, e.g. 6.8.0-142-generic.')
         string(name: 'KERNEL_PATTERN', defaultValue: '^linux-headers-6\\.8\\.0-[0-9]+-generic$',
             description: 'ERE over linux-headers package names to build for.')
+        // Off until the agent can run linux/amd64 containers (an amd64 agent, or
+        // binfmt/QEMU on the DinD daemon) and the catalog binds the arch (see the
+        // Build modules stage).
+        booleanParam(name: 'BUILD_AMD64', defaultValue: false,
+            description: 'Also build amd64 modules (Linux/KVM hosts). Archived as build artifacts, not published.')
     }
 
     environment {
@@ -168,6 +173,37 @@ pipeline {
                         docker rm "sentry-$label"
                     done < sentry-ci/sources
                 '''
+                // amd64 (the Linux/KVM host's guests). Same source, same scripts,
+                // the other platform; ci-build.sh reads the arch from dpkg and
+                // looks up sentry/<hash>/amd64/catalog.json. Kept OUT of
+                // sentry-ci/out-* so the Publish stage never sees them: kernel
+                // names are the same on both arches (6.8.0-NNN-generic) and a
+                // module's signature covers source, kernel, sha256 and size but
+                // not the arch, so amd64 modules wait for a catalog that binds it.
+                script {
+                    if (params.BUILD_AMD64) {
+                        sh '''
+                            set -eu
+                            export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                            mkdir -p sentry-ci/amd64
+                            while read -r label epoch hash; do
+                                echo "=== building amd64 for source $label ($hash) ==="
+                                docker rm -f "sentry-amd64-$label" 2>/dev/null || true
+                                docker build --pull --platform linux/amd64 -q \
+                                    -t "bromure-sentry-builder:amd64-$label" "sentry-ci/ctx-$label"
+                                docker run --platform linux/amd64 --name "sentry-amd64-$label" \
+                                    -e SOURCE_DATE_EPOCH="$epoch" -e PUBLIC_BASE="$DO_SPACES_PUBLIC_BASE" \
+                                    -e MAX_BUILDS="${MAX_BUILDS:-12}" -e FORCE_KERNELS="${FORCE_KERNELS:-}" \
+                                    -e KERNEL_PATTERN="${KERNEL_PATTERN:-^linux-headers-6\\.8\\.0-[0-9]+-generic$}" \
+                                    "bromure-sentry-builder:amd64-$label"
+                                docker cp "sentry-amd64-$label:/out" "sentry-ci/amd64/out-$label"
+                                docker rm "sentry-amd64-$label"
+                            done < sentry-ci/sources
+                        '''
+                        archiveArtifacts artifacts: 'sentry-ci/amd64/*/manifest.json, sentry-ci/amd64/*/modules/**',
+                                         allowEmptyArchive: true
+                    }
+                }
             }
         }
 

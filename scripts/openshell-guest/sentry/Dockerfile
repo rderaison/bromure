@@ -1,9 +1,10 @@
 # Build container for the kernel sentry module (Jenkinsfile.sentry).
 #
-# Ubuntu 24.04 arm64: the same series and architecture as the guest images, so
-# the archive's linux-headers-<ABI>-generic packages and Ubuntu's own compiler
-# (gcc-13, what build.sh pins) are exactly what the guest kernels were built
-# with. The kernel headers themselves are installed per ABI at run time by
+# Ubuntu 24.04 of the guest images' architecture (`--platform linux/arm64` for
+# the Mac's images, `linux/amd64` for Linux/KVM hosts'): the same series and
+# architecture, so the archive's linux-headers-<ABI>-generic packages and
+# Ubuntu's own compiler (gcc-13, what build.sh pins) are exactly what the guest
+# kernels were built with. The kernel headers themselves are installed per ABI at run time by
 # ci-build.sh, since the list of kernels to build is only known then.
 #
 # The build context is a directory holding this file, build.sh, ci-build.sh,
@@ -13,6 +14,7 @@
 #
 #   docker build --platform linux/arm64 -t bromure-sentry-builder <context>
 #   docker run --name sentrybuild -e SOURCE_DATE_EPOCH=<epoch> bromure-sentry-builder
+#   (amd64: --platform linux/amd64 on both; ci-build.sh takes the arch from dpkg)
 #   docker cp sentrybuild:/out ./out
 FROM ubuntu:24.04
 
