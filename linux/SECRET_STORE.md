@@ -55,3 +55,20 @@ The store protects secrets **at rest and from other principals**:
 - **Guests never see the vault at all**: secrets reach the outside world only through the proxy's swaps, as on macOS.
 
 It does **not** protect against **root** on the host, or against **code running as the daemon's own user while the daemon runs**: both can ask systemd-creds to unseal, or read the key from memory. That's the same boundary as the macOS Keychain for same-user processes, minus code-signing ACLs, which Linux has no equivalent of. Without a PCR policy, TPM binding also doesn't prove the host booted the software it expects; the PCR 7 option narrows that for the system service.
+
+## Implementation (ACLinux)
+
+- `SecretsVault` ports the macOS functions. Seven ledger entries are `ported`: `masterKey`, `fileFallbackKey`, `encrypt`, `decrypt`, the Keychain fetch and store (now systemd-creds unseal and seal), and `VaultError.description`.
+- **Blob format:** `0x01 || nonce || ciphertext || tag`, with AAD `"bromure-ac/vault/v1"` (plus `\0` + item name for item-bound blobs). `decrypt` also reads the macOS format: bare combined, no AAD.
+- `VaultItems` holds the Keychain-style (service, account) items, stored at `<vault>/items/<service>/<account>.blob` with the name as AAD.
+- **Key source order:**
+  1. `$CREDENTIALS_DIRECTORY/bromure-ac-master-key`;
+  2. `master-key.cred` (`systemd-creds [--user]`; sealed on first use);
+  3. `secrets-master.key` (0600).
+
+  `BROMURE_VAULT_KEY_SOURCE=file` forces the last. `SecretsVault.masterKeySource` reports which one was used.
+- **When the key is lost:**
+  - An unreadable `master-key.cred` is moved aside (`.unreadable-<time>`) and the key rotated.
+  - Blobs under the old key throw `VaultError.unreadable` (re-enter).
+  - A `master-key.cred` with no `systemd-creds` binary to open it is an error, not a rotation.
+- **Process hardening:** the key sits in `acl_secure_alloc` memory (mlock, MADV_DONTDUMP, explicit_bzero on free). Resolving it sets `PR_SET_DUMPABLE=0`.

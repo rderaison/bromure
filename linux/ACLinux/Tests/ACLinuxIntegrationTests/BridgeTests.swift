@@ -241,7 +241,12 @@ struct PasstBridgeTests {
             #expect(p.exitCode == 0, "\(v.label) probe: \(p.output)")
             if p.exitCode != 0 {
                 let log = ((try? String(contentsOfFile: v.ws.dir + "/outbox/agentd.log", encoding: .utf8)) ?? "")
-                print("DIAG \(v.label) agentd.log:\n" + log.split(separator: "\n").filter { $0.contains("[shell]") }.suffix(15).joined(separator: "\n"))
+                let serial = ((try? String(contentsOfFile: v.ws.dir + "/run/serial.log", encoding: .utf8)) ?? "")
+                print("DIAG \(v.label) agentd.log tail:\n" + log.split(separator: "\n").suffix(25).joined(separator: "\n")
+                      + "\nDIAG serial tail:\n" + serial.split(separator: "\n").suffix(25).joined(separator: "\n")
+                      + "\nDIAG qemu running: \(await v.vm.state)"
+                      + "\nDIAG virtiofsd-bromure-meta.log:\n" + (((try? String(contentsOfFile: v.ws.dir + "/run/virtiofsd-bromure-meta.log", encoding: .utf8)) ?? "").split(separator: "\n").suffix(15).joined(separator: "\n"))
+                      + "\nDIAG qemu.log:\n" + ((try? String(contentsOfFile: v.ws.dir + "/run/qemu.log", encoding: .utf8)) ?? ""))
             }
             print("PERF \(v.label) passt, guest MTU \(mtu): \(p.output.replacingOccurrences(of: "\n", with: " | ")) "
                   + "| passt CPU \(String(format: "%.2f", pc)) s, switch-process CPU \(String(format: "%.2f", sc)) s")

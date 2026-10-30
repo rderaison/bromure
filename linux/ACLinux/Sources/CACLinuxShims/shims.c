@@ -56,6 +56,52 @@ void acl_reap(int pid) {
     while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 }
 
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+
+static size_t acl_round_pages(size_t len) {
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    return (len + (size_t)pg - 1) / (size_t)pg * (size_t)pg;
+}
+
+void *acl_secure_alloc(size_t len, int *locked) {
+    size_t n = acl_round_pages(len ? len : 1);
+    void *p = NULL;
+    long pg = sysconf(_SC_PAGESIZE);
+    if (posix_memalign(&p, pg > 0 ? (size_t)pg : 4096, n) != 0) return NULL;
+    memset(p, 0, n);
+    *locked = mlock(p, n) == 0;
+#ifdef MADV_DONTDUMP
+    madvise(p, n, MADV_DONTDUMP);
+#endif
+    return p;
+}
+
+void acl_secure_free(void *p, size_t len) {
+    if (!p) return;
+    size_t n = acl_round_pages(len ? len : 1);
+    explicit_bzero(p, n);
+    munlock(p, n);
+    free(p);
+}
+
+#ifdef __linux__
+int acl_pipe_cloexec(int fds[2]) { return pipe2(fds, O_CLOEXEC) == 0 ? 0 : -errno; }
+#else
+int acl_pipe_cloexec(int fds[2]) { return pipe(fds) == 0 ? 0 : -errno; }
+#endif
+
+#ifdef __linux__
+#include <sys/prctl.h>
+int acl_set_nondumpable(void) { return prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 ? 0 : -errno; }
+int acl_get_dumpable(void) { return prctl(PR_GET_DUMPABLE, 0, 0, 0, 0); }
+#else
+int acl_set_nondumpable(void) { return -ENOSYS; }
+int acl_get_dumpable(void) { return -ENOSYS; }
+#endif
+
 #ifdef __linux__
 #include <sys/ioctl.h>
 #include <linux/vhost.h>

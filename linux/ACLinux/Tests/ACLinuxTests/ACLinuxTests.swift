@@ -1,4 +1,6 @@
+import Crypto
 import Foundation
+import CACLinuxShims
 import NIOCore
 import NIOPosix
 import Testing
@@ -398,4 +400,192 @@ extension PasstUplinkTests {
         }
         #expect(left.isEmpty, "passt still running after close(): \(left)")
     }
+}
+
+@Suite("Secrets vault", .serialized)
+struct SecretsVaultTests {
+    /// A fresh vault directory, file-fallback key unless `systemd` is set.
+    /// The fallback is forced the production way, BROMURE_VAULT_KEY_SOURCE=file,
+    /// through the vault's environment override (setenv would race other
+    /// suites' posix_spawn reading `environ`).
+    func env(systemd: Bool, _ extra: [String: String] = [:]) -> [String: String] {
+        (systemd ? [:] : ["BROMURE_VAULT_KEY_SOURCE": "file"]).merging(extra) { _, b in b }
+    }
+
+    func withVault(systemd: Bool = false, _ body: (String) throws -> Void) rethrows {
+        let dir = "/tmp/acl-vault-\(UUID().uuidString.prefix(8))"
+        SecretsVault.configure(directory: dir, environment: env(systemd: systemd))
+        defer {
+            SecretsVault.configure(directory: SecretsVault.defaultDirectory())
+            try? FileManager.default.removeItem(atPath: dir)
+        }
+        try body(dir)
+    }
+
+    @Test("round trip, plain and item-bound; the forced fallback is reported; key file 0600")
+    func roundTrip() throws {
+        try withVault { dir in
+            let secret = Data("sk-ant-api03-example".utf8)
+            #expect(try SecretsVault.decrypt(SecretsVault.encrypt(secret)) == secret)
+            try VaultItems.set(secret, service: "io.bromure.agentic-coding.p2p", account: "device/key")
+            #expect(try VaultItems.get(service: "io.bromure.agentic-coding.p2p", account: "device/key") == secret)
+            #expect(try VaultItems.get(service: "io.bromure.agentic-coding.p2p", account: "nope") == nil)
+            #expect(SecretsVault.masterKeySource == .fileFallback)
+            let attrs = try FileManager.default.attributesOfItem(atPath: dir + "/secrets-master.key")
+            #expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+            let blob = try SecretsVault.encrypt(secret)
+            #expect(blob.first == 0x01 && blob.count == 1 + 12 + secret.count + 16)
+            #expect(acl_get_dumpable() == 0, "resolving the key marks the process non-dumpable")
+        }
+    }
+
+    @Test("a blob moved to another item's file doesn't decrypt")
+    func aadSwap() throws {
+        try withVault { _ in
+            try VaultItems.set(Data("A-secret".utf8), service: "svc", account: "a")
+            try VaultItems.set(Data("B-secret".utf8), service: "svc", account: "b")
+            let a = VaultItems.path("svc", "a"), b = VaultItems.path("svc", "b")
+            try FileManager.default.removeItem(atPath: b)
+            try FileManager.default.copyItem(atPath: a, toPath: b)
+            #expect(throws: VaultError.unreadable) { try VaultItems.get(service: "svc", account: "b") }
+            #expect(try VaultItems.get(service: "svc", account: "a") == Data("A-secret".utf8))
+            // An item blob doesn't open as a plain (item-less) one either.
+            let blob = try #require(FileManager.default.contents(atPath: a))
+            #expect(throws: VaultError.unreadable) { try SecretsVault.decrypt(blob) }
+        }
+    }
+
+    @Test("any tampered byte fails")
+    func tamper() throws {
+        try withVault { _ in
+            let blob = try SecretsVault.encrypt(Data("payload".utf8))
+            for i in [1, 6, 13, blob.count - 1] {                 // nonce, nonce, ciphertext, tag
+                var t = blob
+                t[t.startIndex + i] ^= 0x40
+                #expect(throws: VaultError.unreadable) { try SecretsVault.decrypt(t) }
+            }
+        }
+    }
+
+    @Test("macOS-format blobs (bare AES-GCM combined, no AAD) still decrypt")
+    func legacy() throws {
+        try withVault { _ in
+            let key = try SecretsVault.masterKey()
+            for _ in 0..<64 {      // first nonce byte 0x01 included sooner or later
+                let legacy = try #require(try AES.GCM.seal(Data("old".utf8), using: key).combined)
+                #expect(try SecretsVault.decrypt(legacy) == Data("old".utf8))
+            }
+        }
+    }
+
+    @Test("a lost master key: secrets read as unreadable (re-enter), metadata untouched, new writes work")
+    func lostKey() throws {
+        try withVault { dir in
+            try VaultItems.set(Data("token".utf8), service: "svc", account: "x")
+            let meta = dir + "/../acl-vault-meta-\(UUID().uuidString.prefix(6)).json"
+            try Data(#"{"profile":"work","hasToken":true}"#.utf8).write(to: URL(fileURLWithPath: meta))
+            defer { try? FileManager.default.removeItem(atPath: meta) }
+            // Lose the key: a different 32-byte key in its place, cache dropped.
+            try SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+                .write(to: URL(fileURLWithPath: dir + "/secrets-master.key"))
+            SecretsVault.configure(directory: dir, environment: env(systemd: false))
+            #expect(throws: VaultError.unreadable) { try VaultItems.get(service: "svc", account: "x") }
+            #expect(try String(contentsOfFile: meta, encoding: .utf8).contains("hasToken"))
+            try VaultItems.set(Data("re-entered".utf8), service: "svc", account: "x")
+            #expect(try VaultItems.get(service: "svc", account: "x") == Data("re-entered".utf8))
+        }
+    }
+
+    static var credsWork: Bool {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/systemd-creds") else { return false }
+        return (try? ChildProcess.capture("/usr/bin/systemd-creds",
+                                          ["encrypt", "--user", "--name=probe", "-", "-"], input: Data("x".utf8))) != nil
+    }
+
+    @Test("systemd-creds: sealed on first use, unsealed on the next start; a lost seal rotates",
+          .enabled(if: credsWork))
+    func systemdCreds() throws {
+        try withVault(systemd: true) { dir in
+            try VaultItems.set(Data("tpm-sealed".utf8), service: "svc", account: "y")
+            #expect(SecretsVault.masterKeySource == .systemdCreds)
+            #expect(FileManager.default.fileExists(atPath: dir + "/master-key.cred"))
+            #expect(!FileManager.default.fileExists(atPath: dir + "/secrets-master.key"), "no key in the clear")
+            SecretsVault.configure(directory: dir, environment: env(systemd: true))        // a "restart"
+            #expect(try VaultItems.get(service: "svc", account: "y") == Data("tpm-sealed".utf8))
+            #expect(SecretsVault.masterKeySource == .systemdCreds)
+
+            // Corrupt the credential (a reset TPM looks the same): rotate, old
+            // credential kept aside, old secrets unreadable, no crash.
+            var cred = try #require(FileManager.default.contents(atPath: dir + "/master-key.cred"))
+            cred[cred.count / 2] ^= 0xFF
+            try cred.write(to: URL(fileURLWithPath: dir + "/master-key.cred"))
+            SecretsVault.configure(directory: dir, environment: env(systemd: true))
+            #expect(throws: VaultError.unreadable) { try VaultItems.get(service: "svc", account: "y") }
+            #expect(SecretsVault.masterKeySource == .systemdCreds)
+            let aside = try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.hasPrefix("master-key.cred.unreadable-") }
+            #expect(aside.count == 1)
+        }
+    }
+
+    @Test("a system unit's \\$CREDENTIALS_DIRECTORY key wins")
+    func credentialsDirectory() throws {
+        try withVault(systemd: true) { dir in
+            let creds = dir + "-creds"
+            try FileManager.default.createDirectory(atPath: creds, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(atPath: creds) }
+            let key = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+            try key.write(to: URL(fileURLWithPath: creds + "/bromure-ac-master-key"))
+            SecretsVault.configure(directory: dir, environment: env(systemd: true, ["CREDENTIALS_DIRECTORY": creds]))
+            let blob = try SecretsVault.encrypt(Data("unit".utf8))
+            #expect(SecretsVault.masterKeySource == .credentialsDirectory)
+            let sealed = try AES.GCM.SealedBox(combined: blob.dropFirst())
+            #expect(try AES.GCM.open(sealed, using: SymmetricKey(data: key), authenticating: SecretsVault.aad(nil)) == Data("unit".utf8))
+        }
+    }
+
+    @Test("key memory is page-aligned, locked and released")
+    func secureMemory() {
+        let k = SecureKey(Data(repeating: 7, count: 32))
+        #expect(Int(bitPattern: k.pointer) % Int(sysconf(Int32(_SC_PAGESIZE))) == 0)
+        #expect(k.locked, "mlock failed (RLIMIT_MEMLOCK?)")
+        #expect(k.symmetricKey.withUnsafeBytes { Data($0) } == Data(repeating: 7, count: 32))
+    }
+}
+
+extension ChildProcessTests {
+    @Test("a child started from a thread that then exits survives (PDEATHSIG is per-thread)",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/qemu-system-x86_64")))
+    func pdeathsigFollowsThread() async throws {
+        let box = NIOLockedValueBoxShim<ChildProcess?>(nil)
+        let started = DispatchSemaphore(value: 0)
+        // Start QEMU (exit-with-parent = PR_SET_PDEATHSIG) from a thread that
+        // ends right after.
+        let t = Thread {
+            let p = try? ChildProcess(name: "qemu", executable: "/usr/bin/qemu-system-x86_64",
+                                      arguments: ["-machine", "none", "-display", "none", "-nodefaults",
+                                                  "-S", "-run-with", "exit-with-parent=on"], logPath: nil)
+            try? p?.start()
+            box.mutate { $0 = p }
+            // Outlive QEMU's own prctl(PR_SET_PDEATHSIG) (a thread that's
+            // already gone by then has handed its children to another thread).
+            Thread.sleep(forTimeInterval: 0.5)
+            started.signal()
+        }
+        t.start()
+        started.wait()
+        let p = try #require(box.value)
+        try await Task.sleep(for: .milliseconds(500))      // the starter thread has exited
+        #expect(p.isRunning, "QEMU died with the thread that started it (status \\(String(describing: p.exitStatus)))")
+        p.signal(SIGKILL)
+        _ = await p.waitForExit()
+    }
+}
+
+/// A tiny lock box for tests.
+final class NIOLockedValueBoxShim<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v: T
+    init(_ v: T) { self.v = v }
+    func mutate(_ f: (inout T) -> Void) { lock.lock(); f(&v); lock.unlock() }
+    var value: T { lock.lock(); defer { lock.unlock() }; return v }
 }

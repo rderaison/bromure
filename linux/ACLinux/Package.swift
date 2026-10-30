@@ -29,6 +29,8 @@ let package = Package(
             name: "ACLinuxTests",
             dependencies: [
                 "ACLinux",
+                "CACLinuxShims",
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]),

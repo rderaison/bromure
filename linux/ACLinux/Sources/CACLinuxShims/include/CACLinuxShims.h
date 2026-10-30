@@ -28,4 +28,23 @@ int acl_wait_exited(int pid);
 /// Reaps an exited child (after acl_wait_exited).
 void acl_reap(int pid);
 
+#include <stddef.h>
+
+/// Page-aligned, zeroed memory for key material: mlock'ed (best effort; see
+/// *locked) and excluded from core dumps (MADV_DONTDUMP). NULL on failure.
+void *acl_secure_alloc(size_t len, int *locked);
+
+/// Zeroes (explicit_bzero), unlocks and frees acl_secure_alloc memory.
+void acl_secure_free(void *p, size_t len);
+
+/// prctl(PR_SET_DUMPABLE, 0): no core dumps, no same-user ptrace or
+/// /proc/<pid>/mem. Returns 0, or -errno.
+int acl_set_nondumpable(void);
+
+/// pipe2(fds, O_CLOEXEC). Returns 0, or -errno.
+int acl_pipe_cloexec(int fds[2]);
+
+/// prctl(PR_GET_DUMPABLE).
+int acl_get_dumpable(void);
+
 #endif
