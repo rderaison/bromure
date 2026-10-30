@@ -525,6 +525,9 @@ def chain_pids(e):
 def expect(label, what, **match):
     """One flow matching `match`, whose chain names the shell that spawned it."""
     found = pick(**match)
+    # Probes can share a destination (udp, dig and nc all send to DEST:53):
+    # look at the flow this probe's own shell caused first.
+    found.sort(key=lambda e: wpid(label) not in chain_pids(e))
     if not found:
         bad("%s: no net_flow matching %s" % (label, match))
         print("       flows seen: %s" % json.dumps(

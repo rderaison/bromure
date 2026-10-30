@@ -274,7 +274,11 @@ print("ok")
 PROBE
 
 # The same must hold for a command run through the supervisor's exec op, since
-# host `vm exec` and agentd's git both go that way.
+# host `vm exec` and agentd's git both go that way. `requirement: hard` holds
+# every exec until the sentry loader settles (bromure-sandboxd's SentryHold);
+# its verdict here is the one a loaded sentry writes.
+sudo mkdir -p "$WORK/run"
+printf '{"sentry": "running"}' | sudo tee "$WORK/run/sentry.json" > /dev/null
 start_supervisor "$(cat <<EOF
 {"version":1,"filesystem_policy":null,"landlock":null,"process":null,
  "strict_sandbox":false,
@@ -312,6 +316,7 @@ sys.exit(0 if good else 1)
 PY
 rc=$?; [ $rc -eq 0 ] || { fails=$((fails + 1)); printf "  FAIL the block above exited %s (see stderr)\n" "$rc"; }
 stop_supervisor
+sudo rm -f "$WORK/run/sentry.json"
 kill_server
 
 # --------------------------------------------------------------------------
@@ -931,7 +936,8 @@ def run():
 threading.Thread(target=run, daemon=True).start()
 time.sleep(0.5)
 os.close(slave)
-os.write(master, b"id -Gn; grep NoNewPrivs /proc/self/status; tty; exit\n")
+# --color=never: a login shell's `grep` alias colours the match on a tty.
+os.write(master, b"id -Gn; grep --color=never NoNewPrivs /proc/self/status; tty; exit\n")
 buf = b""
 deadline = time.time() + 15
 while time.time() < deadline:
@@ -1910,7 +1916,10 @@ def gate_with(spec, strict_requested, strict_applied, sandbox_status,
           "_SANDBOX": dict(sandbox_status),
           "_load_sandbox_status": lambda: dict(sandbox_status),
           "_SANDBOX_READY": threading.Event(),
-          "_STRICT_UNAPPLIED": unapplied}
+          "_STRICT_UNAPPLIED": unapplied,
+          # The hard-sentry hold (agentd's _sentry_held, read the same way).
+          "_sentry_held": lambda: bool(dict(sandbox_status).get("sentry_hold")),
+          "_SENTRY_HOLD_MAX_S": 45 + 900 + 900 + 60 + 60}
     m = re.search(r"\ndef sandbox_gate\b.*?(?=\n(?:def |class |# ---))", src, re.S)
     exec(compile(m.group(0), "gate", "exec"), ns)
     started = time.time()
