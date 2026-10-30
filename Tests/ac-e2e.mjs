@@ -2836,7 +2836,10 @@ async function main() {
             await sh(id, `cd ${wtDir} && echo kanban > KANBAN.txt && git add -A && ` +
                          `git commit -qm 'add KANBAN.txt'`);
             await signalDone(id, branch);
-            const t = await waitForTask(KTID, (x) => x.stage === "testing", 30);
+            // The tab's agent is live, so completion holds until its own
+            // transcript has been quiet ~20s (waitForSessionQuiet) — poll
+            // well past that on a loaded node.
+            const t = await waitForTask(KTID, (x) => x.stage === "testing", 60);
             assert(t && t.stage === "testing", `task never reached Testing: ${JSON.stringify(t)}`);
             assertEq(t.branch, branch, "Testing task lost its actual branch");
             assertEq(t.parentBranch, defBranch, "parent branch not captured");
@@ -2929,6 +2932,20 @@ async function main() {
             // Fabricate the Claude transcript the host pulls at completion —
             // the project dir just has to match the host's `*-<slug>` glob.
             const MARK = `{"type":"user","message":{"role":"user","content":"ace2e-transcript"}}`;
+            // The run's real agent writes its own transcript under a project
+            // dir that ALSO ends in the slug. Both the quiet probe and the
+            // transcript pull take the newest such dir: an agent that creates
+            // its session after the fabricated one (a slow start on a loaded
+            // node) has the probe hold on a live transcript for 20s+ and the
+            // pull serve the wrong file. Let it create its session (or give
+            // up waiting), then stop it — nothing writes after this point.
+            await sh(id,
+              `for i in $(seq 1 20); do ls ~/.claude/projects/*-${runRec.branchSlug}/*.jsonl ` +
+              `>/dev/null 2>&1 && break; sleep 1; done; ` +
+              `idx=$(tmux list-windows -t bromure -F '#{window_index} #{@worktree}' | ` +
+              `awk -v b='${branchName}' '$2==b {print $1; exit}'); [ -n "$idx" ] || exit 1; ` +
+              `p=$(tmux list-panes -t bromure:$idx -F '#{pane_pid}' | head -1); ` +
+              `pkill -KILL -P "$p"; sleep 1; true`, { timeout: 40 });
             // Back-date the transcript so it reads as already "quiet": the
             // automation-run completion holds in waitForSessionQuiet until the
             // transcript has been untouched for ~20s (to let background subagents
