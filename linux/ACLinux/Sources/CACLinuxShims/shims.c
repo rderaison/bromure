@@ -116,6 +116,16 @@ int acl_pipe_cloexec(int fds[2]) { return pipe2(fds, O_CLOEXEC) == 0 ? 0 : -errn
 int acl_pipe_cloexec(int fds[2]) { return pipe(fds) == 0 ? 0 : -errno; }
 #endif
 
+#include <pthread.h>
+int acl_unblock_term_signals(void) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGTERM);
+    sigaddset(&set, SIGINT);
+    int r = pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    return r == 0 ? 0 : -r;
+}
+
 #ifdef __linux__
 #include <sys/prctl.h>
 int acl_set_nondumpable(void) { return prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 ? 0 : -errno; }

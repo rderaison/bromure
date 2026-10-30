@@ -672,3 +672,85 @@ extension SecretsVaultTests {
         }
     }
 }
+
+@Suite("Guest shell exec")
+struct GuestShellTests {
+    /// A fake agentd on the far end of a socketpair: reads one request,
+    /// counts it, then replies (exit 0) or just closes.
+    final class FakeAgent: @unchecked Sendable {
+        let lock = NSLock()
+        var requests = 0
+        func serve(_ fd: Int32, reply: Bool) {
+            Thread {
+                var hdr = [UInt8](repeating: 0, count: 4)
+                guard read(fd, &hdr, 4) == 4 else { close(fd); return }
+                let n = Int(hdr[0]) << 24 | Int(hdr[1]) << 16 | Int(hdr[2]) << 8 | Int(hdr[3])
+                var body = [UInt8](repeating: 0, count: n)
+                var got = 0
+                while got < n { let r = body.withUnsafeMutableBytes { read(fd, $0.baseAddress! + got, n - got) }; if r <= 0 { break }; got += r }
+                self.lock.lock(); self.requests += 1; self.lock.unlock()
+                if reply {
+                    let json = Array(#"{"stdout":"ok\n","stderr":"","exit_code":0}"#.utf8)
+                    let h: [UInt8] = [0, 0, UInt8(json.count >> 8), UInt8(json.count & 0xFF)]
+                    _ = (h + json).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+                }
+                close(fd)
+            }.start()
+        }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return requests }
+    }
+
+    /// A VsockConnection over one end of a Unix socketpair; the other end's fd.
+    func pair() async throws -> (VsockConnection, Int32) {
+        var fds: [Int32] = [-1, -1]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &fds) == 0)
+        let conn = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .withConnectedSocket(fds[0]) { ch in
+                ch.eventLoop.makeCompletedFuture {
+                    VsockConnection(peer: VsockAddress(cid: 42, port: 5800),
+                                    channel: try NIOAsyncChannel<ByteBuffer, ByteBuffer>(wrappingChannelSynchronously: ch))
+                }
+            }
+        return (conn, fds[1])
+    }
+
+    @Test("a request written but never answered is not retried: exactly one attempt, .noReply")
+    func noRetryAfterWrite() async throws {
+        let agent = FakeAgent()
+        let (stream, sink) = AsyncStream<VsockConnection>.makeStream()
+        // Three pooled connections; each would accept a request and then close.
+        for _ in 0..<3 {
+            let (c, far) = try await pair()
+            agent.serve(far, reply: false)
+            sink.yield(c)
+        }
+        let shell = await GuestShell(cid: 42, connections: stream)
+        await #expect(throws: GuestShell.ShellError.self) {
+            _ = try await shell.exec("rm -rf /important", wait: .seconds(2))
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(agent.count == 1, "the command reached agentd \(agent.count) times")
+        do {
+            _ = try await shell.exec("true", wait: .seconds(2))
+        } catch let e as GuestShell.ShellError {
+            if case .noReply = e {} else { Issue.record("expected .noReply, got \(e)") }
+        }
+    }
+
+    @Test("a connection already dead before the write is skipped for the next one")
+    func skipDeadBeforeWrite() async throws {
+        let agent = FakeAgent()
+        let (stream, sink) = AsyncStream<VsockConnection>.makeStream()
+        let (dead, deadFar) = try await pair()
+        close(deadFar)                                       // agentd recycled it
+        try await Task.sleep(for: .milliseconds(100))        // NIO sees the EOF
+        sink.yield(dead)
+        let (live, liveFar) = try await pair()
+        agent.serve(liveFar, reply: true)
+        sink.yield(live)
+        let shell = await GuestShell(cid: 42, connections: stream)
+        let r = try await shell.exec("echo ok", wait: .seconds(2))
+        #expect(r.stdout == "ok\n" && r.exitCode == 0)
+        #expect(agent.count == 1)
+    }
+}

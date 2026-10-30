@@ -39,11 +39,16 @@ if systemctl --user is-system-running >/dev/null 2>&1 || [ "$(systemctl --user i
     "$ROOT/linux/ACLinux/.build/debug/bromure-ac" daemon
   [ "$(systemctl --user is-active bromure-ac-ci)" = active ] || { echo "not active after READY"; exit 1; }
   XDG_RUNTIME_DIR="$CI_STATE/run" "$ROOT/linux/ACLinux/.build/debug/bromure-ac" vm ls >/dev/null
-  PASST=$(systemctl --user show bromure-ac-ci -p ControlGroup --value)
+  # Only this unit's own cgroup: a real installed bromure-ac.service (and its
+  # passt) may be running alongside and must not count.
+  CG=/sys/fs/cgroup$(systemctl --user show bromure-ac-ci -p ControlGroup --value)
+  [ "$(wc -l < "$CG/cgroup.procs")" -ge 2 ] || { echo "expected the daemon and passt in $CG"; exit 1; }
   systemctl --user stop bromure-ac-ci
-  ! pgrep -f -- "--fd 0 -4 --no-dhcp" -u "$(id -u)" >/dev/null || { echo "passt outlived the unit"; exit 1; }
+  if [ -f "$CG/cgroup.procs" ] && [ -s "$CG/cgroup.procs" ]; then
+    echo "processes outlived the unit:"; cat "$CG/cgroup.procs"; exit 1
+  fi
   rm -rf "$CI_STATE"
-  echo "unit: READY, control.sock served, stop took the cgroup down ($PASST)"
+  echo "unit: READY, control.sock served, stop emptied its cgroup ($CG)"
 else
   echo "skipped: no systemd user manager"
 fi

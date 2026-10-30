@@ -20,6 +20,8 @@ struct Daemon: AsyncParsableCommand {
 
     // @port-skip linux-only: daemon main
     func run() async throws {
+        // Before anything spawns threads that inherit the mask.
+        _ = acl_unblock_term_signals()
         let config = DaemonConfig.fromEnvironment()
         let daemon = try await ACLinux.Daemon.start(config)
         let server = try await ControlServer.start(path: config.controlSocketPath) { req in await daemon.handle(req) }
@@ -128,6 +130,7 @@ extension VM {
         @Argument(parsing: .postTerminator, help: "Command and arguments.") var command: [String] = []
 
         /// Non-interactive exec: stdout/stderr echoed, exit status propagated.
+        // partial: no -i/-t (interactive PTY); non-interactive exec only
         // @port Exec.run() h=78c76b556399f4ba @94eb37f3
         func run() async throws {
             guard !command.isEmpty else { throw ValidationError("Usage: bromure-ac vm exec VM -- command…") }

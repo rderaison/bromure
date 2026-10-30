@@ -17,7 +17,14 @@ public actor GuestShell {
     }
 
     // @port-skip linux-only: exec errors
-    public enum ShellError: Error, Equatable { case notReady, protocolError(String) }
+    public enum ShellError: Error, Equatable {
+        case notReady
+        case protocolError(String)
+        /// The request was written but no reply came: the command may have
+        /// run (agentd dropped the connection mid-command, the reply was lost).
+        /// Never retried: a second attempt could re-run `rm`, `git push`…
+        case noReply(String)
+    }
 
     public nonisolated let cid: UInt32
     private var pool: [VsockConnection] = []
@@ -30,8 +37,13 @@ public actor GuestShell {
     /// Starts taking `cid`'s connections from the shared host listener.
     // @port ShellBridge.init(socketDevice: VZVirtioSocketDevice) h=2bdb1c18bb9740bc @fd4de5b5
     public init(cid: UInt32, listener: VsockListener) async {
+        await self.init(cid: cid, connections: await listener.connections(from: cid))
+    }
+
+    /// From any stream of connections (tests feed their own).
+    // @port-skip linux-only: injectable connection source
+    init(cid: UInt32, connections stream: AsyncStream<VsockConnection>) async {
         self.cid = cid
-        let stream = await listener.connections(from: cid)
         feed = Task { [weak self] in
             for await c in stream { await self?.handleVsockConnection(c) }
         }
@@ -95,8 +107,10 @@ public actor GuestShell {
     // @port-skip linux-only: async wait for the pool
     private func expire(_ id: Int) { waiters.removeValue(forKey: id)?.resume(returning: nil) }
 
-    /// Runs `cmd` in the guest. Retries on a pooled connection agentd already
-    /// dropped; fails with `.notReady` if no connection comes within `wait`.
+    /// Runs `cmd` in the guest. A connection that turns out dead *before* the
+    /// request is written (agentd recycled it) is skipped for the next one; once
+    /// the request is written, any failure is final (`.noReply`): the command
+    /// may have run, and re-sending it could run it twice.
     // @port-skip linux-only: exec over NIO vsock (macOS: the automation server's exec over a VZ connection)
     public func exec(_ cmd: String, timeout: Int = 30, workdir: String? = nil,
                      wait: Duration = .seconds(30)) async throws -> Result {
@@ -105,32 +119,50 @@ public actor GuestShell {
         let body = try JSONSerialization.data(withJSONObject: req)
         for _ in 0..<32 {
             guard let c = await connection(timeout: wait) else { throw ShellError.notReady }
-            if let r = try? await Self.roundTrip(c, body) { return r }
+            switch try await Self.roundTrip(c, body) {
+            case .deadBeforeWrite: continue
+            case .reply(let r): return r
+            }
         }
         throw ShellError.notReady
     }
 
     // @port-skip linux-only: exec over NIO vsock
-    static func roundTrip(_ conn: VsockConnection, _ body: Data) async throws -> Result {
-        try await conn.withStreams { inbound, outbound in
+    enum Attempt { case deadBeforeWrite, reply(Result) }
+
+    // @port-skip linux-only: exec over NIO vsock
+    static func roundTrip(_ conn: VsockConnection, _ body: Data) async throws -> Attempt {
+        guard conn.channel.channel.isActive else { await conn.close(); return .deadBeforeWrite }
+        return try await conn.withStreams { inbound, outbound in
             var buf = ByteBuffer()
             buf.writeInteger(UInt32(body.count))
             buf.writeBytes(body)
-            try await outbound.write(buf)
-            var acc = ByteBuffer()
-            for try await chunk in inbound {
-                var c = chunk
-                acc.writeBuffer(&c)
-                if let n = acc.getInteger(at: acc.readerIndex, as: UInt32.self), acc.readableBytes >= 4 + Int(n) {
-                    let json = Data(acc.getBytes(at: acc.readerIndex + 4, length: Int(n))!)
-                    guard let o = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
-                        throw ShellError.protocolError("not an object")
-                    }
-                    return Result(stdout: o["stdout"] as? String ?? (o["output"] as? String ?? ""),
-                                  stderr: o["stderr"] as? String ?? "", exitCode: o["exit_code"] as? Int ?? -1)
-                }
+            do {
+                try await outbound.write(buf)
+            } catch {
+                return .deadBeforeWrite          // nothing reached agentd
             }
-            throw ShellError.protocolError("connection closed before a reply")
+            // Written: from here on, every failure is final.
+            var acc = ByteBuffer()
+            do {
+                for try await chunk in inbound {
+                    var c = chunk
+                    acc.writeBuffer(&c)
+                    if let n = acc.getInteger(at: acc.readerIndex, as: UInt32.self), acc.readableBytes >= 4 + Int(n) {
+                        let json = Data(acc.getBytes(at: acc.readerIndex + 4, length: Int(n))!)
+                        guard let o = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+                            throw ShellError.noReply("unparseable reply")
+                        }
+                        return .reply(Result(stdout: o["stdout"] as? String ?? (o["output"] as? String ?? ""),
+                                             stderr: o["stderr"] as? String ?? "", exitCode: o["exit_code"] as? Int ?? -1))
+                    }
+                }
+            } catch let e as ShellError {
+                throw e
+            } catch {
+                throw ShellError.noReply("\(error)")
+            }
+            throw ShellError.noReply("connection closed after the request was sent")
         }
     }
 }

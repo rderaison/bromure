@@ -64,12 +64,14 @@ struct DaemonTests {
             return (p.terminationStatus, String(decoding: o, as: UTF8.self), String(decoding: e, as: UTF8.self))
         }
 
-        func state(of name: String) throws -> String? {
+        func vm(_ name: String) throws -> JSONValue? {
             let (_, out, _) = try cli("vm", "ls", "--json")
             guard let j = try? JSONDecoder().decode(JSONValue.self, from: Data(out.utf8)),
                   case .array(let vms) = j["vms"] ?? .null else { return nil }
-            return vms.first { $0["name"]?.stringValue == name }?["state"]?.stringValue
+            return vms.first { $0["name"]?.stringValue == name }
         }
+
+        func state(of name: String) throws -> String? { try vm(name)?["state"]?.stringValue }
     }
 
     /// The direct children of `pid`: pid and command name.
@@ -148,7 +150,40 @@ struct DaemonTests {
         daemon = try await w.startDaemon()
         #expect(try w.state(of: "dm2") == "stopped")
         #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 != 0)
-        kill(daemon.processIdentifier, SIGKILL)
+
+        // A suspended VM keeps its CID across a graceful restart: SIGTERM
+        // (the systemctl stop path, with signals unblocked even though
+        // Foundation's Process spawned the daemon with them blocked) kills the
+        // running VMs, closes passt and unlinks control.sock.
+        #expect(try w.cli("vm", "run", "--name", "dm3").0 == 0)
+        #expect(try w.cli("vm", "exec", "dm3", "--", "true").0 == 0)
+        #expect(try w.cli("vm", "suspend", "dm3").0 == 0)
+        let dm3cid = try w.vm("dm3")?["cid"]?.numberValue
+        #expect(try w.cli("vm", "run", "--name", "dm4").0 == 0)
+        #expect(try w.cli("vm", "exec", "dm4", "--", "true").0 == 0)
+        let termKids = Self.children(of: daemon.processIdentifier)
+        kill(daemon.processIdentifier, SIGTERM)
+        let tTerm = ContinuousClock.now
+        daemon.waitUntilExit()
+        print("TIMING [daemon] SIGTERM -> exit \(ms(ContinuousClock.now - tTerm)), status \(daemon.terminationStatus)")
+        #expect(daemon.terminationReason == .exit && daemon.terminationStatus == 0, "graceful exit")
+        #expect(!FileManager.default.fileExists(atPath: w.socket), "control.sock unlinked")
+        #expect(termKids.filter { Self.alive($0.0) }.isEmpty, "children left after SIGTERM: \(termKids)")
+
+        daemon = try await w.startDaemon()
+        #expect(try w.state(of: "dm3") == "suspended")
+        #expect(try w.state(of: "dm4") == "stopped")
+        #expect(try w.cli("vm", "run", "--name", "dm5").0 == 0)       // must not take dm3's CID
+        #expect(try w.vm("dm5")?["cid"]?.numberValue != dm3cid)
+        #expect(try w.cli("vm", "resume", "dm3").0 == 0)
+        #expect(try w.cli("vm", "exec", "dm3", "--", "true").0 == 0)
+        #expect(try w.vm("dm3")?["cid"]?.numberValue == dm3cid, "dm3 resumed under its own CID")
+
+        // A name that's another VM's id or short id is refused.
+        let dm5short = try #require(try w.vm("dm5")?["shortId"]?.stringValue)
+        #expect(try w.cli("vm", "run", "--name", dm5short).0 != 0)
+
+        kill(daemon.processIdentifier, SIGTERM)
         daemon.waitUntilExit()
     }
 }

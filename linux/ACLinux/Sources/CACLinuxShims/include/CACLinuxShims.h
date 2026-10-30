@@ -52,6 +52,12 @@ int acl_pipe_cloexec(int fds[2]);
 /// no NOTIFY_SOCKET (not under systemd), or -errno.
 int acl_sd_notify(const char *state);
 
+/// Unblocks SIGTERM and SIGINT in the calling thread's (and so the
+/// process's future threads') mask: a parent that spawned us with them blocked
+/// (Foundation's Process does) mustn't take away the graceful-stop path.
+/// Returns 0, or -errno.
+int acl_unblock_term_signals(void);
+
 /// prctl(PR_GET_DUMPABLE).
 int acl_get_dumpable(void);
 

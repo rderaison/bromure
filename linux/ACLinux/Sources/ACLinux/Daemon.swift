@@ -54,6 +54,8 @@ public actor Daemon {
     private let passt: PasstUplink
     private let sw: InterimSwitch
     private let listener: VsockListener
+    /// CIDs of suspended VMs, leased at load so a new VM can't take them.
+    private var reservedCIDs: Set<UInt32> = []
 
     // @port-skip linux-only: Linux daemon core
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
@@ -72,7 +74,10 @@ public actor Daemon {
         self.passt = passt
         self.listener = listener
         self.sw = InterimSwitch(uplink: passt)
-        self.registry = VMRegistry(path: config.stateDir + "/vms.json")
+        let registry = VMRegistry(path: config.stateDir + "/vms.json")
+        self.registry = registry
+        // Suspended VMs keep their CID across daemon restarts.
+        self.reservedCIDs = Set(registry.records.filter { $0.state == .suspended && CIDAllocator.shared.claim($0.cid) }.map(\.cid))
     }
 
     // @port-skip linux-only: Linux daemon core
@@ -109,6 +114,7 @@ public actor Daemon {
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
+    // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, localModels, kubeClusters, generation/epoch, or agent sessions yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
     func state() -> ControlResponse {
         let vms = records.map(\.json)
@@ -122,6 +128,7 @@ public actor Daemon {
         ])
     }
 
+    // partial: entries lack tabs, stats, ports, docker, disk and kube fields (see VMRecord.json)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/vms"): h=b80678b83121852e @7dd92fdf
     func listVMs() -> ControlResponse {
         ControlResponse(200, ["vms": .array(records.map(\.json))])
@@ -129,11 +136,16 @@ public actor Daemon {
 
     /// `POST /vms`: create and start a VM, detached. Body: `name?`,
     /// `machine?` (q35|microvm), `memoryGB?`, `cpus?`. 201 `{id, shortId, name, detached}`.
+    // partial: no profile, tool, auth, apiKey, mounts or rm; takes name/machine/memoryGB/cpus; always detached
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/vms"): h=7a7b62405e4c0dbe @7dd92fdf
     func createVM(_ body: JSONValue) async -> ControlResponse {
         let id = UUID().uuidString.lowercased()
         let name = body["name"]?.stringValue ?? "vm-\(id.prefix(8))"
-        if registry.find(name) != nil { return .error(409, "A VM named '\(name)' already exists") }
+        // `find` matches id, short id and name: a name equal to any of them
+        // would make lookups ambiguous.
+        if registry.records.contains(where: { $0.name == name || $0.id == name || $0.shortId == name }) {
+            return .error(409, "'\(name)' is already a VM's name or id")
+        }
         let machine = body["machine"]?.stringValue ?? "microvm"
         guard QEMUMachineConfig.MachineType(rawValue: machine) != nil else {
             return .error(400, "Unknown machine '\(machine)' (q35 or microvm)")
@@ -156,6 +168,7 @@ public actor Daemon {
         }
     }
 
+    // partial: only GET, DELETE, exec (+ Linux resume); no attach, reboot, file, docker, fusion, routing, model, checkpoints, revert, type
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @7dd92fdf
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
@@ -171,6 +184,7 @@ public actor Daemon {
         }
     }
 
+    // partial: the entry is VMRecord.json, a subset of macOS's vmEntry
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "GET": h=a05dae914d2f170b @7dd92fdf
     func getVM(_ rec: VMRecord) -> ControlResponse { ControlResponse(200, withIP(rec).json) }
 
@@ -211,13 +225,19 @@ public actor Daemon {
         guard rec.state == .suspended, let statePath = rec.statePath else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
         }
-        guard CIDAllocator.shared.claim(rec.cid) else { return .error(409, "vsock CID \(rec.cid) is in use") }
         var r = rec
+        // Its own CID if we reserved or can claim it; otherwise a new one. A
+        // restore under another CID works: the vhost-vsock transport reset
+        // makes the guest re-read guest_cid (CIDChangeTests).
+        if reservedCIDs.remove(rec.cid) == nil, !CIDAllocator.shared.claim(rec.cid) {
+            guard let fresh = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
+            r.cid = fresh
+        }
         do {
             try await launch(&r, restoreFrom: statePath)
             return ControlResponse(200, ["status": "running"])
         } catch {
-            CIDAllocator.shared.release(rec.cid)
+            CIDAllocator.shared.release(r.cid)
             return .error(500, "Resume failed: \(error)")
         }
     }
@@ -225,6 +245,7 @@ public actor Daemon {
     /// `POST /vms/{id}/exec` `{command, argv?, timeout?}` →
     /// `{stdout, stderr, exitCode}`; 409 when the VM isn't running, 502 when
     /// its shell agent doesn't come up within 10 s.
+    // partial: no interactive (-it) PTY streaming; no dead-pool flush-and-retry beyond GuestShell's pre-write skip
     // @port ACAutomationServer.handleExec(fd: Int32, profileID: String, bodyJSON: [String:Any]) h=009a8b0b81d659a5 @7dd92fdf
     func exec(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         if body["interactive"] == .bool(true) { return .error(400, "Interactive exec isn't supported on Linux yet") }
@@ -242,6 +263,8 @@ public actor Daemon {
             let r = try await l.shell.exec(command, timeout: timeout, wait: .seconds(10))
             return ControlResponse(200, ["stdout": .string(r.stdout), "stderr": .string(r.stderr),
                                          "exitCode": .number(Double(r.exitCode))])
+        } catch GuestShell.ShellError.noReply(let why) {
+            return .error(502, "The command may have run; no reply from '\(rec.name)' (\(why)). Not retried.")
         } catch {
             return .error(502, "No shell connection for '\(rec.name)' after 10s — its shell agent hasn't come up yet.")
         }

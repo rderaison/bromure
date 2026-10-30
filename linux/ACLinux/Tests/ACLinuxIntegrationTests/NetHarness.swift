@@ -40,6 +40,9 @@ func guestShell(_ conn: VsockConnection, _ cmd: String, timeout: Int = 60) async
 /// The next connection from `stream` for a shell request (agentd's pool
 /// refills itself; each connection serves one request). A pooled connection
 /// agentd has since dropped (it recycles idle ones) is skipped.
+/// NOTE: this test helper retries even after a request was written, so a
+/// command can run twice. Fine for the idempotent probes here; production
+/// exec (GuestShell.exec) never retries a written request.
 func shell(_ stream: ConnQueue, _ cmd: String, timeout: Int = 60) async throws -> (exitCode: Int, output: String) {
     var lastError: Error?
     for _ in 0..<32 {
