@@ -35,5 +35,6 @@ How it was run:
 
 ## Open on the Linux host (not arch)
 
-- **`run_as_user` and the shares.** DESIGN.md relies on VZ's virtiofs not enforcing the guest's DAC. With virtiofsd it is enforced, because the guest's virtio_fs mounts with `default_permissions`. uid 999 gets EACCES on the outbox share (uid 1000, mode 0700). FUSE has no idmapped mounts on 6.8 either.
-- **The idmapped home.** `can_idmap` needs `/home/ubuntu` to be a mount point (the Mac's home disk). The Linux daemon attaches no home disk yet, so the home falls back to `/home/sandbox`.
+- **The idmapped home: done.** The daemon now attaches a per-VM `home.img` as vdb, and agentd mounts it at `/home/ubuntu`. `test_boot.sh`'s `run_as_user` configs take the idmap path: HOME=/home/ubuntu, and a file the workload writes is uid 999 inside and uid 1000 on disk.
+- **`run_as_user` and the shares: open.** The guest enforces DAC on virtiofs (virtio_fs mounts with `default_permissions`), so uid 999 can't use shares owned by uid 1000. That's 3 checks in each of the two `run_as_user` configs, and the only failures left there. The options are in `linux/VIRTIOFS_DAC.md`, for a decision.
+- One SKIP remains in those configs, "nothing seeded in /home/ubuntu": the Linux daemon doesn't stage `meta/home-seed` yet.
