@@ -4,6 +4,9 @@
 #   2. portmap check --allow-unclaimed
 #   3. linux/ACLinux: build, unit tests, and the KVM integration tests (they boot
 #      linux/bake's image; they skip themselves without /dev/kvm, vhost-vsock or the image)
+#   4. the network: setup-network.sh (install, re-install, uninstall) and the stream-port <-> tap
+#      bridge with a KVM guest, inside throwaway network namespaces (needs passwordless sudo;
+#      the host's own namespace is untouched)
 # More steps (swift build --target ACCore, …) land here as those targets appear.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -23,5 +26,11 @@ if [ -w /dev/vhost-vsock ] || ! sudo -n -g kvm true 2>/dev/null; then
   swift test --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 else
   sudo -n -g kvm env PATH="$PATH" HOME="$HOME" swift test --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
+fi
+step "network: netns bridge test"
+if sudo -n true 2>/dev/null; then
+  sudo -n "$ROOT/linux/test-network.sh"
+else
+  echo "skipped: needs passwordless sudo for the network namespaces"
 fi
 step "ok"

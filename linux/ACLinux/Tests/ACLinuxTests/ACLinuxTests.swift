@@ -239,3 +239,67 @@ struct SnapshotTests {
         #expect(throws: MachineError.self) { try SnapshotIdentity.verify(state: dir + "/none", overlay: overlay) }
     }
 }
+
+@Suite("Stream port framing")
+struct StreamPortTests {
+    /// A raw client standing in for QEMU: writes bytes, collects what it reads.
+    final class RawPeer: ChannelInboundHandler, Sendable {
+        typealias InboundIn = ByteBuffer
+        let got = AsyncStream<ByteBuffer>.makeStream()
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) { got.continuation.yield(unwrapInboundIn(data)) }
+    }
+
+    func connect(_ path: String) async throws -> (Channel, RawPeer) {
+        let peer = RawPeer()
+        let ch = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .channelInitializer { c in c.eventLoop.makeCompletedFuture { try c.pipeline.syncOperations.addHandler(peer) } }
+            .connect(unixDomainSocketPath: path).get()
+        return (ch, peer)
+    }
+
+    func frame(_ n: Int, fill: UInt8) -> [UInt8] { [UInt8](repeating: fill, count: n) }
+    func prefixed(_ b: [UInt8]) -> [UInt8] {
+        [UInt8(b.count >> 24 & 0xFF), UInt8(b.count >> 16 & 0xFF), UInt8(b.count >> 8 & 0xFF), UInt8(b.count & 0xFF)] + b
+    }
+
+    @Test("frames split across writes, bad lengths skipped without desync, replies length-prefixed, reconnect replaces")
+    func framing() async throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let port = try await StreamPort.listen(path: dir + "/net.sock")
+        var frames = port.frames.makeAsyncIterator()
+        let (ch, peer) = try await connect(port.path)
+
+        // A good frame in two pieces; then a too-short one (10 bytes) and an
+        // over-long declared length whose bytes do follow; then a good frame.
+        let a = prefixed(frame(60, fill: 0xAA))
+        try await ch.writeAndFlush(ByteBuffer(bytes: a[0..<30])).get()
+        try await ch.writeAndFlush(ByteBuffer(bytes: a[30...])).get()
+        let bad1 = prefixed(frame(10, fill: 0x01))
+        let bad2 = prefixed(frame(StreamPort.maxFrame + 1, fill: 0x02))
+        let b = prefixed(frame(1514, fill: 0xBB))
+        try await ch.writeAndFlush(ByteBuffer(bytes: bad1 + bad2 + b)).get()
+
+        #expect(await frames.next() == Data(frame(60, fill: 0xAA)))
+        #expect(await frames.next() == Data(frame(1514, fill: 0xBB)))
+        #expect(port.dropped == 2)
+
+        // Outbound: the port prepends the length.
+        for _ in 0..<100 where !port.isConnected { try await Task.sleep(for: .milliseconds(10)) }
+        port.send(Data(frame(64, fill: 0xCC)))
+        var acc = ByteBuffer()
+        var it = peer.got.stream.makeAsyncIterator()
+        while acc.readableBytes < 68, var c = await it.next() { acc.writeBuffer(&c) }
+        #expect(acc.readableBytesView.elementsEqual(prefixed(frame(64, fill: 0xCC))))
+
+        // QEMU reconnects (as after a restore): the new connection takes over.
+        let (ch2, _) = try await connect(port.path)
+        try await ch2.writeAndFlush(ByteBuffer(bytes: prefixed(frame(42, fill: 0xDD)))).get()
+        #expect(await frames.next() == Data(frame(42, fill: 0xDD)))
+        #expect(port.connects == 2)
+        for _ in 0..<100 where ch.isActive { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(!ch.isActive, "the replaced connection is closed")
+        try await ch2.close()
+        await port.close()
+    }
+}
