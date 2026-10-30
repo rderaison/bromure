@@ -1865,6 +1865,9 @@
 "Another sign-in is already in progress." = "另一個登入已在進行中。";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "Bromure 代理伺服器沒有執行，無法擷取登入。";
 "Couldn't start the sign-in machine." = "無法啟動登入機器。";
+"The sign-in was cancelled." = "登入已取消。";
+"The sign-in window was closed." = "登入視窗已關閉。";
+"The sign-in machine stopped." = "登入機器已停止。";
 "Finish signing in in your browser…" = "請在瀏覽器中完成登入…";
 "Almost there — your browser will open in a moment…" = "快好了 — 瀏覽器馬上打開…";
 "Sign in to %@…" = "登入 %@…";

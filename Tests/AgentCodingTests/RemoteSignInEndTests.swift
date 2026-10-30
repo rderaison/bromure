@@ -64,7 +64,7 @@ struct RemoteSignInEndTests {
         let fail = try #require(r.range(of: "func failClaudeRegistration(_ message: String) {"))
         let failBody = r[fail.upperBound...].prefix(500)
         #expect(failBody.contains("teardownClaudeRegistration(reason: .failure, message: message)"))
-        #expect(r.contains("RemoteRegistrationBroker.shared.finish(success: reason == .success, message: message)"))
+        #expect(r.contains("RemoteRegistrationBroker.shared.finish(success: ended == .success, message: message)"))
         // VM start, CLI launch and timeout failures too.
         #expect(r.contains("self.teardownClaudeRegistration(reason: .failure, message: message)\n                return"))
         #expect(r.contains("teardownClaudeRegistration(reason: .failure, message: message)\n            return"))
@@ -135,5 +135,34 @@ struct RemoteSignInEndTests {
         c.awaitRegistration("D", budget: 0.05) { late = ($0, $1) }
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(late?.0 == false && !(late?.1 ?? "").isEmpty)
+    }
+
+    /// Finding (CWE-670): "Register stays silent when the sign-in VM stops
+    /// without a message". Teardowns with no reason (the VM stopping on its
+    /// own, the window closed, no vsock device, the proxy gone) published
+    /// `success: false` with no message, and the Register button showed a
+    /// sheet only when there was one.
+    @Test("every failed end carries a reason, and Register shows one without it")
+    func noSilentEnd() throws {
+        #expect(ClaudeRegistrationTeardownReason.success.endedMessage == nil)
+        for r: ClaudeRegistrationTeardownReason in [.cancelled, .failure, .timeout, .windowClosed] {
+            #expect(!(r.endedMessage ?? "").isEmpty)
+        }
+        let r = try Self.src("Sources/AgentCoding/ClaudeRegistrationCoordinator.swift")
+        let teardown = try #require(r.range(of: "func teardownClaudeRegistration(reason:"))
+        let body = r[teardown.upperBound...].prefix(1400)
+        #expect(body.contains("let message = ended == .success ? nil : (message ?? ended.endedMessage)"))
+        // An end during the linger after the credential is saved is a success.
+        #expect(body.contains("let ended = state.captured ? .success : reason"))
+        #expect(r.contains("state.captured = true\n        // The sign-in card: done"))
+        #expect(body.contains("ev(.finished(success: false, message: message))"))
+        // The VM stopping on its own, no vsock device, the proxy gone.
+        #expect(r.contains("\"The sign-in machine stopped.\""))
+        #expect(!r.contains("teardownClaudeRegistration(reason: .failure)\n"))
+        let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
+        let button = try #require(fc.range(of: "guard a.runModal() == .alertFirstButtonReturn else { return }"))
+        let after = fc[button.upperBound...].prefix(1000)
+        #expect(after.contains("guard !ok, let self else { return }"))
+        #expect(after.contains("failed.informativeText = message ?? NSLocalizedString("))
     }
 }

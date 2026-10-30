@@ -1876,6 +1876,9 @@
 "Another sign-in is already in progress." = "Another sign-in is already in progress.";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "The Bromure proxy isn't running, so the sign-in can't be captured.";
 "Couldn't start the sign-in machine." = "Couldn't start the sign-in machine.";
+"The sign-in was cancelled." = "The sign-in was cancelled.";
+"The sign-in window was closed." = "The sign-in window was closed.";
+"The sign-in machine stopped." = "The sign-in machine stopped.";
 "Finish signing in in your browser…" = "Finish signing in in your browser…";
 "Almost there — your browser will open in a moment…" = "Almost there — your browser will open in a moment…";
 "Sign in to %@…" = "Sign in to %@…";

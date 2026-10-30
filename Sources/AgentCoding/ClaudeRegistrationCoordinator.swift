@@ -62,6 +62,18 @@ public enum SubscriptionRegistrationScope: Sendable {
 
 enum ClaudeRegistrationTeardownReason {
     case success, cancelled, failure, timeout, windowClosed
+
+    /// What a run that ended this way says when its caller had nothing more
+    /// specific: a fat client's Register button only hears this sentence.
+    var endedMessage: String? {
+        switch self {
+        case .success: return nil
+        case .cancelled: return NSLocalizedString("The sign-in was cancelled.", comment: "sign-in")
+        case .windowClosed: return NSLocalizedString("The sign-in window was closed.", comment: "sign-in")
+        case .failure, .timeout:
+            return NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
+        }
+    }
 }
 
 /// Transient state for one in-flight registration. Retained by the app delegate
@@ -78,6 +90,9 @@ final class ClaudeRegistrationState {
     var window: TabbedSessionWindow?
     var pollTask: Task<Void, Never>?
     var finished = false
+    /// The credential is saved: an end during the linger before teardown
+    /// (the VM stopping, the window closing) is still a success.
+    var captured = false
     /// True once the host has kicked (or confirmed) the agent launch in the
     /// guest's tmux window, so the roster ticks don't retry it.
     var agentLaunchStarted = false
@@ -363,7 +378,8 @@ extension ACAppDelegate {
                 return
             }
             guard let dev = sandbox.socketDevice else {
-                self.teardownClaudeRegistration(reason: .failure)
+                self.teardownClaudeRegistration(reason: .failure, message: NSLocalizedString(
+                    "Couldn't start the sign-in machine.", comment: "sign-in"))
                 return
             }
             // Proxy listeners for egress — but deliberately NO swapper.setMap,
@@ -396,7 +412,10 @@ extension ACAppDelegate {
     private func wireRegistrationSandbox(_ sandbox: UbuntuSandboxVM,
                                          window: TabbedSessionWindow) {
         sandbox.onStopped = { [weak self] _ in
-            Task { @MainActor in self?.teardownClaudeRegistration(reason: .windowClosed) }
+            Task { @MainActor in
+                self?.teardownClaudeRegistration(reason: .windowClosed, message: NSLocalizedString(
+                    "The sign-in machine stopped.", comment: "sign-in: the throwaway VM stopped on its own"))
+            }
         }
         // Record the guest's vmnet IP (published to the outbox every ~5s).
         // Normal sessions get this via wireSandboxCallbacks, which this flow
@@ -781,7 +800,8 @@ extension ACAppDelegate {
     private func finishClaudeRegistration(state: ClaudeRegistrationState,
                                           record captured: CapturedSubscription) async {
         guard !state.finished, let engine = mitmEngine else {
-            teardownClaudeRegistration(reason: .failure)
+            teardownClaudeRegistration(reason: .failure, message: NSLocalizedString(
+                "The Bromure proxy isn't running, so the sign-in can't be captured.", comment: "sign-in"))
             return
         }
         // distantPast expiry → the proxy refreshes on first use, which both
@@ -868,6 +888,7 @@ extension ACAppDelegate {
         let providerName = state.provider.displayName
         // Let any open profile editor flip its inline Register → Re-register.
         NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        state.captured = true
         // The sign-in card: done — it restarts the agent on the stand-in key.
         state.onEvent?(.finished(success: true, message: nil))
         state.onEvent = nil
@@ -909,10 +930,15 @@ extension ACAppDelegate {
     func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason, message: String? = nil) {
         guard let state = claudeRegistration, !state.finished else { return }
         state.finished = true
+        // Once the credential is saved, whatever ends the run is a success.
+        let ended = state.captured ? .success : reason
+        // Every end but success says why, so a remote Register button that
+        // only hears `registrationEnded` never ends silently.
+        let message = ended == .success ? nil : (message ?? ended.endedMessage)
         // A card still listening only hears from here when the flow died
         // (cancelled, window closed, failure): success reported itself.
-        if reason != .success, let ev = state.onEvent {
-            ev(.finished(success: false, message: nil))
+        if ended != .success, let ev = state.onEvent {
+            ev(.finished(success: false, message: message))
             state.onEvent = nil
         }
 
@@ -921,7 +947,7 @@ extension ACAppDelegate {
         // tunnel, and hears how it ended. No-op for a local flow (no
         // pending). (Previously never called, so the relay lingered after
         // every remote registration.)
-        RemoteRegistrationBroker.shared.finish(success: reason == .success, message: message)
+        RemoteRegistrationBroker.shared.finish(success: ended == .success, message: message)
 
         state.pollTask?.cancel()
         state.launchTask?.cancel()
