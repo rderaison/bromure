@@ -99,7 +99,9 @@ Today's measure:
    - Extract the `VMBackend` and `VsockDevice` protocols from `UbuntuSandboxVM`, and write the QEMU backend.
    - Bake the amd64 image.
    - Linux `bromure-ac vm run / ls / exec / kill` at parity, with suspend/resume.
-3. **Network:** the switch on stream sockets, the tap uplink and nftables, DHCP, DNS, and the egress firewall.
+3. **Network:** the switch on stream sockets, DHCP, DNS, and the egress firewall.
+   - Uplink: rootless `passt` by default (one per host, on a socketpair; no host loopback; MTU 65520 written to `meta/mtu`, except VPN profiles, which keep the macOS clamp). Tap + nftables (`setup-network.sh`) is the opt-in alternative.
+   - The shared switch must deliver uplink→VM frames by destination IP (passt tracks a single guest MAC).
 4. **Proxy:** MITM on NIOSSL, the secret store, token swaps, guardrails.
 5. **Control plane and fat client:** control.sock, the API, `/state`, the SSH front door, systemd. The milestone is the Mac managing the Linux host.
 6. **P2P, TURN, enrollment.**
