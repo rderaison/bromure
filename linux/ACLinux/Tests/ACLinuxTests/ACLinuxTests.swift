@@ -980,3 +980,57 @@ struct InterimBakeTests {
         #expect(text.contains("init.bromure") && text.contains("echo 1400 >") && text.contains("TRAILER!!!"))
     }
 }
+
+@Suite("Home seed and outbox")
+struct HomeSeedTests {
+    static let pkg = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+
+    @Test("HomeSeedContent.generated.swift matches macOS's Profile.swift (re-run scripts/gen-home-seed.py if not)")
+    func generatedIsCurrent() async throws {
+        try await ChildProcess.run("/usr/bin/python3", [Self.pkg.path + "/scripts/gen-home-seed.py", "--check"])
+    }
+
+    @Test("the staged seed: managed dotfiles overwritten, .bashrc.local only if missing, cleanup sweeps, spec")
+    func staged() throws {
+        let fm = FileManager.default
+        let d = fm.temporaryDirectory.appendingPathComponent("acl-seed-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: d) }
+        try fm.createDirectory(at: d, withIntermediateDirectories: true)
+        try "stale".write(to: d.appendingPathComponent("old"), atomically: true, encoding: .utf8)
+        try HomeSeed.writeHomeSeedFiles(into: d)
+        try HomeSeed.finalizeHomeSeed(seedDir: d)
+        #expect(!fm.fileExists(atPath: d.appendingPathComponent("old").path), "the previous seed is cleared")
+        let m = try String(contentsOf: d.appendingPathComponent("manifest.tsv"), encoding: .utf8)
+        for line in ["D\t755\t.npm-global", "o\t644\t.bashrc", "o\t644\t.bash_profile", "o\t644\t.profile",
+                     "o\t644\t.npmrc", "o\t644\t.tmux.conf", "m\t644\t.bashrc.local",
+                     "d\t-\t.git-credentials", "j\t-\t.claude/.credentials.json\t_bromureManaged"] {
+            #expect(m.contains(line + "\n"), "manifest lacks \(line)")
+        }
+        let bashrc = try String(contentsOf: d.appendingPathComponent("files/.bashrc"), encoding: .utf8)
+        #expect(bashrc.hasPrefix("# ─── Managed by Bromure Agentic Coding"))
+        let npmrc = try String(contentsOf: d.appendingPathComponent("files/.npmrc"), encoding: .utf8)
+        #expect(npmrc.hasPrefix("prefix=/home/ubuntu/.npm-global\nallow-scripts[]=@anthropic-ai/claude-code\n"))
+        let spec = try JSONSerialization.jsonObject(with: Data(contentsOf: d.appendingPathComponent("claude-settings.spec.json")))
+        #expect((spec as? [String: Any])?["usesClaude"] as? Bool == false)
+    }
+
+    @Test("the outbox is 0777 whatever the umask; a fresh boot empties it, a restore drops only one-shot events")
+    func outbox() throws {
+        let fm = FileManager.default
+        let d = fm.temporaryDirectory.appendingPathComponent("acl-outbox-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: d) }
+        let old = umask(0o077)
+        defer { umask(old) }
+        try HomeSeed.prepareOutboxDirectory(d, forRestore: false)
+        var st = stat()
+        #expect(stat(d.path, &st) == 0 && st.st_mode & 0o7777 == 0o777)
+        for f in ["agentd.log", "closed-1", "diag-2", "reboot-intent"] {
+            try "x".write(to: d.appendingPathComponent(f), atomically: true, encoding: .utf8)
+        }
+        try HomeSeed.prepareOutboxDirectory(d, forRestore: true)
+        #expect(try fm.contentsOfDirectory(atPath: d.path) == ["agentd.log"])
+        try HomeSeed.prepareOutboxDirectory(d, forRestore: false)
+        #expect(try fm.contentsOfDirectory(atPath: d.path).isEmpty)
+    }
+}

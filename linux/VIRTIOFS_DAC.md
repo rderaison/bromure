@@ -17,7 +17,7 @@ $ sudo -u sandbox ls /mnt/bromure-outbox   ->  Permission denied
 
 **DESIGN.md says the opposite for VZ:** "a share that stats as uid 1000 mode 0755 is nonetheless created in, and written to, by uid 999". The guest kernel is the same, and its virtio_fs enforces mode bits whatever the device. So the VZ result probably comes from the ids or modes VZ's device reports, or from a step around the check, not from a mount option. The Mac should repeat the same probe (`stat` as 999, then `sudo -u sandbox touch` in a 0755 directory owned by 1000) before Linux copies that behaviour.
 
-There are two layers here. The Linux daemon also creates `outbox` with mode 0700, where macOS's is presumably 0755. 0700 stops even reads, but 0755 alone would still refuse writes.
+**The outbox is settled:** macOS creates it with mode 0777 (`SessionDisk.prepareOutboxDirectory`), so the Mac's uid 999 writes there through plain DAC. "VZ doesn't enforce DAC" is at least partly an artifact of that mode. The Linux daemon now does the same, with an explicit chmod. What is left is files and directories with ordinary modes owned by uid 1000. In `test_boot.sh` that is the workdir the test creates inside the outbox (mkdir by uid 1000, 0755; `host.txt` 0644), which the workload can read but not append to or create in. The same goes for any user-folder share, so the options below are for those.
 
 ## Options
 

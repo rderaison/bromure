@@ -215,6 +215,11 @@ struct DaemonTests {
         print("HOME [daemon] /home/ubuntu: \(mount.split(separator: "\n").last ?? "")")
         #expect(mount.contains("ext4") && mount.contains("/dev/vdb") && mount.contains("bromure-home"), "home: \(mount)")
         #expect(try w.cli("vm", "exec", "h1", "--", "sh", "-c", "echo kept > /home/ubuntu/marker && sync").0 == 0)
+        // The seed landed in the ext4 home, and the outbox is world-writable as on macOS.
+        #expect(try w.cli("vm", "exec", "h1", "--", "head", "-1", "/home/ubuntu/.bashrc").1
+                    .contains("Managed by Bromure Agentic Coding"), "the seeded .bashrc")
+        #expect(try w.cli("vm", "exec", "h1", "--", "stat", "-c", "%a", "/mnt/bromure-outbox").1
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == "777")
 
         // Stop and start: same overlay, same home.
         #expect(try w.cli("vm", "kill", "h1").0 == 0)

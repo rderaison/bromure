@@ -341,9 +341,12 @@ public actor Daemon {
         let dir = vmDir(rec.id)
         let run = config.runtimeDir + "/vms/" + rec.shortId
         let fm = FileManager.default
-        for sub in [dir + "/meta/virtiofs-tags", dir + "/outbox", run] {
+        for sub in [dir + "/meta/virtiofs-tags", run] {
             try fm.createDirectory(atPath: sub, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
+        // 0777 as on macOS: every guest uid (the workspace's, a run_as user's)
+        // writes there through plain DAC. The VM directory above it stays 0700.
+        try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: statePath != nil)
         try? fm.removeItem(atPath: dir + "/meta/bromure-agentd.py")
         try fm.copyItem(atPath: config.agentdPath, toPath: dir + "/meta/bromure-agentd.py")
         for tag in ["bromure-meta", "bromure-outbox"] {
@@ -359,6 +362,16 @@ public actor Daemon {
         let home = dir + "/home.img"
         try Self.ensureHomeImage(atPath: home, gib: config.homeImageGB)
         try "ext4\n".write(toFile: dir + "/meta/home.mode", atomically: true, encoding: .utf8)
+        // The home seed agentd applies to the ext4 home before the session,
+        // and the counters it polls; bumped every launch, as on macOS (on a
+        // restore that's what tells the resumed agent to re-apply).
+        let meta = URL(fileURLWithPath: dir + "/meta")
+        HomeSeed.ensureEnvGeneration(in: meta)
+        HomeSeed.ensureGenerationCounter(named: "seed.generation", in: meta)
+        let seed = meta.appendingPathComponent("home-seed", isDirectory: true)
+        try HomeSeed.writeHomeSeedFiles(into: seed)
+        try HomeSeed.finalizeHomeSeed(seedDir: seed)
+        HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
 
         var qc = try QEMUMachineConfig(name: "bromure-\(rec.shortId)", bakedImage: config.imageDir,
                                        overlay: dir + "/disk.qcow2", vsockCID: rec.cid, runDirectory: run)
