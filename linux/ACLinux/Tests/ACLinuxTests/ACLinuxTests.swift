@@ -1199,3 +1199,26 @@ struct ControlStreamTests {
         await server.close()
     }
 }
+
+@Suite("systemd stop-post")
+struct StopPostTests {
+    @Test("sweep on a stop/restart job or a clean exit; keep for a crash restart")
+    func decision() {
+        typealias F = StopPost.Facts
+        #expect(StopPost.shouldSweep(F(serviceResult: "timeout", job: "2318\n")))      // stop, daemon hung
+        #expect(StopPost.shouldSweep(F(serviceResult: "success", job: "41")))          // stop, clean
+        #expect(StopPost.shouldSweep(F(serviceResult: "success", job: "")))            // exited 0 alone: no restart
+        #expect(!StopPost.shouldSweep(F(serviceResult: "signal", job: "\n")))          // crash: restart re-adopts
+        #expect(!StopPost.shouldSweep(F(serviceResult: "core-dump", job: "")))
+        #expect(!StopPost.shouldSweep(F(serviceResult: "watchdog", job: "0")))
+    }
+
+    @Test("its own unit from /proc/self/cgroup")
+    func unit() {
+        let u = StopPost.ownUnit("0::/user.slice/user-1000.slice/user@1000.service/app.slice/bromure-ac.service\n")
+        #expect(u?.unit == "bromure-ac.service" && u?.user == true)
+        #expect(u?.cgroup == "/user.slice/user-1000.slice/user@1000.service/app.slice/bromure-ac.service")
+        #expect(StopPost.ownUnit("0::/system.slice/bromure-ac-kvm.service")?.user == false)
+        #expect(StopPost.ownUnit("0::/user.slice/user-1000.slice/session-3.scope") == nil)
+    }
+}

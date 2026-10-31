@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self])
+        subcommands: [Daemon.self, VM.self, Image.self, StopPost.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -44,6 +44,17 @@ struct Daemon: AsyncParsableCommand {
         _ = acl_sd_notify("STOPPING=1")
         await server.close()
         await daemon.shutdown()
+    }
+}
+
+/// The unit's ExecStopPost= (see ACLinux.StopPost).
+// @port-skip linux-only: systemd stop-post entry
+struct StopPost: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "stop-post", abstract: "systemd ExecStopPost= helper.",
+                                                    shouldDisplay: false)
+    // @port-skip linux-only: systemd stop-post entry
+    func run() async throws {
+        FileHandle.standardError.write(Data((await ACLinux.StopPost.run() + "\n").utf8))
     }
 }
 

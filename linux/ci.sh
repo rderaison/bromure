@@ -56,6 +56,9 @@ if systemctl --user is-system-running >/dev/null 2>&1 || [ "$(systemctl --user i
   fi
   rm -rf "$CI_STATE"
   echo "unit: READY, control.sock served, stop emptied its cgroup ($CG)"
+  # ExecStopPost=bromure-ac stop-post: a crash restart keeps the leftovers, a
+  # stop that times out ends them.
+  "$ROOT/linux/systemd/test-stop-post.sh" "$ROOT/linux/ACLinux/.build/release/bromure-ac"
 else
   echo "skipped: no systemd user manager"
 fi
