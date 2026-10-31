@@ -1,3 +1,4 @@
+import CACLinuxShims
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
@@ -84,11 +85,16 @@ public actor VsockListener {
 
     /// The process-wide listener for `port`, bound on first use.
     // @port-skip linux-only: host AF_VSOCK
-    public static func shared(port: UInt32,
+    ///
+    /// `fdStoreName`: the daemon's listener, kept in systemd's fd store under
+    /// that name (when the unit has one) and taken back from it after a
+    /// restart: while no daemon runs, guests' connects wait in the listen
+    /// backlog instead of being refused (agentd gives up re-dialing after 2 s).
+    public static func shared(port: UInt32, fdStoreName: String? = nil, stored: Int32? = nil,
                               group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) async throws -> VsockListener {
         let task = registry.withLockedValue { r -> Task<VsockListener, Error> in
             if let t = r[port] { return t }
-            let t = Task { try await VsockListener.bind(port: port, group: group) }
+            let t = Task { try await VsockListener.bind(port: port, fdStoreName: fdStoreName, stored: stored, group: group) }
             r[port] = t
             return t
         }
@@ -119,9 +125,17 @@ public actor VsockListener {
     }
 
     // @port-skip linux-only: host AF_VSOCK
-    private static func bind(port: UInt32, group: EventLoopGroup) async throws -> VsockListener {
+    private static func bind(port: UInt32, fdStoreName: String?, stored: Int32?, group: EventLoopGroup) async throws -> VsockListener {
+        let fd: Int32
+        if let stored {
+            fd = stored
+        } else {
+            fd = acl_vsock_listen(port, 256)
+            guard fd >= 0 else { throw MachineError.io("vsock listen :\(port)", -fd) }
+            if let fdStoreName { FDStore.store(fdStoreName, [fd]) }
+        }
         let server = try await ServerBootstrap(group: group)
-            .bind(to: VsockAddress(cid: .any, port: .init(rawValue: port))) { ch in
+            .bind(fd) { ch in
                 ch.eventLoop.makeCompletedFuture {
                     let peer = try ch.syncOptions!.getOption(.remoteVsockAddress)
                     return VsockConnection(peer: peer,

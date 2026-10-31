@@ -22,6 +22,8 @@ Environment=BROMURE_AGENTD=@AGENTD@
 # follows, and leaves it for the restarted daemon after a crash.
 KillMode=process
 ExecStopPost=@BIN@ stop-post
+# passt's socket and pidfd: a crash restart takes passt (and its open flows) back.
+FileDescriptorStoreMax=4
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=2

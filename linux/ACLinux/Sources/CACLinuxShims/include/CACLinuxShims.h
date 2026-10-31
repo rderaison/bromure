@@ -52,6 +52,15 @@ int acl_pipe_cloexec(int fds[2]);
 /// no NOTIFY_SOCKET (not under systemd), or -errno.
 int acl_sd_notify(const char *state);
 
+/// sd_notify with descriptors attached (SCM_RIGHTS): `FDSTORE=1\nFDNAME=…`
+/// puts them in the service manager's fd store. 0 without NOTIFY_SOCKET,
+/// 1 when sent, -errno on failure.
+int acl_sd_notify_fds(const char *state, const int *fds, int nfds);
+
+/// A listening AF_VSOCK stream socket on (VMADDR_CID_ANY, `port`), close-on-exec,
+/// SO_REUSEADDR: the fd, or -errno.
+int acl_vsock_listen(unsigned int port, int backlog);
+
 /// Unblocks SIGTERM and SIGINT in the calling thread's (and so the
 /// process's future threads') mask: a parent that spawned us with them blocked
 /// (Foundation's Process does) mustn't take away the graceful-stop path.

@@ -111,6 +111,39 @@ int acl_sd_notify(const char *state) {
     return r < 0 ? -e : 1;
 }
 
+int acl_sd_notify_fds(const char *state, const int *fds, int nfds) {
+    const char *path = getenv("NOTIFY_SOCKET");
+    if (!path || !*path) return 0;
+    if (nfds < 0 || nfds > 16) return -EINVAL;
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    size_t n = strlen(path);
+    if (n >= sizeof sa.sun_path) return -ENAMETOOLONG;
+    memcpy(sa.sun_path, path, n);
+    if (sa.sun_path[0] == '@') sa.sun_path[0] = 0;
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    struct iovec iov = { .iov_base = (void *)state, .iov_len = strlen(state) };
+    union { char buf[CMSG_SPACE(sizeof(int) * 16)]; struct cmsghdr align; } u;
+    memset(&u, 0, sizeof u);
+    struct msghdr msg = { .msg_name = &sa, .msg_namelen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n),
+                          .msg_iov = &iov, .msg_iovlen = 1 };
+    if (nfds > 0) {
+        msg.msg_control = u.buf;
+        msg.msg_controllen = CMSG_SPACE(sizeof(int) * (size_t)nfds);
+        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int) * (size_t)nfds);
+        memcpy(CMSG_DATA(c), fds, sizeof(int) * (size_t)nfds);
+    }
+    ssize_t r = sendmsg(fd, &msg, MSG_NOSIGNAL);
+    int e = errno;
+    close(fd);
+    return r < 0 ? -e : 1;
+}
+
 #ifdef __linux__
 int acl_pipe_cloexec(int fds[2]) { return pipe2(fds, O_CLOEXEC) == 0 ? 0 : -errno; }
 #else
@@ -192,3 +225,26 @@ int acl_pidfd_open(int pid) {
 int acl_pidfd_send_signal(int pidfd, int sig) {
     return syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) < 0 ? -errno : 0;
 }
+
+#ifdef __linux__
+#include <linux/vm_sockets.h>
+int acl_vsock_listen(unsigned int port, int backlog) {
+    int fd = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_vm sa;
+    memset(&sa, 0, sizeof sa);
+    sa.svm_family = AF_VSOCK;
+    sa.svm_cid = VMADDR_CID_ANY;
+    sa.svm_port = port;
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(fd, backlog) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    return fd;
+}
+#else
+int acl_vsock_listen(unsigned int port, int backlog) { (void)port; (void)backlog; return -ENOSYS; }
+#endif

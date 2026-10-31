@@ -75,8 +75,19 @@ public actor Daemon {
                                                 attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(atPath: config.runtimeDir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
-        let passt = try await PasstUplink.start(.init(logPath: config.runtimeDir + "/passt.log"))
-        let listener = try await VsockListener.shared(port: 5800)
+        // Under systemd with a fd store, the previous daemon's passt (and the
+        // flows it holds) is taken back rather than replaced.
+        var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
+        pc.useFDStore = true
+        let stored = FDStore.take()
+        let passt = try await PasstUplink.start(pc, adopting: PasstUplink.Adopted.fromStore(stored))
+        let storedListener = stored["vsock-5800"]?.count == 1 ? stored["vsock-5800"]?.first : nil
+        for (name, fds) in stored where !["passt", "passt-pid"].contains(name) && fds.first != storedListener {
+            for fd in fds { close(fd) }
+        }
+        if passt.adopted { FileHandle.standardError.write(Data("bromure-ac daemon: took back passt (pid \(passt.pid ?? 0)) from the fd store\n".utf8)) }
+        if storedListener != nil { FileHandle.standardError.write(Data("bromure-ac daemon: took back the vsock :5800 listener from the fd store\n".utf8)) }
+        let listener = try await VsockListener.shared(port: 5800, fdStoreName: "vsock-5800", stored: storedListener)
         let d = Daemon(config: config, passt: passt, listener: listener)
         await d.adoptRunning()
         return d
@@ -471,8 +482,10 @@ public actor Daemon {
     /// Takes over the VMs a previous daemon left running: same QMP socket,
     /// the stream port re-listened on the same path (QEMU re-dials,
     /// reconnect-ms), the same lease, a new shell (agentd re-dials vsock 5800).
-    /// What doesn't carry over: passt is a new process, so flows the guest had
-    /// open through the old one are gone (DaemonTests measures it).
+    /// Flows the guest had open carry over only under systemd, where passt's
+    /// socket waits in the fd store (systemd/test-unit-kvm.sh); a daemon
+    /// restarted by hand gets a new passt, and those flows are gone
+    /// (DaemonTests measures it).
     // @port-skip linux-only: Linux daemon VM lifecycle (macOS VMs live in the app)
     func adoptRunning() async {
         for rec in registry.records where rec.state == .running || rec.state == .starting {
@@ -569,6 +582,8 @@ public actor Daemon {
     /// guests yet) and passt.
     // @port-skip linux-only: Linux daemon lifecycle
     public func shutdown() async {
+        // A stopping daemon leaves nothing for a next one to take back.
+        FDStore.remove("vsock-5800")
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         sw.stop()

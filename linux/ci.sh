@@ -62,6 +62,15 @@ if systemctl --user is-system-running >/dev/null 2>&1 || [ "$(systemctl --user i
 else
   echo "skipped: no systemd user manager"
 fi
+step "systemd: the daemon with real VMs under systemd (opt-in: BROMURE_UNIT_KVM=1, ~1 min)"
+# Crash -> passt, QEMU and a flow survive (fd store); hung stop -> stop-post
+# sweeps; clean stop. A transient system unit as this user with the kvm group
+# (sudo systemd-run), until a user unit can open /dev/vhost-vsock.
+if [ "${BROMURE_UNIT_KVM:-0}" = 1 ]; then
+  "$ROOT/linux/systemd/test-unit-kvm.sh"
+else
+  echo "skipped (BROMURE_UNIT_KVM=1 to run)"
+fi
 step "guest suites (opt-in: BROMURE_GUEST_SUITES=1, ~4.5 min)"
 # test_sentry -> test_boot -> test_sandbox -> test_net_flow -> test_strict ->
 # test_lockdown --raise in a daemon VM; expected failures are listed in

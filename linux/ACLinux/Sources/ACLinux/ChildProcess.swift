@@ -128,6 +128,13 @@ final class ChildProcess: Sendable {
     static func adopt(name: String, pid: Int32) throws -> ChildProcess {
         let fd = acl_pidfd_open(pid)
         guard fd >= 0 else { throw MachineError.io("pidfd_open \(pid)", -fd) }
+        return try adopt(name: name, pidfd: fd, pid: pid)
+    }
+
+    /// The same, from a pidfd we already hold (passt's, back from the fd
+    /// store); the ChildProcess owns `pidfd` from here on.
+    // @port-skip linux-only: process supervision
+    static func adopt(name: String, pidfd fd: Int32, pid: Int32) throws -> ChildProcess {
         let p = try ChildProcess(name: name, executable: "", arguments: [], logPath: nil)
         p.state.withLockedValue { $0.pid = pid }
         p.pidfd.withLockedValue { $0 = fd }

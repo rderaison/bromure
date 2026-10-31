@@ -1,3 +1,4 @@
+import CACLinuxShims
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
@@ -57,6 +58,9 @@ public final class PasstUplink: Uplink {
         /// (`--log-file` can't be used: Ubuntu's AppArmor profile for passt
         /// denies the read it needs, and passt exits.)
         public var pcapPath: String?
+        /// Keep passt's socket and pidfd in systemd's fd store (when the
+        /// unit has one), so passt and its flows outlive a daemon crash.
+        public var useFDStore = false
 
         // @port-skip linux-only: passt configuration
         public init(logPath: String? = nil) {
@@ -89,7 +93,7 @@ public final class PasstUplink: Uplink {
     private let group: EventLoopGroup
     private let inbox: EagerInbox
     private let state = NIOLockedValueBox<(channel: Channel?, process: ChildProcess?,
-                                           closing: Bool, restarts: Int, readFD: Int32?)>((nil, nil, false, 0, nil))
+                                           closing: Bool, restarts: Int, readFD: Int32?, adopted: Bool)>((nil, nil, false, 0, nil, false))
     /// The current passt connection's writer (nil between restarts).
     private let writer = NIOLockedValueBox<NIOAsyncChannelOutboundWriter<ByteBuffer>?>(nil)
 
@@ -108,12 +112,44 @@ public final class PasstUplink: Uplink {
 
     /// Starts passt and connects to it.
     // @port-skip linux-only: rootless uplink
-    public static func start(_ config: Config,
+    public static func start(_ config: Config, adopting: Adopted? = nil,
                              group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) async throws -> PasstUplink {
         let u = PasstUplink(config: config, group: group)
+        if let adopting {
+            do {
+                try await u.launch(adopting: adopting)
+                u.state.withLockedValue { $0.adopted = true }
+                return u
+            } catch {
+                FileHandle.standardError.write(Data("passt: adopting pid \(adopting.pid) failed (\(error)); starting a new one\n".utf8))
+                Glibc.close(adopting.socket)
+            }
+        }
         try await u.launch()
         return u
     }
+
+    /// A passt left running by the previous daemon: our end of its socket
+    /// and its pidfd (the uplink owns both from here on).
+    // @port-skip linux-only: rootless uplink
+    public struct Adopted: Sendable {
+        public let socket: Int32, pidfd: Int32, pid: Int32
+        /// From the fd store's "passt" and "passt-pid" entries; nil (and the
+        /// descriptors closed) unless the pidfd's process is still alive.
+        // @port-skip linux-only: rootless uplink
+        public static func fromStore(_ received: [String: [Int32]]) -> Adopted? {
+            let socks = received["passt"] ?? [], pidfds = received["passt-pid"] ?? []
+            if socks.count == 1, pidfds.count == 1, let pid = FDStore.pid(ofPidfd: pidfds[0]) {
+                return Adopted(socket: socks[0], pidfd: pidfds[0], pid: pid)
+            }
+            for fd in socks + pidfds { Glibc.close(fd) }
+            return nil
+        }
+    }
+
+    /// Whether this uplink took over the previous daemon's passt.
+    // @port-skip linux-only: rootless uplink
+    public var adopted: Bool { state.withLockedValue { $0.adopted } }
 
     // @port-skip linux-only: rootless uplink
     private init(config: Config, group: EventLoopGroup) {
@@ -135,25 +171,43 @@ public final class PasstUplink: Uplink {
     public var routeBacklogPeak: (frames: Int, bytes: Int) { let s = inbox.stats; return (s.peakFrames, s.peakBytes) }
 
     // @port-skip linux-only: rootless uplink
-    private func launch() async throws {
+    private func launch(adopting: Adopted? = nil) async throws {
         let core = self.core, inbox = self.inbox
         var fds: [Int32] = [-1, -1]
-        guard socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0, &fds) == 0 else {
-            throw MachineError.io("socketpair", errno)
-        }
-        // fds[1] becomes passt's stdin (posix_spawn dup2s it, which drops
-        // CLOEXEC on the copy); the parent's copy is closed once passt has it.
         let p: ChildProcess
-        do {
-            p = try ChildProcess(name: "passt", executable: config.binary, arguments: config.arguments(),
-                                 logPath: config.logPath, standardInput: fds[1])
-            try p.start()
-        } catch {
-            Glibc.close(fds[0])
+        if let adopting {
+            // passt from before a daemon restart: our end of its socket and
+            // its pidfd, back from the fd store (systemd's copies stay there).
+            p = try ChildProcess.adopt(name: "passt", pidfd: adopting.pidfd, pid: adopting.pid)
+            fds[0] = adopting.socket
+        } else {
+            guard socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0, &fds) == 0 else {
+                throw MachineError.io("socketpair", errno)
+            }
+            // fds[1] becomes passt's stdin (posix_spawn dup2s it, which drops
+            // CLOEXEC on the copy); the parent's copy is closed once passt has it.
+            do {
+                p = try ChildProcess(name: "passt", executable: config.binary, arguments: config.arguments(),
+                                     logPath: config.logPath, standardInput: fds[1])
+                try p.start()
+            } catch {
+                Glibc.close(fds[0])
+                Glibc.close(fds[1])
+                throw error
+            }
             Glibc.close(fds[1])
-            throw error
+            // A copy of our end and a pidfd in systemd's fd store: if this
+            // daemon dies, passt keeps its socket (no EOF) and its flows, and
+            // the restarted daemon takes both back (start(adopting:)).
+            if config.useFDStore, FDStore.available {
+                let pidfd = acl_pidfd_open(p.pid)
+                if pidfd >= 0 {
+                    FDStore.store("passt", [fds[0]])
+                    FDStore.store("passt-pid", [pidfd])
+                    Glibc.close(pidfd)
+                }
+            }
         }
-        Glibc.close(fds[1])
         // A second descriptor on our end, for the reader thread. NIO keeps
         // fds[0] for writes only (its reads are blocked below).
         let readFD = fcntl(fds[0], F_DUPFD_CLOEXEC, 0)
@@ -206,8 +260,11 @@ public final class PasstUplink: Uplink {
         // switch), frames go to the routing thread through the inbox; without
         // one (tests reading `inbound`), deliverBlocking paces the reader.
         let state = self.state
+        let mac = adopting == nil ? nil : config.mac.split(separator: ":").compactMap { UInt8($0, radix: 16) }
         let reader = Thread {
-            Self.readLoop(fd: readFD, core: core, inbox: inbox)
+            Self.readLoop(fd: readFD, core: core, inbox: inbox, resyncOn: mac) { dropped in
+                FileHandle.standardError.write(Data("passt: adopted stream in sync after \(dropped) byte(s) dropped\n".utf8))
+            }
             // Closed under the lock, so close() never shuts down a reused number.
             state.withLockedValue { s in
                 if s.readFD == readFD { s.readFD = nil }
@@ -233,9 +290,15 @@ public final class PasstUplink: Uplink {
     /// Reads passt's frames (4-byte big-endian length, then the frame) until
     /// EOF. Bad lengths are skipped byte for byte, as LengthPrefixedFrameDecoder does.
     // @port-skip linux-only: rootless uplink
-    static func readLoop(fd: Int32, core: FramePortCore, inbox: EagerInbox) {
+    ///
+    /// `resyncOn` (passt's MAC): the stream may start mid-frame (an adopted
+    /// socket whose previous reader died in the middle of one), so bytes are
+    /// dropped until a length lines up with a frame whose source is passt.
+    static func readLoop(fd: Int32, core: FramePortCore, inbox: EagerInbox, resyncOn mac: [UInt8]? = nil,
+                         onSynced: ((Int) -> Void)? = nil) {
         var buf = [UInt8](repeating: 0, count: 1 << 20)
         var have = 0, skipping = 0
+        var syncing = mac?.count == 6, dropped = 0
         var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
         loop: while true {
             let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress! + have, $0.count - have) }
@@ -260,6 +323,16 @@ public final class PasstUplink: Uplink {
                 }
                 guard have - at >= 4 else { break }
                 let length = Int(buf[at]) << 24 | Int(buf[at + 1]) << 16 | Int(buf[at + 2]) << 8 | Int(buf[at + 3])
+                if syncing, let mac {
+                    guard have - at >= 16 else { break }
+                    if length < StreamPort.minFrame || length > StreamPort.maxFrame || !buf[(at + 10)..<(at + 16)].elementsEqual(mac) {
+                        at += 1
+                        dropped += 1
+                        continue
+                    }
+                    syncing = false
+                    onSynced?(dropped)
+                }
                 if length < StreamPort.minFrame || length > StreamPort.maxFrame {
                     at += 4
                     skipping = length
@@ -322,6 +395,7 @@ public final class PasstUplink: Uplink {
 
     // @port-skip linux-only: rootless uplink
     public func close() async {
+        if config.useFDStore { FDStore.remove("passt"); FDStore.remove("passt-pid") }
         let (ch, p) = state.withLockedValue { s -> (Channel?, ChildProcess?) in
             s.closing = true
             // The reader's descriptor keeps the socket open: shut it down so
