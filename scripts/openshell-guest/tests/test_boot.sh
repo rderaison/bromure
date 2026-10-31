@@ -1237,7 +1237,10 @@ except ValueError: print('?')")
         fi
         printf '     idling for %ss with the status loops running...\n' "$IDLE_SECONDS"
         local before_denials
-        before_denials=$(grep -c '"kind":"sandbox_denied"' "$SENTRY_LOG" 2>/dev/null || echo 0)
+        # One number either way: `grep -c` already prints 0 when nothing matches
+        # (and exits 1, so `|| echo 0` made it "0\n0"); a missing log prints nothing.
+        before_denials=$(grep -c '"kind":"sandbox_denied"' "$SENTRY_LOG" 2>/dev/null)
+        before_denials=${before_denials:-0}
         sleep "$IDLE_SECONDS"
         [ -s "$SENTRY_LOG" ] || : > "$SENTRY_LOG"
         python3 - "$SENTRY_LOG" "$before_denials" <<'PY'
