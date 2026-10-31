@@ -139,6 +139,35 @@ public final class FramePortCore: Sendable {
                                           drainWaiter: CheckedContinuation<Void, Never>?,
                                           spaceWaiters: [CheckedContinuation<Void, Never>])>(([], 0, FramePortStats(), false, nil, []))
     private let writerTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
+    /// When set, inbound frames go straight to it from the reader: no queue,
+    /// no consumer to wait for, so the reader never pauses. The receiver must
+    /// not block (the switch's routes only `send`, which drops when full).
+    /// The closure lives in a struct: a function type stored directly in the
+    /// generic box made Swift 6.4 emit two reabstraction thunks that called
+    /// each other until the stack overflowed (SIGSEGV on the first frame).
+    private struct Receiver: Sendable { let call: @Sendable (Data) -> Void }
+    private let receiver = NIOLockedValueBox<Receiver?>(nil)
+
+    // @port-skip linux-only: frame port plumbing
+    public func setReceiver(_ r: (@Sendable (Data) -> Void)?) {
+        let boxed = r.map { Receiver(call: $0) }
+        receiver.withLockedValue { $0 = boxed }
+        // A reader blocked on `inbound` (frames that came before the receiver
+        // did, with nobody consuming) must go on: from now on it delivers here.
+        if boxed != nil { demand.produceMore() }
+    }
+
+    /// The eager path: hands `frame` to the receiver if there is one.
+    // @port-skip linux-only: frame port plumbing
+    func receiveEagerly(_ frame: Data) -> Bool {
+        guard let r = receiver.withLockedValue({ $0 }) else { return false }
+        state.withLockedValue { $0.stats.received += 1 }
+        r.call(frame)
+        return true
+    }
+
+    // @port-skip linux-only: frame port plumbing
+    var hasReceiver: Bool { receiver.withLockedValue { $0 != nil } }
 
     /// `write` sends a batch of frames (everything queued, up to `maxBatch`) to
     /// the wire in one go, waiting while the wire isn't writable; it throws
@@ -213,6 +242,7 @@ public final class FramePortCore: Sendable {
     // @port-skip linux-only: frame port plumbing
     @discardableResult
     public func deliver(_ frame: Data) async -> Bool {
+        if receiveEagerly(frame) { return true }
         state.withLockedValue { $0.stats.received += 1 }
         demand.closeGate()
         switch source.yield(frame) {
@@ -231,6 +261,7 @@ public final class FramePortCore: Sendable {
     // @port-skip linux-only: frame port plumbing
     @discardableResult
     public func deliverBlocking(_ frame: Data) -> Bool {
+        if receiveEagerly(frame) { return true }
         state.withLockedValue { $0.stats.received += 1 }
         demand.closeGate()
         switch source.yield(frame) {

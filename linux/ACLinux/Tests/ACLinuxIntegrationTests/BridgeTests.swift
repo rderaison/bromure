@@ -305,17 +305,18 @@ struct StallTests {
         let sw = TestSwitch(uplink: passt, gateway: "192.168.64.1", dns: "192.168.64.1", mtu: { _ in 1500 })
         let listener = try await VsockListener.shared(port: agentPort)
         let a = try await SwitchedVM.make(.q35, mac: macA, on: sw, listener: listener, tag: "stall", mtu: 1500)
-        // B's port queue is small, so one TCP window in flight toward the
-        // paused VM (~700 frames at 1500) overflows it.
+        // B's port queue is small, so what is in flight toward the paused VM
+        // overflows it: its receive window at the pause is ~80-90 frames at
+        // 1500 (measured), so 32.
         let b = try await SwitchedVM.make(.microvm, mac: macB, on: sw, listener: listener, tag: "stall", mtu: 1500,
-                                          queueFrames: 256)
+                                          queueFrames: 32)
         async let ba = a.boot()
         async let bb = b.boot()
         _ = try await (ba, bb)
 
         // Single uploads vary a lot run to run (guest scheduling, CPU
         // frequency), so compare medians of five.
-        let mib = 128, samples = 5
+        let mib = 128, samples = 7
         // Median of the transfers that completed: a 0 is passt dropping a flow
         // at MTU 1500 (it stops ACKing; our ports lose nothing), not the switch.
         func median(_ xs: [Double]) -> Double {
@@ -351,7 +352,15 @@ struct StallTests {
             nohup python3 -c "import socket; s=socket.create_connection(('\(lan)', \(base + 3))); s.sendall(b'4294967296\\n'); [s.recv(1<<20) for _ in iter(int, 1)]" >/dev/null 2>&1 &
             echo started
             """)
-        try await Task.sleep(for: .seconds(1))
+        // Pause only once the download is really flowing toward B (its port
+        // forwarding frames): a pause before that has nothing in flight to drop.
+        let sentB0 = sw.portStats(mac: macB)?.sent ?? 0
+        var flowing = false
+        for _ in 0..<150 {
+            try await Task.sleep(for: .milliseconds(100))
+            if (sw.portStats(mac: macB)?.sent ?? 0) - sentB0 > 2_000 { flowing = true; break }
+        }
+        #expect(flowing, "B's download never got going (port sent \(sentB0) -> \(sw.portStats(mac: macB)?.sent ?? -1))")
         let qmpB = try #require(await b.vm.qmp)
         try await qmpB.execute("stop")
         let droppedBefore = sw.portStats(mac: macB)?.dropped ?? 0
@@ -366,6 +375,12 @@ struct StallTests {
         #expect(alone.filter { $0 > 0 }.count >= 3 && during.filter { $0 > 0 }.count >= 3, "too many passt stalls to compare")
         #expect(stalled >= baseline * 0.9, "A slowed to \(stalled) from \(baseline) MB/s")
         #expect(droppedAfter > droppedBefore, "B's drops should rise while it can't drain")
+        // The regression for the passt stall: passt's reader never paused
+        // (the switch is its receiver), while B's port dropped.
+        let up = passt.stats
+        print("UPLINK passt received \(up.received), inbound pauses \(up.inboundPauses)")
+        #expect(up.inboundPauses == 0, "passt's tap reader paused \(up.inboundPauses) times")
+        #expect(up.received > 0)
         #expect((sw.portStats(mac: macA)?.dropped ?? 1) == 0)
         await a.tearDown(listener)
         await b.tearDown(listener)

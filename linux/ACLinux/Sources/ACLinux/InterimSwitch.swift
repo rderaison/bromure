@@ -9,16 +9,16 @@ import NIOConcurrencyHelpers
 /// - uplink -> VM by destination IP (passt keeps a single guest MAC), ARP by
 ///   target IP, broadcast to every port.
 /// Backpressure (FramePort): a VM's reader waits for room on the uplink
-/// (`sendWaiting`: the pressure goes back to that VM alone); the shared uplink
-/// reader never waits: it `send`s, and a slow VM drops at its own port's
-/// limit, counted in that port's `stats.dropped`, without slowing the others.
+/// (`sendWaiting`: the pressure goes back to that VM alone); the uplink is
+/// never paused: its reader hands each frame to the switch's receiver, which
+/// `send`s, so a slow VM drops at its own port's limit, counted in that
+/// port's `stats.dropped`, without slowing the others or passt.
 /// No VM-to-VM traffic, no DNS snoop, no egress policy. Don't build on it.
 // @port-skip linux-only: interim stand-in for VMNetSwitch until ACCore ships it
 public final class InterimSwitch: Sendable {
     public let dhcp: InterimDHCP
     public let uplink: any Uplink
     private let ports = NIOLockedValueBox<[(mac: [UInt8], port: any FramePort, task: Task<Void, Never>)]>([])
-    private let downTask: NIOLockedValueBox<Task<Void, Never>?> = .init(nil)
 
     // @port-skip linux-only: interim switch
     public init(uplink: any Uplink, gateway: String = "192.168.64.1", dns: String = "192.168.64.1",
@@ -26,35 +26,35 @@ public final class InterimSwitch: Sendable {
         self.uplink = uplink
         dhcp = InterimDHCP(server: Self.ipv4(gateway), dns: Self.ipv4(dns),
                            serverMAC: Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"), mtu: mtu)
-        let t = Task { [ports, dhcp] in
-            for await f in uplink.inbound {
-                // Read the header in place: no copy for a frame that ends up
-                // dropped at a full port (a paused VM's retransmit bursts).
-                let (target, broadcast) = f.withUnsafeBytes { b -> (UInt32?, Bool) in
-                    guard b.count >= 14 else { return (nil, true) }
-                    let bcast = b[0] & 1 != 0
-                    if b[12] == 0x08, b[13] == 0x00, b.count >= 34 {
-                        return (UInt32(b[30]) << 24 | UInt32(b[31]) << 16 | UInt32(b[32]) << 8 | UInt32(b[33]), bcast)
-                    }
-                    if b[12] == 0x08, b[13] == 0x06, b.count >= 42 {
-                        return (UInt32(b[38]) << 24 | UInt32(b[39]) << 16 | UInt32(b[40]) << 8 | UInt32(b[41]), bcast)
-                    }
-                    return (nil, bcast)
+        // The uplink calls this as it reads (no queue in between): it routes
+        // and `send`s, which never waits, so the uplink never stops reading
+        // and a full VM port drops (counted there) instead.
+        uplink.setReceiver { [ports, dhcp] f in
+            // Read the header in place: no copy for a frame that ends up
+            // dropped at a full port (a paused VM's retransmit bursts).
+            let (target, broadcast) = f.withUnsafeBytes { b -> (UInt32?, Bool) in
+                guard b.count >= 14 else { return (nil, true) }
+                let bcast = b[0] & 1 != 0
+                if b[12] == 0x08, b[13] == 0x00, b.count >= 34 {
+                    return (UInt32(b[30]) << 24 | UInt32(b[31]) << 16 | UInt32(b[32]) << 8 | UInt32(b[33]), bcast)
                 }
-                guard f.count >= 14 else { continue }
-                let all = ports.withLockedValue { $0 }
-                if let target, let mac = dhcp.mac(forIP: target), let p = all.first(where: { $0.mac == mac }) {
-                    guard p.port.isWritable else { p.port.send(f); continue }   // counted as that port's drop
-                    if broadcast { p.port.send(f); continue }
-                    var out = f
-                    out.withUnsafeMutableBytes { b in for i in 0..<6 { b[i] = mac[i] } }
-                    p.port.send(out)          // never waits: drops at that port's limit
-                } else {
-                    for p in all { p.port.send(f) }
+                if b[12] == 0x08, b[13] == 0x06, b.count >= 42 {
+                    return (UInt32(b[38]) << 24 | UInt32(b[39]) << 16 | UInt32(b[40]) << 8 | UInt32(b[41]), bcast)
                 }
+                return (nil, bcast)
+            }
+            guard f.count >= 14 else { return }
+            let all = ports.withLockedValue { $0 }
+            if let target, let mac = dhcp.mac(forIP: target), let p = all.first(where: { $0.mac == mac }) {
+                guard p.port.isWritable else { p.port.send(f); return }   // counted as that port's drop
+                if broadcast { p.port.send(f); return }
+                var out = f
+                out.withUnsafeMutableBytes { b in for i in 0..<6 { b[i] = mac[i] } }
+                p.port.send(out)          // never waits: drops at that port's limit
+            } else {
+                for p in all { p.port.send(f) }
             }
         }
-        downTask.withLockedValue { $0 = t }
     }
 
     /// Plugs a VM's stream port in.
@@ -88,7 +88,7 @@ public final class InterimSwitch: Sendable {
 
     // @port-skip linux-only: interim switch
     public func stop() {
-        downTask.withLockedValue { $0?.cancel() }
+        uplink.setReceiver(nil)
         ports.withLockedValue { ps in for p in ps { p.task.cancel() } }
     }
 

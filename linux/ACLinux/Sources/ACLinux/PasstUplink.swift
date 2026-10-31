@@ -87,8 +87,9 @@ public final class PasstUplink: Uplink {
     public let config: Config
     let core: FramePortCore
     private let group: EventLoopGroup
+    private let inbox: EagerInbox
     private let state = NIOLockedValueBox<(channel: Channel?, process: ChildProcess?,
-                                           closing: Bool, restarts: Int)>((nil, nil, false, 0))
+                                           closing: Bool, restarts: Int, readFD: Int32?)>((nil, nil, false, 0, nil))
     /// The current passt connection's writer (nil between restarts).
     private let writer = NIOLockedValueBox<NIOAsyncChannelOutboundWriter<ByteBuffer>?>(nil)
 
@@ -123,10 +124,19 @@ public final class PasstUplink: Uplink {
             guard let w = writer.withLockedValue({ $0 }) else { throw ChannelError.ioOnClosedChannel }
             try await w.write(StreamPort.encode(frames))      // suspends while passt isn't reading
         }
+        inbox = EagerInbox(core: core)
     }
+
+    /// Times the reader waited because routing was 256Ki frames behind
+    /// (expected 0), and the deepest backlog seen.
+    // @port-skip linux-only: rootless uplink
+    public var routeWaits: Int { inbox.readerWaits }
+    // @port-skip linux-only: rootless uplink
+    public var routeBacklogPeak: Int { inbox.peak }
 
     // @port-skip linux-only: rootless uplink
     private func launch() async throws {
+        let core = self.core, inbox = self.inbox
         var fds: [Int32] = [-1, -1]
         guard socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0, &fds) == 0 else {
             throw MachineError.io("socketpair", errno)
@@ -144,20 +154,31 @@ public final class PasstUplink: Uplink {
             throw error
         }
         Glibc.close(fds[1])
+        // A second descriptor on our end, for the reader thread. NIO keeps
+        // fds[0] for writes only (its reads are blocked below).
+        let readFD = fcntl(fds[0], F_DUPFD_CLOEXEC, 0)
+        guard readFD >= 0 else {
+            let e = errno
+            Glibc.close(fds[0])
+            p.signal(SIGKILL)
+            throw MachineError.io("dup", e)
+        }
         if let pause = Self.launchPauseForTesting.withLockedValue({ $0 }) { try? await Task.sleep(for: pause) }
         let ch: Channel
         let conn: NIOAsyncChannel<ByteBuffer, ByteBuffer>
         do {
             (ch, conn) = try await ClientBootstrap(group: group)
+                .channelOption(ChannelOptions.autoRead, value: false)
                 .withConnectedSocket(fds[0]) { c in
                     c.eventLoop.makeCompletedFuture {
-                        try c.pipeline.syncOperations.addHandler(ByteToMessageHandler(
-                            LengthPrefixedFrameDecoder(onDrop: { _ in })))
-                        return (c, try NIOAsyncChannel<ByteBuffer, ByteBuffer>(wrappingChannelSynchronously: c,
-                            configuration: .init(backPressureStrategy: .init(lowWatermark: 64, highWatermark: 256))))
+                        // Writes only: every read request stops here, so the
+                        // reader thread is the socket's only reader.
+                        try c.pipeline.syncOperations.addHandler(NoReadHandler())
+                        return (c, try NIOAsyncChannel<ByteBuffer, ByteBuffer>(wrappingChannelSynchronously: c))
                     }
                 }
         } catch {
+            Glibc.close(readFD)
             Glibc.close(fds[0])
             p.signal(SIGKILL)
             throw error
@@ -168,28 +189,91 @@ public final class PasstUplink: Uplink {
             guard !s.closing else { return false }
             s.channel = ch
             s.process = p
+            s.readFD = readFD
             return true
         }
         guard wanted else {
+            Glibc.close(readFD)
             try? await conn.executeThenClose { _, _ in }   // one-off passt exits on EOF
             if await p.waitForExit(timeout: .seconds(2)) == nil { p.signal(SIGKILL) }
             throw ChannelError.alreadyClosed
         }
-        // Pump: passt's frames into the port, paced by the consumer (reading
-        // stops while the switch lags; passt holds them and its TCP slows).
-        let core = self.core, writer = self.writer
+        // The reader: a thread of its own doing nothing but read passt's
+        // socket and split frames, as QEMU's net backend does. passt's tap
+        // writes fail with EAGAIN as soon as ~200 small frames are unread (a
+        // Unix stream socket charges each against passt's send buffer), and
+        // passt then loses that flow's ACKs for good. With a receiver (the
+        // switch), frames go to the routing thread through the inbox; without
+        // one (tests reading `inbound`), deliverBlocking paces the reader.
+        let state = self.state
+        let reader = Thread {
+            Self.readLoop(fd: readFD, core: core, inbox: inbox)
+            // Closed under the lock, so close() never shuts down a reused number.
+            state.withLockedValue { s in
+                if s.readFD == readFD { s.readFD = nil }
+                Glibc.close(readFD)
+            }
+        }
+        reader.name = "passt-read"
+        reader.start()
+        let writer = self.writer
         Task {
             try? await conn.executeThenClose { inbound, outbound in
                 writer.withLockedValue { $0 = outbound }
-                for try await frame in inbound {
-                    guard await core.deliver(Data(frame.readableBytesView)) else { break }
-                }
+                for try await _ in inbound {}          // never yields: only close ends it
                 writer.withLockedValue { $0 = nil }
             }
         }
         Task { [weak self] in
             _ = await p.waitForExit()
             await self?.processExited(p)
+        }
+    }
+
+    /// Reads passt's frames (4-byte big-endian length, then the frame) until
+    /// EOF. Bad lengths are skipped byte for byte, as LengthPrefixedFrameDecoder does.
+    // @port-skip linux-only: rootless uplink
+    static func readLoop(fd: Int32, core: FramePortCore, inbox: EagerInbox) {
+        var buf = [UInt8](repeating: 0, count: 1 << 20)
+        var have = 0, skipping = 0
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        loop: while true {
+            let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress! + have, $0.count - have) }
+            if n == 0 { break }
+            if n < 0 {
+                if errno == EINTR { continue }
+                if errno == EAGAIN {                // the description is non-blocking (NIO set it)
+                    pfd.revents = 0
+                    _ = poll(&pfd, 1, -1)
+                    continue
+                }
+                break
+            }
+            have += n
+            var at = 0
+            while true {
+                if skipping > 0 {
+                    let k = min(skipping, have - at)
+                    at += k
+                    skipping -= k
+                    if skipping > 0 { break }
+                }
+                guard have - at >= 4 else { break }
+                let length = Int(buf[at]) << 24 | Int(buf[at + 1]) << 16 | Int(buf[at + 2]) << 8 | Int(buf[at + 3])
+                if length < StreamPort.minFrame || length > StreamPort.maxFrame {
+                    at += 4
+                    skipping = length
+                    continue
+                }
+                guard have - at >= 4 + length else { break }
+                let frame = Data(buf[(at + 4)..<(at + 4 + length)])
+                at += 4 + length
+                if core.hasReceiver { inbox.push(frame) } else if !core.deliverBlocking(frame) { break loop }
+            }
+            if at > 0 {
+                buf.withUnsafeMutableBytes { b in _ = memmove(b.baseAddress!, b.baseAddress! + at, have - at) }
+                have -= at
+            }
         }
     }
 
@@ -211,6 +295,9 @@ public final class PasstUplink: Uplink {
     }
 
     // MARK: FramePort
+
+    // @port-skip linux-only: rootless uplink
+    public func setReceiver(_ r: (@Sendable (Data) -> Void)?) { core.setReceiver(r) }
 
     // @port-skip linux-only: rootless uplink
     public var name: String { "passt" }
@@ -235,6 +322,9 @@ public final class PasstUplink: Uplink {
     public func close() async {
         let (ch, p) = state.withLockedValue { s -> (Channel?, ChildProcess?) in
             s.closing = true
+            // The reader's descriptor keeps the socket open: shut it down so
+            // passt sees EOF (and exits) and the reader's read returns 0.
+            if let fd = s.readFD { shutdown(fd, Int32(SHUT_RDWR)) }
             return (s.channel, s.process)
         }
         try? await ch?.close()
@@ -243,5 +333,68 @@ public final class PasstUplink: Uplink {
             if await p.waitForExit(timeout: .seconds(2)) == nil { p.signal(SIGKILL) }
         }
         core.finish()
+        inbox.close()
+    }
+}
+
+/// Swallows read requests: the channel to passt is for writes only.
+// @port-skip linux-only: rootless uplink
+final class NoReadHandler: ChannelOutboundHandler, Sendable {
+    typealias OutboundIn = ByteBuffer
+    // @port-skip linux-only: rootless uplink
+    func read(context: ChannelHandlerContext) {}
+}
+
+/// Frames read from passt, waiting for the routing thread. Never drops: a
+/// lost frame from passt is worse than a late one. A dropped ACK is never
+/// re-sent by passt (the stall), and dropped data makes it resend everything
+/// from the last ACK (measured: 117M frames in 60 s when this dropped). The
+/// backlog is bounded by the guests' TCP windows (passt can't send past
+/// them); at `limit` the reader waits, a last resort that measures as
+/// `readerWaits`.
+// @port-skip linux-only: rootless uplink
+final class EagerInbox: @unchecked Sendable {
+    private let cond = NSCondition()
+    private var frames: [Data] = []
+    private var closed = false
+    private(set) var readerWaits = 0
+    private(set) var peak = 0
+    let limit: Int
+
+    // @port-skip linux-only: rootless uplink
+    init(core: FramePortCore, limit: Int = 1 << 18) {
+        self.limit = limit
+        let t = Thread { [self] in
+            while true {
+                cond.lock()
+                while frames.isEmpty && !closed { cond.wait() }
+                if frames.isEmpty && closed { cond.unlock(); return }
+                let batch = frames
+                frames.removeAll(keepingCapacity: true)
+                cond.broadcast()                  // a reader waiting at the limit
+                cond.unlock()
+                for f in batch { _ = core.receiveEagerly(f) }
+            }
+        }
+        t.name = "passt-route"
+        t.start()
+    }
+
+    // @port-skip linux-only: rootless uplink
+    func push(_ f: Data) {
+        cond.lock()
+        if frames.count >= limit {
+            readerWaits += 1
+            while frames.count >= limit && !closed { cond.wait() }
+        }
+        frames.append(f)
+        peak = max(peak, frames.count)
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    // @port-skip linux-only: rootless uplink
+    func close() {
+        cond.lock(); closed = true; cond.broadcast(); cond.unlock()
     }
 }

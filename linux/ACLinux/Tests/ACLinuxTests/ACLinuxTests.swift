@@ -757,6 +757,27 @@ struct GuestShellTests {
 
 @Suite("Frame port backpressure")
 struct FramePortTests {
+    @Test("with a receiver, inbound frames go straight to it: no consumer needed, the reader never pauses")
+    func eagerReceiver() async throws {
+        let core = FramePortCore(name: "eager", inboundLow: 2, inboundHigh: 4) { _ in }
+        final class Count: @unchecked Sendable { let l = NSLock(); var n = 0
+            func bump() { l.lock(); n += 1; l.unlock() }
+            var value: Int { l.lock(); defer { l.unlock() }; return n } }
+        let got = Count()
+        core.setReceiver { _ in got.bump() }
+        for _ in 0..<10_000 { #expect(await core.deliver(Data(count: 64))) }
+        for _ in 0..<1_000 { #expect(core.deliverBlocking(Data(count: 64))) }
+        #expect(got.value == 11_000)
+        #expect(core.stats.received == 11_000 && core.stats.inboundPauses == 0)
+        // Without one, the bounded sequence pauses the reader again.
+        core.setReceiver(nil)
+        let t = Task { for _ in 0..<8 { _ = await core.deliver(Data(count: 64)) } }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(core.stats.inboundPauses > 0)
+        core.finish()
+        await t.value
+    }
+
     @Test("a fast sender into a slow consumer: every frame arrives, in order; reading pauses instead of dropping")
     func losslessInbound() async throws {
         let dir = try shortTempDir()
