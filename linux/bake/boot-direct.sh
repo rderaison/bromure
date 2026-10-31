@@ -6,7 +6,7 @@
 # NAT: without a NIC, agentd's docker restart waits out network-online (120 s) before the shell starts.
 # Env: CID (vsock CID, distinct per concurrent run), DIAL_TIMEOUT (s, default 180),
 #      CMDLINE_DROP (words removed from the cmdline, e.g. "quiet"), CMDLINE_EXTRA (appended),
-#      LOGDIR (keeps every run's serial log there).
+#      LOGDIR (keeps every run's serial log there), MICROVM_MACHINE (the -machine string for microvm).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 IMG=$(realpath "$1"); MACH=${2:-q35}; RUNS=${3:-3}; CID=${CID:-77}
@@ -16,7 +16,7 @@ trap 'kill $(jobs -p) 2>/dev/null; [ -f "$W/qemu.pid" ] && kill $(cat "$W/qemu.p
 cp "$REPO/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" "$W/meta/"
 mkdir -p "$W/meta/virtiofs-tags"; touch "$W/meta/virtiofs-tags/bromure-meta" "$W/meta/virtiofs-tags/bromure-outbox"
 if [ $MACH = microvm ]; then
-  M="microvm,accel=kvm,pit=off,pic=off,rtc=on,isa-serial=on"; BLK=virtio-blk-device; FS=vhost-user-fs-device; VS=vhost-vsock-device; NIC=virtio-net-device
+  M=${MICROVM_MACHINE:-"microvm,accel=kvm,kernel-irqchip=on,ioapic2=off,pit=off,pic=off,rtc=on,isa-serial=on"}; BLK=virtio-blk-device; FS=vhost-user-fs-device; VS=vhost-vsock-device; NIC=virtio-net-device
 else
   M="q35,accel=kvm"; BLK=virtio-blk-pci; FS=vhost-user-fs-pci; VS=vhost-vsock-pci; NIC=virtio-net-pci
 fi
@@ -41,8 +41,24 @@ for r in $(seq $RUNS); do
     -chardev socket,id=fs1,path="$W/outbox.sock" -device $FS,chardev=fs1,tag=bromure-outbox \
     -netdev user,id=n0 -device $NIC,netdev=n0 \
     -device $VS,guest-cid=$CID -nodefaults -no-user-config \
-    -serial file:"$W/serial-$r.log" -display none -daemonize -pidfile "$W/qemu.pid"
+    -serial file:"$W/serial-$r.log" -qmp unix:"$W/qmp.sock",server=on,wait=off \
+    -display none -daemonize -pidfile "$W/qemu.pid"
   wait $LPID || true; T1=$(date +%s.%N)
+  if ! grep -q connected "$W/agentd.txt"; then
+    # Hung: what the vCPUs and the interrupt controllers are doing, kept next to the serial log.
+    python3 - "$W/qmp.sock" > "${LOGDIR:-$W}/$MACH-$r-hang.txt" 2>&1 <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); f = s.makefile("rw")
+def cmd(c, **a):
+    f.write(json.dumps({"execute": c, "arguments": a} if a else {"execute": c}) + "\n"); f.flush()
+    while True:
+        r = json.loads(f.readline())
+        if "return" in r or "error" in r: return r
+f.readline(); cmd("qmp_capabilities")
+for h in ("info status", "info cpus", "info registers -a", "info irq", "info pic", "info lapic", "info qtree"):
+    print("==== " + h); print(cmd("human-monitor-command", **{"command-line": h}).get("return", ""))
+PY
+  fi
   RSS=$(sudo -n awk '/^Rss:/{print int($2/1024)}' /proc/$(cat "$W/qemu.pid")/smaps_rollup 2>/dev/null || echo "?")
   echo "$MACH run $r: exec -> agentd vsock 5800 = $(echo "$T1 - $T0" | bc) s ($(tail -1 "$W/agentd.txt")); qemu RSS ${RSS} MiB"
   kill $(cat "$W/qemu.pid"); kill $VPID $OPID 2>/dev/null; sleep 0.3

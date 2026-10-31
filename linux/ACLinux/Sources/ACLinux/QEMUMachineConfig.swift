@@ -154,7 +154,13 @@ public struct QEMUMachineConfig: Sendable {
         var a: [String] = ["-name", name]
         switch machine {
         case .q35: a += ["-machine", "q35,accel=kvm"]
-        case .microvm: a += ["-machine", "microvm,accel=kvm,pit=off,pic=off,rtc=on,isa-serial=on"]
+        // kernel-irqchip=on (and so ioapic2=off: the in-kernel IOAPIC has 24
+        // pins): microvm's default split irqchip (QEMU's userspace IOAPICs)
+        // lost a level-triggered virtio-mmio interrupt under host load -- the
+        // IOAPIC kept IRR set for virtio-blk's line, never delivered, both vCPUs
+        // halted, and the boot hung in the initrd (1 in 80 boots on a loaded
+        // host; three CI runs). q35's virtio-pci uses MSI and never hit it.
+        case .microvm: a += ["-machine", "microvm,accel=kvm,kernel-irqchip=on,ioapic2=off,pit=off,pic=off,rtc=on,isa-serial=on"]
         }
         a += ["-cpu", "host", "-smp", "\(cpus)", "-m", "\(memoryMiB)M",
               // memfd shared RAM: required by vhost-user-fs, and what mapped-ram saves.
