@@ -6,7 +6,13 @@ import ACLinux
 /// passt and a KVM guest, driven by the CLI binary over control.sock.
 enum DaemonEnv {
     static let bin = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-        .deletingLastPathComponent().appendingPathComponent(".build/debug/bromure-ac").path
+        .deletingLastPathComponent().appendingPathComponent(".build/\(buildDir)/bromure-ac").path
+    /// The CLI of the configuration these tests were built in (ci.sh: release).
+    #if DEBUG
+    static let buildDir = "debug"
+    #else
+    static let buildDir = "release"
+    #endif
     static var ready: Bool { NetEnv.passtReady && FileManager.default.isExecutableFile(atPath: bin) }
 }
 

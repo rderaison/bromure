@@ -19,6 +19,8 @@ step "portmap: test";            swift test  --package-path "$ROOT/tools/portmap
 step "portmap: check";           "$ROOT/tools/portmap/.build/release/portmap" check --root "$ROOT" --allow-unclaimed
 step "ACLinux: build";          swift build --package-path "$ROOT/linux/ACLinux" --build-tests
 step "ACLinux: unit tests";     swift test  --package-path "$ROOT/linux/ACLinux" --skip ACLinuxIntegrationTests
+# The integration and stall suites run the release build (`swift test -c release`
+# builds it, with testing enabled): routing is ~3x faster than debug.
 step "spike: TLS interception (linux/spike/mitm)"
 swift build --package-path "$ROOT/linux/spike/mitm" -c release
 # The KVM integration step drives it from a guest behind passt (needs Internet).
@@ -27,18 +29,20 @@ step "ACLinux: KVM integration"
 # Until the vhost udev rule is installed, /dev/vhost-vsock is kvm-group only:
 # run as this user with the kvm group added (not as root).
 if [ -w /dev/vhost-vsock ] || ! sudo -n -g kvm true 2>/dev/null; then
-  swift test --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
+  swift test -c release --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 else
-  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" BROMURE_MITM_PROXY="$BROMURE_MITM_PROXY" swift test --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
+  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" BROMURE_MITM_PROXY="$BROMURE_MITM_PROXY" swift test -c release --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 fi
 step "systemd: the daemon as a transient user unit (Type=notify, ExitType=cgroup)"
+# The binary exactly as install-user-service.sh builds it (no testing flags).
+swift build --package-path "$ROOT/linux/ACLinux" -c release --product bromure-ac
 if systemctl --user is-system-running >/dev/null 2>&1 || [ "$(systemctl --user is-system-running 2>/dev/null)" = degraded ]; then
   CI_STATE=$(mktemp -d /tmp/acl-ci-sd.XXXXXX)
   systemd-run --user --unit=bromure-ac-ci -p Type=notify -p NotifyAccess=main -p ExitType=cgroup \
     --setenv=XDG_STATE_HOME="$CI_STATE" --setenv=XDG_RUNTIME_DIR="$CI_STATE/run" \
-    "$ROOT/linux/ACLinux/.build/debug/bromure-ac" daemon
+    "$ROOT/linux/ACLinux/.build/release/bromure-ac" daemon
   [ "$(systemctl --user is-active bromure-ac-ci)" = active ] || { echo "not active after READY"; exit 1; }
-  XDG_RUNTIME_DIR="$CI_STATE/run" "$ROOT/linux/ACLinux/.build/debug/bromure-ac" vm ls >/dev/null
+  XDG_RUNTIME_DIR="$CI_STATE/run" "$ROOT/linux/ACLinux/.build/release/bromure-ac" vm ls >/dev/null
   # Only this unit's own cgroup: a real installed bromure-ac.service (and its
   # passt) may be running alongside and must not count.
   CG=/sys/fs/cgroup$(systemctl --user show bromure-ac-ci -p ControlGroup --value)
