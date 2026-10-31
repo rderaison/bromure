@@ -1148,3 +1148,54 @@ struct SwitchRoutingTests {
         sw.stop()
     }
 }
+
+@Suite("Control socket streaming")
+struct ControlStreamTests {
+    @Test("PTY frames: encode, then split across partial reads")
+    func frames() {
+        let a = PTYFrame.encode(PTYFrame.data, Array("hi".utf8))
+        let b = PTYFrame.encode(PTYFrame.resize, PTYFrame.resizePayload(cols: 132, rows: 40))
+        let c = PTYFrame.encode(PTYFrame.exit, [0xff, 0xff, 0xff, 0xf9])
+        #expect(a == [0, 0, 0, 0, 2, 0x68, 0x69])
+        #expect(b == [1, 0, 0, 0, 4, 0, 132, 0, 40])
+        var buf: [UInt8] = []
+        var got: [(UInt8, [UInt8])] = []
+        for byte in a + b + c { buf.append(byte); got += PTYFrame.take(&buf) }
+        #expect(buf.isEmpty)
+        #expect(got.map(\.0) == [0, 1, 2])
+        #expect(got[0].1 == Array("hi".utf8) && got[2].1 == [0xff, 0xff, 0xff, 0xf9])
+        #expect(PTYFrame.resizePayload(cols: 70_000, rows: -1) == [0xff, 0xff, 0, 0])
+    }
+
+    @Test("a streaming reply: octet-stream header, then raw bytes both ways; an error reply throws its message")
+    func stream() async throws {
+        let path = NSTemporaryDirectory() + "acl-cs-\(UInt32.random(in: 0...UInt32.max)).sock"
+        let server = try await ControlServer.start(path: path) { req in
+            guard req.path == "/echo" else { return .error(409, "VM 'x' is off") }
+            return .streaming { s in
+                // Upper-cases until "bye", then closes.
+                for await b in s.inbound {
+                    let text = String(buffer: b)
+                    try? await s.write(ByteBuffer(string: text.uppercased()))
+                    if text.contains("bye") { return }
+                }
+            }
+        }
+        let client = ControlClient(socketPath: path)
+        #expect(throws: ControlClient.ClientError.self) { try client.openStream("POST", "/nope", body: .object([:])) }
+        do {
+            _ = try client.openStream("POST", "/nope", body: .object([:]))
+        } catch let e as ControlClient.ClientError {
+            #expect(e.description.contains("VM 'x' is off"))
+        }
+        let fd = try client.openStream("POST", "/echo", body: .object([:]))
+        defer { close(fd) }
+        #expect(ControlClient.writeAll(fd, Data("hello ".utf8)))
+        #expect(ControlClient.writeAll(fd, Data("bye".utf8)))
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: 256)
+        while true { let n = read(fd, &buf, buf.count); if n <= 0 { break }; out.append(contentsOf: buf[0..<n]) }
+        #expect(String(decoding: out, as: UTF8.self) == "HELLO BYE")
+        await server.close()
+    }
+}

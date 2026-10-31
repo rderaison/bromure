@@ -1,4 +1,5 @@
 import Foundation
+import NIOCore
 
 /// Where the daemon keeps things.
 // @port-skip linux-only: Linux daemon configuration (XDG layout)
@@ -304,7 +305,7 @@ public actor Daemon {
     // partial: no interactive (-it) PTY streaming; no dead-pool flush-and-retry beyond GuestShell's pre-write skip
     // @port ACAutomationServer.handleExec(fd: Int32, profileID: String, bodyJSON: [String:Any]) h=009a8b0b81d659a5 @7dd92fdf
     func exec(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
-        if body["interactive"] == .bool(true) { return .error(400, "Interactive exec isn't supported on Linux yet") }
+        if body["interactive"] == .bool(true) { return await interactiveExec(rec, body) }
         var command = body["command"]?.stringValue ?? ""
         if case .array(let argv) = body["argv"] ?? .null, !argv.isEmpty {
             command = argv.compactMap(\.stringValue).map(Self.shellQuote).joined(separator: " ")
@@ -323,6 +324,47 @@ public actor Daemon {
             return .error(502, "The command may have run; no reply from '\(rec.name)' (\(why)). Not retried.")
         } catch {
             return .error(502, "No shell connection for '\(rec.name)' after 10s — its shell agent hasn't come up yet.")
+        }
+    }
+
+    /// `POST /vms/{id}/exec` `{command, interactive: true, cols, rows}`: a
+    /// pooled shell connection gets `[u32be len][{"cmd", "interactive", "cols",
+    /// "rows"}]`, the client gets a 200 octet-stream header, and from then on
+    /// the bytes are pumped both ways unchanged (the frames are between the
+    /// CLI and agentd's pty) until either side closes.
+    // partial: a plain pump: no consent gate (no MITM consent on Linux yet), no view/window/sizePassive/guiConsent
+    // @port ACAutomationServer.handleInteractiveExec(clientFD: Int32, profileID: String, bodyJSON: [String:Any]) h=2d264f1f134ea9eb @7dd92fdf
+    func interactiveExec(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
+        guard let l = live[rec.id], rec.state == .running else {
+            let s = rec.state == .stopped ? "off" : rec.state.rawValue
+            return .error(409, "VM '\(rec.name)' is \(s)", ["state": .string(s)])
+        }
+        let req: JSONValue = .object(["cmd": .string(body["command"]?.stringValue ?? ""), "interactive": .bool(true),
+                                      "cols": .number(body["cols"]?.numberValue ?? 80),
+                                      "rows": .number(body["rows"]?.numberValue ?? 24)])
+        guard let reqData = try? JSONEncoder().encode(req) else { return .error(500, "Failed to encode request") }
+        var conn: VsockConnection?
+        for _ in 0..<32 {
+            guard let c = await l.shell.connection(timeout: .seconds(10)) else { break }
+            if c.channel.channel.isActive { conn = c; break }
+            await c.close()
+        }
+        guard let conn else {
+            return .error(502, "No shell connection for '\(rec.name)' after 10s — its shell agent hasn't come up yet.")
+        }
+        return .streaming { client in
+            _ = try? await conn.withStreams { inbound, outbound in
+                var head = ByteBuffer()
+                head.writeInteger(UInt32(reqData.count))
+                head.writeBytes(reqData)
+                try await outbound.write(head)
+                await withTaskGroup(of: Void.self) { g in
+                    g.addTask { for await b in client.inbound { do { try await outbound.write(b) } catch { return } } }
+                    g.addTask { do { for try await b in inbound { try await client.write(b) } } catch {} }
+                    await g.next()
+                    g.cancelAll()
+                }
+            }
         }
     }
 

@@ -18,8 +18,20 @@ public struct ControlRequest: Sendable {
 public struct ControlResponse: Sendable {
     public let status: Int
     public let body: JSONValue
+    /// Set for a streaming reply: the connection answers `200` with an
+    /// octet-stream header and then belongs to this closure (raw bytes both
+    /// ways) until it returns; the connection is closed after it.
+    public let stream: (@Sendable (ControlStream) async -> Void)?
     // @port-skip linux-only: response value type
-    public init(_ status: Int, _ body: JSONValue) { self.status = status; self.body = body }
+    public init(_ status: Int, _ body: JSONValue) { self.status = status; self.body = body; self.stream = nil }
+    // @port-skip linux-only: response value type
+    public static func streaming(_ body: @escaping @Sendable (ControlStream) async -> Void) -> ControlResponse {
+        ControlResponse(stream: body)
+    }
+    // @port-skip linux-only: response value type
+    private init(stream: @escaping @Sendable (ControlStream) async -> Void) {
+        status = 200; body = .null; self.stream = stream
+    }
     // @port-skip linux-only: response helpers
     public static func error(_ status: Int, _ message: String, _ extra: [String: JSONValue] = [:]) -> ControlResponse {
         ControlResponse(status, .object(extra.merging(["error": .string(message)]) { _, b in b }))
@@ -101,6 +113,17 @@ public final class ControlServer: Sendable {
     }
 }
 
+/// A control connection after a streaming reply's header: the client's
+/// bytes as they arrive, and writes back to it.
+// @port-skip linux-only: NIO stream handoff (macOS hands the raw fd to the handler)
+public struct ControlStream: Sendable {
+    /// Ends when the client closes (or the connection fails).
+    public let inbound: AsyncStream<ByteBuffer>
+    let channel: Channel
+    // @port-skip linux-only: NIO stream handoff
+    public func write(_ b: ByteBuffer) async throws { try await channel.writeAndFlush(b) }
+}
+
 /// Reads one request (headers to `\r\n\r\n`, then Content-Length bytes, both
 /// capped as macOS does), answers it, closes.
 // @port-skip linux-only: NIO request framing (macOS: a blocking read loop per thread)
@@ -112,6 +135,8 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     let handler: @Sendable (ControlRequest) async -> ControlResponse
     private var buf = ByteBuffer()
     private var started = false
+    /// Set once a streaming reply has taken the connection over.
+    private var streamIn: AsyncStream<ByteBuffer>.Continuation?
     /// nil until SO_PEERCRED has answered: nothing is served before that.
     private var authorized: Bool?
 
@@ -144,8 +169,15 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     // @port-skip linux-only: NIO request framing
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
+        if let streamIn { streamIn.yield(b); return }
         buf.writeBuffer(&b)
         process(context)
+    }
+
+    // @port-skip linux-only: NIO stream handoff
+    func channelInactive(context: ChannelHandlerContext) {
+        streamIn?.finish()
+        context.fireChannelInactive()
     }
 
     // @port-skip linux-only: NIO request framing
@@ -179,7 +211,31 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
         promise.futureResult.whenSuccess { r in
             let (handler, context) = bound.value
-            handler.reply(context, r)
+            if let stream = r.stream {
+                handler.startStream(context, leftover: headLen + length, stream)
+            } else {
+                handler.reply(context, r)
+            }
+        }
+    }
+
+    /// The octet-stream header, then the connection is `body`'s: bytes the
+    /// client sent after the request (and all later ones) go to its inbound.
+    // @port-skip linux-only: NIO stream handoff (macOS: handleInteractiveExec writes the header on the fd)
+    private func startStream(_ context: ChannelHandlerContext, leftover consumed: Int,
+                             _ body: @escaping @Sendable (ControlStream) async -> Void) {
+        let (inbound, cont) = AsyncStream<ByteBuffer>.makeStream()
+        streamIn = cont
+        buf.moveReaderIndex(forwardBy: consumed)
+        if buf.readableBytes > 0 { cont.yield(buf.slice()) }
+        buf = ByteBuffer()
+        if !context.channel.isActive { cont.finish() }
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+        context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(string: head)), promise: nil)
+        let channel = context.channel
+        Task {
+            await body(ControlStream(inbound: inbound, channel: channel))
+            try? await channel.close()
         }
     }
 
@@ -268,6 +324,44 @@ public struct ControlClient: Sendable {
         }
     }
 
+    /// A streaming request: returns the connected fd once a 200 header has
+    /// been read (byte by byte, so no stream byte is consumed); any other
+    /// status throws the reply's `error`. The header read is bounded at 12 s.
+    // partial: no link-stats-scaled handshake timeout (fixed 12 s), Unix socket only
+    // @port ControlClient.openStream(_: String, _: String, body: [String:Any]) h=8e529cadf8cdad71 @53294cad
+    public func openStream(_ method: String, _ path: String, body: JSONValue) throws -> Int32 {
+        let fd = try Self.connect(to: socketPath)
+        let payload = try JSONEncoder().encode(body)
+        var head = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+        head += "Content-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
+        guard Self.writeAll(fd, Data(head.utf8) + payload) else { close(fd); throw ClientError.protocolError("write failed") }
+        var tv = timeval(tv_sec: 12, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var header = [UInt8]()
+        var one: UInt8 = 0
+        while true {
+            let r = read(fd, &one, 1)
+            if r < 0 && errno == EINTR { continue }
+            if r <= 0 { close(fd); throw ClientError.protocolError("the daemon closed during the handshake") }
+            header.append(one)
+            if header.count >= 4, header.suffix(4).elementsEqual([13, 10, 13, 10]) { break }
+            if header.count > 16384 { close(fd); throw ClientError.protocolError("oversized response header") }
+        }
+        let status = String(decoding: header, as: UTF8.self).split(separator: "\r\n").first?
+            .split(separator: " ").dropFirst().first.flatMap { Int($0) } ?? 0
+        guard status == 200 else {
+            var rest = Data()
+            var b = [UInt8](repeating: 0, count: 4096)
+            while true { let r = read(fd, &b, b.count); if r <= 0 { break }; rest.append(contentsOf: b[0..<r]) }
+            close(fd)
+            let json = (try? JSONDecoder().decode(JSONValue.self, from: rest)) ?? .null
+            throw ClientError.protocolError(json["error"]?.stringValue ?? "request failed (HTTP \(status))")
+        }
+        var none = timeval()
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &none, socklen_t(MemoryLayout<timeval>.size))
+        return fd
+    }
+
     /// One request; reads the reply to EOF (the server closes after it).
     // @port-skip linux-only: blocking request (macOS's adds gzip, timeouts and extra headers)
     public func request(_ method: String, _ path: String, body: JSONValue? = nil) throws -> Response {
@@ -290,5 +384,50 @@ public struct ControlClient: Sendable {
         }
         let json = (try? JSONDecoder().decode(JSONValue.self, from: data[sep.upperBound...])) ?? .null
         return Response(status: status, json: json)
+    }
+}
+
+/// The interactive exec frames, CLI <-> agentd (the daemon only pumps them):
+/// `[type u8][len u32be][payload]`; data 0, resize 1 (cols u16be, rows u16be),
+/// exit 2 (i32be), stdin EOF 3.
+// @port-skip linux-only: the namespace; its members carry @port lines
+public enum PTYFrame {
+    public static let data: UInt8 = 0
+    public static let resize: UInt8 = 1
+    public static let exit: UInt8 = 2
+    public static let eof: UInt8 = 3
+
+    // @port PTYFrame.static encode(_: UInt8, _: [UInt8]) h=3d950a36f69dff33 @53294cad
+    public static func encode(_ type: UInt8, _ payload: [UInt8]) -> [UInt8] {
+        let len = UInt32(payload.count)
+        return [type, UInt8(len >> 24), UInt8((len >> 16) & 0xff), UInt8((len >> 8) & 0xff), UInt8(len & 0xff)] + payload
+    }
+
+    // @port PTYFrame.static resizePayload(cols: Int, rows: Int) h=c8eb5f2db136b1c2 @53294cad
+    public static func resizePayload(cols: Int, rows: Int) -> [UInt8] {
+        let c = UInt16(clamping: cols), r = UInt16(clamping: rows)
+        return [UInt8(c >> 8), UInt8(c & 0xff), UInt8(r >> 8), UInt8(r & 0xff)]
+    }
+
+    /// One frame to a blocking fd (short-write safe); false on a write error.
+    // @port PTYFrame.static send(_: Int32, _: UInt8, _: [UInt8]) h=a2e489f84937d9a4 @53294cad
+    @discardableResult
+    public static func send(_ fd: Int32, _ type: UInt8, _ payload: [UInt8]) -> Bool {
+        ControlClient.writeAll(fd, Data(encode(type, payload)))
+    }
+
+    /// Splits complete frames off the front of `buf`; a partial one stays.
+    // @port-skip linux-only: frame parsing (macOS parses inline in InteractiveExec.run)
+    public static func take(_ buf: inout [UInt8]) -> [(UInt8, [UInt8])] {
+        var out: [(UInt8, [UInt8])] = []
+        var at = 0
+        while buf.count - at >= 5 {
+            let len = Int(buf[at + 1]) << 24 | Int(buf[at + 2]) << 16 | Int(buf[at + 3]) << 8 | Int(buf[at + 4])
+            guard buf.count - at - 5 >= len else { break }
+            out.append((buf[at], Array(buf[(at + 5)..<(at + 5 + len)])))
+            at += 5 + len
+        }
+        buf.removeFirst(at)
+        return out
     }
 }

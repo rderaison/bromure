@@ -56,7 +56,9 @@ struct DaemonTests {
 
         /// Runs the CLI; returns (exit status, stdout, stderr).
         @discardableResult
-        func cli(_ args: String...) throws -> (Int32, String, String) {
+        func cli(_ args: String...) throws -> (Int32, String, String) { try cli(args, input: nil) }
+
+        func cli(_ args: [String], input: String?) throws -> (Int32, String, String) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: DaemonEnv.bin)
             p.arguments = args
@@ -64,7 +66,13 @@ struct DaemonTests {
             let out = Pipe(), err = Pipe()
             p.standardOutput = out
             p.standardError = err
+            let inp = Pipe()
+            if input != nil { p.standardInput = inp }
             try p.run()
+            if let input {
+                inp.fileHandleForWriting.write(Data(input.utf8))
+                try inp.fileHandleForWriting.close()
+            }
             let o = out.fileHandleForReading.readDataToEndOfFile(), e = err.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
             return (p.terminationStatus, String(decoding: o, as: UTF8.self), String(decoding: e, as: UTF8.self))
@@ -114,6 +122,14 @@ struct DaemonTests {
         print("TIMING [daemon] first exec (boot included) \(ms(ContinuousClock.now - t0)): \(uname.prefix(60))")
         #expect(rc2 == 0 && uname.hasPrefix("Linux bromure-ac"), "exec: \(uname) \(err2)")
         #expect(try w.cli("vm", "exec", "dm1", "--", "sh", "-c", "exit 7").0 == 7, "exit status propagates")
+        // exec -i without a terminal: stdin is framed to the guest pty, EOF
+        // reaches it as an EOF frame, the exit status comes back.
+        let t3 = ContinuousClock.now
+        let (irc, iout, ierr) = try w.cli(["vm", "exec", "-i", "dm1", "--", "bash", "--norc", "--noprofile"],
+                                          input: "tty; stty size; echo in-$((6*7))\nexit 5\n")
+        print("TIMING [daemon] exec -i \(ms(ContinuousClock.now - t3)): \(iout.split(separator: "\n").prefix(4))")
+        #expect(irc == 5, "exec -i exit status: \(irc) \(ierr)")
+        #expect(iout.contains("/dev/pts/") && iout.contains("24 80") && iout.contains("in-42"), "exec -i: \(iout)")
         let (lsrc, ls, _) = try w.cli("vm", "ls")
         #expect(lsrc == 0 && ls.contains("dm1") && ls.contains("running"))
 
@@ -164,6 +180,9 @@ struct DaemonTests {
         let names = Set(kids.map { $0.1 })
         #expect(names.contains { $0.hasPrefix("qemu-system") } && names.contains { $0.hasPrefix("passt") },
                 "expected QEMU and passt under the daemon, saw \(names)")
+        // QEMU outlives a SIGKILLed daemon by design; if the test stops before
+        // `vm kill dm2`, nothing else would end it.
+        defer { for k in kids where k.1.hasPrefix("qemu-system") && Self.alive(k.0) { kill(k.0, SIGKILL) } }
         kill(daemon.processIdentifier, SIGKILL)
         daemon.waitUntilExit()
         let tKill = Date().timeIntervalSince1970
