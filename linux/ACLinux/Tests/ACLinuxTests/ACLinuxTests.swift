@@ -1055,3 +1055,51 @@ struct HomeSeedTests {
         #expect(try fm.contentsOfDirectory(atPath: d.path).isEmpty)
     }
 }
+
+@Suite("passt routing inbox")
+struct EagerInboxTests {
+    final class Gate: @unchecked Sendable {
+        let open = DispatchSemaphore(value: 0)
+        let l = NSLock(); var got = 0, bytes = 0
+        func take(_ d: Data) { open.wait(); open.signal(); l.lock(); got += 1; bytes += d.count; l.unlock() }
+        var counts: (Int, Int) { l.lock(); defer { l.unlock() }; return (got, bytes) }
+    }
+
+    @Test("at the byte limit the reader waits (large frames), and nothing is dropped")
+    func byteLimit() async throws {
+        let core = FramePortCore(name: "inbox") { _ in }
+        let gate = Gate()
+        core.setReceiver { gate.take($0) }        // routing blocks until the gate opens
+        let inbox = EagerInbox(core: core, frameLimit: 1 << 18, byteLimit: 1 << 20)
+        let frame = Data(count: 65_000), n = 64           // 64 x 65 KB = ~4 MiB, 4x the bound
+        let pushed = DispatchSemaphore(value: 0)
+        Thread { for _ in 0..<n { inbox.push(frame) }; pushed.signal() }.start()
+        try await Task.sleep(for: .milliseconds(300))
+        let s = inbox.stats
+        #expect(s.waits == 1, "the reader waits at the byte limit")
+        #expect(s.peakBytes <= 1 << 20 && s.peakFrames <= 17, "peak \(s.peakBytes) bytes, \(s.peakFrames) frames")
+        #expect(pushed.wait(timeout: .now()) == .timedOut, "the reader is still waiting")
+        gate.open.signal()                               // routing proceeds
+        #expect(pushed.wait(timeout: .now() + 5) == .success)
+        for _ in 0..<100 where gate.counts.0 < n { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(gate.counts == (n, n * 65_000), "every frame was routed")
+        inbox.close()
+    }
+
+    @Test("the frame limit binds for small frames")
+    func frameLimit() async throws {
+        let core = FramePortCore(name: "inbox") { _ in }
+        let gate = Gate()
+        core.setReceiver { gate.take($0) }
+        let inbox = EagerInbox(core: core, frameLimit: 100, byteLimit: 64 << 20)
+        let pushed = DispatchSemaphore(value: 0)
+        Thread { for _ in 0..<1000 { inbox.push(Data(count: 60)) }; pushed.signal() }.start()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(inbox.stats.peakFrames <= 100 && inbox.stats.waits >= 1)
+        gate.open.signal()
+        #expect(pushed.wait(timeout: .now() + 5) == .success)
+        for _ in 0..<100 where gate.counts.0 < 1000 { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(gate.counts.0 == 1000)
+        inbox.close()
+    }
+}

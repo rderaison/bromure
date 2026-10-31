@@ -127,12 +127,12 @@ public final class PasstUplink: Uplink {
         inbox = EagerInbox(core: core)
     }
 
-    /// Times the reader waited because routing was 256Ki frames behind
-    /// (expected 0), and the deepest backlog seen.
+    /// Times the reader waited because routing was 256Ki frames or 64 MiB
+    /// behind (expected 0), and the deepest backlog seen (frames, bytes).
     // @port-skip linux-only: rootless uplink
-    public var routeWaits: Int { inbox.readerWaits }
+    public var routeWaits: Int { inbox.stats.waits }
     // @port-skip linux-only: rootless uplink
-    public var routeBacklogPeak: Int { inbox.peak }
+    public var routeBacklogPeak: (frames: Int, bytes: Int) { let s = inbox.stats; return (s.peakFrames, s.peakBytes) }
 
     // @port-skip linux-only: rootless uplink
     private func launch() async throws {
@@ -356,14 +356,19 @@ final class NoReadHandler: ChannelOutboundHandler, Sendable {
 final class EagerInbox: @unchecked Sendable {
     private let cond = NSCondition()
     private var frames: [Data] = []
+    /// Frames and bytes not yet routed: queued plus the batch being routed.
+    private var pendingFrames = 0, pendingBytes = 0
     private var closed = false
-    private(set) var readerWaits = 0
-    private(set) var peak = 0
-    let limit: Int
+    private var waits = 0, peakFrames = 0, peakBytes = 0
+    let frameLimit: Int, byteLimit: Int
 
+    /// 64 MiB: at the default MTU behind passt (65520) the frame limit alone
+    /// would allow ~16 GiB. The bytes bind first at any MTU above ~256 bytes
+    /// (about 44Ki frames at 1500); the frame limit caps tiny-frame floods.
     // @port-skip linux-only: rootless uplink
-    init(core: FramePortCore, limit: Int = 1 << 18) {
-        self.limit = limit
+    init(core: FramePortCore, frameLimit: Int = 1 << 18, byteLimit: Int = 64 << 20) {
+        self.frameLimit = frameLimit
+        self.byteLimit = byteLimit
         let t = Thread { [self] in
             while true {
                 cond.lock()
@@ -371,24 +376,36 @@ final class EagerInbox: @unchecked Sendable {
                 if frames.isEmpty && closed { cond.unlock(); return }
                 let batch = frames
                 frames.removeAll(keepingCapacity: true)
-                cond.broadcast()                  // a reader waiting at the limit
                 cond.unlock()
                 for f in batch { _ = core.receiveEagerly(f) }
+                cond.lock()
+                pendingFrames -= batch.count
+                pendingBytes -= batch.reduce(0) { $0 + $1.count }
+                cond.broadcast()                  // a reader waiting at a limit
+                cond.unlock()
             }
         }
         t.name = "passt-route"
         t.start()
     }
 
+    /// Never drops: past either limit the reader waits until routing catches
+    /// up (always admitting a frame when nothing is pending).
     // @port-skip linux-only: rootless uplink
     func push(_ f: Data) {
         cond.lock()
-        if frames.count >= limit {
-            readerWaits += 1
-            while frames.count >= limit && !closed { cond.wait() }
+        func full() -> Bool {
+            pendingFrames > 0 && (pendingFrames >= frameLimit || pendingBytes + f.count > byteLimit)
+        }
+        if full() {
+            waits += 1
+            while full() && !closed { cond.wait() }
         }
         frames.append(f)
-        peak = max(peak, frames.count)
+        pendingFrames += 1
+        pendingBytes += f.count
+        peakFrames = max(peakFrames, pendingFrames)
+        peakBytes = max(peakBytes, pendingBytes)
         cond.broadcast()
         cond.unlock()
     }
@@ -396,5 +413,12 @@ final class EagerInbox: @unchecked Sendable {
     // @port-skip linux-only: rootless uplink
     func close() {
         cond.lock(); closed = true; cond.broadcast(); cond.unlock()
+    }
+
+    /// Times the reader waited at a limit; the deepest backlog (frames, bytes).
+    // @port-skip linux-only: rootless uplink
+    var stats: (waits: Int, peakFrames: Int, peakBytes: Int) {
+        cond.lock(); defer { cond.unlock() }
+        return (waits, peakFrames, peakBytes)
     }
 }
