@@ -1222,3 +1222,35 @@ struct StopPostTests {
         #expect(StopPost.ownUnit("0::/user.slice/user-1000.slice/session-3.scope") == nil)
     }
 }
+
+@Suite("VM hostname and home size")
+struct HostnameHomeTests {
+    @Test("hostname from the VM name, as macOS sanitizes a workspace name")
+    func hostname() {
+        #expect(Daemon.sanitizeHostname("My Workspace_2") == "myworkspace2")
+        #expect(Daemon.sanitizeHostname("--uk--") == "uk")
+        #expect(Daemon.sanitizeHostname("Ünïcode!") == "ncode")
+        #expect(Daemon.sanitizeHostname("___") == "bromure")
+        #expect(Daemon.sanitizeHostname(String(repeating: "a", count: 40)).count == 32)
+    }
+
+    @Test("target size: the VM's own, else the default, clamped to 8-1024 GiB; grows, never shrinks, stays sparse")
+    func grow() throws {
+        #expect(Daemon.homeImageTargetBytes(gb: nil, defaultGB: 16) == 16 << 30)
+        #expect(Daemon.homeImageTargetBytes(gb: 2, defaultGB: 16) == 8 << 30)
+        #expect(Daemon.homeImageTargetBytes(gb: 4096, defaultGB: 16) == 1024 << 30)
+        let path = NSTemporaryDirectory() + "acl-home-\(UUID().uuidString).img"
+        defer { unlink(path) }
+        try Daemon.ensureHomeImage(atPath: path, bytes: 8 << 30)
+        var st = stat()
+        let grown = try Daemon.growHomeImageIfNeeded(atPath: path, target: 12 << 30, setting: 12)
+        #expect(grown == "home image grown 8 GiB → 12 GiB (target 12 GiB)")
+        _ = stat(path, &st)
+        #expect(st.st_size == 12 << 30 && st.st_blocks == 0, "sparse: \(st.st_blocks) blocks")
+        let kept = try Daemon.growHomeImageIfNeeded(atPath: path, target: 8 << 30, setting: nil)
+        #expect(kept == "home image 12 GiB (setting default, target 8 GiB) — nothing to grow")
+        _ = stat(path, &st)
+        #expect(st.st_size == 12 << 30)
+        #expect(try Daemon.growHomeImageIfNeeded(atPath: path + ".missing", target: 8 << 30, setting: nil).hasPrefix("home image unreadable"))
+    }
+}

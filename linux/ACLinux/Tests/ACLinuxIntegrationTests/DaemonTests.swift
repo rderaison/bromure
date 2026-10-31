@@ -120,7 +120,7 @@ struct DaemonTests {
         let t0 = ContinuousClock.now
         let (rc2, uname, err2) = try w.cli("vm", "exec", "dm1", "--", "uname", "-a")
         print("TIMING [daemon] first exec (boot included) \(ms(ContinuousClock.now - t0)): \(uname.prefix(60))")
-        #expect(rc2 == 0 && uname.hasPrefix("Linux bromure-ac"), "exec: \(uname) \(err2)")
+        #expect(rc2 == 0 && uname.hasPrefix("Linux "), "exec: \(uname) \(err2)")   // the hostname (dm1) is checked in homeImage()
         #expect(try w.cli("vm", "exec", "dm1", "--", "sh", "-c", "exit 7").0 == 7, "exit status propagates")
         // exec -i without a terminal: stdin is framed to the guest pty, EOF
         // reaches it as an EOF frame, the exit status comes back.
@@ -299,6 +299,33 @@ struct DaemonTests {
             try await Task.sleep(for: .milliseconds(500))
         }
         #expect(marker.contains("kept"), "the home survived kill/start: \(marker)")
+        // The guest hostname is the VM's name (meta/hostname.txt, applied by agentd).
+        var host = ""
+        for _ in 0..<20 {
+            host = try w.cli("vm", "exec", "h1", "--", "hostname").1.trimmingCharacters(in: .whitespacesAndNewlines)
+            if host == "h1" { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        #expect(host == "h1", "hostname: \(host)")
+
+        // A bigger home at a cold boot: home.img grows (sparse) and agentd's
+        // resize2fs grows the mounted ext4. A smaller one is refused.
+        #expect(try w.cli("vm", "kill", "h1").0 == 0)
+        #expect(try w.cli("vm", "start", "h1", "--home-gb", "8").0 != 0, "home images don't shrink")
+        #expect(try w.cli("vm", "start", "h1", "--home-gb", "20").0 == 0)
+        #expect(stat(dir + "/home.img", &st) == 0 && st.st_size == 20 << 30, "home.img grown to 20 GiB")
+        var fsMiB = 0
+        for _ in 0..<60 {
+            fsMiB = Int(try w.cli("vm", "exec", "h1", "--", "sh", "-c",
+                                  "findmnt -no FSTYPE /home/ubuntu | grep -q ext4 && df -B1M --output=size /home/ubuntu | tail -1")
+                            .1.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            if fsMiB > 19_000 { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        print("HOME [daemon] after --home-gb 20: the ext4 is \(fsMiB) MiB")
+        #expect(fsMiB > 19_000, "resize2fs grew the home: \(fsMiB) MiB")
+        #expect(try w.cli("vm", "exec", "h1", "--", "cat", "/home/ubuntu/marker").1.contains("kept"), "the marker survived the grow")
+        #expect(try w.vm("h1")?["homeGB"]?.numberValue == 20)
 
         // Suspend and resume: the home is part of the snapshot.
         #expect(try w.cli("vm", "suspend", "h1").0 == 0)

@@ -94,12 +94,14 @@ extension VM {
         @Option(help: "q35 or microvm.") var machine = "microvm"
         @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB = 2.0
         @Option(help: "vCPUs.") var cpus = 2
+        @Option(name: .customLong("home-gb"), help: "Home image size in GiB (8-1024; default: the daemon's).") var homeGB: Int?
 
         // @port-skip linux-only: detached run
         func run() async throws {
             var body: [String: JSONValue] = ["machine": .string(machine), "memoryGB": .number(memoryGB),
                                              "cpus": .number(Double(cpus)), "detach": true]
             if let name { body["name"] = .string(name) }
+            if let homeGB { body["homeGB"] = .number(Double(homeGB)) }
             let r = try client().request("POST", "/vms", body: .object(body))
             try check(r, "run")
             print(r.json["id"]?.stringValue ?? "")
@@ -217,9 +219,12 @@ extension VM {
     struct Start: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Start a stopped VM again (its disk and home are kept).")
         @Argument(help: "VM id or name.") var vm: String
+        @Option(name: .customLong("home-gb"), help: "Grow the home image to this size in GiB first (it never shrinks).")
+        var homeGB: Int?
         // @port-skip linux-only: start a stopped VM
         func run() async throws {
-            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/start")
+            let body: JSONValue = .object(homeGB.map { ["homeGB": .number(Double($0))] } ?? [:])
+            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/start", body: body)
             try check(r, "start")
             print("Started \(vm).")
         }

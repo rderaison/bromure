@@ -27,6 +27,9 @@ public struct VMRecord: Codable, Sendable, Equatable {
     public var pid: Int32?
     public var pidStart: UInt64?
     public var lease: String?
+    /// The VM's own home size in GiB (nil: the daemon's default); a raise
+    /// grows home.img at the next cold boot.
+    public var homeGB: Int?
 
     // @port-skip linux-only: VM record
     public var shortId: String { String(id.prefix(8)) }
@@ -43,6 +46,7 @@ public struct VMRecord: Codable, Sendable, Equatable {
             "ip": ip.map(JSONValue.string) ?? .null,
             "bootedAt": bootedAt.map { .number($0.timeIntervalSince1970.rounded()) } ?? .null,
         ]
+        if let homeGB { o["homeGB"] = .number(Double(homeGB)) }
         if state == .running, let b = bootedAt { o["uptimeSeconds"] = .number(Date().timeIntervalSince(b).rounded()) }
         return .object(o)
     }

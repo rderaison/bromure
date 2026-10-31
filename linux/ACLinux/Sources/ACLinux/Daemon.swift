@@ -177,10 +177,12 @@ public actor Daemon {
         }
         let memMiB = Int((body["memoryGB"]?.numberValue ?? 2) * 1024)
         let cpus = Int(body["cpus"]?.numberValue ?? 2)
+        let homeGB = body["homeGB"]?.numberValue.map { min(1024, max(8, Int($0))) }
         guard let cid = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
         let mac = String(format: "52:54:00:%02x:%02x:%02x", cid >> 16 & 0xFF, cid >> 8 & 0xFF, cid & 0xFF)
         var rec = VMRecord(id: id, name: name, machine: machine, cid: cid, mac: mac, state: .starting, ip: nil,
                            cpus: cpus, memoryMiB: memMiB, createdAt: Date(), bootedAt: nil, statePath: nil)
+        rec.homeGB = homeGB
         do {
             try registry.upsert(rec)
             try await launch(&rec, restoreFrom: nil)
@@ -205,7 +207,7 @@ public actor Daemon {
         case ("DELETE", ""): return await deleteVM(rec, action: body["action"]?.stringValue ?? "shutdown")
         case ("POST", "exec"): return await exec(rec, body)
         case ("POST", "resume"): return await resume(rec)
-        case ("POST", "start"): return await start(rec)
+        case ("POST", "start"): return await start(rec, body)
         case ("POST", "remove"): return remove(rec)
         default: return .error(405, "Method not allowed")
         }
@@ -272,12 +274,20 @@ public actor Daemon {
     /// `POST /vms/{id}/start` (Linux): boot a stopped VM again, on its own
     /// overlay and home image.
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
-    func start(_ rec: VMRecord) async -> ControlResponse {
+    func start(_ rec: VMRecord, _ body: JSONValue = .object([:])) async -> ControlResponse {
         guard rec.state == .stopped else {
             let hint = rec.state == .suspended ? " (resume it)" : ""
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)\(hint)", ["state": .string(rec.state.rawValue)])
         }
         var r = rec
+        // `homeGB`: a new home size, applied by this cold boot. Images don't shrink.
+        if let gb = body["homeGB"]?.numberValue.map({ min(1024, max(8, Int($0))) }) {
+            var st = stat()
+            if stat(vmDir(rec.id) + "/home.img", &st) == 0, UInt64(gb) << 30 < UInt64(st.st_size) {
+                return .error(400, "'\(rec.name)' has a \(UInt64(st.st_size) >> 30) GiB home image; home images don't shrink")
+            }
+            r.homeGB = gb
+        }
         if !CIDAllocator.shared.claim(rec.cid) {
             guard let fresh = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
             r.cid = fresh
@@ -415,7 +425,16 @@ public actor Daemon {
         // `home.mode` ext4, mkfs's the blank disk on first boot (label
         // bromure-home) and mounts it over /home/ubuntu, as on macOS.
         let home = dir + "/home.img"
-        try Self.ensureHomeImage(atPath: home, gib: config.homeImageGB)
+        let target = Self.homeImageTargetBytes(gb: rec.homeGB, defaultGB: config.homeImageGB)
+        try Self.ensureHomeImage(atPath: home, bytes: target)
+        // A size change lands at a cold boot (agentd's resize2fs grows the
+        // mounted ext4); a saved state was taken against the old geometry.
+        let homeNote = statePath != nil
+            ? "saved state present — home image kept at its size until a cold boot"
+            : try Self.growHomeImageIfNeeded(atPath: home, target: target, setting: rec.homeGB)
+        FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': \(homeNote)\n".utf8))
+        // The guest's hostname (agentd's task_apply_hostname), from the VM's name.
+        try (Self.sanitizeHostname(rec.name) + "\n").write(toFile: dir + "/meta/hostname.txt", atomically: true, encoding: .utf8)
         try "ext4\n".write(toFile: dir + "/meta/home.mode", atomically: true, encoding: .utf8)
         // The home seed agentd applies to the ext4 home before the session,
         // and the counters it polls; bumped every launch, as on macOS (on a
@@ -542,18 +561,62 @@ public actor Daemon {
 
     /// Creates the sparse home image if missing (ftruncate: all holes). An
     /// existing one is left alone: it's the VM's home.
-    // partial: no free-space check (EphemeralDisk.checkDiskSpace) and no ProfileStore change notice; size from DaemonConfig
+    // partial: no free-space check (EphemeralDisk.checkDiskSpace) and no ProfileStore change notice
     // @port SessionDisk.ensureHomeImageExists() h=83d4fac81b0747d2 @25ad3a88
-    static func ensureHomeImage(atPath path: String, gib: Int) throws {
+    static func ensureHomeImage(atPath path: String, bytes: UInt64) throws {
         guard !FileManager.default.fileExists(atPath: path) else { return }
         let fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw MachineError.io("create \(path)", errno) }
         defer { close(fd) }
-        guard ftruncate(fd, off_t(gib) << 30) == 0 else {
+        guard ftruncate(fd, off_t(bytes)) == 0 else {
             let e = errno
             unlink(path)
             throw MachineError.io("ftruncate \(path)", e)
         }
+    }
+
+    /// The home image's guest-visible size: the VM's own setting, else the
+    /// daemon-wide default (BROMURE_AC_HOME_GB), 8–1024 GiB.
+    // partial: no legacy-home migration size (Linux homes start on ext4)
+    // @port SessionDisk.var homeImageTargetBytes h=fa34eac9bb8da5e5 @25ad3a88
+    static func homeImageTargetBytes(gb: Int?, defaultGB: Int) -> UInt64 {
+        UInt64(min(1024, max(8, gb ?? defaultGB))) << 30
+    }
+
+    /// Grows an existing home image to `target` (never shrinks; it stays
+    /// sparse; agentd runs resize2fs after mounting). Returns what it did,
+    /// for the log: a grow that doesn't happen says why.
+    // partial: no free-space check (EphemeralDisk.checkDiskSpace) and no ProfileStore change notice
+    // @port SessionDisk.growHomeImageIfNeeded() h=594c22d9dd98aa97 @25ad3a88
+    static func growHomeImageIfNeeded(atPath path: String, target: UInt64, setting: Int?) throws -> String {
+        let gib = { (b: UInt64) in "\(b >> 30) GiB" }
+        var st = stat()
+        guard stat(path, &st) == 0 else { return "home image unreadable at \(path) — not grown (target \(gib(target)))" }
+        let size = UInt64(st.st_size)
+        guard size < target else {
+            return "home image \(gib(size)) (setting \(setting.map { "\($0) GB" } ?? "default"), target \(gib(target))) — nothing to grow"
+        }
+        let fd = open(path, O_WRONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw MachineError.io("open \(path)", errno) }
+        defer { close(fd) }
+        guard ftruncate(fd, off_t(target)) == 0 else { throw MachineError.io("ftruncate \(path)", errno) }
+        var now = stat()
+        _ = fstat(fd, &now)
+        return "home image grown \(gib(size)) → \(gib(UInt64(now.st_size))) (target \(gib(target)))"
+    }
+
+    /// The guest hostname for a VM name: lowercase a-z 0-9 and hyphens, no
+    /// leading or trailing hyphen, at most 32 characters, "bromure" if empty.
+    // @port SessionDisk.static sanitizeHostname(_: String) h=72495a211cde5f30 @25ad3a88
+    static func sanitizeHostname(_ name: String) -> String {
+        let allowed: Set<Character> = Set("abcdefghijklmnopqrstuvwxyz0123456789-")
+        var s = String(name.lowercased().filter { allowed.contains($0) })
+        while s.hasPrefix("-") { s.removeFirst() }
+        while s.hasSuffix("-") { s.removeLast() }
+        if s.isEmpty { s = "bromure" }
+        if s.count > 32 { s = String(s.prefix(32)) }
+        if let first = s.first, !first.isLetter && !first.isNumber { s = "x" + s }
+        return s
     }
 
     /// QEMU went away (any reason): unplug it, and record what it is now.
