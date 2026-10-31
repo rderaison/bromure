@@ -1,0 +1,7 @@
+# Expected failures of the guest suites (linux/guest-suites/run.sh), tab-separated:
+# suite	regex (a FAIL line, or a line of the suite's output)	count	why
+# run.sh reports each entry as expected (count matches seen), UNEXPECTED PASS (fewer: some now
+# pass, update this file), or unexpected (more). Matched lines are not counted as unexpected FAILs.
+test_boot	FAIL the sandbox could not append to /mnt/bromure-outbox/	2	virtiofs DAC for run_as_user (the two run_as configs) on a uid-1000 0755 directory: linux/VIRTIOFS_DAC.md, pending the user's decision
+test_boot	FAIL the sandbox could not create a file in /mnt/bromure-outbox/	2	virtiofs DAC, as above
+test_lockdown	^bpf_prog_load +no 	1	the probe passes license=NULL, so BPF_PROG_LOAD fails at any lockdown level (pre-existing test bug)

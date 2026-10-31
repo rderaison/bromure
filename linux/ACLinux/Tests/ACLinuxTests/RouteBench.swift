@@ -58,7 +58,6 @@ struct RouteBench {
         let n = 1_000_000
         // batch 1: a batch end (port flush) after every frame, the cost before
         // per-batch wakes; 64: the routing thread's batches under load.
-        _ = n
         for batch in [1, 64] {
             var rounds: [Double] = []
             for _ in 0..<5 {

@@ -56,6 +56,15 @@ if systemctl --user is-system-running >/dev/null 2>&1 || [ "$(systemctl --user i
 else
   echo "skipped: no systemd user manager"
 fi
+step "guest suites (opt-in: BROMURE_GUEST_SUITES=1, ~4.5 min)"
+# test_sentry -> test_boot -> test_sandbox -> test_net_flow -> test_strict ->
+# test_lockdown --raise in a daemon VM; expected failures are listed in
+# linux/guest-suites/expected-failures.tsv. Needs the release bromure-ac built above.
+if [ "${BROMURE_GUEST_SUITES:-0}" = 1 ]; then
+  "$ROOT/linux/guest-suites/run.sh"
+else
+  echo "skipped (BROMURE_GUEST_SUITES=1 to run)"
+fi
 step "network: netns bridge test"
 if sudo -n true 2>/dev/null; then
   sudo -n "$ROOT/linux/test-network.sh"
