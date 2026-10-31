@@ -23,7 +23,7 @@ struct RouteBench {
     /// An uplink whose receiver the bench calls directly.
     final class DirectUplink: Uplink, @unchecked Sendable {
         let sink = SinkPort("up")
-        var receiver: (@Sendable (Data) -> Void)?
+        var receiver: (@Sendable (inout Data) -> Void)?
         var batchEnd: (@Sendable () -> Void)?
         var name: String { "up" }
         var inbound: FrameSequence { sink.inbound }
@@ -33,7 +33,7 @@ struct RouteBench {
         var stats: FramePortStats { sink.stats }
         var gatewayMAC: String? { "9a:55:9a:55:9a:55" }
         var mtu: Int { 65520 }
-        func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
+        func setReceiver(_ r: (@Sendable (inout Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
             receiver = r
             self.batchEnd = batchEnd
         }
@@ -53,17 +53,19 @@ struct RouteBench {
         for i in 0..<4 { bytes[30 + i] = ip[i] }
         let route = try #require(up.receiver)
         let end = up.batchEnd ?? {}
-        // Each frame is a fresh buffer, as the passt reader hands them over.
-        let frames = (0..<1024).map { _ in Data(bytes) }
+        // Each frame is a fresh, uniquely held buffer, as the passt reader hands
+        // them over (its Data copy out of the read buffer is part of the cost).
         let n = 1_000_000
         // batch 1: a batch end (port flush) after every frame, the cost before
         // per-batch wakes; 64: the routing thread's batches under load.
+        _ = n
         for batch in [1, 64] {
             var rounds: [Double] = []
             for _ in 0..<5 {
                 let t0 = ContinuousClock.now
                 for i in 0..<n {
-                    route(frames[i & 1023])
+                    var f = Data(bytes)
+                    route(&f)
                     if (i + 1) % batch == 0 { end() }
                 }
                 let d = ContinuousClock.now - t0

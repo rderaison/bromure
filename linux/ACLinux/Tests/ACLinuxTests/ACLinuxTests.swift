@@ -1122,3 +1122,29 @@ struct EagerInboxTests {
         inbox.close()
     }
 }
+
+@Suite("Switch routing")
+struct SwitchRoutingTests {
+    @Test("MAC values round-trip; a routed frame gets its VM's MAC written in place")
+    func macRewrite() async throws {
+        let m = MAC([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef])
+        #expect(m.bytes == [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef])
+        #expect(m == MAC(InterimSwitch.mac("52:54:00:ab:cd:ef")))
+        let up = RouteBench.DirectUplink()
+        let sw = InterimSwitch(uplink: up)
+        let port = RouteBench.SinkPort("vm")
+        sw.attach(port, mac: "52:54:00:ab:cd:ef")
+        let ip = sw.dhcp.lease(for: m.bytes)
+        var bytes = [UInt8](repeating: 0xff, count: 60)     // to the broadcast MAC (passt's single-guest MAC in reality)
+        bytes[0] = 0x9a                                     // unicast, not ours
+        bytes[12] = 0x08; bytes[13] = 0x00; bytes[14] = 0x45
+        for i in 0..<4 { bytes[30 + i] = ip[i] }
+        var f = Data(bytes)
+        let route = try #require(up.receiver)
+        route(&f)
+        up.batchEnd?()
+        #expect(Array(f.prefix(6)) == m.bytes, "rewritten in place")
+        #expect(port.stats.queued + port.stats.sent == 1)
+        sw.stop()
+    }
+}

@@ -18,7 +18,7 @@ import NIOConcurrencyHelpers
 public final class InterimSwitch: Sendable {
     public let dhcp: InterimDHCP
     public let uplink: any Uplink
-    private let ports = NIOLockedValueBox<[(mac: [UInt8], port: any FramePort, task: Task<Void, Never>)]>([])
+    private let ports = NIOLockedValueBox<[(mac: MAC, port: any FramePort, task: Task<Void, Never>)]>([])
 
     // @port-skip linux-only: interim switch
     public init(uplink: any Uplink, gateway: String = "192.168.64.1", dns: String = "192.168.64.1",
@@ -29,7 +29,7 @@ public final class InterimSwitch: Sendable {
         // The uplink calls this as it reads (no queue in between): it routes
         // and `send`s, which never waits, so the uplink never stops reading
         // and a full VM port drops (counted there) instead.
-        uplink.setReceiver { [ports, dhcp] f in
+        uplink.setReceiver { [ports, dhcp] (f: inout Data) in
             // Read the header in place: no copy for a frame that ends up
             // dropped at a full port (a paused VM's retransmit bursts).
             let (target, broadcast) = f.withUnsafeBytes { b -> (UInt32?, Bool) in
@@ -48,9 +48,10 @@ public final class InterimSwitch: Sendable {
             if let target, let mac = dhcp.mac(forIP: target), let p = all.first(where: { $0.mac == mac }) {
                 guard p.port.isWritable else { p.port.sendDeferred(f); return }   // counted as that port's drop
                 if broadcast { p.port.sendDeferred(f); return }
-                var out = f
-                out.withUnsafeMutableBytes { b in for i in 0..<6 { b[i] = mac[i] } }
-                p.port.sendDeferred(out)  // never waits: drops at that port's limit
+                // In place: the routing thread hands over the only reference,
+                // so this doesn't copy the frame.
+                f.withUnsafeMutableBytes { mac.write(to: $0) }
+                p.port.sendDeferred(f)    // never waits: drops at that port's limit
             } else {
                 for p in all { p.port.sendDeferred(f) }
             }
@@ -62,7 +63,7 @@ public final class InterimSwitch: Sendable {
     /// Plugs a VM's stream port in.
     // @port-skip linux-only: interim switch
     public func attach(_ port: any FramePort, mac: String) {
-        let m = Self.mac(mac)
+        let m = MAC(Self.mac(mac))
         let t = Task { [dhcp, uplink] in
             for await f in port.inbound {
                 if let r = dhcp.handle(f) { port.send(r) } else { await uplink.sendWaiting(f) }
@@ -73,7 +74,7 @@ public final class InterimSwitch: Sendable {
 
     // @port-skip linux-only: interim switch
     public func detach(mac: String) {
-        let m = Self.mac(mac)
+        let m = MAC(Self.mac(mac))
         ports.withLockedValue { ps in
             for p in ps where p.mac == m { p.task.cancel() }
             ps.removeAll { $0.mac == m }
@@ -84,7 +85,7 @@ public final class InterimSwitch: Sendable {
     /// VM refused at its queue limit).
     // @port-skip linux-only: interim switch
     public func portStats(mac: String) -> FramePortStats? {
-        let m = Self.mac(mac)
+        let m = MAC(Self.mac(mac))
         return ports.withLockedValue { $0.first { $0.mac == m }?.port.stats }
     }
 
@@ -108,7 +109,7 @@ public final class InterimDHCP: Sendable {
     let mtu: @Sendable ([UInt8]) -> Int?
     /// MAC -> IP, and the reverse index IP (big-endian u32) -> MAC that the
     /// per-frame uplink lookup uses; both kept in lease() and release().
-    private let leases = NIOLockedValueBox<(byMAC: [[UInt8]: [UInt8]], byIP: [UInt32: [UInt8]])>(([:], [:]))
+    private let leases = NIOLockedValueBox<(byMAC: [[UInt8]: [UInt8]], byIP: [UInt32: MAC])>(([:], [:]))
     private let acked = NIOLockedValueBox<[[UInt8]: ContinuousClock.Instant]>([:])
 
     // @port-skip linux-only: interim DHCP
@@ -126,7 +127,7 @@ public final class InterimDHCP: Sendable {
             while used.contains(host) { host += 1 }
             let ip = Array(server[0..<3]) + [host]
             l.byMAC[mac] = ip
-            l.byIP[Self.u32(ip)] = mac
+            l.byIP[Self.u32(ip)] = MAC(mac)
             return ip
         }
     }
@@ -150,12 +151,12 @@ public final class InterimDHCP: Sendable {
     }
 
     // @port-skip linux-only: interim DHCP
-    func mac(for ip: [UInt8]) -> [UInt8]? { ip.count == 4 ? mac(forIP: Self.u32(ip)) : nil }
+    func mac(for ip: [UInt8]) -> [UInt8]? { ip.count == 4 ? mac(forIP: Self.u32(ip))?.bytes : nil }
 
     /// The MAC holding `ip` (big-endian u32), from the reverse index: one
     /// dictionary lookup per frame.
     // @port-skip linux-only: interim DHCP
-    func mac(forIP ip: UInt32) -> [UInt8]? { leases.withLockedValue { $0.byIP[ip] } }
+    func mac(forIP ip: UInt32) -> MAC? { leases.withLockedValue { $0.byIP[ip] } }
 
     // @port-skip linux-only: interim DHCP
     public func ackedAt(_ mac: [UInt8]) -> ContinuousClock.Instant? { acked.withLockedValue { $0[mac] } }
@@ -206,5 +207,24 @@ public final class InterimDHCP: Sendable {
         ip[10] = UInt8((~sum >> 8) & 0xFF); ip[11] = UInt8(~sum & 0xFF)
         let u: [UInt8] = [0, 67, 0, 68, UInt8(udpLen >> 8), UInt8(udpLen & 0xFF), 0, 0]
         return Data([255, 255, 255, 255, 255, 255] + serverMAC + [0x08, 0x00] + ip + u + p)
+    }
+}
+
+/// A MAC address as a value (no heap array on the routing path).
+// @port-skip linux-only: interim switch
+struct MAC: Hashable, Sendable {
+    let raw: UInt64
+    // @port-skip linux-only: interim switch
+    init(_ b: [UInt8]) {
+        var r: UInt64 = 0
+        for x in b.prefix(6) { r = r << 8 | UInt64(x) }
+        raw = r
+    }
+    // @port-skip linux-only: interim switch
+    var bytes: [UInt8] { (0..<6).map { UInt8(truncatingIfNeeded: raw >> (8 * (5 - UInt64($0)))) } }
+    /// Writes the six bytes at the start of `b` (a frame's destination).
+    // @port-skip linux-only: interim switch
+    func write(to b: UnsafeMutableRawBufferPointer) {
+        for i in 0..<6 { b[i] = UInt8(truncatingIfNeeded: raw >> (8 * UInt64(5 - i))) }
     }
 }

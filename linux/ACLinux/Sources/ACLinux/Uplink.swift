@@ -17,14 +17,14 @@ public protocol Uplink: FramePort {
     /// loses a flow's ACKs for good; linux/PASST_STALL_REPORT.md.)
     /// `batchEnd` runs after a burst of frames (at least after every frame
     /// read alone): the switch flushes its ports there.
-    func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)?)
+    func setReceiver(_ r: (@Sendable (inout Data) -> Void)?, batchEnd: (@Sendable () -> Void)?)
     func close() async
 }
 
 // @port-skip linux-only: NetworkUplink protocol stand-in
 extension TapUplink: Uplink {
     // @port-skip linux-only: tap uplink
-    public func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
+    public func setReceiver(_ r: (@Sendable (inout Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
         core.setReceiver(r, batchEnd: batchEnd)
     }
     // @port-skip linux-only: tap uplink

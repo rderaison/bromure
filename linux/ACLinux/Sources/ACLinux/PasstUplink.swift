@@ -297,7 +297,7 @@ public final class PasstUplink: Uplink {
     // MARK: FramePort
 
     // @port-skip linux-only: rootless uplink
-    public func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
+    public func setReceiver(_ r: (@Sendable (inout Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
         core.setReceiver(r, batchEnd: batchEnd)
     }
 
@@ -376,14 +376,20 @@ final class EagerInbox: @unchecked Sendable {
                 cond.lock()
                 while frames.isEmpty && !closed { cond.wait() }
                 if frames.isEmpty && closed { cond.unlock(); return }
-                let batch = frames
-                frames.removeAll(keepingCapacity: true)
+                var batch: [Data] = []
+                swap(&batch, &frames)              // the batch now holds the only references
                 cond.unlock()
-                for f in batch { _ = core.receiveEagerly(f, endsBatch: false) }
+                // Its size, before the frames are moved out of it.
+                let batchFrames = batch.count, batchBytes = batch.reduce(0) { $0 + $1.count }
+                for i in batch.indices {
+                    var f = batch[i]
+                    batch[i] = Data()              // moved out: unique, rewritten in place
+                    _ = core.receiveEagerly(owning: &f, endsBatch: false)
+                }
                 core.endBatch()                   // one writer wake per port per batch
                 cond.lock()
-                pendingFrames -= batch.count
-                pendingBytes -= batch.reduce(0) { $0 + $1.count }
+                pendingFrames -= batchFrames
+                pendingBytes -= batchBytes
                 cond.broadcast()                  // a reader waiting at a limit
                 cond.unlock()
             }

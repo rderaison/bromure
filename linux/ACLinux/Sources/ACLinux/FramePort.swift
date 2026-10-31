@@ -159,11 +159,11 @@ public final class FramePortCore: Sendable {
     /// The closure lives in a struct: a function type stored directly in the
     /// generic box made Swift 6.4 emit two reabstraction thunks that called
     /// each other until the stack overflowed (SIGSEGV on the first frame).
-    private struct Receiver: Sendable { let call: @Sendable (Data) -> Void; let batchEnd: (@Sendable () -> Void)? }
+    private struct Receiver: Sendable { let call: @Sendable (inout Data) -> Void; let batchEnd: (@Sendable () -> Void)? }
     private let receiver = NIOLockedValueBox<Receiver?>(nil)
 
     // @port-skip linux-only: frame port plumbing
-    public func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)? = nil) {
+    public func setReceiver(_ r: (@Sendable (inout Data) -> Void)?, batchEnd: (@Sendable () -> Void)? = nil) {
         let boxed = r.map { Receiver(call: $0, batchEnd: batchEnd) }
         receiver.withLockedValue { $0 = boxed }
         // A reader blocked on `inbound` (frames that came before the receiver
@@ -176,9 +176,17 @@ public final class FramePortCore: Sendable {
     /// `endsBatch: false` when more frames follow at once (the passt routing
     /// thread's batches, closed by `endBatch`); a lone frame ends its batch.
     func receiveEagerly(_ frame: Data, endsBatch: Bool = true) -> Bool {
+        var f = frame
+        return receiveEagerly(owning: &f, endsBatch: endsBatch)
+    }
+
+    /// The receiver may change `frame` in place (the switch rewrites the
+    /// destination MAC): when the caller holds the only reference, no copy.
+    // @port-skip linux-only: frame port plumbing
+    func receiveEagerly(owning frame: inout Data, endsBatch: Bool = true) -> Bool {
         guard let r = receiver.withLockedValue({ $0 }) else { return false }
         state.withLockedValue { $0.stats.received += 1 }
-        r.call(frame)
+        r.call(&frame)
         if endsBatch { r.batchEnd?() }
         return true
     }
