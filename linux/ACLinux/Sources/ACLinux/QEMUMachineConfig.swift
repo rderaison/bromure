@@ -185,7 +185,9 @@ public struct QEMUMachineConfig: Sendable {
         switch network {
         case .none: break
         case .stream(let path):
-            a += ["-netdev", "stream,id=n0,server=off,addr.type=unix,addr.path=\(Self.optValue(path))",
+            // reconnect-ms: QEMU re-dials when the switch goes away (a daemon
+            // restart re-listens on the same path and re-adopts the VM).
+            a += ["-netdev", "stream,id=n0,server=off,addr.type=unix,addr.path=\(Self.optValue(path)),reconnect-ms=250",
                   "-device", "\(dev("virtio-net")),netdev=n0\(mac)"]
         case .user:
             a += ["-netdev", "user,id=n0", "-device", "\(dev("virtio-net")),netdev=n0\(mac)"]

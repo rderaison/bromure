@@ -76,7 +76,9 @@ public actor Daemon {
                                                 attributes: [.posixPermissions: 0o700])
         let passt = try await PasstUplink.start(.init(logPath: config.runtimeDir + "/passt.log"))
         let listener = try await VsockListener.shared(port: 5800)
-        return Daemon(config: config, passt: passt, listener: listener)
+        let d = Daemon(config: config, passt: passt, listener: listener)
+        await d.adoptRunning()
+        return d
     }
 
     // @port-skip linux-only: Linux daemon core
@@ -85,7 +87,7 @@ public actor Daemon {
         self.passt = passt
         self.listener = listener
         self.sw = InterimSwitch(uplink: passt)
-        let registry = VMRegistry(path: config.stateDir + "/vms.json")
+        let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurQEMU)
         self.registry = registry
         // Suspended VMs keep their CID across daemon restarts.
         self.reservedCIDs = Set(registry.records.filter { $0.state == .suspended && CIDAllocator.shared.claim($0.cid) }.map(\.cid))
@@ -373,19 +375,12 @@ public actor Daemon {
         try HomeSeed.finalizeHomeSeed(seedDir: seed)
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
 
-        var qc = try QEMUMachineConfig(name: "bromure-\(rec.shortId)", bakedImage: config.imageDir,
-                                       overlay: dir + "/disk.qcow2", vsockCID: rec.cid, runDirectory: run)
-        qc.machine = QEMUMachineConfig.MachineType(rawValue: rec.machine) ?? .microvm
-        qc.cpus = rec.cpus
-        qc.memoryMiB = rec.memoryMiB
-        qc.shares = [.init(tag: "bromure-meta", hostPath: dir + "/meta", readOnly: true),
-                     .init(tag: "bromure-outbox", hostPath: dir + "/outbox")]
-        qc.network = .stream(socketPath: run + "/net.sock")
-        qc.macAddress = rec.mac
-        qc.extraDisks = [.init(path: home)]
-
+        let qc = try machineConfig(rec)
         let port = try await StreamPort.listen(path: run + "/net.sock")
         sw.attach(port, mac: rec.mac)
+        // The address is leased now and recorded, so a restarted daemon hands
+        // the same one back (the guest keeps it).
+        rec.lease = sw.dhcp.lease(for: InterimSwitch.mac(rec.mac)).map(String.init).joined(separator: ".")
         let shell = await GuestShell(cid: rec.cid, listener: listener)
         let machine = QEMUMachine(config: qc)
         let id = rec.id
@@ -400,12 +395,94 @@ public actor Daemon {
         }
         rec.state = .running
         rec.bootedAt = statePath == nil ? Date() : (rec.bootedAt ?? Date())
+        if let pid = await machine.pid {
+            rec.pid = pid
+            rec.pidStart = Self.processStartTime(pid)
+        }
         if statePath != nil {
             try? fm.removeItem(atPath: statePath!)
             for p in SnapshotIdentity.sidecars(forState: statePath!, disks: qc.extraDisks.count) { try? fm.removeItem(atPath: p) }
             rec.statePath = nil
         }
         try registry.upsert(rec)
+    }
+
+    /// A VM's QEMU configuration (launch and re-adoption build the same one).
+    // @port-skip linux-only: Linux daemon VM layout
+    func machineConfig(_ rec: VMRecord) throws -> QEMUMachineConfig {
+        let dir = vmDir(rec.id), run = config.runtimeDir + "/vms/" + rec.shortId
+        var qc = try QEMUMachineConfig(name: "bromure-\(rec.shortId)", bakedImage: config.imageDir,
+                                       overlay: dir + "/disk.qcow2", vsockCID: rec.cid, runDirectory: run)
+        qc.machine = QEMUMachineConfig.MachineType(rawValue: rec.machine) ?? .microvm
+        qc.cpus = rec.cpus
+        qc.memoryMiB = rec.memoryMiB
+        qc.shares = [.init(tag: "bromure-meta", hostPath: dir + "/meta", readOnly: true),
+                     .init(tag: "bromure-outbox", hostPath: dir + "/outbox")]
+        qc.network = .stream(socketPath: run + "/net.sock")
+        qc.macAddress = rec.mac
+        qc.extraDisks = [.init(path: dir + "/home.img")]
+        // A VM outlives a daemon crash: the next daemon re-adopts it.
+        qc.exitWithParent = false
+        return qc
+    }
+
+    /// Takes over the VMs a previous daemon left running: same QMP socket,
+    /// the stream port re-listened on the same path (QEMU re-dials,
+    /// reconnect-ms), the same lease, a new shell (agentd re-dials vsock 5800).
+    /// What doesn't carry over: passt is a new process, so flows the guest had
+    /// open through the old one are gone (DaemonTests measures it).
+    // @port-skip linux-only: Linux daemon VM lifecycle (macOS VMs live in the app)
+    func adoptRunning() async {
+        for rec in registry.records where rec.state == .running || rec.state == .starting {
+            var r = rec
+            do {
+                guard let pid = rec.pid else { throw MachineError.notRunning }
+                // Its own QEMU holds the CID: lease it without probing.
+                guard CIDAllocator.shared.adopt(rec.cid) else { throw MachineError.invalidConfig("CID \(rec.cid) is taken") }
+                let qc = try machineConfig(rec)
+                try? FileManager.default.removeItem(atPath: config.runtimeDir + "/vms/" + rec.shortId + "/net.sock")
+                let port = try await StreamPort.listen(path: config.runtimeDir + "/vms/" + rec.shortId + "/net.sock")
+                sw.attach(port, mac: rec.mac)
+                if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
+                let shell = await GuestShell(cid: rec.cid, listener: listener)
+                let machine: QEMUMachine
+                do { machine = try await QEMUMachine.adopt(config: qc, pid: pid) } catch {
+                    sw.detach(mac: rec.mac)
+                    await shell.stop()
+                    await port.close()
+                    throw error
+                }
+                let id = rec.id
+                await machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
+                live[id] = Live(machine: machine, port: port, shell: shell, config: qc)
+                r.state = .running
+            } catch {
+                CIDAllocator.shared.release(rec.cid)
+                r.state = .stopped
+                r.pid = nil
+                r.pidStart = nil
+            }
+            try? registry.upsert(r)
+        }
+    }
+
+    /// /proc/<pid>/stat's starttime (field 22), nil if there's no such process.
+    // @port-skip linux-only: Linux process identity
+    static func processStartTime(_ pid: Int32) -> UInt64? {
+        guard let st = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+              let close = st.lastIndex(of: ")") else { return nil }
+        let fields = st[st.index(after: close)...].split(separator: " ")
+        return fields.count > 19 ? UInt64(fields[19]) : nil       // fields[0] is field 3 (state)
+    }
+
+    /// Whether `rec`'s recorded QEMU is still the process at that pid: same
+    /// start time, and it runs this VM (`-name bromure-<short id>`).
+    // @port-skip linux-only: Linux process identity
+    static func isOurQEMU(_ rec: VMRecord) -> Bool {
+        guard let pid = rec.pid, let start = rec.pidStart, processStartTime(pid) == start,
+              let cmd = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline") else { return false }
+        let args = cmd.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+        return zip(args, args.dropFirst()).contains { $0 == "-name" && $1 == "bromure-\(rec.shortId)" }
     }
 
     /// Creates the sparse home image if missing (ftruncate: all holes). An
@@ -431,6 +508,8 @@ public actor Daemon {
         await teardown(l, mac: rec.mac)
         if case .suspended = info.reason { rec.state = .suspended } else if rec.state != .suspended { rec.state = .stopped }
         rec.ip = nil
+        rec.pid = nil
+        rec.pidStart = nil
         CIDAllocator.shared.release(rec.cid)
         try? registry.upsert(rec)
     }

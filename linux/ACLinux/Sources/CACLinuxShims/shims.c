@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -182,3 +183,12 @@ int acl_vhost_vsock_cid_in_use(uint64_t cid) {
     return -ENOSYS;
 }
 #endif
+
+int acl_pidfd_open(int pid) {
+    long r = syscall(SYS_pidfd_open, (pid_t)pid, 0);
+    return r < 0 ? -errno : (int)r;
+}
+
+int acl_pidfd_send_signal(int pidfd, int sig) {
+    return syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) < 0 ? -errno : 0;
+}

@@ -13,10 +13,12 @@ NotifyAccess=main
 ExecStart=@BIN@ daemon
 Environment=BROMURE_AC_IMAGE=@IMAGE@
 Environment=BROMURE_AGENTD=@AGENTD@
-# The service lasts as long as anything in its cgroup does, and stop kills
-# the whole cgroup: QEMU, passt and virtiofsd go with the daemon.
-ExitType=cgroup
-KillMode=control-group
+# Only the daemon is signalled: on stop, the daemon's own SIGTERM path shuts
+# its VMs and passt down. If the daemon dies (crash, OOM), its VMs keep
+# running in the cgroup and the restarted daemon re-adopts them (pidfile
+# identity, QMP, the stream port QEMU re-dials). A daemon that hangs past
+# TimeoutStopSec is SIGKILLed alone, and its VMs are re-adopted at the next start.
+KillMode=process
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=2

@@ -21,6 +21,12 @@ public struct VMRecord: Codable, Sendable, Equatable {
     public var bootedAt: Date?
     /// The suspend state file (with its overlay identity sidecar).
     public var statePath: String?
+    /// The running QEMU, so a restarted daemon can re-adopt it: its pid, its
+    /// start time (/proc/<pid>/stat, against pid reuse), and the address the
+    /// switch leased the VM.
+    public var pid: Int32?
+    public var pidStart: UInt64?
+    public var lease: String?
 
     // @port-skip linux-only: VM record
     public var shortId: String { String(id.prefix(8)) }
@@ -50,11 +56,11 @@ public struct VMRegistry: Sendable {
     public private(set) var records: [VMRecord] = []
 
     /// Loads the registry. VMs recorded as running or starting are marked
-    /// stopped: their QEMU died with the previous daemon (exit-with-parent),
-    /// so nothing is left running behind a registry that says otherwise.
-    /// Suspended ones stay suspended (their state file is still valid).
+    /// stopped unless `isAlive` says their QEMU is still there (the daemon
+    /// re-adopts those). Suspended ones stay suspended (their state file is
+    /// still valid).
     // @port-skip linux-only: Linux daemon state persistence
-    public init(path: String) {
+    public init(path: String, isAlive: (VMRecord) -> Bool = { _ in false }) {
         self.path = path
         if let data = FileManager.default.contents(atPath: path) {
             let dec = JSONDecoder()
@@ -62,8 +68,10 @@ public struct VMRegistry: Sendable {
             records = (try? dec.decode([VMRecord].self, from: data)) ?? []
         }
         var changed = false
-        for i in records.indices where records[i].state == .running || records[i].state == .starting {
+        for i in records.indices where (records[i].state == .running || records[i].state == .starting) && !isAlive(records[i]) {
             records[i].state = .stopped
+            records[i].pid = nil
+            records[i].pidStart = nil
             records[i].ip = nil
             changed = true
         }

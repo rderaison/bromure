@@ -120,6 +120,37 @@ final class ChildProcess: Sendable {
         t.start()
     }
 
+    /// A process this one didn't spawn: a VM's QEMU kept running across a
+    /// daemon restart. Watched through a pidfd (readable once it exits) and
+    /// signalled through it, so never a recycled pid; it isn't our child, so
+    /// its exit status is unknown and reads as -1.
+    // @port-skip linux-only: process supervision
+    static func adopt(name: String, pid: Int32) throws -> ChildProcess {
+        let fd = acl_pidfd_open(pid)
+        guard fd >= 0 else { throw MachineError.io("pidfd_open \(pid)", -fd) }
+        let p = try ChildProcess(name: name, executable: "", arguments: [], logPath: nil)
+        p.state.withLockedValue { $0.pid = pid }
+        p.pidfd.withLockedValue { $0 = fd }
+        let state = p.state, pidfd = p.pidfd
+        let t = Thread {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            while poll(&pfd, 1, -1) < 0 && errno == EINTR {}
+            let waiters = state.withLockedValue { s -> [CheckedContinuation<Int32, Never>] in
+                s.status = -1
+                defer { s.waiters = [] }
+                return s.waiters
+            }
+            pidfd.withLockedValue { if let f = $0 { close(f) }; $0 = nil }
+            for w in waiters { w.resume(returning: -1) }
+        }
+        t.name = "wait-adopted-\(name)-\(pid)"
+        t.start()
+        return p
+    }
+
+    /// Set for an adopted process: signal() goes through it.
+    private let pidfd = NIOLockedValueBox<Int32?>(nil)
+
     /// Tests only: a pause between the child's exit and recording it.
     static let reapPauseForTesting = NIOLockedValueBox<Double?>(nil)
 
@@ -164,6 +195,7 @@ final class ChildProcess: Sendable {
     func signal(_ sig: Int32) -> Bool {
         state.withLockedValue { s in
             guard s.pid != 0, s.status == nil else { return false }
+            if let fd = pidfd.withLockedValue({ $0 }) { return acl_pidfd_send_signal(fd, sig) == 0 }
             return kill(s.pid, sig) == 0
         }
     }

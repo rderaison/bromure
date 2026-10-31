@@ -63,6 +63,17 @@ public final class CIDAllocator: Sendable {
         }
     }
 
+    /// Leases `cid` for a VM whose QEMU already holds it (a re-adopted VM):
+    /// no probe, which would see that QEMU and answer in use.
+    // @port-skip linux-only: CID leasing
+    public func adopt(_ cid: UInt32) -> Bool {
+        state.withLockedValue { s in
+            guard range.contains(cid), !s.leased.contains(cid) else { return false }
+            s.leased.insert(cid)
+            return true
+        }
+    }
+
     /// Leases `cid` specifically (a resumed VM keeps its CID), if it's free.
     // @port-skip linux-only: CID allocation
     public func claim(_ cid: UInt32) -> Bool {

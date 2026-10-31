@@ -97,7 +97,7 @@ struct DaemonTests {
         return st[st.index(after: close)...].split(separator: " ").first != "Z"
     }
 
-    @Test("run, ls, exec, suspend, resume, exec, kill; SIGKILLed daemon leaves no QEMU/passt; restart shows it stopped")
+    @Test("run, ls, exec, suspend, resume, exec, kill; a SIGKILLed daemon's VM is re-adopted by the next one (exec works; flows through the old passt break)")
     func lifecycle() async throws {
         let w = try World()
         defer { try? FileManager.default.removeItem(atPath: w.root) }
@@ -135,27 +135,69 @@ struct DaemonTests {
         let r = try ControlClient(socketPath: w.socket).request("GET", "/no/such/route")
         #expect(r.status == 404 && r.json["error"]?.stringValue == "Not found")
 
-        // A running VM, then SIGKILL the daemon: nothing of it may survive.
+        // A running VM, then SIGKILL the daemon: passt goes with it (its
+        // socket hits EOF), the VM doesn't (no exit-with-parent), and the next
+        // daemon re-adopts it.
+        let lan = try #require(hostLANAddress())
+        let base = 47_000 + Int.random(in: 0..<400) * 8
+        let svc = try await startServices(ip: lan, base: base)
+        defer { stopHelper(svc) }
         #expect(try w.cli("vm", "run", "--name", "dm2").0 == 0)
         #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 == 0)
+        // A TCP flow through passt that outlives the restart: one echo a second,
+        // each reply's time in /tmp/flow.log.
+        #expect(try w.cli("vm", "exec", "dm2", "--", "sh", "-c", """
+            nohup python3 -c "
+            import socket, time
+            s = socket.create_connection(('\(lan)', \(base + 1)), timeout=5); s.settimeout(5)
+            while True:
+                try:
+                    s.sendall(b'x'); s.recv(1)
+                    open('/tmp/flow.log', 'a').write('ok %.1f\\n' % time.time())
+                except Exception as e:
+                    open('/tmp/flow.log', 'a').write('err %s %.1f\\n' % (type(e).__name__, time.time()))
+                time.sleep(1)
+            " >/dev/null 2>&1 &
+            sleep 2; tail -1 /tmp/flow.log
+            """).1.contains("ok"), "the flow runs before the restart")
         let kids = Self.children(of: daemon.processIdentifier)
         let names = Set(kids.map { $0.1 })
         #expect(names.contains { $0.hasPrefix("qemu-system") } && names.contains { $0.hasPrefix("passt") },
                 "expected QEMU and passt under the daemon, saw \(names)")
         kill(daemon.processIdentifier, SIGKILL)
         daemon.waitUntilExit()
-        var left = kids.filter { Self.alive($0.0) }
-        for _ in 0..<50 where !left.isEmpty {
-            try await Task.sleep(for: .milliseconds(100))
-            left = kids.filter { Self.alive($0.0) }
-        }
-        #expect(left.isEmpty, "survived the daemon: \(left)")
-        print("ORPHANS [daemon] children before SIGKILL: \(kids.map { $0.1 }.sorted()); alive after: \(left.count)")
+        let tKill = Date().timeIntervalSince1970
+        try await Task.sleep(for: .seconds(1))
+        let qemuLeft = kids.filter { $0.1.hasPrefix("qemu-system") && Self.alive($0.0) }
+        let passtLeft = kids.filter { $0.1.hasPrefix("passt") && Self.alive($0.0) }
+        #expect(qemuLeft.count == 1, "the VM outlives the daemon")
+        #expect(passtLeft.isEmpty, "passt ends with the daemon's socket")
+        print("ADOPT [daemon] after SIGKILL: QEMU alive \(qemuLeft.count), passt alive \(passtLeft.count)")
 
-        // Restart: the registry says stopped, not phantom-running.
+        // Restart: dm2 is re-adopted, not phantom-stopped.
+        let tRestart = ContinuousClock.now
         daemon = try await w.startDaemon()
-        #expect(try w.state(of: "dm2") == "stopped")
-        #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 != 0)
+        #expect(try w.state(of: "dm2") == "running", "re-adopted")
+        var execRC = -1
+        for _ in 0..<30 where execRC != 0 {
+            execRC = Int(try w.cli("vm", "exec", "dm2", "--", "true").0)
+            if execRC != 0 { try await Task.sleep(for: .milliseconds(500)) }
+        }
+        #expect(execRC == 0, "exec after re-adoption")
+        print("ADOPT [daemon] restart -> exec works: \(ms(ContinuousClock.now - tRestart))")
+        // New connections work through the new passt; the old flow is measured.
+        let fresh = try w.cli("vm", "exec", "dm2", "--", "python3", "-c",
+                              "import socket; print(socket.create_connection(('\(lan)', \(base + 2)), timeout=5).recv(64).decode().strip())").1
+        #expect(fresh.contains("hello from"), "a new connection after the restart: \(fresh)")
+        try await Task.sleep(for: .seconds(6))
+        let flow = try w.cli("vm", "exec", "dm2", "--", "cat", "/tmp/flow.log").1
+        let after = flow.split(separator: "\n").filter { l in
+            l.split(separator: " ").last.flatMap { Double($0) }.map { $0 > tKill + 2 } ?? false
+        }
+        print("ADOPT [daemon] the flow opened before the kill, after the restart: \(after.prefix(3)) (\(after.count) lines)")
+        // Expected: dead (passt is a new process with none of the old flow's
+        // state). Recorded, not asserted, so a change in that shows up as data.
+        #expect(try w.cli("vm", "kill", "--force", "dm2").0 == 0)
 
         // A suspended VM keeps its CID across a graceful restart: SIGTERM
         // (the systemctl stop path, with signals unblocked even though

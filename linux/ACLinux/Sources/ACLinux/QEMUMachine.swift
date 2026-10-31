@@ -99,6 +99,37 @@ public actor QEMUMachine {
         self.config = config
     }
 
+    /// Takes over a QEMU that a previous daemon started (`pid`, still running
+    /// `config`): reconnects QMP and watches the process. Its virtiofsds are
+    /// not supervised (they exit when QEMU does); its exit status is unknown,
+    /// so an exit nobody asked for reads as `.crashed`.
+    // @port-skip linux-only: QEMU backend (daemon restart; macOS VMs live in the app process)
+    public static func adopt(config: QEMUMachineConfig, pid: Int32) async throws -> QEMUMachine {
+        let m = QEMUMachine(config: config)
+        try await m.attach(pid: pid)
+        return m
+    }
+
+    // @port-skip linux-only: QEMU backend
+    private func attach(pid: Int32) async throws {
+        guard state == .idle else { throw MachineError.alreadyStarted }
+        let q = try ChildProcess.adopt(name: "qemu", pid: pid)
+        qemu = q
+        state = .starting
+        Task { [weak self] in
+            let status = await q.waitForExit()
+            await self?.qemuExited(status)
+        }
+        do {
+            qmp = try await QMPClient.connect(socketPath: config.qmpSocketPath, timeout: .seconds(5))
+        } catch {
+            state = .idle
+            qemu = nil
+            throw error
+        }
+        state = .running
+    }
+
     /// Called once, when the VM has stopped for any reason.
     // @port-skip linux-only: QEMU backend
     public func setOnStopped(_ handler: @escaping @Sendable (StopInfo) -> Void) {

@@ -61,4 +61,10 @@ int acl_unblock_term_signals(void);
 /// prctl(PR_GET_DUMPABLE).
 int acl_get_dumpable(void);
 
+/// pidfd_open(2): a descriptor that becomes readable when `pid` exits (-errno on failure).
+int acl_pidfd_open(int pid);
+
+/// pidfd_send_signal(2): signals the process the pidfd refers to, never a recycled pid.
+int acl_pidfd_send_signal(int pidfd, int sig);
+
 #endif

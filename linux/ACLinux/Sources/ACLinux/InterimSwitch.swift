@@ -138,6 +138,17 @@ public final class InterimDHCP: Sendable {
         leases.withLockedValue { $0.byMAC[InterimSwitch.mac(mac)] }.map { $0.map(String.init).joined(separator: ".") }
     }
 
+    /// Hands `mac` the address it had (a re-adopted VM keeps its lease).
+    // @port-skip linux-only: interim DHCP
+    public func assign(mac: [UInt8], ip: [UInt8]) {
+        guard ip.count == 4 else { return }
+        leases.withLockedValue { l in
+            if let old = l.byMAC[mac] { l.byIP.removeValue(forKey: Self.u32(old)) }
+            l.byMAC[mac] = ip
+            l.byIP[Self.u32(ip)] = MAC(mac)
+        }
+    }
+
     // @port-skip linux-only: interim DHCP
     public func release(mac: String) {
         leases.withLockedValue { l in
