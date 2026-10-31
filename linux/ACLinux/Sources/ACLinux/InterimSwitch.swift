@@ -46,14 +46,16 @@ public final class InterimSwitch: Sendable {
             guard f.count >= 14 else { return }
             let all = ports.withLockedValue { $0 }
             if let target, let mac = dhcp.mac(forIP: target), let p = all.first(where: { $0.mac == mac }) {
-                guard p.port.isWritable else { p.port.send(f); return }   // counted as that port's drop
-                if broadcast { p.port.send(f); return }
+                guard p.port.isWritable else { p.port.sendDeferred(f); return }   // counted as that port's drop
+                if broadcast { p.port.sendDeferred(f); return }
                 var out = f
                 out.withUnsafeMutableBytes { b in for i in 0..<6 { b[i] = mac[i] } }
-                p.port.send(out)          // never waits: drops at that port's limit
+                p.port.sendDeferred(out)  // never waits: drops at that port's limit
             } else {
-                for p in all { p.port.send(f) }
+                for p in all { p.port.sendDeferred(f) }
             }
+        } batchEnd: { [ports] in
+            for p in ports.withLockedValue({ $0 }) { p.port.flush() }
         }
     }
 
@@ -88,7 +90,7 @@ public final class InterimSwitch: Sendable {
 
     // @port-skip linux-only: interim switch
     public func stop() {
-        uplink.setReceiver(nil)
+        uplink.setReceiver(nil, batchEnd: nil)
         ports.withLockedValue { ps in for p in ps { p.task.cancel() } }
     }
 

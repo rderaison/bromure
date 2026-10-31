@@ -97,6 +97,14 @@ public final class StreamPort: FramePort {
     // MARK: FramePort
 
     // @port-skip linux-only: QEMU stream netdev
+    @discardableResult public func sendDeferred(_ frame: Data) -> FrameSendResult {
+        guard frame.count >= Self.minFrame, frame.count <= Self.maxFrame else { return .dropped }
+        return core.sendDeferred(frame)
+    }
+    // @port-skip linux-only: QEMU stream netdev
+    public func flush() { core.flush() }
+
+    // @port-skip linux-only: QEMU stream netdev
     public var inbound: FrameSequence { core.sequence }
     // @port-skip linux-only: QEMU stream netdev
     @discardableResult public func send(_ frame: Data) -> FrameSendResult {

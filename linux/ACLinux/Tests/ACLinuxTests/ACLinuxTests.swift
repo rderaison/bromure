@@ -757,6 +757,25 @@ struct GuestShellTests {
 
 @Suite("Frame port backpressure")
 struct FramePortTests {
+    @Test("sendDeferred queues and drops like send, in order; the writer runs after flush")
+    func deferredSend() async throws {
+        final class Got: @unchecked Sendable { let l = NSLock(); var frames: [UInt8] = []
+            func add(_ fs: [Data]) { l.lock(); frames += fs.map { $0[0] }; l.unlock() }
+            var value: [UInt8] { l.lock(); defer { l.unlock() }; return frames } }
+        let got = Got()
+        let core = FramePortCore(name: "deferred", queueFrames: 8) { got.add($0) }
+        try await Task.sleep(for: .milliseconds(50))            // the writer is idle, waiting
+        for i in 0..<10 { core.sendDeferred(Data([UInt8(i)] + [UInt8](repeating: 0, count: 13))) }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(got.value.isEmpty, "nothing is written before flush")
+        #expect(core.stats.dropped == 2, "frames past the queue limit are dropped and counted")
+        core.flush()
+        for _ in 0..<50 where got.value.count < 8 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(got.value == [0, 1, 2, 3, 4, 5, 6, 7], "in order, the first 8")
+        core.flush()                                            // nothing queued: a no-op
+        core.finish()
+    }
+
     @Test("with a receiver, inbound frames go straight to it: no consumer needed, the reader never pauses")
     func eagerReceiver() async throws {
         let core = FramePortCore(name: "eager", inboundLow: 2, inboundHigh: 4) { _ in }
@@ -770,7 +789,7 @@ struct FramePortTests {
         #expect(got.value == 11_000)
         #expect(core.stats.received == 11_000 && core.stats.inboundPauses == 0)
         // Without one, the bounded sequence pauses the reader again.
-        core.setReceiver(nil)
+        core.setReceiver(nil, batchEnd: nil)
         let t = Task { for _ in 0..<8 { _ = await core.deliver(Data(count: 64)) } }
         try await Task.sleep(for: .milliseconds(200))
         #expect(core.stats.inboundPauses > 0)

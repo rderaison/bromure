@@ -34,6 +34,20 @@ public protocol FramePort: AnyObject, Sendable {
     /// Whether `send` would queue right now.
     var isWritable: Bool { get }
     var stats: FramePortStats { get }
+    /// `send`, without waking the writer: a burst of these is followed by
+    /// one `flush` (the switch routes a batch, then flushes). Same queue,
+    /// same order, same drop counting as `send`.
+    @discardableResult func sendDeferred(_ frame: Data) -> FrameSendResult
+    /// Wakes the writer for whatever `sendDeferred` queued.
+    func flush()
+}
+
+// @port-skip linux-only: frame port plumbing
+extension FramePort {
+    // @port-skip linux-only: frame port plumbing
+    @discardableResult public func sendDeferred(_ frame: Data) -> FrameSendResult { send(frame) }
+    // @port-skip linux-only: frame port plumbing
+    public func flush() {}
 }
 
 // @port-skip linux-only: frame port plumbing
@@ -145,12 +159,12 @@ public final class FramePortCore: Sendable {
     /// The closure lives in a struct: a function type stored directly in the
     /// generic box made Swift 6.4 emit two reabstraction thunks that called
     /// each other until the stack overflowed (SIGSEGV on the first frame).
-    private struct Receiver: Sendable { let call: @Sendable (Data) -> Void }
+    private struct Receiver: Sendable { let call: @Sendable (Data) -> Void; let batchEnd: (@Sendable () -> Void)? }
     private let receiver = NIOLockedValueBox<Receiver?>(nil)
 
     // @port-skip linux-only: frame port plumbing
-    public func setReceiver(_ r: (@Sendable (Data) -> Void)?) {
-        let boxed = r.map { Receiver(call: $0) }
+    public func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)? = nil) {
+        let boxed = r.map { Receiver(call: $0, batchEnd: batchEnd) }
         receiver.withLockedValue { $0 = boxed }
         // A reader blocked on `inbound` (frames that came before the receiver
         // did, with nobody consuming) must go on: from now on it delivers here.
@@ -159,12 +173,18 @@ public final class FramePortCore: Sendable {
 
     /// The eager path: hands `frame` to the receiver if there is one.
     // @port-skip linux-only: frame port plumbing
-    func receiveEagerly(_ frame: Data) -> Bool {
+    /// `endsBatch: false` when more frames follow at once (the passt routing
+    /// thread's batches, closed by `endBatch`); a lone frame ends its batch.
+    func receiveEagerly(_ frame: Data, endsBatch: Bool = true) -> Bool {
         guard let r = receiver.withLockedValue({ $0 }) else { return false }
         state.withLockedValue { $0.stats.received += 1 }
         r.call(frame)
+        if endsBatch { r.batchEnd?() }
         return true
     }
+
+    // @port-skip linux-only: frame port plumbing
+    func endBatch() { receiver.withLockedValue { $0 }?.batchEnd?() }
 
     // @port-skip linux-only: frame port plumbing
     var hasReceiver: Bool { receiver.withLockedValue { $0 != nil } }
@@ -312,6 +332,34 @@ public final class FramePortCore: Sendable {
                 }
             }
         }
+    }
+
+    /// `send` without waking the writer (see FramePort.sendDeferred).
+    // @port-skip linux-only: frame port plumbing
+    @discardableResult
+    public func sendDeferred(_ frame: Data) -> FrameSendResult {
+        state.withLockedValue { s -> FrameSendResult in
+            if s.closed { return .closed }
+            if !hasRoom(s.queue.count, s.bytes) {
+                s.stats.dropped += 1
+                return .dropped
+            }
+            s.queue.append(frame)
+            s.bytes += frame.count
+            s.stats.queued = s.queue.count
+            return .queued
+        }
+    }
+
+    /// Wakes the writer if it waits and anything is queued.
+    // @port-skip linux-only: frame port plumbing
+    public func flush() {
+        let waiter = state.withLockedValue { s -> CheckedContinuation<Void, Never>? in
+            guard !s.queue.isEmpty, let w = s.drainWaiter else { return nil }
+            s.drainWaiter = nil
+            return w
+        }
+        waiter?.resume()
     }
 
     /// `send` without counting a drop (sendWaiting retries).

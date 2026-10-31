@@ -14,7 +14,8 @@ struct RouteBench {
         init(_ n: String) { name = n; core = FramePortCore(name: n, queueFrames: 1 << 22, queueBytes: 1 << 40) { _ in } }
         var inbound: FrameSequence { core.sequence }
         func send(_ f: Data) -> FrameSendResult { core.send(f) }
-        func sendBatch(_ fs: [Data]) { for f in fs { _ = core.send(f) } }
+        func sendDeferred(_ f: Data) -> FrameSendResult { core.sendDeferred(f) }
+        func flush() { core.flush() }
         func sendWaiting(_ f: Data) async { await core.sendWaiting(f) }
         var isWritable: Bool { core.isWritable }
         var stats: FramePortStats { core.stats }
@@ -23,6 +24,7 @@ struct RouteBench {
     final class DirectUplink: Uplink, @unchecked Sendable {
         let sink = SinkPort("up")
         var receiver: (@Sendable (Data) -> Void)?
+        var batchEnd: (@Sendable () -> Void)?
         var name: String { "up" }
         var inbound: FrameSequence { sink.inbound }
         func send(_ f: Data) -> FrameSendResult { .queued }
@@ -31,7 +33,10 @@ struct RouteBench {
         var stats: FramePortStats { sink.stats }
         var gatewayMAC: String? { "9a:55:9a:55:9a:55" }
         var mtu: Int { 65520 }
-        func setReceiver(_ r: (@Sendable (Data) -> Void)?) { receiver = r }
+        func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
+            receiver = r
+            self.batchEnd = batchEnd
+        }
         func close() async {}
     }
 
@@ -47,14 +52,27 @@ struct RouteBench {
         bytes[12] = 0x08; bytes[13] = 0x00; bytes[14] = 0x45
         for i in 0..<4 { bytes[30 + i] = ip[i] }
         let route = try #require(up.receiver)
-        let n = 2_000_000
+        let end = up.batchEnd ?? {}
         // Each frame is a fresh buffer, as the passt reader hands them over.
         let frames = (0..<1024).map { _ in Data(bytes) }
-        let t0 = ContinuousClock.now
-        for i in 0..<n { route(frames[i & 1023]) }
-        let d = ContinuousClock.now - t0
-        let ns = (Double(d.components.seconds) * 1e9 + Double(d.components.attoseconds) / 1e9) / Double(n)
-        print("BENCH route: \(String(format: "%.0f", ns)) ns/frame (\(String(format: "%.2f", 1e3 / ns))M frames/s); delivered \(a.stats.queued + a.stats.sent)")
+        let n = 1_000_000
+        // batch 1: a batch end (port flush) after every frame, the cost before
+        // per-batch wakes; 64: the routing thread's batches under load.
+        for batch in [1, 64] {
+            var rounds: [Double] = []
+            for _ in 0..<5 {
+                let t0 = ContinuousClock.now
+                for i in 0..<n {
+                    route(frames[i & 1023])
+                    if (i + 1) % batch == 0 { end() }
+                }
+                let d = ContinuousClock.now - t0
+                rounds.append((Double(d.components.seconds) * 1e9 + Double(d.components.attoseconds) / 1e9) / Double(n))
+            }
+            rounds.sort()
+            print("BENCH route, batch \(batch): best \(String(format: "%.0f", rounds[0])) ns/frame, median \(String(format: "%.0f", rounds[2])) ns/frame")
+        }
+        print("BENCH delivered \(a.stats.queued + a.stats.sent), dropped \(a.stats.dropped)")
         sw.stop()
     }
 }

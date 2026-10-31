@@ -297,7 +297,9 @@ public final class PasstUplink: Uplink {
     // MARK: FramePort
 
     // @port-skip linux-only: rootless uplink
-    public func setReceiver(_ r: (@Sendable (Data) -> Void)?) { core.setReceiver(r) }
+    public func setReceiver(_ r: (@Sendable (Data) -> Void)?, batchEnd: (@Sendable () -> Void)?) {
+        core.setReceiver(r, batchEnd: batchEnd)
+    }
 
     // @port-skip linux-only: rootless uplink
     public var name: String { "passt" }
@@ -377,7 +379,8 @@ final class EagerInbox: @unchecked Sendable {
                 let batch = frames
                 frames.removeAll(keepingCapacity: true)
                 cond.unlock()
-                for f in batch { _ = core.receiveEagerly(f) }
+                for f in batch { _ = core.receiveEagerly(f, endsBatch: false) }
+                core.endBatch()                   // one writer wake per port per batch
                 cond.lock()
                 pendingFrames -= batch.count
                 pendingBytes -= batch.reduce(0) { $0 + $1.count }
