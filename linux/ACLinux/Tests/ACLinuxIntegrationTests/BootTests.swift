@@ -87,6 +87,13 @@ struct BootTests {
         let cid: UInt32
         var config: QEMUMachineConfig
 
+        /// The image's cmdline without `quiet`, with systemd's unit status and
+        /// kernel timestamps on the serial console.
+        static func diagnosableCmdline(_ c: String) -> String {
+            (c.split(separator: " ").filter { $0 != "quiet" }.map(String.init)
+             + ["systemd.show_status=1", "printk.time=1"]).joined(separator: " ")
+        }
+
         init(machine: QEMUMachineConfig.MachineType) throws {
             // A comma in every path QEMU parses: proves the option escaping.
             dir = "/tmp/acl-it,\(UUID().uuidString.prefix(8))"
@@ -102,6 +109,10 @@ struct BootTests {
                                            overlay: "\(dir)/disk.qcow2", vsockCID: cid,
                                            runDirectory: "\(dir)/run")
             config.machine = machine
+            // Test VMs boot verbose: an early-boot hang (seen on microvm in CI:
+            // an initrd udev-settle timeout, and a stop right after the root
+            // fsck) then shows in the serial log which step it stopped at.
+            config.cmdline = Self.diagnosableCmdline(config.cmdline)
             config.shares = [.init(tag: "bromure-meta", hostPath: "\(dir)/meta", readOnly: true),
                              .init(tag: "bromure-outbox", hostPath: "\(dir)/outbox")]
             // A link up front: without one, agentd's docker restart waits out

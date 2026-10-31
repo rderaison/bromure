@@ -4,6 +4,9 @@
 # from `bromure-ac image bake`), with the bromure-meta virtiofs share holding bromure-agentd.py, and times
 # QEMU exec -> bromure-agentd's first vsock connection to host port 5800. The NIC is QEMU user-mode
 # NAT: without a NIC, agentd's docker restart waits out network-online (120 s) before the shell starts.
+# Env: CID (vsock CID, distinct per concurrent run), DIAL_TIMEOUT (s, default 180),
+#      CMDLINE_DROP (words removed from the cmdline, e.g. "quiet"), CMDLINE_EXTRA (appended),
+#      LOGDIR (keeps every run's serial log there).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 IMG=$(realpath "$1"); MACH=${2:-q35}; RUNS=${3:-3}; CID=${CID:-77}
@@ -17,6 +20,9 @@ if [ $MACH = microvm ]; then
 else
   M="q35,accel=kvm"; BLK=virtio-blk-pci; FS=vhost-user-fs-pci; VS=vhost-vsock-pci; NIC=virtio-net-pci
 fi
+CMDLINE=$(cat "$IMG/cmdline")
+for w in ${CMDLINE_DROP:-}; do CMDLINE=$(printf '%s' "$CMDLINE" | sed "s/\(^\| \)$w\( \|$\)/ /g"); done
+CMDLINE="$CMDLINE ${CMDLINE_EXTRA:-}"
 for r in $(seq $RUNS); do
   rm -f "$W/disk.qcow2" "$W/meta.sock" "$W/outbox.sock"
   qemu-img create -q -f qcow2 -F raw -b "$IMG/base.img" "$W/disk.qcow2"
@@ -24,12 +30,12 @@ for r in $(seq $RUNS); do
   VPID=$!
   /usr/libexec/virtiofsd --shared-dir "$W/outbox" --socket-path "$W/outbox.sock" --sandbox namespace >"$W/vfs-outbox.log" 2>&1 &
   OPID=$!; for i in $(seq 100); do [ -S "$W/meta.sock" ] && [ -S "$W/outbox.sock" ] && break; sleep 0.02; done
-  python3 "$HERE/vsock-host.py" 5800 180 > "$W/agentd.txt" &
+  python3 "$HERE/vsock-host.py" 5800 "${DIAL_TIMEOUT:-180}" > "$W/agentd.txt" &
   LPID=$!; until grep -q ready "$W/agentd.txt" 2>/dev/null; do sleep 0.01; done
   T0=$(date +%s.%N)
   qemu-system-x86_64 -name bromure-direct -machine $M -cpu host -smp 2 -m 2G \
     -object memory-backend-memfd,id=mem,size=2G,share=on -numa node,memdev=mem \
-    -kernel "$IMG/vmlinuz" -initrd "$IMG/initrd.img" -append "$(cat "$IMG/cmdline")" \
+    -kernel "$IMG/vmlinuz" -initrd "$IMG/initrd.img" -append "$CMDLINE" \
     -drive if=none,id=d0,file="$W/disk.qcow2",format=qcow2,cache=none,aio=io_uring -device $BLK,drive=d0 \
     -chardev socket,id=fs0,path="$W/meta.sock" -device $FS,chardev=fs0,tag=bromure-meta \
     -chardev socket,id=fs1,path="$W/outbox.sock" -device $FS,chardev=fs1,tag=bromure-outbox \

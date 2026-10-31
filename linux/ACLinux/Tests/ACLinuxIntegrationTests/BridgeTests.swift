@@ -61,10 +61,14 @@ struct SwitchedVM {
         let first = await next(conns, timeout: .seconds(150))
         if first == nil {
             func tail(_ p: String) -> String {
-                ((try? String(contentsOfFile: p, encoding: .utf8)) ?? "(none)").split(separator: "\n").suffix(15).joined(separator: "\n")
+                ((try? String(contentsOfFile: p, encoding: .utf8)) ?? "(none)").split(separator: "\n").suffix(40).joined(separator: "\n")
             }
             print("DIAG \(label) serial:\n\(tail(ws.dir + "/run/serial.log"))\nDIAG agentd.log:\n\(tail(ws.dir + "/outbox/agentd.log"))"
                   + "\nDIAG qemu.log:\n\(tail(ws.dir + "/run/qemu.log"))\nDIAG stream port connects=\(port.connects)")
+            // The whole serial log (verbose boot, see Workspace) next to the test's, kept.
+            let keep = "/tmp/acl-bootfail-\(label.filter { $0.isLetter || $0.isNumber })-\(UUID().uuidString.prefix(6)).log"
+            try? FileManager.default.copyItem(atPath: ws.dir + "/run/serial.log", toPath: keep)
+            print("DIAG full serial log kept at \(keep); port stats \(port.stats)")
         }
         try #require(first != nil, "\(label) agentd never dialed")
         await first?.close()
