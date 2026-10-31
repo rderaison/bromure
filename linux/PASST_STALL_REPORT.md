@@ -1,6 +1,6 @@
 # Draft upstream report: a guest TCP flow stops for good when passt's tap writes hit EAGAIN
 
-**Status: drafted for the passt maintainers, NOT filed.** Bromure's side decides whether and how to send it.
+**Status: draft for the passt maintainers, not filed yet.**
 
 ## Summary
 
@@ -19,9 +19,9 @@ The guest backs off exponentially and the flow is dead. Other flows keep working
 - Host: Ubuntu 26.04, kernel 7.0.0-42-generic, x86_64 (Threadripper 9970X)
 - Guest: Ubuntu 24.04, kernel 6.8.0-147-generic, virtio-net, MTU 1500
 
-## Reproduction (no Bromure code on the host)
+## Reproduction
 
-`linux/passt-repro/repro.sh` in this repository: QEMU + passt, plus virtiofsd only to hand the guest a script. The guest boots with `systemd.run=` and uploads N × 256 MiB, one connection each, to a sink on the host's LAN address. A transfer counts as stalled when `send()` makes no progress for 10 s.
+`repro.sh` (attached): QEMU + passt, plus virtiofsd only to hand the guest a script. The guest boots with `systemd.run=` and uploads N × 256 MiB, one connection each, to a sink on the host's LAN address. A transfer counts as stalled when `send()` makes no progress for 10 s.
 
 passt runs as:
 
@@ -38,14 +38,13 @@ Its fd 0 is one end of a socketpair. The other end goes to QEMU (`-netdev stream
 | relay forwarding every read unchanged (control) | **0 / 20** |
 | relay forwarding guest→passt in random pieces, nothing held back | **0 / 40** |
 | **relay that stops reading passt's side for 5–50 ms every 200 reads, socket buffers 32 KiB** (`RELAY=slowread`) | **5 / 20**, **2 / 20** |
-| Bromure's L2 switch in place of the relay (it stops reading passt while a VM's port is full), one guest | 5 / 30 |
+| our L2 switch in place of the relay (it stopped reading passt while behind), one guest | 5 / 30 |
 
 ```bash
-sudo -g kvm env MACHINE=microvm PCAP=0 RELAY=slowread \
-    linux/passt-repro/repro.sh <image-dir> <out-dir> 1500 20 256
+MACHINE=microvm PCAP=0 RELAY=slowread ./repro.sh <image-dir> <out-dir> 1500 20 256
 ```
 
-`<image-dir>` is any Ubuntu guest kernel, initrd and raw disk whose fstab mounts the virtiofs tag `bromure-meta` at `/mnt/bromure-meta`. `bromure-ac image bake` produces one.
+`<image-dir>` is any Ubuntu guest kernel, initrd and raw disk whose fstab mounts a virtiofs tag at the path `repro.sh` uses (tag `bromure-meta` at `/mnt/bromure-meta` in our image). The guest-side `runner.sh` (attached) is shared from there.
 
 ## What a stalled flow looks like
 
@@ -84,21 +83,17 @@ So the guest's data reached passt, and passt's host side is healthy. What's miss
 ## Things that make it hard to see
 
 - **`--pcap` hides it:** 0/32 stalls with passt's capture on, against 5/20 off. A capture taken in the relay (headers only) hides it too. The socket states above are the evidence instead.
-- An earlier capture, through Bromure's switch with `--pcap` on, did catch one. In it, passt's last ACK opened about 1 MB of window, the guest filled it, every segment appears in passt's capture, and afterwards passt sends nothing on the flow while each retransmit still appears. That matches the reading above. That pcap was not kept.
+- An earlier capture, through our switch with `--pcap` on, did catch one. In it, passt's last ACK opened about 1 MB of window, the guest filled it, every segment appears in passt's capture, and afterwards passt sends nothing on the flow while each retransmit still appears. That matches the reading above. That pcap was not kept.
 - Ubuntu's AppArmor profile for passt denies its syslog socket, and the reads `--log-file` needs, so passt's own warnings aren't visible: "Failed to send … to syslog".
 
 ## Separately, smaller
 
 In this build, `passt --socket <path>` (with the socket under `/tmp`, which the AppArmor profile allows) logs `Failed to add fd to epoll: Bad file descriptor` as soon as a client connects. We saw it with every option set we tried and with `socat` as the client. We moved to `--fd 0` and did not check whether traffic still flows in socket mode, so this may be only a spurious message.
 
-## Local data (lnx-ntv)
+## Data
 
-Nothing is in git:
+The socket dumps, serial logs and run records from the runs above are available on request.
 
-- Socket dumps and logs: `/tmp/claude-1000/-home-renaud/5df66134-3725-4495-a1a1-913617f2f140/scratchpad/passt-repro/ss-slowread/` (`sink.log`, `serial.log`, `results.txt`).
-- The `--pcap` captures from the non-stalling runs (0.9–5.6 GB each) were deleted, since none of them shows a stall.
+## How we hit it
 
-## On Bromure's side, regardless
-
-- ACLinux's PasstUplink stops reading passt when the switch's consumer lags. That is the trigger. Reading passt eagerly and dropping at the VM's own port (which the switch already does toward a slow VM) avoids it.
-- The guest MTU default behind passt (65520) makes it rarer, not impossible: fewer, larger frames.
+The stalling reader was ours: an L2 switch between several VMs and one passt, which stopped reading passt's socket while it was behind. We have since made it read eagerly.
