@@ -77,3 +77,31 @@ struct RouteBench {
         sw.stop()
     }
 }
+
+/// The passt routing inbox's own cost (BROMURE_BENCH=1): frames pushed by one
+/// thread, drained by the routing thread into a no-op receiver.
+@Suite("inbox bench", .enabled(if: ProcessInfo.processInfo.environment["BROMURE_BENCH"] != nil))
+struct InboxBench {
+    @Test func inbox() async throws {
+        final class Count: @unchecked Sendable { let l = NSLock(); var n = 0
+            func add() { l.lock(); n += 1; l.unlock() }
+            var value: Int { l.lock(); defer { l.unlock() }; return n } }
+        var rounds: [Double] = []
+        let n = 1_000_000
+        for _ in 0..<5 {
+            let core = FramePortCore(name: "inbox") { _ in }
+            let got = Count()
+            core.setReceiver({ _ in got.add() }, batchEnd: nil)
+            let inbox = EagerInbox(core: core)
+            let frame = Data(count: 60)
+            let t0 = ContinuousClock.now
+            for _ in 0..<n { inbox.push(frame) }
+            while got.value < n { try await Task.sleep(for: .microseconds(200)) }
+            let d = ContinuousClock.now - t0
+            rounds.append((Double(d.components.seconds) * 1e9 + Double(d.components.attoseconds) / 1e9) / Double(n))
+            inbox.close()
+        }
+        rounds.sort()
+        print("BENCH inbox: best \(String(format: "%.0f", rounds[0])) ns/frame, median \(String(format: "%.0f", rounds[2])) ns/frame")
+    }
+}
