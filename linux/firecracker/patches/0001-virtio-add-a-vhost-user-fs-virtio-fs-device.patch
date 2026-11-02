@@ -1,0 +1,736 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Renaud Deraison <rderaison@gmail.com>
+Date: Mon, 2 Nov 2026 17:44:26 -0500
+Subject: [PATCH] virtio: add a vhost-user-fs (virtio-fs) device
+
+A virtio-fs device whose queues a vhost-user backend (virtiofsd) serves,
+built on the vhost-user frontend the vhost-user-blk device uses: one
+high-priority and one request queue, the tag and request-queue count in
+config space, guest memory memfd-backed when any is configured. Set up
+pre-boot from the config file's "fs" list. Not snapshotted.
+
+The MMIO transport now answers the shared-memory region registers
+(SHMSel/SHMLen/SHMBase) as the spec says a device without one must: the
+length and base read as all ones. The virtio-fs driver probes them for
+DAX, and failed the device on the zeros it read before.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/vmm/src/builder.rs                        |  30 +++
+ src/vmm/src/device_manager/pci_mngr.rs        |   3 +
+ src/vmm/src/device_manager/persist.rs         |   5 +
+ src/vmm/src/devices/virtio/device.rs          |   1 +
+ src/vmm/src/devices/virtio/fs/device.rs       | 220 ++++++++++++++++++
+ .../src/devices/virtio/fs/event_handler.rs    |  64 +++++
+ src/vmm/src/devices/virtio/fs/mod.rs          |  35 +++
+ src/vmm/src/devices/virtio/mod.rs             |   1 +
+ src/vmm/src/devices/virtio/transport/mmio.rs  |  15 ++
+ src/vmm/src/lib.rs                            |   8 +
+ src/vmm/src/resources.rs                      |  21 +-
+ src/vmm/src/vmm_config/fs.rs                  |  66 ++++++
+ src/vmm/src/vmm_config/mod.rs                 |   2 +
+ 13 files changed, 470 insertions(+), 1 deletion(-)
+ create mode 100644 src/vmm/src/devices/virtio/fs/device.rs
+ create mode 100644 src/vmm/src/devices/virtio/fs/event_handler.rs
+ create mode 100644 src/vmm/src/devices/virtio/fs/mod.rs
+ create mode 100644 src/vmm/src/vmm_config/fs.rs
+
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index bcb0e02..10a7c89 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -31,6 +31,7 @@ use crate::device_manager::{
+ use crate::devices::virtio::balloon::Balloon;
+ use crate::devices::virtio::block::device::Block;
+ use crate::devices::virtio::device::VirtioDevice;
++use crate::devices::virtio::fs::VhostUserFs;
+ use crate::devices::virtio::mem::{VIRTIO_MEM_DEFAULT_SLOT_SIZE_MIB, VirtioMem};
+ use crate::devices::virtio::net::Net;
+ use crate::devices::virtio::pmem::device::Pmem;
+@@ -256,6 +257,13 @@ pub fn build_microvm_for_boot(
+         &vm_resources.pmem.configs,
+         event_manager,
+     )?;
++    attach_fs_devices(
++        &mut device_manager,
++        &vm,
++        &mut boot_cmdline,
++        vm_resources.fs.devices.iter(),
++        event_manager,
++    )?;
+ 
+     if let Some(unix_vsock) = vm_resources.vsock.get() {
+         attach_unixsock_vsock_device(
+@@ -688,6 +696,28 @@ fn attach_block_devices<'a, I: Iterator<Item = &'a Arc<Mutex<Block>>> + Debug>(
+     Ok(())
+ }
+ 
++fn attach_fs_devices<'a, I: Iterator<Item = &'a Arc<Mutex<VhostUserFs>>> + Debug>(
++    device_manager: &mut DeviceManager,
++    vm: &Vm,
++    cmdline: &mut LoaderKernelCmdline,
++    devices: I,
++    event_manager: &mut EventManager,
++) -> Result<(), StartMicrovmError> {
++    for fs in devices {
++        let id = fs.lock().expect("Poisoned lock").id.clone();
++        // The device mutex mustn't be locked here otherwise it will deadlock.
++        device_manager.attach_boot_virtio_device(
++            vm,
++            id,
++            fs.clone(),
++            cmdline,
++            event_manager,
++            true,
++        )?;
++    }
++    Ok(())
++}
++
+ fn attach_net_devices<'a, I: Iterator<Item = &'a Arc<Mutex<Net>>> + Debug>(
+     device_manager: &mut DeviceManager,
+     vm: &Vm,
+diff --git a/src/vmm/src/device_manager/pci_mngr.rs b/src/vmm/src/device_manager/pci_mngr.rs
+index 283b1f3..bf89089 100644
+--- a/src/vmm/src/device_manager/pci_mngr.rs
++++ b/src/vmm/src/device_manager/pci_mngr.rs
+@@ -366,6 +366,9 @@ impl<'a> Persist<'a> for PciDevices {
+             let sbdf = transport_state.sbdf;
+ 
+             match locked_virtio_dev.device_type() {
++                VirtioDeviceType::Fs => {
++                    warn!("Skipping vhost-user-fs device: it does not support snapshotting");
++                }
+                 VirtioDeviceType::Balloon => {
+                     let balloon_device = locked_virtio_dev
+                         .as_any()
+diff --git a/src/vmm/src/device_manager/persist.rs b/src/vmm/src/device_manager/persist.rs
+index 82518eb..c1b66bd 100644
+--- a/src/vmm/src/device_manager/persist.rs
++++ b/src/vmm/src/device_manager/persist.rs
+@@ -286,6 +286,11 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
+             let device_id = devid.clone();
+ 
+             match locked_device.device_type() {
++                VirtioDeviceType::Fs => {
++                    crate::logger::warn!(
++                        "Skipping vhost-user-fs device: it does not support snapshotting"
++                    );
++                }
+                 VirtioDeviceType::Balloon => {
+                     let device_state = locked_device
+                         .as_any()
+diff --git a/src/vmm/src/devices/virtio/device.rs b/src/vmm/src/devices/virtio/device.rs
+index 76103b4..fb2e530 100644
+--- a/src/vmm/src/devices/virtio/device.rs
++++ b/src/vmm/src/devices/virtio/device.rs
+@@ -69,6 +69,7 @@ pub enum VirtioDeviceType {
+     Vsock = virtio_ids::VIRTIO_ID_VSOCK as u8,
+     Mem = virtio_ids::VIRTIO_ID_MEM as u8,
+     Pmem = virtio_ids::VIRTIO_ID_PMEM as u8,
++    Fs = virtio_ids::VIRTIO_ID_FS as u8,
+ }
+ 
+ /// Unique identifier for a virtio device: its type and string ID.
+diff --git a/src/vmm/src/devices/virtio/fs/device.rs b/src/vmm/src/devices/virtio/fs/device.rs
+new file mode 100644
+index 0000000..8aba1bc
+--- /dev/null
++++ b/src/vmm/src/devices/virtio/fs/device.rs
+@@ -0,0 +1,220 @@
++// Copyright 2026 Bromure. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++// Modelled on the vhost-user block device.
++
++use std::ops::Deref;
++use std::sync::Arc;
++
++use vhost::vhost_user::Frontend;
++use vhost::vhost_user::message::*;
++use vmm_sys_util::eventfd::EventFd;
++
++use super::{NUM_QUEUES, NUM_REQUEST_QUEUES, QUEUE_SIZE, TAG_LEN, VhostUserFsError};
++use crate::devices::virtio::ActivateError;
++use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
++use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
++use crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
++use crate::devices::virtio::queue::Queue;
++use crate::devices::virtio::transport::VirtioInterrupt;
++use crate::devices::virtio::vhost_user::{VhostUserHandleBackend, VhostUserHandleImpl};
++use crate::utils::u64_to_usize;
++use crate::vmm_config::fs::FsDeviceConfig;
++use crate::vstate::memory::GuestMemoryMmap;
++use crate::{MutEventSubscriber, impl_device_type};
++
++const AVAILABLE_FEATURES: u64 = (1 << VIRTIO_F_VERSION_1)
++    | (1 << VIRTIO_RING_F_EVENT_IDX)
++    | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
++
++/// The guest-visible `struct virtio_fs_config`: the tag, NUL-padded, then
++/// `num_request_queues` (le32).
++pub fn config_space(tag: &str) -> Result<Vec<u8>, VhostUserFsError> {
++    let bytes = tag.as_bytes();
++    if bytes.is_empty() || bytes.len() > TAG_LEN || bytes.contains(&0) {
++        return Err(VhostUserFsError::Tag(tag.to_string()));
++    }
++    let mut space = vec![0u8; TAG_LEN];
++    space[..bytes.len()].copy_from_slice(bytes);
++    space.extend_from_slice(&NUM_REQUEST_QUEUES.to_le_bytes());
++    Ok(space)
++}
++
++pub type VhostUserFs = VhostUserFsImpl<Frontend>;
++
++/// vhost-user fs device.
++pub struct VhostUserFsImpl<T: VhostUserHandleBackend> {
++    pub avail_features: u64,
++    pub acked_features: u64,
++    pub config_space: Vec<u8>,
++    pub activate_evt: EventFd,
++
++    pub queues: Vec<Queue>,
++    pub queue_evts: [EventFd; u64_to_usize(NUM_QUEUES)],
++    pub device_state: DeviceState,
++
++    pub id: String,
++    pub tag: String,
++
++    pub vu_handle: VhostUserHandleImpl<T>,
++}
++
++impl<T: VhostUserHandleBackend> std::fmt::Debug for VhostUserFsImpl<T> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("VhostUserFsImpl")
++            .field("avail_features", &self.avail_features)
++            .field("acked_features", &self.acked_features)
++            .field("device_state", &self.device_state)
++            .field("id", &self.id)
++            .field("tag", &self.tag)
++            .field("vu_handle", &self.vu_handle)
++            .finish()
++    }
++}
++
++impl<T: VhostUserHandleBackend> VhostUserFsImpl<T> {
++    pub fn new(config: &FsDeviceConfig) -> Result<Self, VhostUserFsError> {
++        let config_space = config_space(&config.tag)?;
++        let mut vu_handle = VhostUserHandleImpl::<T>::new(&config.socket, NUM_QUEUES)
++            .map_err(VhostUserFsError::VhostUser)?;
++        // No protocol features needed: the config space is ours (virtiofsd
++        // has none to offer) and the queue count is fixed.
++        let (acked_features, _) = vu_handle
++            .negotiate_features(AVAILABLE_FEATURES, VhostUserProtocolFeatures::empty())
++            .map_err(VhostUserFsError::VhostUser)?;
++        let queue_evts = [
++            EventFd::new(libc::EFD_NONBLOCK).map_err(VhostUserFsError::EventFd)?,
++            EventFd::new(libc::EFD_NONBLOCK).map_err(VhostUserFsError::EventFd)?,
++        ];
++        Ok(Self {
++            // What the backend accepted is what the guest may choose from.
++            avail_features: acked_features,
++            acked_features: acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits(),
++            config_space,
++            activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VhostUserFsError::EventFd)?,
++            queues: (0..NUM_QUEUES).map(|_| Queue::new(QUEUE_SIZE)).collect(),
++            queue_evts,
++            device_state: DeviceState::Inactive,
++            id: config.fs_id.clone(),
++            tag: config.tag.clone(),
++            vu_handle,
++        })
++    }
++
++    pub fn config(&self) -> FsDeviceConfig {
++        FsDeviceConfig {
++            fs_id: self.id.clone(),
++            tag: self.tag.clone(),
++            socket: self.vu_handle.socket_path.clone(),
++        }
++    }
++}
++
++impl<T: VhostUserHandleBackend + Send + 'static> VirtioDevice for VhostUserFsImpl<T>
++where
++    VhostUserFsImpl<T>: MutEventSubscriber,
++{
++    impl_device_type!(VirtioDeviceType::Fs);
++
++    fn id(&self) -> &str {
++        &self.id
++    }
++
++    fn avail_features(&self) -> u64 {
++        self.avail_features
++    }
++
++    fn acked_features(&self) -> u64 {
++        self.acked_features
++    }
++
++    fn set_acked_features(&mut self, acked_features: u64) {
++        self.acked_features = acked_features;
++    }
++
++    fn queues(&self) -> &[Queue] {
++        &self.queues
++    }
++
++    fn queues_mut(&mut self) -> &mut [Queue] {
++        &mut self.queues
++    }
++
++    fn queue_events(&self) -> &[EventFd] {
++        &self.queue_evts
++    }
++
++    fn interrupt_trigger(&self) -> &dyn VirtioInterrupt {
++        self.device_state
++            .active_state()
++            .expect("Device is not initialized")
++            .interrupt
++            .deref()
++    }
++
++    fn config_as_bytes(&self) -> &[u8] {
++        self.config_space.as_slice()
++    }
++
++    fn write_config(&mut self, _offset: u64, _data: &[u8]) {
++        // virtio_fs_config is read-only.
++    }
++
++    fn activate(
++        &mut self,
++        mem: GuestMemoryMmap,
++        interrupt: Arc<dyn VirtioInterrupt>,
++    ) -> Result<(), ActivateError> {
++        assert!(!self.is_activated());
++        for q in self.queues.iter_mut() {
++            q.initialize(&mem)
++                .map_err(ActivateError::QueueMemoryError)?;
++        }
++        let queues: Vec<_> = self
++            .queues
++            .iter()
++            .zip(self.queue_evts.iter())
++            .enumerate()
++            .map(|(i, (q, e))| (i, q, e))
++            .collect();
++        self.vu_handle
++            .set_features(self.acked_features)
++            .and_then(|()| {
++                self.vu_handle
++                    .setup_backend(&mem, &queues, interrupt.clone())
++            })
++            .map_err(ActivateError::VhostUser)?;
++        self.device_state = DeviceState::Activated(ActiveState { mem, interrupt });
++        Ok(())
++    }
++
++    fn is_activated(&self) -> bool {
++        self.device_state.is_activated()
++    }
++
++    fn deactivate(&mut self) {
++        self.device_state = DeviceState::Inactive;
++    }
++
++    fn _reset(&mut self) -> bool {
++        false
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_config_space() {
++        let space = config_space("bromure-outbox").unwrap();
++        assert_eq!(space.len(), TAG_LEN + 4);
++        assert_eq!(&space[..14], b"bromure-outbox");
++        assert!(space[14..TAG_LEN].iter().all(|&b| b == 0));
++        assert_eq!(&space[TAG_LEN..], &NUM_REQUEST_QUEUES.to_le_bytes());
++        config_space("").unwrap_err();
++        config_space(&"x".repeat(TAG_LEN + 1)).unwrap_err();
++        config_space("a\0b").unwrap_err();
++        config_space(&"x".repeat(TAG_LEN)).unwrap();
++    }
++}
+diff --git a/src/vmm/src/devices/virtio/fs/event_handler.rs b/src/vmm/src/devices/virtio/fs/event_handler.rs
+new file mode 100644
+index 0000000..abca1df
+--- /dev/null
++++ b/src/vmm/src/devices/virtio/fs/event_handler.rs
+@@ -0,0 +1,64 @@
++// Copyright 2026 Bromure. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++use event_manager::{EventOps, Events, MutEventSubscriber};
++use vmm_sys_util::epoll::EventSet;
++
++use super::VhostUserFs;
++use crate::devices::virtio::device::VirtioDevice;
++use crate::logger::{error, warn};
++
++// As vhost-user-blk: the queues' kick and call eventfds go to the backend, so
++// the only event Firecracker handles is the activation one.
++impl VhostUserFs {
++    const PROCESS_ACTIVATE: u32 = 0;
++
++    fn register_activate_event(&self, ops: &mut EventOps) {
++        if let Err(err) = ops.add(Events::with_data(
++            &self.activate_evt,
++            Self::PROCESS_ACTIVATE,
++            EventSet::IN,
++        )) {
++            error!("Failed to register activate event: {}", err);
++        }
++    }
++
++    fn process_activate_event(&self, ops: &mut EventOps) {
++        if let Err(err) = self.activate_evt.read() {
++            error!("Failed to consume fs activate event: {:?}", err);
++        }
++        if let Err(err) = ops.remove(Events::with_data(
++            &self.activate_evt,
++            Self::PROCESS_ACTIVATE,
++            EventSet::IN,
++        )) {
++            error!("Failed to un-register activate event: {}", err);
++        }
++    }
++}
++
++impl MutEventSubscriber for VhostUserFs {
++    fn process(&mut self, event: Events, ops: &mut EventOps) {
++        let source = event.data();
++        if !EventSet::IN.contains(event.event_set()) {
++            warn!(
++                "Received unknown event: {:?} from source: {:?}",
++                event.event_set(),
++                source
++            );
++            return;
++        }
++        if self.is_activated() && Self::PROCESS_ACTIVATE == source {
++            self.process_activate_event(ops)
++        } else {
++            warn!("FsVhost: Spurious event received: {:?}", source)
++        }
++    }
++
++    fn init(&mut self, ops: &mut EventOps) {
++        if self.is_activated() {
++            warn!("Vhost-user fs: unexpected init event");
++        } else {
++            self.register_activate_event(ops);
++        }
++    }
++}
+diff --git a/src/vmm/src/devices/virtio/fs/mod.rs b/src/vmm/src/devices/virtio/fs/mod.rs
+new file mode 100644
+index 0000000..4a5c28e
+--- /dev/null
++++ b/src/vmm/src/devices/virtio/fs/mod.rs
+@@ -0,0 +1,35 @@
++// Copyright 2026 Bromure. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++//! vhost-user-fs: a virtio-fs device whose queues a vhost-user backend
++//! (virtiofsd) serves. Firecracker only relays the vhost-user setup; file
++//! requests never pass through it.
++
++pub mod device;
++pub mod event_handler;
++
++pub use self::device::{VhostUserFs, VhostUserFsImpl};
++use crate::devices::virtio::vhost_user::VhostUserError;
++
++/// Request queues: one is what virtiofsd serves best (it is single-queue
++/// unless built for more).
++pub const NUM_REQUEST_QUEUES: u32 = 1;
++/// The high-priority queue (FUSE_INTERRUPT, FORGET) plus the request queues.
++pub const NUM_QUEUES: u64 = 1 + NUM_REQUEST_QUEUES as u64;
++/// Queue size, as QEMU's vhost-user-fs default.
++pub const QUEUE_SIZE: u16 = 1024;
++/// virtio_fs_config.tag length; a shorter tag is NUL-padded.
++pub const TAG_LEN: usize = 36;
++
++/// vhost-user-fs device error.
++#[derive(Debug, thiserror::Error, displaydoc::Display)]
++pub enum VhostUserFsError {
++    /// Invalid tag {0:?}: 1 to 36 bytes, no NUL
++    Tag(String),
++    /// Snapshotting of vhost-user-fs devices is not supported
++    SnapshottingNotSupported,
++    /// Vhost-user error: {0}
++    VhostUser(VhostUserError),
++    /// Error opening eventfd: {0}
++    EventFd(std::io::Error),
++}
+diff --git a/src/vmm/src/devices/virtio/mod.rs b/src/vmm/src/devices/virtio/mod.rs
+index ec95368..5e5059f 100644
+--- a/src/vmm/src/devices/virtio/mod.rs
++++ b/src/vmm/src/devices/virtio/mod.rs
+@@ -15,6 +15,7 @@ use crate::devices::virtio::net::TapError;
+ pub mod balloon;
+ pub mod block;
+ pub mod device;
++pub mod fs;
+ pub mod generated;
+ mod iov_deque;
+ pub mod iovec;
+diff --git a/src/vmm/src/devices/virtio/transport/mmio.rs b/src/vmm/src/devices/virtio/transport/mmio.rs
+index f82e125..188eed6 100644
+--- a/src/vmm/src/devices/virtio/transport/mmio.rs
++++ b/src/vmm/src/devices/virtio/transport/mmio.rs
+@@ -269,6 +269,11 @@ impl BusDevice for MmioTransport {
+                         }
+                     }
+                     0x70 => self.device_status,
++                    // SHMLenLow/High, SHMBaseLow/High: no device here has a
++                    // shared memory region, which the spec says reads as all
++                    // ones. Drivers that probe for one (virtio-fs DAX) fail
++                    // the device on anything else.
++                    0xb0 | 0xb4 | 0xb8 | 0xbc => 0xffff_ffff,
+                     0xfc => self.config_generation,
+                     _ => {
+                         warn!("unknown virtio mmio register read: {:#x}", offset);
+@@ -333,6 +338,8 @@ impl BusDevice for MmioTransport {
+                     0x94 => self.update_queue_field(|q| hi(&mut q.avail_ring_address, v)),
+                     0xa0 => self.update_queue_field(|q| lo(&mut q.used_ring_address, v)),
+                     0xa4 => self.update_queue_field(|q| hi(&mut q.used_ring_address, v)),
++                    // SHMSel: there are no regions to select (see the read side).
++                    0xac => {}
+                     _ => {
+                         warn!("unknown virtio mmio register write: {:#x}", offset);
+                     }
+@@ -691,6 +698,14 @@ pub(crate) mod tests {
+         d.read(0x0, 0x34, &mut buf[..]);
+         assert_eq!(read_le_u32(&buf[..]), 16);
+ 
++        // No shared memory region: its length and base read as all ones.
++        d.write(0x0, 0xac, &[0, 0, 0, 0]);
++        for offset in [0xb0, 0xb4, 0xb8, 0xbc] {
++            buf.copy_from_slice(&[0; 4]);
++            d.read(0x0, offset, &mut buf[..]);
++            assert_eq!(read_le_u32(&buf[..]), 0xffff_ffff);
++        }
++
+         d.read(0x0, 0x44, &mut buf[..]);
+         assert_eq!(read_le_u32(&buf[..]), u32::from(false));
+ 
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index 41b7b8d..a7a9d37 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -138,6 +138,7 @@ use crate::devices::virtio::balloon::{
+ use crate::devices::virtio::block::BlockError;
+ use crate::devices::virtio::block::device::Block;
+ use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceId, VirtioDeviceType};
++use crate::devices::virtio::fs::VhostUserFs;
+ use crate::devices::virtio::mem::device::VirtioMem;
+ use crate::devices::virtio::mem::{VIRTIO_MEM_DEV_ID, VirtioMemError, VirtioMemStatus};
+ use crate::devices::virtio::net::Net;
+@@ -348,6 +349,7 @@ impl Vmm {
+         let mut net = Vec::new();
+         let mut net_with_mmds = Vec::new();
+         let mut pmem = Vec::new();
++        let mut fs = Vec::new();
+         let mut balloon = None;
+         let mut vsock = None;
+         let mut entropy = None;
+@@ -379,6 +381,11 @@ impl Vmm {
+                         pmem.push(p.config.clone());
+                     }
+                 }
++                VirtioDeviceType::Fs => {
++                    if let Some(f) = device.as_any().downcast_ref::<VhostUserFs>() {
++                        fs.push(f.config());
++                    }
++                }
+                 VirtioDeviceType::Balloon => {
+                     if let Some(b) = device.as_any().downcast_ref::<Balloon>() {
+                         balloon = Some(BalloonDeviceConfig::from(b.config()));
+@@ -427,6 +434,7 @@ impl Vmm {
+             vsock,
+             entropy,
+             pmem_devices: pmem,
++            fs_devices: fs,
+             // serial_config is marked serde(skip) so that it doesnt end up in snapshots
+             serial_config: None,
+             memory_hotplug,
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index 55f784a..da2d438 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -23,6 +23,7 @@ use crate::vmm_config::boot_source::{
+ };
+ use crate::vmm_config::drive::*;
+ use crate::vmm_config::entropy::*;
++use crate::vmm_config::fs::{FsBuilder, FsConfigError, FsDeviceConfig};
+ use crate::vmm_config::instance_info::InstanceInfo;
+ use crate::vmm_config::machine_config::{MachineConfig, MachineConfigError, MachineConfigUpdate};
+ use crate::vmm_config::memory_hotplug::{MemoryHotplugConfig, MemoryHotplugConfigError};
+@@ -66,6 +67,8 @@ pub enum ResourcesError {
+     EntropyConfig(#[from] EntropyDeviceError),
+     /// Pmem device error: {0}
+     PmemConfig(#[from] PmemConfigError),
++    /// vhost-user-fs device error: {0}
++    FsConfig(#[from] FsConfigError),
+     /// Memory hotplug config error: {0}
+     MemoryHotplugConfig(#[from] MemoryHotplugConfigError),
+ }
+@@ -97,6 +100,8 @@ pub struct VmmConfig {
+     pub entropy: Option<EntropyDeviceConfig>,
+     #[serde(default, rename = "pmem")]
+     pub pmem_devices: Vec<PmemConfig>,
++    #[serde(default, rename = "fs")]
++    pub fs_devices: Vec<FsDeviceConfig>,
+     #[serde(skip)]
+     pub serial_config: Option<SerialConfig>,
+     pub memory_hotplug: Option<MemoryHotplugConfig>,
+@@ -122,6 +127,8 @@ pub struct VmResources {
+     pub entropy: EntropyDeviceBuilder,
+     /// The pmem device configs.
+     pub pmem: PmemBuilder,
++    /// The vhost-user-fs devices.
++    pub fs: FsBuilder,
+     /// The memory hotplug configuration.
+     pub memory_hotplug: Option<MemoryHotplugConfig>,
+     /// The optional Mmds data store.
+@@ -230,6 +237,10 @@ impl VmResources {
+             resources.build_pmem_device(pmem_config)?;
+         }
+ 
++        for fs_config in vmm_config.fs_devices.into_iter() {
++            resources.build_fs_device(fs_config)?;
++        }
++
+         if let Some(serial_cfg) = vmm_config.serial_config {
+             resources.serial_out_path = serial_cfg.serial_out_path;
+             resources.serial_rate_limiter_cfg = serial_cfg.rate_limiter;
+@@ -388,6 +399,11 @@ impl VmResources {
+         self.entropy.insert(body)
+     }
+ 
++    /// Connects a vhost-user-fs device to its backend, to be attached when the VM starts.
++    pub fn build_fs_device(&mut self, body: FsDeviceConfig) -> Result<(), FsConfigError> {
++        self.fs.insert(body)
++    }
++
+     /// Builds a pmem device to be attached when the VM starts.
+     pub fn build_pmem_device(&mut self, body: PmemConfig) -> Result<(), PmemConfigError> {
+         let has_block_root = self.block.has_root_device();
+@@ -489,7 +505,8 @@ impl VmResources {
+             .block
+             .devices
+             .iter()
+-            .any(|b| b.lock().expect("Poisoned lock").is_vhost_user());
++            .any(|b| b.lock().expect("Poisoned lock").is_vhost_user())
++            || !self.fs.devices.is_empty();
+ 
+         // Page faults are more expensive for shared memory mapping, including  memfd.
+         // For this reason, we only back guest memory with a memfd
+@@ -550,6 +567,7 @@ impl From<&VmResources> for VmmConfig {
+             vsock: resources.vsock.config(),
+             entropy: resources.entropy.config(),
+             pmem_devices: resources.pmem.configs.clone(),
++            fs_devices: resources.fs.configs(),
+             // serial_config is marked serde(skip) so that it doesnt end up in snapshots.
+             serial_config: None,
+             memory_hotplug: resources.memory_hotplug.clone(),
+@@ -665,6 +683,7 @@ mod tests {
+             mmds_size_limit: HTTP_MAX_PAYLOAD_SIZE,
+             entropy: Default::default(),
+             pmem: Default::default(),
++            fs: Default::default(),
+             pci_enabled: false,
+             serial_out_path: None,
+             serial_rate_limiter_cfg: None,
+diff --git a/src/vmm/src/vmm_config/fs.rs b/src/vmm/src/vmm_config/fs.rs
+new file mode 100644
+index 0000000..d989b29
+--- /dev/null
++++ b/src/vmm/src/vmm_config/fs.rs
+@@ -0,0 +1,66 @@
++// Copyright 2026 Bromure. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++use std::sync::{Arc, Mutex};
++
++use serde::{Deserialize, Serialize};
++
++use crate::devices::virtio::fs::{VhostUserFs, VhostUserFsError};
++
++/// Errors associated with vhost-user-fs devices.
++#[derive(Debug, thiserror::Error, displaydoc::Display)]
++pub enum FsConfigError {
++    /// Unable to create the vhost-user-fs device: {0}
++    CreateDevice(#[from] VhostUserFsError),
++    /// Tag {0:?} is already used by another fs device
++    DuplicateTag(String),
++}
++
++/// A virtio-fs share served by a vhost-user backend (virtiofsd).
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct FsDeviceConfig {
++    /// Unique identifier of the device.
++    pub fs_id: String,
++    /// The tag the guest mounts: `mount -t virtiofs <tag> <dir>`.
++    pub tag: String,
++    /// The backend's vhost-user socket.
++    pub socket: String,
++}
++
++/// The fs devices to attach at boot.
++#[derive(Debug, Default)]
++pub struct FsBuilder {
++    /// The devices, connected to their backends.
++    pub devices: Vec<Arc<Mutex<VhostUserFs>>>,
++}
++
++impl FsBuilder {
++    /// Connects to the backend and adds the device, replacing one with the same id.
++    pub fn insert(&mut self, config: FsDeviceConfig) -> Result<(), FsConfigError> {
++        if self.devices.iter().any(|d| {
++            let d = d.lock().expect("Poisoned lock");
++            d.id != config.fs_id && d.tag == config.tag
++        }) {
++            return Err(FsConfigError::DuplicateTag(config.tag));
++        }
++        let device = Arc::new(Mutex::new(VhostUserFs::new(&config)?));
++        match self
++            .devices
++            .iter()
++            .position(|d| d.lock().expect("Poisoned lock").id == config.fs_id)
++        {
++            Some(i) => self.devices[i] = device,
++            None => self.devices.push(device),
++        }
++        Ok(())
++    }
++
++    /// The devices' configs, as given.
++    pub fn configs(&self) -> Vec<FsDeviceConfig> {
++        self.devices
++            .iter()
++            .map(|d| d.lock().expect("Poisoned lock").config())
++            .collect()
++    }
++}
+diff --git a/src/vmm/src/vmm_config/mod.rs b/src/vmm/src/vmm_config/mod.rs
+index 6a86137..b19c03d 100644
+--- a/src/vmm/src/vmm_config/mod.rs
++++ b/src/vmm/src/vmm_config/mod.rs
+@@ -17,6 +17,8 @@ pub mod boot_source;
+ pub mod drive;
+ /// Wrapper for configuring the entropy device attached to the microVM.
+ pub mod entropy;
++/// Wrapper for configuring the vhost-user-fs devices.
++pub mod fs;
+ /// Wrapper over the microVM general information attached to the microVM.
+ pub mod instance_info;
+ /// Wrapper for configuring the memory and CPU of the microVM.

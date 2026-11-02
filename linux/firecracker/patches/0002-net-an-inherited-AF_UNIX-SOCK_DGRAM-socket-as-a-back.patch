@@ -1,0 +1,418 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Renaud Deraison <rderaison@gmail.com>
+Date: Mon, 2 Nov 2026 17:50:02 -0500
+Subject: [PATCH] net: an inherited AF_UNIX SOCK_DGRAM socket as a backend
+
+host_dev_name "fd:<N>" (':' is never in an interface name) takes the
+inherited descriptor N, a connected AF_UNIX SOCK_DGRAM socket, instead of
+opening a tap: one Ethernet frame per datagram, without the virtio-net
+header, which is dropped on the way out and zero-filled on the way in. No
+offloads are offered over it, so frames are whole and checksummed.
+
+A datagram arrives whole or not at all, and there is no connection to
+lose: the host side can restart while it keeps its end of a socketpair
+open, and nothing here notices. Sends that fail because the peer is full
+or gone (EAGAIN, ENOBUFS, ECONNREFUSED, ENOTCONN) drop the frame and count
+it in tap_write_fails without logging each one; the TX queue never stalls.
+Socket buffers are asked for 4 MiB (capped by the kernel).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/vmm/src/devices/virtio/net/device.rs |  25 +-
+ src/vmm/src/devices/virtio/net/tap.rs    | 277 +++++++++++++++++++++++
+ 2 files changed, 301 insertions(+), 1 deletion(-)
+
+diff --git a/src/vmm/src/devices/virtio/net/device.rs b/src/vmm/src/devices/virtio/net/device.rs
+index 8ccc58d..244d1a6 100644
+--- a/src/vmm/src/devices/virtio/net/device.rs
++++ b/src/vmm/src/devices/virtio/net/device.rs
+@@ -303,6 +303,18 @@ impl Net {
+             | (1 << VIRTIO_F_VERSION_1)
+             | (1 << VIRTIO_NET_F_MRG_RXBUF)
+             | (1 << VIRTIO_RING_F_EVENT_IDX);
++        if tap.is_dgram() {
++            // A socket carries plain frames: the guest checksums and
++            // segments them itself, and gets them whole.
++            avail_features &= !((1 << VIRTIO_NET_F_GUEST_CSUM)
++                | (1 << VIRTIO_NET_F_CSUM)
++                | (1 << VIRTIO_NET_F_GUEST_TSO4)
++                | (1 << VIRTIO_NET_F_GUEST_TSO6)
++                | (1 << VIRTIO_NET_F_GUEST_UFO)
++                | (1 << VIRTIO_NET_F_HOST_TSO4)
++                | (1 << VIRTIO_NET_F_HOST_TSO6)
++                | (1 << VIRTIO_NET_F_HOST_UFO));
++        }
+ 
+         let mut config_space = ConfigSpace::default();
+         if let Some(mtu) = mtu {
+@@ -357,6 +369,10 @@ impl Net {
+         tx_rate_limiter: RateLimiter,
+         mtu: Option<u16>,
+     ) -> Result<Self, NetError> {
++        if let Some(fd) = Tap::dgram_fd(tap_if_name) {
++            let tap = Tap::open_dgram_fd(fd, vnet_hdr_len()).map_err(NetError::TapOpen)?;
++            return Self::new_with_tap(id, tap, guest_mac, rx_rate_limiter, tx_rate_limiter, mtu);
++        }
+         let tap = Tap::open_named(tap_if_name).map_err(NetError::TapOpen)?;
+ 
+         let vnet_hdr_size = i32::try_from(vnet_hdr_len()).unwrap();
+@@ -614,7 +630,14 @@ impl Net {
+                 net_metrics.tx_count.inc();
+             }
+             Err(err) => {
+-                error!("Failed to write to tap: {:?}", err);
++                // A full or absent peer (a datagram socket's, while the host
++                // side restarts): drop the frame and count it, quietly.
++                if !matches!(
++                    err.raw_os_error(),
++                    Some(libc::EAGAIN | libc::ENOBUFS | libc::ECONNREFUSED | libc::ENOTCONN)
++                ) {
++                    error!("Failed to write to tap: {:?}", err);
++                }
+                 net_metrics.tap_write_fails.inc();
+             }
+         };
+diff --git a/src/vmm/src/devices/virtio/net/tap.rs b/src/vmm/src/devices/virtio/net/tap.rs
+index 58bc82d..0c0e36a 100644
+--- a/src/vmm/src/devices/virtio/net/tap.rs
++++ b/src/vmm/src/devices/virtio/net/tap.rs
+@@ -27,6 +27,8 @@ const IFACE_NAME_MAX_LEN: usize = 16;
+ pub enum TapError {
+     /// Couldn't open /dev/net/tun: {0}
+     OpenTun(IoError),
++    /// Descriptor {0} is not a usable AF_UNIX SOCK_DGRAM socket: {1}
++    DgramSocket(RawFd, IoError),
+     /// Invalid interface name
+     InvalidIfname,
+     /// Error while creating ifreq structure: {0}. Invalid TUN/TAP Backend provided by {1}. Check our documentation on setting up the network devices.
+@@ -47,10 +49,50 @@ ioctl_iow_nr!(TUNSETVNETHDRSZ, TUNTAP, 216, ::std::os::raw::c_int);
+ /// For now, this simply wraps the file descriptor for the tap device so methods
+ /// can run ioctls on the interface. The tap interface fd will be closed when
+ /// Tap goes out of scope, and the kernel will clean up the interface automatically.
++///
++/// It can instead wrap an inherited, connected `AF_UNIX` `SOCK_DGRAM` socket
++/// (`host_dev_name` `fd:<N>`; `:` is never in an interface name): one
++/// Ethernet frame per datagram, without the virtio-net header, which this
++/// side drops on the way out and zero-fills on the way in. A datagram is
++/// delivered whole or not at all, and no reconnect exists to stall on: the
++/// peer can come and go while its end of the socket is kept alive.
+ #[derive(Debug)]
+ pub struct Tap {
+     tap_file: File,
+     pub(crate) if_name: [u8; IFACE_NAME_MAX_LEN],
++    /// For a datagram socket, the virtio-net header length to strip and add.
++    dgram_hdr_len: Option<usize>,
++    /// Scratch iovecs for a datagram socket: the guest's, minus the header.
++    dgram_iov: Vec<libc::iovec>,
++}
++
++// SAFETY: `dgram_iov` only holds pointers between the building of an iovec
++// list and the syscall that uses it, within one call.
++unsafe impl Send for Tap {}
++
++/// The socket buffer size asked for a datagram socket, for bursts; the kernel
++/// caps it at net.core.{w,r}mem_max.
++static DGRAM_SOCKET_BUFFER: c_int = 4 << 20;
++
++/// `size_of::<c_int>()`, as the socket calls take it.
++const C_INT_LEN: libc::socklen_t = 4;
++const _: () = assert!(std::mem::size_of::<c_int>() == C_INT_LEN as usize);
++
++/// `iovs` without its first `skip` bytes, into `out`.
++fn iovecs_skipping(iovs: &[libc::iovec], mut skip: usize, out: &mut Vec<libc::iovec>) {
++    out.clear();
++    for iov in iovs {
++        if skip >= iov.iov_len {
++            skip -= iov.iov_len;
++            continue;
++        }
++        out.push(libc::iovec {
++            // SAFETY: `skip` is within this iovec.
++            iov_base: unsafe { iov.iov_base.cast::<u8>().add(skip) }.cast(),
++            iov_len: iov.iov_len - skip,
++        });
++        skip = 0;
++    }
+ }
+ 
+ // Returns a byte vector representing the contents of a null terminated C string which
+@@ -147,9 +189,74 @@ impl Tap {
+             tap_file: tuntap,
+             // SAFETY: Safe since only the name is accessed, and it's cloned out.
+             if_name: unsafe { ifreq.ifr_ifrn.ifrn_name },
++            dgram_hdr_len: None,
++            dgram_iov: Vec::new(),
+         })
+     }
+ 
++    /// `fd:<N>`: the inherited descriptor N, if `name` is of that form.
++    pub fn dgram_fd(name: &str) -> Option<RawFd> {
++        name.strip_prefix("fd:")?.parse().ok().filter(|fd| *fd >= 0)
++    }
++
++    /// Takes over `fd`, a connected `AF_UNIX` `SOCK_DGRAM` socket, as a
++    /// backend whose frames carry no virtio-net header of `hdr_len` bytes.
++    pub fn open_dgram_fd(fd: RawFd, hdr_len: usize) -> Result<Tap, TapError> {
++        let sockopt = |opt: c_int| -> Result<c_int, TapError> {
++            let mut v: c_int = 0;
++            let mut len = C_INT_LEN;
++            // SAFETY: getsockopt into a c_int of the given length; checked.
++            if unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, opt, (&raw mut v).cast(), &mut len) }
++                < 0
++            {
++                return Err(TapError::DgramSocket(fd, IoError::last_os_error()));
++            }
++            Ok(v)
++        };
++        if sockopt(libc::SO_DOMAIN)? != libc::AF_UNIX || sockopt(libc::SO_TYPE)? != libc::SOCK_DGRAM
++        {
++            return Err(TapError::DgramSocket(
++                fd,
++                IoError::from_raw_os_error(libc::ENOTSOCK),
++            ));
++        }
++        // SAFETY: plain fcntl/setsockopt on a socket we checked; results checked.
++        unsafe {
++            let flags = libc::fcntl(fd, libc::F_GETFL);
++            if flags < 0
++                || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
++                || libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0
++            {
++                return Err(TapError::DgramSocket(fd, IoError::last_os_error()));
++            }
++            for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
++                // Best effort: the kernel caps it, and the default works too.
++                libc::setsockopt(
++                    fd,
++                    libc::SOL_SOCKET,
++                    opt,
++                    (&raw const DGRAM_SOCKET_BUFFER).cast(),
++                    C_INT_LEN,
++                );
++            }
++        }
++        let mut if_name = [0u8; IFACE_NAME_MAX_LEN];
++        let name = format!("fd:{fd}");
++        if_name[..name.len()].copy_from_slice(name.as_bytes());
++        Ok(Tap {
++            // SAFETY: the caller hands the descriptor over.
++            tap_file: unsafe { File::from_raw_fd(fd) },
++            if_name,
++            dgram_hdr_len: Some(hdr_len),
++            dgram_iov: Vec::new(),
++        })
++    }
++
++    /// Whether this is a datagram socket rather than a tap.
++    pub fn is_dgram(&self) -> bool {
++        self.dgram_hdr_len.is_some()
++    }
++
+     /// Retrieve the interface's name as a str.
+     pub fn if_name_as_str(&self) -> &str {
+         let len = self
+@@ -162,6 +269,9 @@ impl Tap {
+ 
+     /// Set the offload flags for the tap interface.
+     pub fn set_offload(&self, flags: c_uint) -> Result<(), TapError> {
++        if self.is_dgram() {
++            return Ok(());
++        }
+         // SAFETY: ioctl is safe. Called with a valid tap fd, and we check the return.
+         if unsafe { ioctl_with_val(&self.tap_file, TUNSETOFFLOAD(), c_ulong::from(flags)) } < 0 {
+             return Err(TapError::SetOffloadFlags(IoError::last_os_error()));
+@@ -172,6 +282,9 @@ impl Tap {
+ 
+     /// Set the size of the vnet hdr.
+     pub fn set_vnet_hdr_size(&self, size: c_int) -> Result<(), TapError> {
++        if self.is_dgram() {
++            return Ok(());
++        }
+         // SAFETY: ioctl is safe. Called with a valid tap fd, and we check the return.
+         if unsafe { ioctl_with_ref(&self.tap_file, TUNSETVNETHDRSZ(), &size) } < 0 {
+             return Err(TapError::SetSizeOfVnetHdr(IoError::last_os_error()));
+@@ -182,6 +295,20 @@ impl Tap {
+ 
+     /// Write an `IoVecBuffer` to tap
+     pub(crate) fn write_iovec(&mut self, buffer: &IoVecBuffer) -> Result<usize, IoError> {
++        if let Some(hdr_len) = self.dgram_hdr_len {
++            // SAFETY: the buffer's iovecs, as it hands them to writev below.
++            let iovs =
++                unsafe { std::slice::from_raw_parts(buffer.as_iovec_ptr(), buffer.iovec_count()) };
++            iovecs_skipping(iovs, hdr_len, &mut self.dgram_iov);
++            let iovcnt = i32::try_from(self.dgram_iov.len()).unwrap();
++            // SAFETY: as below, over the same memory less the header.
++            let ret =
++                unsafe { libc::writev(self.tap_file.as_raw_fd(), self.dgram_iov.as_ptr(), iovcnt) };
++            if ret == -1 {
++                return Err(IoError::last_os_error());
++            }
++            return Ok(usize::try_from(ret).unwrap() + hdr_len);
++        }
+         let iovcnt = i32::try_from(buffer.iovec_count()).unwrap();
+         let iov = buffer.as_iovec_ptr();
+ 
+@@ -196,6 +323,39 @@ impl Tap {
+ 
+     /// Read from tap to an `IoVecBufferMut`
+     pub(crate) fn read_iovec(&mut self, buffer: &mut [libc::iovec]) -> Result<usize, IoError> {
++        if let Some(hdr_len) = self.dgram_hdr_len {
++            if buffer.iter().map(|i| i.iov_len).sum::<usize>() <= hdr_len {
++                return Err(IoError::from_raw_os_error(libc::ENOBUFS));
++            }
++            iovecs_skipping(buffer, hdr_len, &mut self.dgram_iov);
++            let ret = loop {
++                let iovcnt = i32::try_from(self.dgram_iov.len()).unwrap();
++                // SAFETY: as below, over the same memory less the header.
++                let ret = unsafe {
++                    libc::readv(self.tap_file.as_raw_fd(), self.dgram_iov.as_ptr(), iovcnt)
++                };
++                // An empty datagram is no frame: skip it.
++                if ret != 0 {
++                    break ret;
++                }
++            };
++            if ret == -1 {
++                return Err(IoError::last_os_error());
++            }
++            // No offloads are offered over a socket, so the header is all
++            // zeros (the device fills num_buffers in itself).
++            let mut left = hdr_len;
++            for iov in buffer.iter() {
++                let n = left.min(iov.iov_len);
++                // SAFETY: within this iovec, which the caller gives us to fill.
++                unsafe { std::ptr::write_bytes(iov.iov_base.cast::<u8>(), 0, n) };
++                left -= n;
++                if left == 0 {
++                    break;
++                }
++            }
++            return Ok(usize::try_from(ret).unwrap() + hdr_len);
++        }
+         let iov = buffer.as_mut_ptr();
+         let iovcnt = buffer.len().try_into().unwrap();
+ 
+@@ -274,6 +434,123 @@ pub mod tests {
+         assert_eq!(name, tap.if_name_as_str());
+     }
+ 
++    fn dgram_pair(kind: c_int) -> (RawFd, RawFd) {
++        let mut fds = [0; 2];
++        assert_eq!(
++            unsafe { libc::socketpair(libc::AF_UNIX, kind, 0, fds.as_mut_ptr()) },
++            0
++        );
++        (fds[0], fds[1])
++    }
++
++    const HDR: usize = 12;
++
++    #[test]
++    fn test_dgram_fd_name() {
++        assert_eq!(Tap::dgram_fd("fd:3"), Some(3));
++        assert_eq!(Tap::dgram_fd("fd:x"), None);
++        assert_eq!(Tap::dgram_fd("fd:-1"), None);
++        assert_eq!(Tap::dgram_fd("tap0"), None);
++        let (stream, other) = dgram_pair(libc::SOCK_STREAM);
++        assert!(matches!(
++            Tap::open_dgram_fd(stream, HDR),
++            Err(TapError::DgramSocket(..))
++        ));
++        unsafe { libc::close(stream) };
++        unsafe { libc::close(other) };
++    }
++
++    #[test]
++    fn test_dgram_frames() {
++        let (ours, peer) = dgram_pair(libc::SOCK_DGRAM);
++        let mut tap = Tap::open_dgram_fd(ours, HDR).unwrap();
++        assert!(tap.is_dgram());
++        assert_eq!(tap.if_name_as_str(), format!("fd:{ours}"));
++        tap.set_offload(0).unwrap();
++        tap.set_vnet_hdr_size(12).unwrap();
++
++        // Out: the header is dropped, even split across iovecs.
++        let hdr = [0xaau8; HDR];
++        let frame = vmm_sys_util::rand::rand_bytes(1514);
++        let out = IoVecBuffer::from(vec![&hdr[..5], &hdr[5..], &frame[..100], &frame[100..]]);
++        assert_eq!(tap.write_iovec(&out).unwrap(), HDR + 1514);
++        let mut got = vec![0u8; 4096];
++        let n = unsafe { libc::recv(peer, got.as_mut_ptr().cast(), got.len(), 0) };
++        assert_eq!(&got[..usize::try_from(n).unwrap()], &frame[..]);
++
++        // In: an empty datagram is skipped; the header is zeroed in front.
++        assert_eq!(unsafe { libc::send(peer, std::ptr::null(), 0, 0) }, 0);
++        assert_eq!(
++            unsafe { libc::send(peer, frame.as_ptr().cast(), frame.len(), 0) },
++            1514
++        );
++        let mut b1 = vec![0xffu8; 8];
++        let mut b2 = vec![0xffu8; 2048];
++        let mut rx = IoVecBufferMut::from(vec![b1.as_mut_slice(), b2.as_mut_slice()]);
++        assert_eq!(tap.read_iovec(rx.as_iovec_mut_slice()).unwrap(), HDR + 1514);
++        assert_eq!(b1, vec![0; 8]);
++        assert_eq!(&b2[..HDR - 8], &[0; HDR - 8]);
++        assert_eq!(&b2[HDR - 8..HDR - 8 + 1514], &frame[..]);
++        let mut b3 = vec![0u8; 2048];
++        let mut rx = IoVecBufferMut::from(vec![b3.as_mut_slice()]);
++        let err = tap.read_iovec(rx.as_iovec_mut_slice()).unwrap_err();
++        assert_eq!(err.raw_os_error(), Some(libc::EAGAIN));
++        unsafe { libc::close(peer) };
++    }
++
++    #[test]
++    fn test_dgram_full_peer() {
++        // A peer that stops reading fills the socket: writes then fail with
++        // EAGAIN (the device drops and counts), and resume once it reads.
++        let (ours, peer) = dgram_pair(libc::SOCK_DGRAM);
++        let mut tap = Tap::open_dgram_fd(ours, HDR).unwrap();
++        let frame = [0x55u8; HDR + 1514];
++        let out = IoVecBuffer::from(vec![&frame[..]]);
++        let mut sent = 0;
++        let err = loop {
++            match tap.write_iovec(&out) {
++                Ok(_) => sent += 1,
++                Err(e) => break e,
++            }
++            assert!(sent < 100_000);
++        };
++        assert!(sent > 0);
++        assert_eq!(err.raw_os_error(), Some(libc::EAGAIN));
++        let mut got = vec![0u8; 4096];
++        assert_eq!(
++            unsafe { libc::recv(peer, got.as_mut_ptr().cast(), got.len(), 0) },
++            1514
++        );
++        tap.write_iovec(&out).unwrap();
++        unsafe { libc::close(peer) };
++    }
++
++    #[test]
++    fn test_dgram_net_offers_no_offloads() {
++        use crate::devices::virtio::device::VirtioDevice;
++        use crate::devices::virtio::generated::virtio_net::*;
++        let (ours, peer) = dgram_pair(libc::SOCK_DGRAM);
++        let net = crate::devices::virtio::net::Net::new(
++            "eth0".into(),
++            &format!("fd:{ours}"),
++            None,
++            Default::default(),
++            Default::default(),
++            None,
++        )
++        .unwrap();
++        for f in [
++            VIRTIO_NET_F_CSUM,
++            VIRTIO_NET_F_GUEST_CSUM,
++            VIRTIO_NET_F_HOST_TSO4,
++            VIRTIO_NET_F_GUEST_TSO4,
++        ] {
++            assert_eq!(net.avail_features() & (1 << f), 0, "feature {f}");
++        }
++        assert_eq!(net.iface_name(), format!("fd:{ours}"));
++        unsafe { libc::close(peer) };
++    }
++
+     #[test]
+     fn test_tap_exclusive_open() {
+         let _tap1 = Tap::open_named("exclusivetap").unwrap();
