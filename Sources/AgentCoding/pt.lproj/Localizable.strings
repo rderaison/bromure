@@ -2084,8 +2084,8 @@
 "VMs" = "VMs";
 "New automation…" = "Nova automação…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "“%@” executa %@, que não avisa quando termina, então esta cadeia nunca vai disparar.";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "Execuções clonadas precisam de um agente que avise a conclusão (Claude Code ou Kimi Code) — é esse sinal que desmonta o clone.";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "Só agentes que avisam a conclusão por um hook (Claude Code, Kimi Code) podem fechar sua aba; as abas dos outros agentes ficam abertas.";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "Execuções clonadas precisam de um agente que avise a conclusão (Claude Code, Codex, Grok ou Kimi Code) — é esse sinal que desmonta o clone.";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "Só agentes que avisam a conclusão por um hook (Claude Code, Codex, Grok, Kimi Code) podem fechar sua aba; as abas dos outros agentes ficam abertas.";
 "The image catalog could not be downloaded." = "O catálogo de imagens não pôde ser baixado.";
 "Unsupported image compression: %@" = "Compressão de imagem não suportada: %@";
 "Could not expand the downloaded image: %@" = "Não foi possível expandir a imagem baixada: %@";

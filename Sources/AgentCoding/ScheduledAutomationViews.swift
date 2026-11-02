@@ -1549,7 +1549,7 @@ struct AutomationEditorView: View {
                     .disabled(!draft.tool.hasReliableDoneSignal)
                 hint(!draft.tool.hasReliableDoneSignal
                      ? NSLocalizedString(
-                        "Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down.",
+                        "Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down.",
                         comment: "")
                      : (draft.cloneWorkspaceFirst
                         ? NSLocalizedString(
@@ -1671,7 +1671,7 @@ struct AutomationEditorView: View {
                         "The transcript is saved first — readable any time from the run's card on the automation board. Turn off to leave the session up for inspection.",
                         comment: "")
                      : NSLocalizedString(
-                        "Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open.",
+                        "Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open.",
                         comment: ""))
             }
         }

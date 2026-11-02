@@ -2118,8 +2118,8 @@
 "VMs" = "VMs";
 "New automation…" = "New automation…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "“%@” runs %@, which doesn't report finishing, so this chain will never fire.";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down.";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open.";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down.";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open.";
 "The image catalog could not be downloaded." = "The image catalog could not be downloaded.";
 "Unsupported image compression: %@" = "Unsupported image compression: %@";
 "Could not expand the downloaded image: %@" = "Could not expand the downloaded image: %@";

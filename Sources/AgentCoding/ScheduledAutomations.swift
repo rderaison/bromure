@@ -2326,17 +2326,16 @@ final class ScheduledAutomationEngine {
     /// Delegate callback: a Claude tab flipped to .done. If its branch maps
     /// back to a launched automation run (persisted branchSlug — survives
     /// app restarts), ask the guest to save the transcript into the worktree
-    /// and close the tab. Claude only: its per-window Stop hook is the one
-    /// reliable "done" signal — the Codex/Grok proxy heuristic can report
-    /// .done during a long silent stretch, and closing a tab on a false
+    /// and close the tab. Only an agent whose own per-window Stop hook says
+    /// so (`Profile.Tool.hasReliableDoneSignal`): closing a tab on a false
     /// positive would kill live work. Runs that pause on .needsInput finish
     /// whenever the user unblocks them and the next .done arrives.
     func agentFinished(profileID: UUID, worktreeBranch: String?) {
         guard let branch = worktreeBranch,
               let found = launchedRun(profileID: profileID, branch: branch),
-              // Only a hook-driven done is trustworthy — the Codex/Grok proxy
-              // heuristic can flip .done during a long silent stretch.
-              found.automation.tool.hasReliableDoneSignal
+              // The agent the run was launched with (the automation may have
+              // been switched to another since).
+              (found.run.tool ?? found.automation.tool).hasReliableDoneSignal
         else { return }
         finishRun(found.run, found.automation, profileID: profileID, branch: branch, declared: false)
     }
@@ -2350,7 +2349,7 @@ final class ScheduledAutomationEngine {
               let found = launchedRun(profileID: profileID, branch: branch)
         else { return false }
         finishRun(found.run, found.automation, profileID: profileID, branch: branch,
-                  declared: !found.automation.tool.hasReliableDoneSignal)
+                  declared: !(found.run.tool ?? found.automation.tool).hasReliableDoneSignal)
         return true
     }
 

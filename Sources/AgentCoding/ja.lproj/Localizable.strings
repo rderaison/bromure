@@ -2084,8 +2084,8 @@
 "VMs" = "VM";
 "New automation…" = "新規オートメーション…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "「%@」は %@ を実行しますが、完了を報告しないため、このチェーンは決して発火しません。";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "クローン実行には完了を報告するエージェント（Claude Code または Kimi Code）が必要です — その合図でクローンが片付けられます。";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "フックで完了を報告するエージェント（Claude Code、Kimi Code）だけがタブを閉じられます。他のエージェントのタブは開いたままです。";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "クローン実行には完了を報告するエージェント（Claude Code、Codex、Grok または Kimi Code）が必要です — その合図でクローンが片付けられます。";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "フックで完了を報告するエージェント（Claude Code、Codex、Grok、Kimi Code）だけがタブを閉じられます。他のエージェントのタブは開いたままです。";
 "The image catalog could not be downloaded." = "イメージカタログをダウンロードできませんでした。";
 "Unsupported image compression: %@" = "対応していないイメージ圧縮形式：%@";
 "Could not expand the downloaded image: %@" = "ダウンロードしたイメージを展開できませんでした：%@";

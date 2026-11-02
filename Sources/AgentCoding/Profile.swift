@@ -1054,20 +1054,23 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// per-tab hooks — a trustworthy "the agent is finished" signal the
         /// automation engine can stamp, chain, and tear down a clone on.
         ///
-        /// Claude Code (`Stop` hook) and Kimi Code (`[[hooks]]` event =
-        /// "Stop", plus a clean exit from its one-shot `--prompt` mode) both
-        /// qualify. Codex and Grok have neither, so their only "done" is the
-        /// proxy's 4-second traffic-silence heuristic — which fires during
-        /// any long quiet stretch mid-run and would complete a run early.
-        /// See `ACAppDelegate.hookDrivenAgents` for the UI-side twin.
+        /// Claude Code (`Stop` hook), Kimi Code (`[[hooks]]` event = "Stop",
+        /// plus a clean exit from its one-shot `--prompt` mode), Codex
+        /// (`[[hooks.Stop]]` in ~/.codex/config.toml, seeded with its trust
+        /// by agentd `_seed_codex_hooks`) and Grok (the same
+        /// ~/.claude/settings.json Stop hook as Claude) all qualify. A tool
+        /// left out here never completes a run: its tab stays open and the
+        /// run reads as running for days, since the proxy's silence
+        /// heuristic doesn't report for hook-driven agents
+        /// (`ACAppDelegate.hookDrivenAgents`, the UI-side twin).
         public var hasReliableDoneSignal: Bool {
             switch self {
-            case .claude, .kimi: return true
+            case .claude, .kimi, .codex, .grok: return true
             // omp drives its per-tab sidebar dot via a turn hook (loaded with
             // --hook; see Profile bashrc), but its "done" isn't yet trusted for
             // automation teardown/chaining — automation uses the worktree-exit
-            // reporter fallback like Codex/Grok until the hook path is hardened.
-            case .codex, .grok, .omp:  return false
+            // reporter fallback until the hook path is hardened.
+            case .omp: return false
             }
         }
 
