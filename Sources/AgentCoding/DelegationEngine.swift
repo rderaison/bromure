@@ -304,6 +304,15 @@ final class DelegationEngine {
         sessionEngine.archive(id)
     }
 
+    func keepBranchQuietly(_ id: UUID) {
+        let all = sessions
+        if let s = all.session(id), let h = all.host(for: s.profileID) {
+            h.hostSessionCommand(id, "branch-keep", [:])
+            return
+        }
+        sessionEngine.keepBranchQuietly(id)
+    }
+
     /// The sessions `me` may talk to: not put away, in a workspace the
     /// policy allows — asleep or ended ones included (a message wakes them).
     func reachableSessions(from me: AgentSession) -> [AgentSession] {
@@ -1161,10 +1170,14 @@ final class DelegationEngine {
 
     /// The delegation is over: the child's agent ends and its session is
     /// put away (the Archived fold, readable as ever) rather than left
-    /// under Ended. A request's peer is left alone.
+    /// under Ended. A request's peer is left alone. A delegate's worktree
+    /// keeps its checkout and branch, but the machine stops reopening it
+    /// at boot — else every closed delegation comes back as a live agent
+    /// tab after a reboot (a resume opens it again).
     private func retireChild(_ d: Delegation) {
         guard !d.isRequest,
               let child = sessions.session(d.childSessionID), !child.isDeleted, !child.isArchived else { return }
+        if child.worktreeBranch != nil { keepBranchQuietly(d.childSessionID) }
         archive(d.childSessionID)
     }
 
