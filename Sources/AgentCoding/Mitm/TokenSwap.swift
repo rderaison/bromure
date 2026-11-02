@@ -685,10 +685,13 @@ public final class TokenSwapper: @unchecked Sendable {
     /// Case-insensitive. Substring matching is intentionally NOT used —
     /// see the security note on `TokenMap.Entry.host`.
     static func hostMatchesScope(host: String, scope: String) -> Bool {
-        let h = host.lowercased()
-        let s = scope.lowercased()
+        // An IPv6 literal compares unbracketed: CONNECT's authority gives
+        // `[2001:db8::1]`, a URL's host and a peer address `2001:db8::1`.
+        let h = HostAuthority.bare(host)
+        let s = HostAuthority.bare(scope)
         return h == s || h.hasSuffix("." + s)
     }
+
 
     /// The swap's match: a `host:port` scope (a kubeconfig server, a docker
     /// registry) names its host and the port the connection must be dialed
@@ -705,8 +708,18 @@ public final class TokenSwapper: @unchecked Sendable {
     }
 
     /// `host:port` → (host, port); a bare host, or an IPv6 literal's colons,
-    /// → (scope, nil).
+    /// → (scope, nil). A bracketed IPv6 authority (`[2001:db8::1]:6443`, what
+    /// `KubeconfigEntry.tokenScope` writes) → its literal, unbracketed, and
+    /// its port; a bracketed literal alone → (literal, nil).
     static func splitScope(_ scope: String) -> (host: String, port: Int?) {
+        if scope.hasPrefix("["), let close = scope.firstIndex(of: "]") {
+            let literal = String(scope[scope.index(after: scope.startIndex)..<close])
+            let rest = scope[scope.index(after: close)...]
+            if rest.isEmpty { return (literal, nil) }
+            guard rest.hasPrefix(":"), let port = Int(rest.dropFirst()), (1...65535).contains(port)
+            else { return (scope, nil) }
+            return (literal, port)
+        }
         guard let colon = scope.lastIndex(of: ":"), !scope[..<colon].contains(":"),
               let port = Int(scope[scope.index(after: colon)...]), (1...65535).contains(port)
         else { return (scope, nil) }
