@@ -14384,25 +14384,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// another Stop). Tearing the session down on the first done kills
     /// them mid-flight. This holds completion until the transcript has
     /// been quiet for `quiet` seconds; an unreadable probe (no transcript,
-    /// VM gone) counts as quiet, and `cap` bounds the total wait.
-    func waitForSessionQuiet(profileID: Profile.ID, branch: String,
-                             quiet: Int = 20, cap: TimeInterval = 1800) async {
+    /// VM gone) counts as quiet, and `cap` bounds the total wait. `tool`
+    /// picks the agent's transcript store. Returns whether the probe read the
+    /// transcript's age at all: false, nothing was watched.
+    @discardableResult
+    func waitForSessionQuiet(profileID: Profile.ID, branch: String, tool: Profile.Tool? = nil,
+                             quiet: Int = 20, cap: TimeInterval = 1800) async -> Bool {
         guard branch.hasPrefix("wt/"),
               let cmd = CodingTaskEngine.transcriptAgeCommand(
-                  slug: String(branch.dropFirst(3))) else { return }
+                  slug: String(branch.dropFirst(3)), agent: tool) else { return false }
         let deadline = Date().addingTimeInterval(cap)
-        var held = false
+        var held = false, read = false
         while Date() < deadline {
             guard let out = try? await guestExec(profileID: profileID,
                                                  command: cmd, timeout: 10),
                   let age = Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
-            else { return }
+            else { return read }
+            read = true
             if age >= quiet {
                 if held {
                     BACDebug.log("session",
                                  "\(branch): transcript quiet — completing")
                 }
-                return
+                return true
             }
             if !held {
                 held = true
@@ -14414,6 +14418,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 UInt64(max(quiet - age, 5)) * 1_000_000_000)
         }
         BACDebug.log("session", "\(branch): settle cap reached — completing anyway")
+        return read
     }
 
     /// Copy a finished automation run's Claude transcript out of the guest
