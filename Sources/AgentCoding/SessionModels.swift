@@ -149,17 +149,32 @@ public struct ListeningPort: Equatable, Sendable {
 enum AgentStatus: String, Sendable {
     case working, done, needsInput
 
-    /// Parse a guest-hook signal ("working"/"done"/"needsInput"/"needs-input").
-    /// Only its first line: the reporter adds the hook's session id on a
-    /// second one (`AgentStatusReport`).
+    /// Parse a guest-hook signal ("working"/"done"/"idle"/"needsInput"/
+    /// "needs-input"). Only its first line: the reporter adds the hook's
+    /// session id on a second one (`AgentStatusReport`).
     init?(signal: String) {
-        let first = signal.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        switch first.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        switch Self.firstLine(signal) {
         case "working": self = .working
-        case "done": self = .done
+        case "done", "idle": self = .done
         case "needsinput", "needs-input", "needs_input": self = .needsInput
         default: return nil
         }
+    }
+
+    /// Whether the signal says the agent's turn ended (`done`: Stop), not just
+    /// that it sits at its prompt. `idle` -- an interrupt (Codex/Kimi Esc,
+    /// Grok's StopCancelled), Codex's SessionEnd, an idle_prompt notification
+    /// -- shows the tab as done but finishes no automation run or coding task:
+    /// the work stopped unfinished and can be resumed (Finding CWE-670,
+    /// "Interrupting Codex now completes and tears down an unfinished
+    /// automation").
+    static func endsTurn(signal: String) -> Bool {
+        firstLine(signal) != "idle"
+    }
+
+    private static func firstLine(_ signal: String) -> String {
+        (signal.split(whereSeparator: \.isNewline).first.map(String.init) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
 

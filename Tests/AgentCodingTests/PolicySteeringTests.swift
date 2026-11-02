@@ -748,7 +748,7 @@ struct PolicyNoteDeliveryTests {
             proc.waitUntilExit()
         }
         for (arg, json) in [("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"abc-1"}"#),
-                            ("done", #"{"hook_event_name":"StopCancelled","session_id":"abc-1"}"#),
+                            ("idle", #"{"hook_event_name":"StopCancelled","session_id":"abc-1"}"#),
                             ("done", "")] {
             try hook(arg, json)
             #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"), "\(arg) \(json)")
@@ -762,7 +762,7 @@ struct PolicyNoteDeliveryTests {
         // typed `done`, StopCancelled) is not the turn's end.
         try hook("working", #"{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"abc-1"}"#)
         #expect(!fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
-        for (arg, json) in [("done", ""), ("done", #"{"hook_event_name":"StopCancelled","session_id":"abc-1"}"#)] {
+        for (arg, json) in [("done", ""), ("idle", #"{"hook_event_name":"StopCancelled","session_id":"abc-1"}"#)] {
             try hook(arg, json)
             #expect(try String(contentsOf: status, encoding: .utf8).hasPrefix("needsInput"), "\(arg) \(json)")
         }
@@ -825,7 +825,8 @@ struct PolicyNoteDeliveryTests {
         for n in try fm.contentsOfDirectory(at: stuck.deletingLastPathComponent(), includingPropertiesForKeys: nil)
         where n.lastPathComponent.hasPrefix("w3-") { try fm.removeItem(at: n) }
         try hook("needsInput", #"{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"new-2"}"#)
-        #expect(try String(contentsOf: status, encoding: .utf8) == "done\nnew-2")
+        // Idle: done on the dot, but no turn ended (AgentStatus.endsTurn).
+        #expect(try String(contentsOf: status, encoding: .utf8) == "idle\nnew-2")
         #expect(!fm.fileExists(atPath: outbox.appendingPathComponent(".policy-owed-3").path))
     }
 

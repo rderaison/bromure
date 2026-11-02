@@ -4484,14 +4484,15 @@ public final class ProfileStore {
     static let claudeInboxDirectory = "~/.bromure/inbox"
 
     /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
-    /// (`StopCancelled`, fired instead of `Stop`) reports the tab done.
+    /// (`StopCancelled`, fired instead of `Stop`) reports the tab idle --
+    /// done on its dot, but the turn didn't finish (`AgentStatus.endsTurn`).
     static let grokStatusHooksJSON = """
     {
       "hooks": {
         "StopCancelled": [
           {
             "hooks": [
-              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh done", "timeout": 5 }
+              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh idle", "timeout": 5 }
             ]
           }
         ]
@@ -5061,7 +5062,7 @@ public final class ProfileStore {
             let statusScript = #"""
             #!/bin/sh
             # Bromure Claude-hook status reporter → per-tab sidebar dot.
-            # $1 = working|done|needsInput.
+            # $1 = working|done|idle|needsInput (idle: at its prompt, no turn ended).
             # $2 = optional tmux pane. Claude/Kimi hooks run inside the tab's
             # pane, so $TMUX_PANE is set and $2 is omitted; omp's hook passes
             # $TMUX_PANE explicitly (its pi.exec may not inherit the env).
@@ -5236,7 +5237,8 @@ public final class ProfileStore {
             # for a while. Reporting that as "needs input" made every idle
             # agent look like it had a dialog up, and the host then held its
             # delegation notices indefinitely (that is the state it never
-            # types over). Only a real prompt is needsInput; idle is done;
+            # types over). Only a real prompt is needsInput; idle is "idle"
+            # (done on the dot, but no turn ended: no run or task finishes);
             # anything else (auth_success, elicitation bookkeeping, quota
             # notices) says nothing about the turn.
             # Grok runs these same hooks (it loads ~/.claude/settings.json)
@@ -5247,7 +5249,7 @@ public final class ProfileStore {
               case "$ntype" in
                 "") ;;
                 permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) ;;
-                idle_prompt) signal="done" ;;
+                idle_prompt) signal="idle" ;;   # at its prompt: no turn ended
                 *) exit 0 ;;
               esac
             fi
@@ -5276,7 +5278,8 @@ public final class ProfileStore {
               done
               [ -n "$left" ] || rm -f "$owed" 2>/dev/null
             fi
-            if [ "$signal" = "done" ] && [ -e "$owed" ]; then signal="needsInput"; fi
+            # An idle report too: the note is still owed, the tab needs you.
+            if { [ "$signal" = "done" ] || [ "$signal" = "idle" ]; } && [ -e "$owed" ]; then signal="needsInput"; fi
             # The mark goes on new activity (a PreToolUse `working`), but the
             # note it held for may still be unread: a `done` that didn't drain
             # (StopCancelled, an Interrupt, a typed `done`) is no turn end
@@ -5284,7 +5287,7 @@ public final class ProfileStore {
             # "PreToolUse working clears an owed policy note, so a non-Stop
             # done finishes the task"). Notes are only written for tabs whose
             # hooks drain them (Claude's).
-            if [ "$signal" = "done" ] && [ -z "${drained:-}" ]; then
+            if { [ "$signal" = "done" ] || [ "$signal" = "idle" ]; } && [ -z "${drained:-}" ]; then
               for n in /mnt/bromure-meta/policy-notes/w"$idx"-*.note; do
                 [ -e "$n" ] || continue
                 [ -e "$HOME/.bromure/policy-claims/${n##*/}" ] && continue
