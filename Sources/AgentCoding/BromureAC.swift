@@ -3580,20 +3580,59 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     nonisolated static func hostIsLocalOrPrivate(_ h: String) -> Bool { GuestURLGate.hostIsLocalOrPrivate(h) }
 
     /// Open a guest-relayed URL (from the VM's `bromure-open` outbox) in the
-    /// user's REAL browser — unless its host is local/private. A compromised
-    /// guest must not be able to point the host browser at loopback / LAN
-    /// services (H2 "local drive-by"): the browser would fetch them carrying
-    /// the user's cookies + session. The legitimate in-VM OAuth flow only ever
-    /// opens a PUBLIC authorize URL here; the browser then follows the
-    /// `127.0.0.1:<port>` redirect to the loopback forwarder ITSELF, so
-    /// blocking local hosts at this hand-off costs the real flow nothing.
-    static func openGuestRelayedURL(_ url: URL) {
-        guard opensInRealBrowser(url) else {
+    /// user's REAL browser. A compromised guest must not be able to point the
+    /// host browser at loopback / LAN services (H2 "local drive-by"): the
+    /// browser would fetch them carrying the user's cookies + session. A
+    /// local/private host is refused; an agent's sign-in page opens (the
+    /// browser then follows its `127.0.0.1:<port>` redirect to the loopback
+    /// forwarder itself); any other page -- a public name can resolve to the
+    /// LAN, a public page can redirect there -- opens only once the user says
+    /// so (`GuestURLGate.disposition`).
+    static func openGuestRelayedURL(_ url: URL, workspace: String? = nil) {
+        switch GuestURLGate.disposition(for: url) {
+        case .refuse:
             FileHandle.standardError.write(Data(
                 "[ac] refused to open guest URL with local/private host: \(url.host ?? "?")\n".utf8))
+        case .open:
+            NSWorkspace.shared.open(url)
+        case .ask:
+            askBeforeOpeningGuestURL(url, workspace: workspace)
+        }
+    }
+
+    /// Guest pages waiting on the user's word: a guest can't stack sheets.
+    private static var guestURLAsksPending = 0
+
+    /// "Open this page from the workspace?" as a sheet (a modal would stall
+    /// the main queue). No window to ask in (an unattended launch), or three
+    /// already waiting: not opened.
+    private static func askBeforeOpeningGuestURL(_ url: URL, workspace: String?) {
+        let delegate = NSApp.delegate as? ACAppDelegate
+        guard guestURLAsksPending < 3,
+              let window = NSApp.keyWindow ?? delegate?.unifiedWindow as NSWindow? ?? delegate?.mainWindow else {
+            FileHandle.standardError.write(Data(
+                "[ac] did not open guest URL (no window to ask in, or asks pending): \(url.host ?? "?")\n".utf8))
             return
         }
-        NSWorkspace.shared.open(url)
+        guestURLAsksPending += 1
+        let shown = url.absoluteString.count > 400 ? String(url.absoluteString.prefix(400)) + "…" : url.absoluteString
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Open a Page from the Workspace?", comment: "guest URL open prompt")
+        alert.informativeText = workspace.map {
+            String(format: NSLocalizedString(
+                "Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+                comment: "guest URL open prompt: workspace name, URL"), $0, shown)
+        } ?? String(format: NSLocalizedString(
+            "Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+            comment: "guest URL open prompt: URL"), shown)
+        // Cancel is the default: Return doesn't open it.
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Open in Browser", comment: "guest URL open prompt"))
+        alert.beginSheetModal(for: window) { response in
+            guestURLAsksPending -= 1
+            if response == .alertSecondButtonReturn { NSWorkspace.shared.open(url) }
+        }
     }
 
     /// Per-profile shell bridges (vsock 5800), created for every session —
@@ -15976,7 +16015,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }
-                Self.openGuestRelayedURL(url)
+                Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name)
             }
         }
         sandbox.onTabList = { [weak self] tabs in
