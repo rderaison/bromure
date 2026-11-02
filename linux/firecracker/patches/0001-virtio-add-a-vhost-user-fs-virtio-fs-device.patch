@@ -1,13 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Renaud Deraison <rderaison@gmail.com>
-Date: Mon, 2 Nov 2026 17:44:26 -0500
+From: Renaud Deraison <renaud@secl.io>
+Date: Mon, 2 Nov 2026 18:14:37 -0500
 Subject: [PATCH] virtio: add a vhost-user-fs (virtio-fs) device
 
 A virtio-fs device whose queues a vhost-user backend (virtiofsd) serves,
 built on the vhost-user frontend the vhost-user-blk device uses: one
 high-priority and one request queue, the tag and request-queue count in
 config space, guest memory memfd-backed when any is configured. Set up
-pre-boot from the config file's "fs" list. Not snapshotted.
+pre-boot from the config file's "fs" list. Creating a snapshot of a VM
+with one fails (it would restore a guest whose mounts point at nothing).
 
 The MMIO transport now answers the shared-memory region registers
 (SHMSel/SHMLen/SHMBase) as the spec says a device without one must: the
@@ -18,7 +19,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
  src/vmm/src/builder.rs                        |  30 +++
  src/vmm/src/device_manager/pci_mngr.rs        |   3 +
- src/vmm/src/device_manager/persist.rs         |   5 +
+ src/vmm/src/device_manager/persist.rs         |   3 +
  src/vmm/src/devices/virtio/device.rs          |   1 +
  src/vmm/src/devices/virtio/fs/device.rs       | 220 ++++++++++++++++++
  .../src/devices/virtio/fs/event_handler.rs    |  64 +++++
@@ -26,10 +27,11 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
  src/vmm/src/devices/virtio/mod.rs             |   1 +
  src/vmm/src/devices/virtio/transport/mmio.rs  |  15 ++
  src/vmm/src/lib.rs                            |   8 +
+ src/vmm/src/persist.rs                        |  13 ++
  src/vmm/src/resources.rs                      |  21 +-
  src/vmm/src/vmm_config/fs.rs                  |  66 ++++++
  src/vmm/src/vmm_config/mod.rs                 |   2 +
- 13 files changed, 470 insertions(+), 1 deletion(-)
+ 14 files changed, 481 insertions(+), 1 deletion(-)
  create mode 100644 src/vmm/src/devices/virtio/fs/device.rs
  create mode 100644 src/vmm/src/devices/virtio/fs/event_handler.rs
  create mode 100644 src/vmm/src/devices/virtio/fs/mod.rs
@@ -91,7 +93,7 @@ index bcb0e02..10a7c89 100644
      device_manager: &mut DeviceManager,
      vm: &Vm,
 diff --git a/src/vmm/src/device_manager/pci_mngr.rs b/src/vmm/src/device_manager/pci_mngr.rs
-index 283b1f3..bf89089 100644
+index 283b1f3..1d280f7 100644
 --- a/src/vmm/src/device_manager/pci_mngr.rs
 +++ b/src/vmm/src/device_manager/pci_mngr.rs
 @@ -366,6 +366,9 @@ impl<'a> Persist<'a> for PciDevices {
@@ -99,23 +101,21 @@ index 283b1f3..bf89089 100644
  
              match locked_virtio_dev.device_type() {
 +                VirtioDeviceType::Fs => {
-+                    warn!("Skipping vhost-user-fs device: it does not support snapshotting");
++                    unreachable!("create_snapshot refuses vhost-user-fs devices");
 +                }
                  VirtioDeviceType::Balloon => {
                      let balloon_device = locked_virtio_dev
                          .as_any()
 diff --git a/src/vmm/src/device_manager/persist.rs b/src/vmm/src/device_manager/persist.rs
-index 82518eb..c1b66bd 100644
+index 82518eb..ebdff5b 100644
 --- a/src/vmm/src/device_manager/persist.rs
 +++ b/src/vmm/src/device_manager/persist.rs
-@@ -286,6 +286,11 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
+@@ -286,6 +286,9 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
              let device_id = devid.clone();
  
              match locked_device.device_type() {
 +                VirtioDeviceType::Fs => {
-+                    crate::logger::warn!(
-+                        "Skipping vhost-user-fs device: it does not support snapshotting"
-+                    );
++                    unreachable!("create_snapshot refuses vhost-user-fs devices");
 +                }
                  VirtioDeviceType::Balloon => {
                      let device_state = locked_device
@@ -561,6 +561,30 @@ index 41b7b8d..a7a9d37 100644
              // serial_config is marked serde(skip) so that it doesnt end up in snapshots
              serial_config: None,
              memory_hotplug,
+diff --git a/src/vmm/src/persist.rs b/src/vmm/src/persist.rs
+index 71a0345..b872240 100644
+--- a/src/vmm/src/persist.rs
++++ b/src/vmm/src/persist.rs
+@@ -171,6 +171,19 @@ pub fn create_snapshot(
+     vm_info: &VmInfo,
+     params: &CreateSnapshotParams,
+ ) -> Result<(), CreateSnapshotError> {
++    // A snapshot without the vhost-user-fs devices would restore a guest
++    // whose mounts point at nothing: refuse it.
++    let mut has_fs = false;
++    vmm.device_manager.for_each_virtio_device(|t, _| {
++        has_fs |= t == crate::devices::virtio::device::VirtioDeviceType::Fs
++    });
++    if has_fs {
++        return Err(CreateSnapshotError::MicrovmState(
++            MicrovmStateError::NotAllowed(
++                "vhost-user-fs devices do not support snapshotting".into(),
++            ),
++        ));
++    }
+     let microvm_state = vmm
+         .save_state(vm_info)
+         .map_err(CreateSnapshotError::MicrovmState)?;
 diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
 index 55f784a..da2d438 100644
 --- a/src/vmm/src/resources.rs

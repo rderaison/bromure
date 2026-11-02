@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Renaud Deraison <rderaison@gmail.com>
-Date: Mon, 2 Nov 2026 17:50:02 -0500
+From: Renaud Deraison <renaud@secl.io>
+Date: Mon, 2 Nov 2026 18:14:37 -0500
 Subject: [PATCH] net: an inherited AF_UNIX SOCK_DGRAM socket as a backend
 
 host_dev_name "fd:<N>" (':' is never in an interface name) takes the
@@ -14,16 +14,19 @@ lose: the host side can restart while it keeps its end of a socketpair
 open, and nothing here notices. Sends that fail because the peer is full
 or gone (EAGAIN, ENOBUFS, ECONNREFUSED, ENOTCONN) drop the frame and count
 it in tap_write_fails without logging each one; the TX queue never stalls.
-Socket buffers are asked for 4 MiB (capped by the kernel).
+A frame longer than the guest's receive buffers is dropped whole and
+counted in tap_read_fails (recvmsg, MSG_TRUNC), never handed over cut; a
+header with no frame sends nothing. Socket buffers are asked for 4 MiB
+(capped by the kernel).
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
- src/vmm/src/devices/virtio/net/device.rs |  25 +-
- src/vmm/src/devices/virtio/net/tap.rs    | 277 +++++++++++++++++++++++
- 2 files changed, 301 insertions(+), 1 deletion(-)
+ src/vmm/src/devices/virtio/net/device.rs |  31 ++-
+ src/vmm/src/devices/virtio/net/tap.rs    | 315 +++++++++++++++++++++++
+ 2 files changed, 345 insertions(+), 1 deletion(-)
 
 diff --git a/src/vmm/src/devices/virtio/net/device.rs b/src/vmm/src/devices/virtio/net/device.rs
-index 8ccc58d..244d1a6 100644
+index 8ccc58d..193b048 100644
 --- a/src/vmm/src/devices/virtio/net/device.rs
 +++ b/src/vmm/src/devices/virtio/net/device.rs
 @@ -303,6 +303,18 @@ impl Net {
@@ -72,8 +75,21 @@ index 8ccc58d..244d1a6 100644
                  net_metrics.tap_write_fails.inc();
              }
          };
+@@ -702,6 +725,12 @@ impl Net {
+                     // unexpected.
+                     match err.raw_os_error() {
+                         Some(err) if err == EAGAIN => (),
++                        // A datagram socket's frame too long for the buffers:
++                        // dropped and counted; read on.
++                        Some(libc::EMSGSIZE) => {
++                            self.metrics.tap_read_fails.inc();
++                            continue;
++                        }
+                         _ => {
+                             error!("Failed to read tap: {:?}", err);
+                             self.metrics.tap_read_fails.inc();
 diff --git a/src/vmm/src/devices/virtio/net/tap.rs b/src/vmm/src/devices/virtio/net/tap.rs
-index 58bc82d..0c0e36a 100644
+index 58bc82d..288d602 100644
 --- a/src/vmm/src/devices/virtio/net/tap.rs
 +++ b/src/vmm/src/devices/virtio/net/tap.rs
 @@ -27,6 +27,8 @@ const IFACE_NAME_MAX_LEN: usize = 16;
@@ -231,7 +247,7 @@ index 58bc82d..0c0e36a 100644
          // SAFETY: ioctl is safe. Called with a valid tap fd, and we check the return.
          if unsafe { ioctl_with_ref(&self.tap_file, TUNSETVNETHDRSZ(), &size) } < 0 {
              return Err(TapError::SetSizeOfVnetHdr(IoError::last_os_error()));
-@@ -182,6 +295,20 @@ impl Tap {
+@@ -182,6 +295,25 @@ impl Tap {
  
      /// Write an `IoVecBuffer` to tap
      pub(crate) fn write_iovec(&mut self, buffer: &IoVecBuffer) -> Result<usize, IoError> {
@@ -240,6 +256,11 @@ index 58bc82d..0c0e36a 100644
 +            let iovs =
 +                unsafe { std::slice::from_raw_parts(buffer.as_iovec_ptr(), buffer.iovec_count()) };
 +            iovecs_skipping(iovs, hdr_len, &mut self.dgram_iov);
++            // A header and no frame: nothing to send (an empty datagram
++            // would be a frame to the peer).
++            if self.dgram_iov.is_empty() {
++                return Ok(iovs.iter().map(|i| i.iov_len).sum());
++            }
 +            let iovcnt = i32::try_from(self.dgram_iov.len()).unwrap();
 +            // SAFETY: as below, over the same memory less the header.
 +            let ret =
@@ -252,7 +273,7 @@ index 58bc82d..0c0e36a 100644
          let iovcnt = i32::try_from(buffer.iovec_count()).unwrap();
          let iov = buffer.as_iovec_ptr();
  
-@@ -196,6 +323,39 @@ impl Tap {
+@@ -196,6 +328,49 @@ impl Tap {
  
      /// Read from tap to an `IoVecBufferMut`
      pub(crate) fn read_iovec(&mut self, buffer: &mut [libc::iovec]) -> Result<usize, IoError> {
@@ -262,19 +283,29 @@ index 58bc82d..0c0e36a 100644
 +            }
 +            iovecs_skipping(buffer, hdr_len, &mut self.dgram_iov);
 +            let ret = loop {
-+                let iovcnt = i32::try_from(self.dgram_iov.len()).unwrap();
-+                // SAFETY: as below, over the same memory less the header.
-+                let ret = unsafe {
-+                    libc::readv(self.tap_file.as_raw_fd(), self.dgram_iov.as_ptr(), iovcnt)
-+                };
++                // SAFETY: an all-zero msghdr is valid; the iovecs are set below.
++                let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
++                msg.msg_iov = self.dgram_iov.as_mut_ptr();
++                // size_t in glibc, c_int in musl.
++                #[allow(clippy::useless_conversion)]
++                let iovlen = self.dgram_iov.len().try_into().unwrap();
++                msg.msg_iovlen = iovlen;
++                // SAFETY: recvmsg into the guest's buffers less the header,
++                // as readv below does; checked.
++                let ret = unsafe { libc::recvmsg(self.tap_file.as_raw_fd(), &mut msg, 0) };
++                if ret == -1 {
++                    return Err(IoError::last_os_error());
++                }
++                // A frame longer than the buffers is gone, the rest of it
++                // discarded: never hand the guest a cut frame.
++                if msg.msg_flags & libc::MSG_TRUNC != 0 {
++                    return Err(IoError::from_raw_os_error(libc::EMSGSIZE));
++                }
 +                // An empty datagram is no frame: skip it.
 +                if ret != 0 {
 +                    break ret;
 +                }
 +            };
-+            if ret == -1 {
-+                return Err(IoError::last_os_error());
-+            }
 +            // No offloads are offered over a socket, so the header is all
 +            // zeros (the device fills num_buffers in itself).
 +            let mut left = hdr_len;
@@ -292,7 +323,7 @@ index 58bc82d..0c0e36a 100644
          let iov = buffer.as_mut_ptr();
          let iovcnt = buffer.len().try_into().unwrap();
  
-@@ -274,6 +434,123 @@ pub mod tests {
+@@ -274,6 +449,146 @@ pub mod tests {
          assert_eq!(name, tap.if_name_as_str());
      }
  
@@ -357,6 +388,29 @@ index 58bc82d..0c0e36a 100644
 +        let mut rx = IoVecBufferMut::from(vec![b3.as_mut_slice()]);
 +        let err = tap.read_iovec(rx.as_iovec_mut_slice()).unwrap_err();
 +        assert_eq!(err.raw_os_error(), Some(libc::EAGAIN));
++
++        // A frame longer than the buffers is dropped whole, not cut; the
++        // next one reads normally.
++        assert_eq!(
++            unsafe { libc::send(peer, frame.as_ptr().cast(), frame.len(), 0) },
++            1514
++        );
++        assert_eq!(
++            unsafe { libc::send(peer, frame.as_ptr().cast(), 100, 0) },
++            100
++        );
++        let mut small = vec![0u8; HDR + 1000];
++        let mut rx = IoVecBufferMut::from(vec![small.as_mut_slice()]);
++        let err = tap.read_iovec(rx.as_iovec_mut_slice()).unwrap_err();
++        assert_eq!(err.raw_os_error(), Some(libc::EMSGSIZE));
++        assert_eq!(tap.read_iovec(rx.as_iovec_mut_slice()).unwrap(), HDR + 100);
++        assert_eq!(&small[HDR..HDR + 100], &frame[..100]);
++
++        // A header with no frame sends nothing.
++        let empty = IoVecBuffer::from(vec![&hdr[..]]);
++        assert_eq!(tap.write_iovec(&empty).unwrap(), HDR);
++        let n = unsafe { libc::recv(peer, got.as_mut_ptr().cast(), got.len(), libc::MSG_DONTWAIT) };
++        assert_eq!(n, -1);
 +        unsafe { libc::close(peer) };
 +    }
 +
