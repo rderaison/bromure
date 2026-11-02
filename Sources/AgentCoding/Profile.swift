@@ -26,6 +26,22 @@ public enum ProfileColor: String, Codable, CaseIterable, Equatable, Sendable {
     }
 }
 
+/// `host:port` with an IPv6 literal bracketed, the one form the proxy's
+/// scopes and endpoint keys use (`TokenSwapper.splitScope` reads it back).
+enum HostAuthority {
+    /// Lowercased; an IPv6 literal without its brackets.
+    static func bare(_ host: String) -> String {
+        let h = host.lowercased()
+        return h.hasPrefix("[") && h.hasSuffix("]") ? String(h.dropFirst().dropLast()) : h
+    }
+
+    /// `h:6443`, `[2001:db8::1]:6443`.
+    static func format(host: String, port: Int) -> String {
+        let h = bare(host)
+        return h.contains(":") ? "[\(h)]:\(port)" : "\(h):\(port)"
+    }
+}
+
 /// One Kubernetes context (cluster + auth) the user pointed bromure
 /// at. The full kubeconfig is materialized in the VM at session prep
 /// using only the synthetic credentials we generate; the real cert /
@@ -153,7 +169,7 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     /// registering client identities and cluster CAs (see `endpointKey`).
     public var hostPattern: String {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
-        if let port = url.port { return "\(host):\(port)" }
+        if let port = url.port { return HostAuthority.format(host: host, port: port) }
         return host
     }
 
@@ -163,7 +179,9 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     public var tokenScope: String {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
         let port = url.port ?? (url.scheme?.lowercased() == "http" ? 80 : 443)
-        return "\(host):\(port)"
+        // An IPv6 host is bracketed ([2001:db8::1]:443): its own colons
+        // would otherwise swallow the port (splitScope).
+        return HostAuthority.format(host: host, port: port)
     }
 
     private enum CodingKeys: String, CodingKey {

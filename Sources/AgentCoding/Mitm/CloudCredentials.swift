@@ -13,16 +13,17 @@ import SwiftASN1
 /// folded onto the bare form (same endpoint). One key per endpoint, so a
 /// registration never writes into another context's slot and a lookup
 /// never falls back to one.
+/// An IPv6 literal is keyed unbracketed on 443 and bracketed with any other
+/// port (`[2001:db8::1]:6443`), whichever form the host arrived in (CONNECT's
+/// authority is bracketed, a URL's host is not).
 func endpointKey(host: String, port: Int) -> String {
-    let h = host.lowercased()
-    return port == 443 ? h : "\(h):\(port)"
+    port == 443 ? HostAuthority.bare(host) : HostAuthority.format(host: host, port: port)
 }
 
 /// A registration's `host[:port]` as an `endpointKey`.
 func endpointKey(_ hostPattern: String) -> String {
-    let h = hostPattern.lowercased()
-    if h.hasSuffix(":443") { return String(h.dropLast(4)) }
-    return h
+    let (host, port) = TokenSwapper.splitScope(hostPattern.lowercased())
+    return endpointKey(host: host, port: port ?? 443)
 }
 
 // MARK: - SecIdentity registry
