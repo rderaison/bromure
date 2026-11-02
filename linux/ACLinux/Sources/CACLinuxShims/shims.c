@@ -11,6 +11,23 @@
 extern char **environ;
 
 int acl_spawn(const char *path, char *const argv[], int in_fd, int out_fd, int err_fd, int *pid_out) {
+    return acl_spawn_fds(path, argv, in_fd, out_fd, err_fd, NULL, 0, pid_out);
+}
+
+int acl_spawn_fds(const char *path, char *const argv[], int in_fd, int out_fd, int err_fd,
+                  const int *extra, int nextra, int *pid_out) {
+    if (nextra < 0 || nextra > 64) return EINVAL;
+    // Each extra descriptor through a private copy above every target, so a
+    // dup2 onto 3+i can't clobber a source still to be placed.
+    int high[64];
+    for (int i = 0; i < nextra; i++) {
+        high[i] = fcntl(extra[i], F_DUPFD_CLOEXEC, 3 + nextra + 64);
+        if (high[i] < 0) {
+            int e = errno;
+            while (i-- > 0) close(high[i]);
+            return e;
+        }
+    }
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t at;
     posix_spawn_file_actions_init(&fa);
@@ -20,8 +37,10 @@ int acl_spawn(const char *path, char *const argv[], int in_fd, int out_fd, int e
         if (fds[i] >= 0) posix_spawn_file_actions_adddup2(&fa, fds[i], i);
         else posix_spawn_file_actions_addopen(&fa, i, "/dev/null", i == 0 ? O_RDONLY : O_WRONLY, 0);
     }
+    // dup2 clears close-on-exec on the copy.
+    for (int i = 0; i < nextra; i++) posix_spawn_file_actions_adddup2(&fa, high[i], 3 + i);
 #ifdef __linux__
-    posix_spawn_file_actions_addclosefrom_np(&fa, 3);
+    posix_spawn_file_actions_addclosefrom_np(&fa, 3 + nextra);
 #endif
     sigset_t none, all;
     sigemptyset(&none);
@@ -33,6 +52,7 @@ int acl_spawn(const char *path, char *const argv[], int in_fd, int out_fd, int e
     int r = posix_spawn(&pid, path, &fa, &at, argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&at);
+    for (int i = 0; i < nextra; i++) close(high[i]);
     if (r == 0) *pid_out = pid;
     return r;
 }

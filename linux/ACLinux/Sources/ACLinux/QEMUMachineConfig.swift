@@ -10,6 +10,8 @@ public struct QEMUMachineConfig: Sendable {
         case q35
         /// Minimal virtio-mmio machine: about 0.5 s faster to the agent.
         case microvm
+        /// Not QEMU: FirecrackerMachine runs this config (linux/firecracker).
+        case firecracker
     }
 
     /// A host folder shared over virtiofs; each gets its own virtiofsd.
@@ -41,6 +43,9 @@ public struct QEMUMachineConfig: Sendable {
         case stream(socketPath: String)
         /// QEMU user-mode NAT (tests and the image bake).
         case user
+        /// Firecracker: the VM's end of a DgramPort socketpair, inherited by
+        /// the firecracker process (FirecrackerMachine.start closes it here).
+        case datagram(peerFD: Int32)
     }
 
     // @port-skip linux-only: disk image formats
@@ -95,6 +100,12 @@ public struct QEMUMachineConfig: Sendable {
     public var qemuBinary = "/usr/bin/qemu-system-x86_64"
     public var qemuImg = "/usr/bin/qemu-img"
     public var virtiofsd = "/usr/libexec/virtiofsd"
+    /// linux/firecracker/build.sh's output, unless BROMURE_FIRECRACKER says otherwise.
+    public var firecrackerBinary = Self.defaultFirecrackerBinary
+    // @port-skip linux-only: Firecracker backend
+    public static var defaultFirecrackerBinary: String {
+        ProcessInfo.processInfo.environment["BROMURE_FIRECRACKER"] ?? (NSHomeDirectory() + "/.local/share/bromure-ac/bin/firecracker")
+    }
     public var extraArguments: [String] = []
     /// QEMU exits when the process that started it does (`-run-with
     /// exit-with-parent=on`), so a crashed daemon leaves no orphan VMs; their
@@ -143,6 +154,12 @@ public struct QEMUMachineConfig: Sendable {
         }
         if cpus < 1 || memoryMiB < 128 { throw MachineError.invalidConfig("cpus/memory") }
         if Set(shares.map(\.tag)).count != shares.count { throw MachineError.invalidConfig("duplicate share tag") }
+        if machine == .firecracker {
+            if case .stream = network { throw MachineError.invalidConfig("Firecracker takes a datagram network") }
+            if case .user = network { throw MachineError.invalidConfig("Firecracker takes a datagram network") }
+            socks += [firecrackerAPISocketPath, HybridVsockListener.path(uds: firecrackerVsockPath, port: 65_535)]
+            for s in socks where s.utf8.count > 107 { throw MachineError.socketPathTooLong(s) }
+        }
     }
 
     /// QEMU's argv (without the binary). `incoming` adds `-incoming defer`
@@ -160,7 +177,9 @@ public struct QEMUMachineConfig: Sendable {
         // IOAPIC kept IRR set for virtio-blk's line, never delivered, both vCPUs
         // halted, and the boot hung in the initrd (1 in 80 boots on a loaded
         // host; three CI runs). q35's virtio-pci uses MSI and never hit it.
-        case .microvm: a += ["-machine", "microvm,accel=kvm,kernel-irqchip=on,ioapic2=off,pit=off,pic=off,rtc=on,isa-serial=on"]
+        case .microvm, .firecracker:
+            // (.firecracker never gets here: QEMUMachine refuses it.)
+            a += ["-machine", "microvm,accel=kvm,kernel-irqchip=on,ioapic2=off,pit=off,pic=off,rtc=on,isa-serial=on"]
         }
         a += ["-cpu", "host", "-smp", "\(cpus)", "-m", "\(memoryMiB)M",
               // memfd shared RAM: required by vhost-user-fs, and what mapped-ram saves.
@@ -191,6 +210,8 @@ public struct QEMUMachineConfig: Sendable {
                   "-device", "\(dev("virtio-net")),netdev=n0\(mac)"]
         case .user:
             a += ["-netdev", "user,id=n0", "-device", "\(dev("virtio-net")),netdev=n0\(mac)"]
+        case .datagram:
+            break                                   // Firecracker's; QEMUMachine refuses it
         }
         if vsock { a += ["-device", "\(dev("vhost-vsock")),guest-cid=\(vsockCID)"] }
         a += ["-chardev", "socket,id=qmp,path=\(Self.optValue(qmpSocketPath)),server=on,wait=off",

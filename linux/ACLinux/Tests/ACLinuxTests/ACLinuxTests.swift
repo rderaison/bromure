@@ -1254,3 +1254,116 @@ struct HostnameHomeTests {
         #expect(try Daemon.growHomeImageIfNeeded(atPath: path + ".missing", target: 8 << 30, setting: nil).hasPrefix("home image unreadable"))
     }
 }
+
+@Suite("Firecracker backend")
+struct FirecrackerBackendTests {
+    @Test("datagram port: one frame per datagram both ways; a full peer is waited for, not dropped on")
+    func dgramPort() async throws {
+        let (port, peer) = try DgramPort.pair(name: "t")
+        defer { port.close(); close(peer) }
+        // VM -> switch: whole frames; runts are dropped.
+        let frame = Data((0..<1514).map { UInt8($0 & 0xFF) })
+        #expect(frame.withUnsafeBytes { send(peer, $0.baseAddress, $0.count, 0) } == 1514)
+        #expect(send(peer, [UInt8](repeating: 1, count: 10), 10, 0) == 10)
+        #expect(frame.withUnsafeBytes { send(peer, $0.baseAddress, 100, 0) } == 100)
+        var it = port.inbound.makeAsyncIterator()
+        #expect(await it.next() == frame)
+        #expect(await it.next() == frame.prefix(100))
+        // Switch -> VM: far more 64 KiB frames than the socket holds, with
+        // the VM's end not read at first: none may be lost.
+        let big = Data(repeating: 0x5A, count: 65_000), n = 200
+        for _ in 0..<n { await port.sendWaiting(big) }
+        let got = await Task.detached { () -> Int in
+            var count = 0, buf = [UInt8](repeating: 0, count: 70_000)
+            while count < n {
+                var p = pollfd(fd: peer, events: Int16(POLLIN), revents: 0)
+                guard poll(&p, 1, 5000) == 1 else { break }
+                if recv(peer, &buf, buf.count, 0) == big.count { count += 1 }
+            }
+            return count
+        }.value
+        #expect(got == n)
+        #expect(port.stats.dropped == 0 && port.sendErrors == 0)
+    }
+
+    @Test("config JSON: raw system disk, home, shares by tag, fd:3 network, hybrid vsock, reboot=k")
+    func config() throws {
+        var c = QEMUMachineConfig(name: "bromure-abc", kernel: "/k", initrd: "/i", cmdline: "console=ttyS0",
+                                  baseImage: "/base.img", overlay: "/vm/disk.raw", vsockCID: 7, runDirectory: "/r")
+        c.machine = .firecracker
+        c.extraDisks = [.init(path: "/vm/home.img")]
+        c.shares = [.init(tag: "bromure-meta", hostPath: "/m", readOnly: true), .init(tag: "bromure-outbox", hostPath: "/o")]
+        c.macAddress = "52:54:00:00:00:07"
+        c.network = .datagram(peerFD: 9)
+        try c.validate()
+        let j = c.firecrackerConfig(netFD: 3)
+        #expect(j["boot-source"]?["boot_args"]?.stringValue == "console=ttyS0 reboot=k panic=1")
+        #expect(j["boot-source"]?["initrd_path"]?.stringValue == "/i")
+        #expect(j["drives"] == [["drive_id": "root", "path_on_host": "/vm/disk.raw", "is_root_device": false, "is_read_only": false],
+                                ["drive_id": "disk1", "path_on_host": "/vm/home.img", "is_root_device": false, "is_read_only": false]])
+        #expect(j["fs"] == [["fs_id": "fs0", "tag": "bromure-meta", "socket": "/r/fs0.sock"],
+                            ["fs_id": "fs1", "tag": "bromure-outbox", "socket": "/r/fs1.sock"]])
+        #expect(j["network-interfaces"] == [["iface_id": "eth0", "host_dev_name": "fd:3", "guest_mac": "52:54:00:00:00:07"]])
+        #expect(j["vsock"] == ["guest_cid": 7, "uds_path": "/r/v.sock"])
+        // Integers stay integers on the wire (Firecracker's serde wants u32/usize).
+        let text = String(decoding: try JSONEncoder().encode(j["machine-config"]!), as: UTF8.self)
+        #expect(!text.contains("."), "\(text)")
+        c.network = .stream(socketPath: "/r/net.sock")
+        #expect(throws: MachineError.self) { try c.validate() }
+    }
+
+    @Test("QEMU refuses a Firecracker config")
+    func qemuRefuses() async throws {
+        var c = QEMUMachineConfig(name: "x", kernel: "/k", initrd: nil, cmdline: "", baseImage: "/b",
+                                  overlay: "/o", vsockCID: 3, runDirectory: try shortTempDir())
+        c.machine = .firecracker
+        await #expect(throws: MachineError.self) { try await QEMUMachine(config: c).start() }
+    }
+
+    @Test("hybrid vsock: a connection to <uds>_<port> comes out as from (cid, port), also from a stored listener")
+    func hybridVsock() async throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let fd = try HybridVsockListener.bindListening(dir + "/v.sock_5800")
+        let l = try await HybridVsockListener.listen(udsPath: dir + "/v.sock", port: 5800, cid: 42, stored: fd)
+        let client = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .connect(unixDomainSocketPath: dir + "/v.sock_5800").get()
+        var it = l.connections.makeAsyncIterator()
+        let conn = try #require(await it.next())
+        #expect(conn.peer.cid.rawValue == 42 && conn.peer.port.rawValue == 5800)
+        try await client.writeAndFlush(ByteBuffer(string: "hi")).get()
+        let got = try await conn.withStreams { inbound, _ in
+            var i = inbound.makeAsyncIterator()
+            return try await i.next().map { String(buffer: $0) }
+        }
+        #expect(got == "hi")
+        // The server end closed after withStreams: NIO closes the client on EOF.
+        try? await client.close()
+        await l.close()
+        #expect(!FileManager.default.fileExists(atPath: dir + "/v.sock_5800"))
+    }
+
+    @Test("spawn: inherited descriptors become 3, 4, … in the child; nothing else leaks")
+    func inheritedFDs() async throws {
+        var a: [Int32] = [-1, -1], b: [Int32] = [-1, -1]
+        #expect(pipe(&a) == 0 && pipe(&b) == 0)
+        let log = try shortTempDir() + "/out"
+        // Put b's write end where a's would land, to exercise the shuffle.
+        let p = try ChildProcess(name: "sh", executable: "/bin/sh",
+                                 arguments: ["-c", "echo three >&3; echo four >&4; ls /proc/self/fd | sort -n | tr '\\n' ' '"],
+                                 logPath: log, inheritedFDs: [a[1], b[1]])
+        try p.start()
+        #expect(await p.waitForExit() == 0)
+        close(a[1]); close(b[1])
+        func readAll(_ fd: Int32) -> String {
+            var buf = [UInt8](repeating: 0, count: 64)
+            let n = read(fd, &buf, buf.count)
+            return String(decoding: buf[0..<max(0, n)], as: UTF8.self)
+        }
+        #expect(readAll(a[0]) == "three\n" && readAll(b[0]) == "four\n")
+        close(a[0]); close(b[0])
+        // ls's own directory fd is the extra one.
+        let fds = try String(contentsOfFile: log, encoding: .utf8).split(separator: " ").compactMap { Int($0) }
+        #expect(fds.filter { $0 > 2 }.count == 3, "\(fds)")
+    }
+}

@@ -91,7 +91,7 @@ extension VM {
     struct Run: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Create and start a VM (detached).")
         @Option(help: "VM name.") var name: String?
-        @Option(help: "q35 or microvm.") var machine = "microvm"
+        @Option(help: "q35, microvm or firecracker (linux/firecracker/build.sh).") var machine = "microvm"
         @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB = 2.0
         @Option(help: "vCPUs.") var cpus = 2
         @Option(name: .customLong("home-gb"), help: "Home image size in GiB (8-1024; default: the daemon's).") var homeGB: Int?

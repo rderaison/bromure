@@ -20,6 +20,11 @@ int acl_tap_open(const char *name);
 /// dispositions are reset. Returns 0 and the pid, or an errno.
 int acl_spawn(const char *path, char *const argv[], int in_fd, int out_fd, int err_fd, int *pid_out);
 
+/// acl_spawn, and `extra[i]` (up to 64) become the child's descriptor 3 + i;
+/// everything above them is closed.
+int acl_spawn_fds(const char *path, char *const argv[], int in_fd, int out_fd, int err_fd,
+                  const int *extra, int nextra, int *pid_out);
+
 /// Blocks until `pid` has exited, WITHOUT reaping it (waitid WNOWAIT): the
 /// zombie keeps the pid reserved, so it can't be recycled until acl_reap.
 /// Returns the exit status, or 128 + signal, or -1.

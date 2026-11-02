@@ -67,13 +67,16 @@ final class ChildProcess: Sendable {
     private let logPath: String?
     private let stdinFD: Int32?
     private let stdoutFD: Int32?
+    /// Become the child's descriptors 3, 4, … (Firecracker's net socket).
+    private let inheritedFDs: [Int32]
     private let state = NIOLockedValueBox<(pid: Int32, status: Int32?, waiters: [CheckedContinuation<Int32, Never>])>(
         (0, nil, []))
 
     // @port-skip linux-only: process supervision
     init(name: String, executable: String, arguments: [String], logPath: String?,
-         standardInput: Int32? = nil, standardOutput: Int32? = nil) throws {
+         standardInput: Int32? = nil, standardOutput: Int32? = nil, inheritedFDs: [Int32] = []) throws {
         self.name = name
+        self.inheritedFDs = inheritedFDs
         self.executable = executable
         self.arguments = arguments
         self.logPath = logPath
@@ -93,8 +96,13 @@ final class ChildProcess: Sendable {
         defer { for a in argv { free(a) } }
         var pid: Int32 = 0
         let exe = executable, inFD = stdinFD ?? -1, outFD = stdoutFD ?? logFD, errFD = logFD
+        let extra = inheritedFDs
         let r = Spawner.shared.run {
-            argv.withUnsafeBufferPointer { a in acl_spawn(exe, a.baseAddress, inFD, outFD, errFD, &pid) }
+            argv.withUnsafeBufferPointer { a in
+                extra.withUnsafeBufferPointer { e in
+                    acl_spawn_fds(exe, a.baseAddress, inFD, outFD, errFD, e.baseAddress, Int32(e.count), &pid)
+                }
+            }
         }
         guard r == 0 else { throw MachineError.io("spawn \(executable)", r) }
         let child = pid

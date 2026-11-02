@@ -276,6 +276,8 @@ public actor QEMUMachine {
     private func launch(incoming: Bool) async throws {
         guard state == .idle else { throw MachineError.alreadyStarted }
         try config.validate()
+        if config.machine == .firecracker { throw MachineError.invalidConfig("a Firecracker config: use FirecrackerMachine") }
+        if case .datagram = config.network { throw MachineError.invalidConfig("QEMU has no datagram network here") }
         state = .starting
         do {
             try FileManager.default.createDirectory(atPath: config.runDirectory, withIntermediateDirectories: true)
