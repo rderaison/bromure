@@ -128,9 +128,35 @@ enum GuestURLGate {
         return false
     }
 
+    /// What happens to a URL a guest asks the user's browser to open.
+    enum Disposition: Equatable, Sendable {
+        /// Never: its host is this Mac's loopback or its network (or no host).
+        case refuse
+        /// Without asking: an agent sign-in page (`AgentScreen.isSignInURL`:
+        /// the provider's exact host and path, its own client, a loopback
+        /// redirect).
+        case open
+        /// Only once the user says so.
+        case ask
+    }
+
+    /// A public host isn't enough to open a guest's URL unasked: a name the
+    /// guest controls can resolve to 127.0.0.1 or a LAN address, and a
+    /// public page can redirect there -- both past any check of the URL's
+    /// spelling, and a lookup here wouldn't hold through a redirect or a
+    /// rebinding (Finding CWE-918, "Guest URL gate permits private-network
+    /// browser requests through DNS names and redirects"). So only the
+    /// sign-in pages the agents print open by themselves (fixed provider
+    /// hosts, whose redirect is the sign-in's own loopback callback); any
+    /// other page needs the user's decision.
+    static func disposition(for url: URL) -> Disposition {
+        guard opensInRealBrowser(url) else { return .refuse }
+        return AgentScreen.isSignInURL(url.absoluteString, agent: nil) ? .open : .ask
+    }
+
     /// Whether `url` may be handed to the user's real browser: it must have a
     /// PUBLIC host. Empty / local / private / link-local / ULA / `.local`
-    /// hosts are refused.
+    /// hosts are refused. Necessary, not sufficient: see `disposition(for:)`.
     static func opensInRealBrowser(_ url: URL) -> Bool {
         guard let host = url.host, !host.isEmpty else { return false }
         return !hostIsLocalOrPrivate(host)

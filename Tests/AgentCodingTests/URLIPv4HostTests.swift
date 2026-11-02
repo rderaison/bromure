@@ -130,14 +130,14 @@ struct URLIPv4HostTests {
         let f = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
         let fn = try #require(f.range(of: "private func applyPendingRegistration(_ reg: [String: Any]?) {"))
         let body = f[fn.upperBound...].prefix(4500)
-        let refuse = try #require(body.range(of: "!GuestURLGate.opensInRealBrowser(url) {"))
+        let refuse = try #require(body.range(of: "GuestURLGate.disposition(for: url) != .open {"))
         let tunnel = try #require(body.range(of: "registrationCallback = RegistrationCallbackTunnel("))
         let macOpen = try #require(body.range(of: "NSWorkspace.shared.open(url)"))
         let iosOpen = try #require(body.range(of: "UIApplication.shared.open(url)"))
         #expect(refuse.lowerBound < tunnel.lowerBound && tunnel.lowerBound < macOpen.lowerBound && macOpen.lowerBound < iosOpen.lowerBound)
         #expect(body[refuse.upperBound..<tunnel.lowerBound].contains("registrationCallback?.stop()"))
         // No platform conditional between the gate and the opens.
-        let gate2 = try #require(body.range(of: "guard GuestURLGate.opensInRealBrowser(url) else { return }"))
+        let gate2 = try #require(body.range(of: "guard GuestURLGate.disposition(for: url) == .open else { return }"))
         #expect(gate2.lowerBound < macOpen.lowerBound && !body[gate2.upperBound..<macOpen.lowerBound].contains("#else"))
         let mac = body[..<gate2.lowerBound].components(separatedBy: "#if os(macOS)").count
         #expect(mac == 1, "the gate must not sit inside #if os(macOS)")

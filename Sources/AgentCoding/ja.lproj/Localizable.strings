@@ -4339,3 +4339,15 @@
 
 /* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
 "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "サインインを開きませんでした：ポート %d は別のサインインで使用中です。そちらを完了するかキャンセルしてから、もう一度お試しください。";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "ワークスペースのページを開きますか？";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "“%1$@” 内の何かが、このページをブラウザで開こうとしています：\n\n%2$@\n\n心当たりがある場合だけ開いてください。ページはブラウザをこの Mac やネットワーク上のサービスへ誘導できます。";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "ワークスペース内の何かが、このページをブラウザで開こうとしています：\n\n%@\n\n心当たりがある場合だけ開いてください。ページはブラウザをこの Mac やネットワーク上のサービスへ誘導できます。";
+
+/* guest URL open prompt */
+"Open in Browser" = "ブラウザで開く";

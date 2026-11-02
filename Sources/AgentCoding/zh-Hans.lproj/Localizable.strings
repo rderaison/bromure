@@ -4339,3 +4339,15 @@
 
 /* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
 "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "未打开登录：端口 %d 正被另一个登录使用。请先完成或取消该登录，然后重试。";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "打开来自工作区的页面？";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "“%1$@”中的某个程序想在你的浏览器中打开此页面：\n\n%2$@\n\n仅在你预期如此时才打开：页面可能把你的浏览器引向这台 Mac 或你的网络上的服务。";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "某个工作区中的程序想在你的浏览器中打开此页面：\n\n%@\n\n仅在你预期如此时才打开：页面可能把你的浏览器引向这台 Mac 或你的网络上的服务。";
+
+/* guest URL open prompt */
+"Open in Browser" = "在浏览器中打开";
