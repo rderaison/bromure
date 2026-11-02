@@ -1971,10 +1971,10 @@ public final class SessionDisk {
     event = "StopFailure"
     command = "/home/ubuntu/.bromure/agent-status.sh needsInput"
 
-    # Esc: no Stop follows.
+    # Esc: no Stop follows. Idle, not done: the turn didn't finish.
     [[hooks]]
     event = "Interrupt"
-    command = "/home/ubuntu/.bromure/agent-status.sh done"
+    command = "/home/ubuntu/.bromure/agent-status.sh idle"
 
     # Agent-to-agent traffic (our own delegation MCP to the host) never
     # waits on an approval. Kimi matches a rule's pattern (picomatch) against

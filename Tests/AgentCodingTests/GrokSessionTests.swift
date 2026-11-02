@@ -465,14 +465,15 @@ struct GrokAgentdTests {
         #expect(try call(config: ask, "update") == "ARGS:update")
     }
 
-    @Test("Grok's StopCancelled hook (a Ctrl-C'd turn) reports the tab done, from Grok's own hooks dir")
+    @Test("Grok's StopCancelled hook (a Ctrl-C'd turn) reports the tab idle, from Grok's own hooks dir")
     func grokCancelHook() throws {
         let obj = try #require(try JSONSerialization.jsonObject(with: Data(ProfileStore.grokStatusHooksJSON.utf8)) as? [String: Any])
         let hooks = try #require(obj["hooks"] as? [String: Any])
         #expect(Set(hooks.keys) == ["StopCancelled"])
         let group = try #require((hooks["StopCancelled"] as? [[String: Any]])?.first)
         let cmd = try #require((group["hooks"] as? [[String: Any]])?.first?["command"] as? String)
-        #expect(cmd == "/home/ubuntu/.bromure/agent-status.sh done")
+        // Idle, not done: a cancelled turn finishes no run or task.
+        #expect(cmd == "/home/ubuntu/.bromure/agent-status.sh idle")
     }
 
     @Test("A task worktree is locked (no host-side prune can drop it) and unlocked on removal",

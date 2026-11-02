@@ -2437,7 +2437,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per-tab status from a Claude hook (keyed by the tmux window index the
     /// hook reported). Authoritative for that tab — no timer, since the Stop
     /// hook delivers the terminal state explicitly.
-    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
+    /// `turnEnded` false: a `.done` that is only the agent idle at its prompt
+    /// (an interrupt, a session end, an idle notification -- see
+    /// `AgentStatus.endsTurn`): the tab shows it, no run or task finishes.
+    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus,
+                           turnEnded: Bool = true) {
         // Always on the session too: a workspace the fat client drives has no
         // pane here, and dropping the report left every tab of it "Ready".
         let recorded = runningSessions[id]?.agentStatus[index]
@@ -2463,10 +2467,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // its transcript and closes the tab if so — or a coding task, which
             // moves to Testing.
             if status == .done {
-                scheduledAutomationEngine.agentFinished(
-                    profileID: id, worktreeBranch: tab.worktreeBranch)
-                codingTaskEngine.agentFinished(
-                    profileID: id, worktreeBranch: tab.worktreeBranch)
+                if turnEnded {
+                    scheduledAutomationEngine.agentFinished(
+                        profileID: id, worktreeBranch: tab.worktreeBranch)
+                    codingTaskEngine.agentFinished(
+                        profileID: id, worktreeBranch: tab.worktreeBranch)
+                }
                 // A request or a reply held while this agent worked goes now.
                 delegationEngine.promptFreed(profileID: id, window: index)
             }
@@ -2482,10 +2488,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard status == .done,
               let tab = runningSessions[id]?.tabs.first(where: { $0.index == index })
         else { return }
-        scheduledAutomationEngine.agentFinished(
-            profileID: id, worktreeBranch: tab.worktreeBranch)
-        codingTaskEngine.agentFinished(
-            profileID: id, worktreeBranch: tab.worktreeBranch)
+        if turnEnded {
+            scheduledAutomationEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+            codingTaskEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+        }
         delegationEngine.promptFreed(profileID: id, window: index)
     }
 
@@ -16147,7 +16155,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let w = AgentSessionStore.statusWindow(
                     index: index, conversation: conversation, profileID: pid,
                     sessions: self.agentSessionStore.sessions) else { return }
-                self.setTabAgentStatus(pid, index: w, status)
+                self.setTabAgentStatus(pid, index: w, status,
+                                       turnEnded: AgentStatus.endsTurn(signal: signal))
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
