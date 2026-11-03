@@ -33,6 +33,16 @@ public struct VMRecord: Codable, Sendable, Equatable {
     /// A registration sign-in's throwaway VM (LinuxRegistration): no
     /// workspace, never listed, never taken back by a restarted daemon.
     public var registration: Bool?
+    /// A machine of a Kubernetes cluster, registry or connector: the owner's
+    /// id. Never a workspace, never listed as one; taken back by a
+    /// restarted daemon like any VM.
+    public var kube: String?
+    /// The managed machine's data disk (data.img, vdc) in GiB, if it has one.
+    public var dataDiskGB: Int?
+
+    /// Not a workspace: a sign-in VM or a cluster's machine.
+    // @port-skip linux-only: VM record
+    public var managed: Bool { registration == true || kube != nil }
 
     // @port-skip linux-only: VM record
     public var shortId: String { String(id.prefix(8)) }

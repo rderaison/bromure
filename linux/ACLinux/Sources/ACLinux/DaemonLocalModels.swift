@@ -107,10 +107,11 @@ extension Daemon {
     }
 
     /// The VM's inference bridge listener (`stored`: a restarted daemon's);
-    /// none for a sign-in VM (its token agent has 8446) or without a proxy.
+    /// none for a sign-in VM (its token agent has 8446), a cluster machine,
+    /// or without a proxy.
     // @port-skip linux-only: the per-VM inference listener (macOS: MitmEngine.register's inferenceListener)
     func serveInference(_ rec: VMRecord, udsPath: String, stored: Int32?) -> InferenceBridgeListener? {
-        guard mitm != nil, rec.registration != true else { if let stored { close(stored) }; return nil }
+        guard mitm != nil, !rec.managed else { if let stored { close(stored) }; return nil }
         do {
             return try InferenceBridgeListener(udsPath: udsPath, fdStoreName: "llm-" + rec.shortId, stored: stored)
         } catch {

@@ -256,7 +256,7 @@ public actor Daemon {
             if let r = await workspaceRoute(req.method, req.path, req.body) { return r }
             if let r = await roomsRoute(req.method, req.path, req.body) { return r }
             if let r = await traceRoute(req.method, req.path) { return r }
-            if let r = await kubeRoute(req.method, path) { return r }
+            if let r = await kubeRoute(req.method, path, req.body) { return r }
             return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
@@ -376,7 +376,7 @@ public actor Daemon {
         return .object([
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
-            "vms": .array(vms), "workspaces": .array(all.filter { $0.registration != true }.map(\.workspaceJSON)),
+            "vms": .array(vms), "workspaces": .array(all.filter { !$0.managed }.map(\.workspaceJSON)),
             "workspacesListed": true,
             "supportsPush": true,
             "vmnetSubnet": "192.168.64.0/24", "vmnetGateway": "192.168.64.1",
@@ -400,7 +400,7 @@ public actor Daemon {
     /// `id`: a workspace Profile's (POST /profiles), else a new one; `boot`
     /// false only registers it (stopped).
     func createVM(_ body: JSONValue, id fixedID: String? = nil, boot: Bool = true,
-                  registration: Bool = false) async -> ControlResponse {
+                  registration: Bool = false, kube: String? = nil, dataDiskGB: Int? = nil) async -> ControlResponse {
         let id = fixedID?.lowercased() ?? UUID().uuidString.lowercased()
         let name = body["name"]?.stringValue ?? "vm-\(id.prefix(8))"
         // `find` matches id, short id and name: a name equal to any of them
@@ -424,6 +424,8 @@ public actor Daemon {
                            cpus: cpus, memoryMiB: memMiB, createdAt: Date(), bootedAt: nil, statePath: nil)
         rec.homeGB = homeGB
         if registration { rec.registration = true }
+        rec.kube = kube
+        rec.dataDiskGB = dataDiskGB
         if !boot {
             rec.state = .stopped
             CIDAllocator.shared.release(cid)
@@ -821,7 +823,7 @@ public actor Daemon {
                      vsock: vsock, browser: browser, storedNet: storeName)
         l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         startTraceSession(rec)
-        l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:])
+        if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:]) }
         l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         if let staged, rec.registration != true { startLocalEngineIfNeeded(for: staged) }
         sw.attach(l.port, mac: rec.mac)
@@ -869,6 +871,8 @@ public actor Daemon {
                      .init(tag: "bromure-outbox", hostPath: dir + "/outbox")]
         qc.macAddress = rec.mac
         qc.extraDisks = [.init(path: dir + "/home.img")]
+        // A cluster machine's data disk (Longhorn, a registry's storage): vdc.
+        if rec.dataDiskGB != nil { qc.extraDisks.append(.init(path: dir + "/data.img")) }
         return qc
     }
 
@@ -931,7 +935,7 @@ public actor Daemon {
                 for name in ["tbmcp-", "amcp-", "dmcp-"] {
                     if let fd = storedNet.removeValue(forKey: name + rec.shortId) { storedMCP[name] = fd }
                 }
-                l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP)
+                if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP) }
                 l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath,
                                              stored: storedNet.removeValue(forKey: "llm-" + rec.shortId))
                 if let staged = await launchProfile(for: rec) { startLocalEngineIfNeeded(for: staged) }
@@ -1080,6 +1084,12 @@ public actor Daemon {
         // A sign-in VM that stopped on its own ends its sign-in.
         if rec.registration == true, let pid = UUID(uuidString: id) {
             await MainActor.run { LinuxSessionHost.shared?.registrationVMStopped(pid) }
+        }
+        // A cluster machine that stopped: the engine counts it down.
+        if let owner = rec.kube.flatMap(UUID.init(uuidString:)), let nodeID = UUID(uuidString: id) {
+            await MainActor.run {
+                SessionStores.shared?.kubeEngine?.nodeStopped(clusterID: owner, nodeID: nodeID, error: nil)
+            }
         }
         rec = registry.find(id) ?? rec
         // A resume that failed stays suspended (start() says so too).

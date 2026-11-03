@@ -40,6 +40,16 @@ extension Daemon {
             delegations.onBoardMessage = { d, m in SessionStores.shared?.taskDispatcher?.handle(d, m) }
             delegations.boardWantsRevival = { d in SessionStores.shared?.taskDispatcher?.wantsRevival(d) ?? true }
             stores.startWatches(host: host)
+            // Clusters, registries and the connector, their machines this
+            // daemon's VMs (macOS: the app delegate's lazy kubeClusterEngine).
+            let kubeHost = LinuxKubeHost(daemon: me, session: host)
+            LinuxKubeHost.shared = kubeHost
+            stores.kubeHost = kubeHost
+            let kube = KubeClusterEngine(host: kubeHost, store: stores.kube,
+                                         rootDirectory: URL(fileURLWithPath: state, isDirectory: true)
+                                            .appendingPathComponent("kube", isDirectory: true))
+            stores.kubeEngine = kube
+            kube.startAutoStartClusters()
             // Their timers are on RunLoop.main, which an async daemon never
             // runs: the same ticks, from here (30 s and 5 min, as macOS's).
             Task { @MainActor in

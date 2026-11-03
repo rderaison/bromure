@@ -32,6 +32,9 @@ final class SessionStores {
     /// The watch engine and its host (DaemonWatches.swift).
     var watchEngine: RepoWatchEngine?
     var watchHost: LinuxRepoWatchHost?
+    /// The cluster engine and its machine host (DaemonKube.swift).
+    var kubeEngine: KubeClusterEngine?
+    var kubeHost: LinuxKubeHost?
 
     // @port-skip linux-only: daemon layout
     init(stateDir: String) {

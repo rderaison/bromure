@@ -16,6 +16,8 @@ extension Daemon {
         guard let uuid = UUID(uuidString: rec.id) else { return nil }
         // A sign-in VM's Profile is the daemon's alone, never saved.
         if rec.registration == true { return registrationProfiles[rec.id] }
+        // A cluster's machine has no workspace Profile.
+        if rec.kube != nil { return nil }
         let store = profileStore
         if let p = store.loadAll().first(where: { $0.id == uuid }) { return p }
         var p = store.newProfileFromTemplate(name: rec.name)
@@ -30,7 +32,7 @@ extension Daemon {
     func workspace(_ key: String) -> (Profile, VMRecord)? {
         guard let rec = registry.find(key) ?? registry.records.first(where: {
             $0.id.caseInsensitiveCompare(key) == .orderedSame || $0.name.lowercased() == key.lowercased()
-        }), rec.registration != true, let p = profile(for: rec) else { return nil }
+        }), !rec.managed, let p = profile(for: rec) else { return nil }
         return (p, rec)
     }
 
@@ -39,7 +41,7 @@ extension Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/profiles"): h=5741f93279fa34e4 @7dd92fdf
     func listProfiles() -> ControlResponse {
         let rows: [JSONValue] = registry.records.compactMap { rec in
-            guard rec.registration != true, let p = profile(for: rec) else { return nil }
+            guard !rec.managed, let p = profile(for: rec) else { return nil }
             let state: String
             switch rec.state {
             case .running: state = "running"
