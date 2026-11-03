@@ -272,3 +272,147 @@ extension CodingTaskEngine {
         return cmd
     }
 }
+
+// Typing into an agent's tab when it's free, through any machine's exec.
+extension CodingTaskEngine {
+    /// The same, through any machine's exec (an attached Mac's, say).
+    static func typeWhenFree(exec: @escaping (String) async throws -> String, tabIndex: Int, text: String,
+                             patience: TimeInterval = 600) async -> Bool {
+        await typeWhenFreeResult(exec: exec, target: .index(tabIndex), text: text, patience: patience) == .typed
+    }
+
+    enum TypeResult: Equatable {
+        case typed
+        /// A menu or dialog stayed open.
+        case menuOpen
+        /// Someone else's text sat in the agent's input box.
+        case draftInBox
+        /// The guard refused: the window isn't the intended one any more, or
+        /// no agent holds it. Nothing was typed; never retried.
+        case refused(PaneRefusal)
+    }
+
+
+
+    /// The pane's bottom rows with their escapes, for `AgentInputBox`.
+    nonisolated static func inputProbeCommand(tabIndex: Int) -> String {
+        inputProbeCommand(target: .index(tabIndex))
+    }
+
+    nonisolated static func inputProbeCommand(target: PaneTarget) -> String {
+        PaneTypeGuard.resolve(target)
+            + "[ -n \"$_bt\" ] && tmux capture-pane -p -e -t \"$_bt\" 2>/dev/null | tail -n 30"
+    }
+
+    nonisolated static func cursorProbeCommand(target: PaneTarget) -> String {
+        PaneTypeGuard.resolve(target)
+            + "[ -n \"$_bt\" ] && { \(AgentInputBox.cursorProbeCommand(target: "\"$_bt\"")); }"
+    }
+
+    /// `typeWhenFree` with why it gave up. Never types onto text already
+    /// in the agent's input box: our own message from an earlier try that
+    /// held off before Enter just gets its Enter; anything else (a user's
+    /// draft, a stray command) holds the text until the box is clear —
+    /// concatenating the two would send neither as meant. A guard refusal
+    /// (wrong window, a shell in the foreground) ends it at once.
+    static func typeWhenFreeResult(exec: @escaping (String) async throws -> String, target: PaneTarget,
+                                   text: String, patience: TimeInterval = 600) async -> TypeResult {
+        let deadline = Date().addingTimeInterval(patience)
+        var last: TypeResult = .menuOpen
+        let label = "\(target.ref)"
+        // Our text went in last round but its Enter never took: what the box
+        // shows now is ours, however the agent drew it (omp's paste chip).
+        var typedUnconfirmed = false
+        var unconfirmedRounds = 0
+        while true {
+            let screen = (try? await exec(inputProbeCommand(target: target))) ?? ""
+            var command: String? = nil   // nil: the guarded type (staged when long)
+            var held = false
+            var box = AgentInputBox.content(screen)
+            if box == .unknown {
+                // No ruled box: the terminal cursor's line (Kimi's prompt).
+                let probe = (try? await exec(cursorProbeCommand(target: target))) ?? ""
+                box = AgentInputBox.cursorContent(probe)
+            }
+            if case .text(let draft) = box {
+                if typedUnconfirmed || AgentInputBox.isOwn(draft, of: text) {
+                    BACDebug.log("type", "\(label): our text is already in the box — Enter only")
+                    command = guardedEnterCommand(target: target)
+                } else {
+                    BACDebug.log("type", "held text for \(label): the input box has text in it")
+                    held = true
+                    last = .draftInBox
+                }
+            }
+            if !held {
+                var agentTarget = target
+                agentTarget.foreground = .agent
+                let run: String?
+                if let command {
+                    run = try? await exec(command)
+                } else {
+                    run = await PaneTypeGuard.runType(target: agentTarget, text: text) { try? await exec($0) }
+                }
+                guard let out = run else {
+                    // The guest couldn't be asked: nothing is known typed.
+                    last = .refused(.gone)
+                    guard Date() < deadline else { return last }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    continue
+                }
+                if let r = PaneTypeGuard.refusal(in: out) {
+                    BACDebug.log("type", "REFUSED to type into \(label): \(r.rawValue)")
+                    return .refused(r)
+                }
+                if PaneTypeGuard.typed(in: out) { return .typed }
+                if PaneTypeGuard.unconfirmed(in: out) {
+                    BACDebug.log("type", "\(label): the Enter didn't take — confirming again")
+                    typedUnconfirmed = true
+                    unconfirmedRounds += 1
+                    last = .draftInBox
+                    // Never Enter after Enter for long: twice more, then the
+                    // caller says it wasn't delivered.
+                    guard Date() < deadline, unconfirmedRounds < 3 else { return last }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    continue
+                }
+                if out.contains(typeHeldMarker) {
+                    BACDebug.log("type", "held text for \(label): a menu or dialog is open")
+                    last = .menuOpen
+                } else {
+                    // Ran, but didn't go through (tmux refused it): try
+                    // again — what did land is found in the box next time.
+                    BACDebug.log("type", "typing into \(label) FAILED — retrying")
+                    last = .refused(.gone)
+                }
+            }
+            guard Date() < deadline else { return last }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+    /// Enter for text already in the box — unless a menu came up, or the
+    /// window stopped being the intended agent's.
+    nonisolated static func guardedEnterCommand(tabIndex: Int) -> String {
+        guardedEnterCommand(target: .index(tabIndex))
+    }
+
+    nonisolated static func guardedEnterCommand(target: PaneTarget) -> String {
+        PaneTypeGuard.prelude(target) + menuFunction + PaneTypeGuard.confirmFunctions
+            + "if _bg; then if _bm; then echo \(typeHeldMarker); else \(PaneTypeGuard.confirmedEnter); fi; fi"
+    }
+
+    /// The user-facing reason a guarded send typed nothing.
+    nonisolated static func refusalReason(_ r: PaneRefusal, worker: String) -> String {
+        switch r {
+        case .shell:
+            return String(format: NSLocalizedString(
+                "%@ isn't running in the task's session any more (only a shell is left), so nothing was typed — Restart Session to bring it back.",
+                comment: "task send refused"), worker)
+        case .identity, .gone, .agent:
+            return String(format: NSLocalizedString(
+                "The task's session tab is gone or now belongs to something else, so nothing was typed into it — Restart Session to bring %@ back.",
+                comment: "task send refused"), worker)
+        }
+    }
+}
