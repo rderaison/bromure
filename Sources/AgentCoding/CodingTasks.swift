@@ -2782,11 +2782,12 @@ final class CodingTaskEngine {
             // (Move to Review, then Send Back or Back to In Progress), the
             // finish no longer moves it.
             let armed = TaskFinishArmed(startedAt: task.startedAt, testingAt: task.testingAt)
+            let tool = task.tool
             // Finalize only after the session is quiet — a Stop-hook done
             // with background subagents still running isn't done.
             Task { [weak self] in
                 await self?.delegate?.waitForSessionQuiet(profileID: profileID,
-                                                          branch: branch)
+                                                          branch: branch, tool: tool)
                 guard let self else { return }
                 self.settling.remove(task.id)
                 await self.finalizeTaskDone(task.id, profileID: profileID,
@@ -2821,11 +2822,12 @@ final class CodingTaskEngine {
         }) {
             guard !settling.contains(parent.id) else { return }
             settling.insert(parent.id)
+            let tool = parent.tool
             Task { [weak self] in
                 // Subagents the planner spawned may still be exploring — or
                 // about to file phases through the MCP. Settle before judging.
                 await self?.delegate?.waitForSessionQuiet(profileID: profileID,
-                                                          branch: branch)
+                                                          branch: branch, tool: tool)
                 guard let self else { return }
                 self.settling.remove(parent.id)
                 guard let p = self.store.task(parent.id) else { return }
@@ -3735,6 +3737,15 @@ final class CodingTaskEngine {
     /// store; each task records the tool it ran.
     nonisolated static func taskTranscriptCommand(
         branch: String, agent: Profile.Tool = .claude) -> String? {
+        transcriptCommand(branch: branch, agent: agent,
+                          emit: "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" "
+                            + "| iconv -f UTF-8 -t UTF-8 -c; fi")
+    }
+
+    /// Locates the session's transcript as `taskTranscriptCommand` does (into
+    /// `$f`), then runs `emit` on it.
+    private nonisolated static func transcriptCommand(
+        branch: String, agent: Profile.Tool, emit: String) -> String? {
         guard branch.hasPrefix("wt/") else { return nil }
         let slug = String(branch.dropFirst(3))
         guard !slug.isEmpty,
@@ -3747,8 +3758,6 @@ final class CodingTaskEngine {
         let markerCwd =
             "cwd=$(tmux -u list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
-        let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" "
-            + "| iconv -f UTF-8 -t UTF-8 -c; fi"
         switch agent {
         case .claude:
             return "d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); "
@@ -3853,10 +3862,29 @@ final class CodingTaskEngine {
     /// working?" probe. Project dir by worktree-slug glob, with the
     /// plain-tab fallback through the wt/ marker's cwd. Prints nothing
     /// when no transcript exists.
-    nonisolated static func transcriptAgeCommand(slug: String) -> String? {
+    ///
+    /// `agent`: Claude's and Kimi's trees are globbed by slug (below); the
+    /// other agents keep their sessions in stores of their own (Codex's
+    /// date-keyed rollouts, Grok's per-cwd updates, omp's per-cwd dirs), so
+    /// for them it's the age of the file `taskTranscriptCommand` reads. Only
+    /// globbing Claude's and Kimi's, the probe printed nothing for a Codex or
+    /// Grok run -- "quiet" at once -- and a watch agent's findings_done closed
+    /// its tab while it was still writing its last message (Finding, "Codex
+    /// and Grok findings_done lose their closing grace despite having no
+    /// supported quiet probe").
+    nonisolated static func transcriptAgeCommand(slug: String, agent: Profile.Tool? = nil) -> String? {
         guard !slug.isEmpty,
               slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
         else { return nil }
+        switch agent {
+        case .codex?, .grok?, .omp?:
+            return transcriptCommand(
+                branch: "wt/" + slug, agent: agent!,
+                emit: "if [ -n \"$f\" ]; then m=$(date -r \"$f\" +%s 2>/dev/null); "
+                    + "[ -n \"$m\" ] && echo $(( $(date +%s) - m )); fi")
+        case nil, .claude?, .kimi?:
+            break
+        }
         // Kimi Code's session store is keyed by an opaque workspace id
         // `wd_<dir-basename-slug>_<hash>` under ~/.kimi-code/sessions — and a
         // worktree's directory basename IS the slug (or "<slug>-N" on the

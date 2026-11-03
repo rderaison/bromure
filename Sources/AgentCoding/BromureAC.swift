@@ -2437,7 +2437,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per-tab status from a Claude hook (keyed by the tmux window index the
     /// hook reported). Authoritative for that tab — no timer, since the Stop
     /// hook delivers the terminal state explicitly.
-    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
+    /// `turnEnded` false: a `.done` that is only the agent idle at its prompt
+    /// (an interrupt, a session end, an idle notification -- see
+    /// `AgentStatus.endsTurn`): the tab shows it, no run or task finishes.
+    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus,
+                           turnEnded: Bool = true) {
         // Always on the session too: a workspace the fat client drives has no
         // pane here, and dropping the report left every tab of it "Ready".
         let recorded = runningSessions[id]?.agentStatus[index]
@@ -2463,10 +2467,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // its transcript and closes the tab if so — or a coding task, which
             // moves to Testing.
             if status == .done {
-                scheduledAutomationEngine.agentFinished(
-                    profileID: id, worktreeBranch: tab.worktreeBranch)
-                codingTaskEngine.agentFinished(
-                    profileID: id, worktreeBranch: tab.worktreeBranch)
+                if turnEnded {
+                    scheduledAutomationEngine.agentFinished(
+                        profileID: id, worktreeBranch: tab.worktreeBranch)
+                    codingTaskEngine.agentFinished(
+                        profileID: id, worktreeBranch: tab.worktreeBranch)
+                }
                 // A request or a reply held while this agent worked goes now.
                 delegationEngine.promptFreed(profileID: id, window: index)
             }
@@ -2482,10 +2488,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard status == .done,
               let tab = runningSessions[id]?.tabs.first(where: { $0.index == index })
         else { return }
-        scheduledAutomationEngine.agentFinished(
-            profileID: id, worktreeBranch: tab.worktreeBranch)
-        codingTaskEngine.agentFinished(
-            profileID: id, worktreeBranch: tab.worktreeBranch)
+        if turnEnded {
+            scheduledAutomationEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+            codingTaskEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+        }
         delegationEngine.promptFreed(profileID: id, window: index)
     }
 
@@ -3572,20 +3580,59 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     nonisolated static func hostIsLocalOrPrivate(_ h: String) -> Bool { GuestURLGate.hostIsLocalOrPrivate(h) }
 
     /// Open a guest-relayed URL (from the VM's `bromure-open` outbox) in the
-    /// user's REAL browser — unless its host is local/private. A compromised
-    /// guest must not be able to point the host browser at loopback / LAN
-    /// services (H2 "local drive-by"): the browser would fetch them carrying
-    /// the user's cookies + session. The legitimate in-VM OAuth flow only ever
-    /// opens a PUBLIC authorize URL here; the browser then follows the
-    /// `127.0.0.1:<port>` redirect to the loopback forwarder ITSELF, so
-    /// blocking local hosts at this hand-off costs the real flow nothing.
-    static func openGuestRelayedURL(_ url: URL) {
-        guard opensInRealBrowser(url) else {
+    /// user's REAL browser. A compromised guest must not be able to point the
+    /// host browser at loopback / LAN services (H2 "local drive-by"): the
+    /// browser would fetch them carrying the user's cookies + session. A
+    /// local/private host is refused; an agent's sign-in page opens (the
+    /// browser then follows its `127.0.0.1:<port>` redirect to the loopback
+    /// forwarder itself); any other page -- a public name can resolve to the
+    /// LAN, a public page can redirect there -- opens only once the user says
+    /// so (`GuestURLGate.disposition`).
+    static func openGuestRelayedURL(_ url: URL, workspace: String? = nil) {
+        switch GuestURLGate.disposition(for: url) {
+        case .refuse:
             FileHandle.standardError.write(Data(
                 "[ac] refused to open guest URL with local/private host: \(url.host ?? "?")\n".utf8))
+        case .open:
+            NSWorkspace.shared.open(url)
+        case .ask:
+            askBeforeOpeningGuestURL(url, workspace: workspace)
+        }
+    }
+
+    /// Guest pages waiting on the user's word: a guest can't stack sheets.
+    private static var guestURLAsksPending = 0
+
+    /// "Open this page from the workspace?" as a sheet (a modal would stall
+    /// the main queue). No window to ask in (an unattended launch), or three
+    /// already waiting: not opened.
+    private static func askBeforeOpeningGuestURL(_ url: URL, workspace: String?) {
+        let delegate = NSApp.delegate as? ACAppDelegate
+        guard guestURLAsksPending < 3,
+              let window = NSApp.keyWindow ?? delegate?.unifiedWindow as NSWindow? ?? delegate?.mainWindow else {
+            FileHandle.standardError.write(Data(
+                "[ac] did not open guest URL (no window to ask in, or asks pending): \(url.host ?? "?")\n".utf8))
             return
         }
-        NSWorkspace.shared.open(url)
+        guestURLAsksPending += 1
+        let shown = url.absoluteString.count > 400 ? String(url.absoluteString.prefix(400)) + "…" : url.absoluteString
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Open a Page from the Workspace?", comment: "guest URL open prompt")
+        alert.informativeText = workspace.map {
+            String(format: NSLocalizedString(
+                "Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+                comment: "guest URL open prompt: workspace name, URL"), $0, shown)
+        } ?? String(format: NSLocalizedString(
+            "Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+            comment: "guest URL open prompt: URL"), shown)
+        // Cancel is the default: Return doesn't open it.
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Open in Browser", comment: "guest URL open prompt"))
+        alert.beginSheetModal(for: window) { response in
+            guestURLAsksPending -= 1
+            if response == .alertSecondButtonReturn { NSWorkspace.shared.open(url) }
+        }
     }
 
     /// Per-profile shell bridges (vsock 5800), created for every session —
@@ -14365,25 +14412,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// another Stop). Tearing the session down on the first done kills
     /// them mid-flight. This holds completion until the transcript has
     /// been quiet for `quiet` seconds; an unreadable probe (no transcript,
-    /// VM gone) counts as quiet, and `cap` bounds the total wait.
-    func waitForSessionQuiet(profileID: Profile.ID, branch: String,
-                             quiet: Int = 20, cap: TimeInterval = 1800) async {
+    /// VM gone) counts as quiet, and `cap` bounds the total wait. `tool`
+    /// picks the agent's transcript store. Returns whether the probe read the
+    /// transcript's age at all: false, nothing was watched.
+    @discardableResult
+    func waitForSessionQuiet(profileID: Profile.ID, branch: String, tool: Profile.Tool? = nil,
+                             quiet: Int = 20, cap: TimeInterval = 1800) async -> Bool {
         guard branch.hasPrefix("wt/"),
               let cmd = CodingTaskEngine.transcriptAgeCommand(
-                  slug: String(branch.dropFirst(3))) else { return }
+                  slug: String(branch.dropFirst(3)), agent: tool) else { return false }
         let deadline = Date().addingTimeInterval(cap)
-        var held = false
+        var held = false, read = false
         while Date() < deadline {
             guard let out = try? await guestExec(profileID: profileID,
                                                  command: cmd, timeout: 10),
                   let age = Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
-            else { return }
+            else { return read }
+            read = true
             if age >= quiet {
                 if held {
                     BACDebug.log("session",
                                  "\(branch): transcript quiet — completing")
                 }
-                return
+                return true
             }
             if !held {
                 held = true
@@ -14395,6 +14446,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 UInt64(max(quiet - age, 5)) * 1_000_000_000)
         }
         BACDebug.log("session", "\(branch): settle cap reached — completing anyway")
+        return read
     }
 
     /// Copy a finished automation run's Claude transcript out of the guest
@@ -15944,7 +15996,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }
-                Self.openGuestRelayedURL(url)
+                Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name)
             }
         }
         sandbox.onTabList = { [weak self] tabs in
@@ -16123,7 +16175,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let w = AgentSessionStore.statusWindow(
                     index: index, conversation: conversation, profileID: pid,
                     sessions: self.agentSessionStore.sessions) else { return }
-                self.setTabAgentStatus(pid, index: w, status)
+                self.setTabAgentStatus(pid, index: w, status,
+                                       turnEnded: AgentStatus.endsTurn(signal: signal))
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in

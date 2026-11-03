@@ -2087,8 +2087,8 @@
 "VMs" = "虛擬機器";
 "New automation…" = "新增自動化…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "「%@」執行 %@，而它不會回報完成，所以這條鏈永遠不會觸發。";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "複製執行需要一個會回報完成的代理程式（Claude Code 或 Kimi Code）— 正是這個訊號拆除複製品。";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "只有透過鉤子回報完成的代理程式（Claude Code、Kimi Code）能關閉自己的分頁；其他代理程式的分頁保持開啟。";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "複製執行需要一個會回報完成的代理程式（Claude Code、Codex、Grok 或 Kimi Code）— 正是這個訊號拆除複製品。";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "只有透過鉤子回報完成的代理程式（Claude Code、Codex、Grok、Kimi Code）能關閉自己的分頁；其他代理程式的分頁保持開啟。";
 "The image catalog could not be downloaded." = "無法下載映像檔目錄。";
 "Unsupported image compression: %@" = "不支援的映像檔壓縮格式：%@";
 "Could not expand the downloaded image: %@" = "無法解壓縮下載的映像檔：%@";
@@ -4342,3 +4342,15 @@
 
 /* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
 "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "未開啟登入：連接埠 %d 正被另一個登入使用。請先完成或取消該登入，然後再試一次。";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "要打開來自工作區的頁面嗎？";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "「%1$@」中的某個程式想在你的瀏覽器中打開此頁面：\n\n%2$@\n\n只有在你預期如此時才打開：頁面可能把你的瀏覽器引向這台 Mac 或你網路上的服務。";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "某個工作區中的程式想在你的瀏覽器中打開此頁面：\n\n%@\n\n只有在你預期如此時才打開：頁面可能把你的瀏覽器引向這台 Mac 或你網路上的服務。";
+
+/* guest URL open prompt */
+"Open in Browser" = "在瀏覽器中打開";

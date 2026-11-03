@@ -2084,8 +2084,8 @@
 "VMs" = "VM";
 "New automation…" = "Nouvelle automatisation…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "« %@ » exécute %@, qui ne signale pas sa fin, cette chaîne ne se déclenchera donc jamais.";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "Les exécutions clonées requièrent un agent qui signale son achèvement (Claude Code ou Kimi Code) — c’est ce signal qui démonte le clone.";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "Seuls les agents qui signalent leur achèvement par un hook (Claude Code, Kimi Code) peuvent fermer leur onglet ; les onglets des autres agents restent ouverts.";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "Les exécutions clonées requièrent un agent qui signale son achèvement (Claude Code, Codex, Grok ou Kimi Code) — c’est ce signal qui démonte le clone.";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "Seuls les agents qui signalent leur achèvement par un hook (Claude Code, Codex, Grok, Kimi Code) peuvent fermer leur onglet ; les onglets des autres agents restent ouverts.";
 "The image catalog could not be downloaded." = "Le catalogue d’images n’a pas pu être téléchargé.";
 "Unsupported image compression: %@" = "Compression d’image non prise en charge : %@";
 "Could not expand the downloaded image: %@" = "Impossible de décompresser l’image téléchargée : %@";
@@ -4339,3 +4339,15 @@
 
 /* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
 "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Connexion non ouverte : le port %d est utilisé par une autre connexion. Terminez-la ou annulez-la, puis réessayez.";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "Ouvrir une page de l’espace de travail ?";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Quelque chose dans « %1$@ » veut ouvrir cette page dans votre navigateur :\n\n%2$@\n\nNe l’ouvrez que si vous vous y attendez : une page peut mener votre navigateur vers des services de ce Mac ou de votre réseau.";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Quelque chose dans un espace de travail veut ouvrir cette page dans votre navigateur :\n\n%@\n\nNe l’ouvrez que si vous vous y attendez : une page peut mener votre navigateur vers des services de ce Mac ou de votre réseau.";
+
+/* guest URL open prompt */
+"Open in Browser" = "Ouvrir dans le navigateur";

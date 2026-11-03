@@ -3755,8 +3755,10 @@ _CODEX_STATUS_HOOKS = [
     ("PostToolUse", "*", "working"),
     ("PermissionRequest", "*", "needsInput"),
     ("Stop", None, "done"),
-    ("Interrupt", None, "done"),     # Esc — no Stop follows
-    ("SessionEnd", None, "done"),
+    # Esc (no Stop follows) and the session ending: idle at the prompt, not a
+    # finished turn -- an automation run or a task stays open to resume.
+    ("Interrupt", None, "idle"),
+    ("SessionEnd", None, "idle"),
 ]
 _CODEX_HOOKS_BEGIN = "# >>> bromure-status-hooks (managed)"
 _CODEX_HOOKS_END = "# <<< bromure-status-hooks"

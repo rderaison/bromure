@@ -2084,8 +2084,8 @@
 "VMs" = "虚拟机";
 "New automation…" = "新建自动化…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "“%@”运行 %@，而它不会报告完成，所以这条链永远不会触发。";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "克隆运行需要一个会报告完成的代理（Claude Code 或 Kimi Code）— 正是这个信号拆除克隆。";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "只有通过钩子报告完成的代理（Claude Code、Kimi Code）能关闭自己的标签页；其他代理的标签页保持打开。";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "克隆运行需要一个会报告完成的代理（Claude Code、Codex、Grok 或 Kimi Code）— 正是这个信号拆除克隆。";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "只有通过钩子报告完成的代理（Claude Code、Codex、Grok、Kimi Code）能关闭自己的标签页；其他代理的标签页保持打开。";
 "The image catalog could not be downloaded." = "无法下载镜像目录。";
 "Unsupported image compression: %@" = "不支持的镜像压缩格式：%@";
 "Could not expand the downloaded image: %@" = "无法解压下载的镜像：%@";
@@ -4339,3 +4339,15 @@
 
 /* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
 "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "未打开登录：端口 %d 正被另一个登录使用。请先完成或取消该登录，然后重试。";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "打开来自工作区的页面？";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "“%1$@”中的某个程序想在你的浏览器中打开此页面：\n\n%2$@\n\n仅在你预期如此时才打开：页面可能把你的浏览器引向这台 Mac 或你的网络上的服务。";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "某个工作区中的程序想在你的浏览器中打开此页面：\n\n%@\n\n仅在你预期如此时才打开：页面可能把你的浏览器引向这台 Mac 或你的网络上的服务。";
+
+/* guest URL open prompt */
+"Open in Browser" = "在浏览器中打开";

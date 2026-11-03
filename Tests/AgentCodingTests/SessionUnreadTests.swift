@@ -152,7 +152,7 @@ struct SessionUnreadTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
         let ac = try src("Sources/AgentCoding/BromureAC.swift")
-        let set = try #require(ac.range(of: "func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {"))
+        let set = try #require(ac.range(of: "func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus,\n                           turnEnded: Bool = true) {"))
         #expect(ac[set.upperBound...].prefix(1200).contains("agentSessionStore.noteReply(s.id)"))
         #expect(ac.contains("case (let sid?, \"read\"):"))
         #expect(ac.contains("self.markSessionRead(sid, upTo: body[\"seen\"] as? Int)"))

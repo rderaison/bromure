@@ -1606,8 +1606,9 @@ final class ScheduledAutomationEngine {
     var prepareWatchRun: ((ScheduledAutomation, _ forceBaseline: Bool) async -> WatchRunPreparation?)?
 
     /// How long a run whose agent DECLARED itself done (findings_done) but
-    /// has no transcript the quiet probe can read gets to finish its last
-    /// message before its tab is closed.
+    /// has no transcript the quiet probe could read gets to finish its last
+    /// message before its tab is closed. Whether the probe read one is the
+    /// probe's answer (`waitForSessionQuiet`), not the tool's hook support.
     static let declaredDoneGrace: UInt64 = 45_000_000_000
 
     func start() {
@@ -2339,17 +2340,16 @@ final class ScheduledAutomationEngine {
     /// Delegate callback: a Claude tab flipped to .done. If its branch maps
     /// back to a launched automation run (persisted branchSlug — survives
     /// app restarts), ask the guest to save the transcript into the worktree
-    /// and close the tab. Claude only: its per-window Stop hook is the one
-    /// reliable "done" signal — the Codex/Grok proxy heuristic can report
-    /// .done during a long silent stretch, and closing a tab on a false
+    /// and close the tab. Only an agent whose own per-window Stop hook says
+    /// so (`Profile.Tool.hasReliableDoneSignal`): closing a tab on a false
     /// positive would kill live work. Runs that pause on .needsInput finish
     /// whenever the user unblocks them and the next .done arrives.
     func agentFinished(profileID: UUID, worktreeBranch: String?) {
         guard let branch = worktreeBranch,
               let found = launchedRun(profileID: profileID, branch: branch),
-              // Only a hook-driven done is trustworthy — the Codex/Grok proxy
-              // heuristic can flip .done during a long silent stretch.
-              found.automation.tool.hasReliableDoneSignal
+              // The agent the run was launched with (the automation may have
+              // been switched to another since).
+              (found.run.tool ?? found.automation.tool).hasReliableDoneSignal
         else { return }
         finishRun(found.run, found.automation, profileID: profileID, branch: branch, declared: false)
     }
@@ -2362,8 +2362,11 @@ final class ScheduledAutomationEngine {
         guard let branch = worktreeBranch,
               let found = launchedRun(profileID: profileID, branch: branch)
         else { return false }
+        // Declared whatever the agent: a findings_done is a tool call inside
+        // the turn, not its end. finishRun holds it on the transcript, or on
+        // the grace when there's none to watch.
         finishRun(found.run, found.automation, profileID: profileID, branch: branch,
-                  declared: !found.automation.tool.hasReliableDoneSignal)
+                  declared: true)
         return true
     }
 
@@ -2485,8 +2488,9 @@ final class ScheduledAutomationEngine {
     }
 
     /// Stamp, chain, archive the transcript and (closeWhenDone) close the
-    /// run's tab. `declared`: the agent has no transcript the quiet probe
-    /// can read — give its closing message a fixed grace instead.
+    /// run's tab. `declared`: the agent said so mid-turn (findings_done) —
+    /// its closing message is still coming: held on the transcript going
+    /// quiet, or, when the probe read none, a fixed grace.
     private func finishRun(_ run: AutomationRunRecord, _ automation: ScheduledAutomation,
                            profileID: UUID, branch: String, declared: Bool) {
         finishSent.insert(branch)
@@ -2498,14 +2502,17 @@ final class ScheduledAutomationEngine {
         let automationID = automation.id
         let tool = run.tool ?? automation.tool
         Task { [weak self] in
-            if declared {
-                try? await Task.sleep(nanoseconds: Self.declaredDoneGrace)
-            }
             // A done with background subagents still running isn't done —
             // settle on transcript quiescence before stamping, chaining,
             // and tearing the session down.
-            await self?.delegate?.waitForSessionQuiet(profileID: profileID,
-                                                      branch: branch)
+            let watched = await self?.delegate?.waitForSessionQuiet(profileID: profileID,
+                                                                    branch: branch, tool: tool) ?? false
+            // A declared done comes mid-turn (the agent goes on to write its
+            // closing message): with no transcript the probe could watch, a
+            // fixed grace stands in for it.
+            if declared && !watched {
+                try? await Task.sleep(nanoseconds: Self.declaredDoneGrace)
+            }
             guard let self else { return }
 
             // The run is over — stamp it (the kanban board's In Progress →

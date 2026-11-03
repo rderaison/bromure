@@ -2118,8 +2118,8 @@
 "VMs" = "VMs";
 "New automation…" = "New automation…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "“%@” runs %@, which doesn't report finishing, so this chain will never fire.";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down.";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open.";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down.";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open.";
 "The image catalog could not be downloaded." = "The image catalog could not be downloaded.";
 "Unsupported image compression: %@" = "Unsupported image compression: %@";
 "Could not expand the downloaded image: %@" = "Could not expand the downloaded image: %@";
@@ -4373,3 +4373,15 @@
 
 /* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
 "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again.";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "Open a Page from the Workspace?";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.";
+
+/* guest URL open prompt */
+"Open in Browser" = "Open in Browser";

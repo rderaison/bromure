@@ -26,6 +26,22 @@ public enum ProfileColor: String, Codable, CaseIterable, Equatable, Sendable {
     }
 }
 
+/// `host:port` with an IPv6 literal bracketed, the one form the proxy's
+/// scopes and endpoint keys use (`TokenSwapper.splitScope` reads it back).
+enum HostAuthority {
+    /// Lowercased; an IPv6 literal without its brackets.
+    static func bare(_ host: String) -> String {
+        let h = host.lowercased()
+        return h.hasPrefix("[") && h.hasSuffix("]") ? String(h.dropFirst().dropLast()) : h
+    }
+
+    /// `h:6443`, `[2001:db8::1]:6443`.
+    static func format(host: String, port: Int) -> String {
+        let h = bare(host)
+        return h.contains(":") ? "[\(h)]:\(port)" : "\(h):\(port)"
+    }
+}
+
 /// One Kubernetes context (cluster + auth) the user pointed bromure
 /// at. The full kubeconfig is materialized in the VM at session prep
 /// using only the synthetic credentials we generate; the real cert /
@@ -153,7 +169,7 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     /// registering client identities and cluster CAs (see `endpointKey`).
     public var hostPattern: String {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
-        if let port = url.port { return "\(host):\(port)" }
+        if let port = url.port { return HostAuthority.format(host: host, port: port) }
         return host
     }
 
@@ -163,7 +179,9 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     public var tokenScope: String {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
         let port = url.port ?? (url.scheme?.lowercased() == "http" ? 80 : 443)
-        return "\(host):\(port)"
+        // An IPv6 host is bracketed ([2001:db8::1]:443): its own colons
+        // would otherwise swallow the port (splitScope).
+        return HostAuthority.format(host: host, port: port)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1054,20 +1072,23 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// per-tab hooks — a trustworthy "the agent is finished" signal the
         /// automation engine can stamp, chain, and tear down a clone on.
         ///
-        /// Claude Code (`Stop` hook) and Kimi Code (`[[hooks]]` event =
-        /// "Stop", plus a clean exit from its one-shot `--prompt` mode) both
-        /// qualify. Codex and Grok have neither, so their only "done" is the
-        /// proxy's 4-second traffic-silence heuristic — which fires during
-        /// any long quiet stretch mid-run and would complete a run early.
-        /// See `ACAppDelegate.hookDrivenAgents` for the UI-side twin.
+        /// Claude Code (`Stop` hook), Kimi Code (`[[hooks]]` event = "Stop",
+        /// plus a clean exit from its one-shot `--prompt` mode), Codex
+        /// (`[[hooks.Stop]]` in ~/.codex/config.toml, seeded with its trust
+        /// by agentd `_seed_codex_hooks`) and Grok (the same
+        /// ~/.claude/settings.json Stop hook as Claude) all qualify. A tool
+        /// left out here never completes a run: its tab stays open and the
+        /// run reads as running for days, since the proxy's silence
+        /// heuristic doesn't report for hook-driven agents
+        /// (`ACAppDelegate.hookDrivenAgents`, the UI-side twin).
         public var hasReliableDoneSignal: Bool {
             switch self {
-            case .claude, .kimi: return true
+            case .claude, .kimi, .codex, .grok: return true
             // omp drives its per-tab sidebar dot via a turn hook (loaded with
             // --hook; see Profile bashrc), but its "done" isn't yet trusted for
             // automation teardown/chaining — automation uses the worktree-exit
-            // reporter fallback like Codex/Grok until the hook path is hardened.
-            case .codex, .grok, .omp:  return false
+            // reporter fallback until the hook path is hardened.
+            case .omp: return false
             }
         }
 
@@ -4487,14 +4508,15 @@ public final class ProfileStore {
     static let claudeInboxDirectory = "~/.bromure/inbox"
 
     /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
-    /// (`StopCancelled`, fired instead of `Stop`) reports the tab done.
+    /// (`StopCancelled`, fired instead of `Stop`) reports the tab idle --
+    /// done on its dot, but the turn didn't finish (`AgentStatus.endsTurn`).
     static let grokStatusHooksJSON = """
     {
       "hooks": {
         "StopCancelled": [
           {
             "hooks": [
-              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh done", "timeout": 5 }
+              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh idle", "timeout": 5 }
             ]
           }
         ]
@@ -5064,7 +5086,7 @@ public final class ProfileStore {
             let statusScript = #"""
             #!/bin/sh
             # Bromure Claude-hook status reporter → per-tab sidebar dot.
-            # $1 = working|done|needsInput.
+            # $1 = working|done|idle|needsInput (idle: at its prompt, no turn ended).
             # $2 = optional tmux pane. Claude/Kimi hooks run inside the tab's
             # pane, so $TMUX_PANE is set and $2 is omitted; omp's hook passes
             # $TMUX_PANE explicitly (its pi.exec may not inherit the env).
@@ -5239,7 +5261,8 @@ public final class ProfileStore {
             # for a while. Reporting that as "needs input" made every idle
             # agent look like it had a dialog up, and the host then held its
             # delegation notices indefinitely (that is the state it never
-            # types over). Only a real prompt is needsInput; idle is done;
+            # types over). Only a real prompt is needsInput; idle is "idle"
+            # (done on the dot, but no turn ended: no run or task finishes);
             # anything else (auth_success, elicitation bookkeeping, quota
             # notices) says nothing about the turn.
             # Grok runs these same hooks (it loads ~/.claude/settings.json)
@@ -5250,7 +5273,7 @@ public final class ProfileStore {
               case "$ntype" in
                 "") ;;
                 permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) ;;
-                idle_prompt) signal="done" ;;
+                idle_prompt) signal="idle" ;;   # at its prompt: no turn ended
                 *) exit 0 ;;
               esac
             fi
@@ -5279,7 +5302,8 @@ public final class ProfileStore {
               done
               [ -n "$left" ] || rm -f "$owed" 2>/dev/null
             fi
-            if [ "$signal" = "done" ] && [ -e "$owed" ]; then signal="needsInput"; fi
+            # An idle report too: the note is still owed, the tab needs you.
+            if { [ "$signal" = "done" ] || [ "$signal" = "idle" ]; } && [ -e "$owed" ]; then signal="needsInput"; fi
             # The mark goes on new activity (a PreToolUse `working`), but the
             # note it held for may still be unread: a `done` that didn't drain
             # (StopCancelled, an Interrupt, a typed `done`) is no turn end
@@ -5287,7 +5311,7 @@ public final class ProfileStore {
             # "PreToolUse working clears an owed policy note, so a non-Stop
             # done finishes the task"). Notes are only written for tabs whose
             # hooks drain them (Claude's).
-            if [ "$signal" = "done" ] && [ -z "${drained:-}" ]; then
+            if { [ "$signal" = "done" ] || [ "$signal" = "idle" ]; } && [ -z "${drained:-}" ]; then
               for n in /mnt/bromure-meta/policy-notes/w"$idx"-*.note; do
                 [ -e "$n" ] || continue
                 [ -e "$HOME/.bromure/policy-claims/${n##*/}" ] && continue

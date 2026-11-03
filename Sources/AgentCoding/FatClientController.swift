@@ -519,13 +519,16 @@ final class RemoteHostController {
             registrationTerminalID = sid
             onRegistrationTerminal?(sid, (reg["provider"] as? String) ?? "")
         }
-        // A published sign-in URL is the guest's: a page on this device's
-        // loopback or LAN opens nowhere, and no callback tunnel stands up
-        // for it. A current server never publishes one; an older one did, and
-        // Bromure Remote (iPhone, iPad, Vision Pro) opened it unchecked.
-        if let s = reg["url"] as? String, let url = URL(string: s), !GuestURLGate.opensInRealBrowser(url) {
+        // A published sign-in URL is the guest's: only an agent's own sign-in
+        // page opens here (GuestURLGate.disposition) -- a page on this
+        // device's loopback or LAN, or any other page (a public name can
+        // resolve to the LAN, a public page redirect there), opens nowhere,
+        // and no callback tunnel stands up for it. An older server published
+        // such URLs, and Bromure Remote (iPhone, iPad, Vision Pro) opened them
+        // unchecked. The VM's terminal (shown above) still has the URL.
+        if let s = reg["url"] as? String, let url = URL(string: s), GuestURLGate.disposition(for: url) != .open {
             if openedRegistrationURLs.insert(s).inserted {
-                FatClientLog.log("remote registration: refused sign-in URL with a local/private host")
+                FatClientLog.log("remote registration: refused a sign-in URL that isn't an agent sign-in page, or has a local/private host")
             }
             registrationCallback?.stop()
             registrationCallback = nil
@@ -556,7 +559,7 @@ final class RemoteHostController {
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
         // Checked above, before the tunnel.
-        guard GuestURLGate.opensInRealBrowser(url) else { return }
+        guard GuestURLGate.disposition(for: url) == .open else { return }
 #if os(macOS)
         NSWorkspace.shared.open(url)
 #else
