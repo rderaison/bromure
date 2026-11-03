@@ -844,6 +844,9 @@ struct SwitchRoutingTests {
         route(&f)
         up.batchEnd?()
         #expect(Array(f.prefix(6)) == m.bytes, "rewritten in place")
+        // The port's writer takes the frame off its queue before it counts it
+        // sent: between the two the frame is in neither counter. Wait it out.
+        for _ in 0..<400 where port.stats.queued + port.stats.sent != 1 { try await Task.sleep(for: .milliseconds(5)) }
         #expect(port.stats.queued + port.stats.sent == 1)
         sw.stop()
     }
