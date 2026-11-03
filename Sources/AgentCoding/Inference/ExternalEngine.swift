@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Bridges local inference to a USER-SUPPLIED OpenAI-compatible server
 /// (vLLM, Ollama, LM Studio, llama-server, …) instead of the built-in
@@ -100,7 +103,7 @@ enum ExternalEngine {
         case .chat:
             break   // handled above
         case .messages:
-            let sys = WireRequest.flattenContent(payload["system"])
+            let sys = WireText.flattenContent(payload["system"])
             if !sys.isEmpty { msgs.append(["role": "system", "content": sys]) }
             for m in payload["messages"] as? [[String: Any]] ?? [] {
                 msgs += fromAnthropicMessage(m)
@@ -153,7 +156,7 @@ enum ExternalEngine {
     private static func fromAnthropicMessage(_ m: [String: Any]) -> [[String: Any]] {
         let role = (m["role"] as? String) ?? "user"
         guard let blocks = m["content"] as? [[String: Any]] else {
-            let text = WireRequest.flattenContent(m["content"])
+            let text = WireText.flattenContent(m["content"])
             return text.isEmpty ? [] : [["role": role, "content": text]]
         }
         if role == "assistant" {
@@ -166,7 +169,7 @@ enum ExternalEngine {
                 case "tool_use":
                     calls.append(["id": b["id"] as? String ?? "call_x", "type": "function",
                                   "function": ["name": b["name"] as? String ?? "",
-                                               "arguments": WireRequest.jsonString(b["input"])]])
+                                               "arguments": WireText.jsonString(b["input"])]])
                 default:
                     break   // thinking / redacted blocks never round-trip
                 }
@@ -193,7 +196,7 @@ enum ExternalEngine {
             case "tool_result":
                 out.append(["role": "tool",
                             "tool_call_id": b["tool_use_id"] as? String ?? "call_x",
-                            "content": WireRequest.flattenContent(b["content"])])
+                            "content": WireText.flattenContent(b["content"])])
                 // OpenAI tool messages are text-only; a screenshot inside a
                 // tool_result (e.g. a browser capture) is lifted into the
                 // following user turn so the model still sees it.
@@ -257,7 +260,7 @@ enum ExternalEngine {
                 }
             }
             if hasImage { return [["role": mapped, "content": parts]] }
-            let text = WireRequest.flattenContent(item["content"])
+            let text = WireText.flattenContent(item["content"])
             return text.isEmpty ? [] : [["role": mapped, "content": text]]
         case "function_call":
             let callID = (item["call_id"] as? String) ?? (item["id"] as? String) ?? "call_x"
@@ -268,7 +271,7 @@ enum ExternalEngine {
         case "function_call_output":
             return [["role": "tool",
                      "tool_call_id": item["call_id"] as? String ?? "call_x",
-                     "content": WireRequest.flattenContent(item["output"])]]
+                     "content": WireText.flattenContent(item["output"])]]
         default:
             return []
         }
@@ -327,7 +330,7 @@ enum ExternalEngine {
         if case .chat = wire { return chat }
         let choice = (chat["choices"] as? [[String: Any]])?.first ?? [:]
         let message = choice["message"] as? [String: Any] ?? [:]
-        let text = WireRequest.flattenContent(message["content"])
+        let text = WireText.flattenContent(message["content"])
         let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
         let finish = choice["finish_reason"] as? String ?? "stop"
         let usage = chat["usage"] as? [String: Any] ?? [:]

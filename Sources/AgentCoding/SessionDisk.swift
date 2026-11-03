@@ -527,8 +527,8 @@ public final class SessionDisk {
     /// listener). 65534: out of the way of anything people run (8080 was
     /// forever colliding with dev servers and containers) and above the
     /// kernel's ephemeral range. 8080 is what daemons before it listened on.
-    static let guestProxyPort = 65534
-    static let legacyGuestProxyPort = 8080
+    static let guestProxyPort = GuestPorts.guestProxyPort
+    static let legacyGuestProxyPort = GuestPorts.legacyGuestProxyPort
 
     /// Which port this boot's guest proxy listens on, recorded when the
     /// machine cold-boots so a snapshot restore — or a live re-stage of the
@@ -1487,7 +1487,7 @@ public final class SessionDisk {
 
     /// Host vsock port the guest browser-MCP stdio shim connects to (host CID
     /// 2). The host serves line-delimited JSON-RPC (BrowserMCPServer) there.
-    public static let browserMCPVsockPort: UInt32 = 5830
+    public static let browserMCPVsockPort = GuestPorts.browserMCPVsockPort
     /// Guest path of the stdio shim, staged into the (read-only) meta share.
     static let browserMCPShimGuestPath = "/mnt/bromure-meta/bromure-browser-mcp.py"
     /// Meta-share file holding Kimi's approval-mode flag (see KimiApprovals).
@@ -1495,14 +1495,14 @@ public final class SessionDisk {
     /// Host vsock port for the coding-board MCP (TaskBoardMCPServer): the
     /// task tools coding-task agents get (set plan, create subtasks, hand to
     /// review). Sibling of the browser MCP, one port over.
-    public static let taskBoardMCPVsockPort: UInt32 = 5831
+    public static let taskBoardMCPVsockPort = GuestPorts.taskBoardMCPVsockPort
     /// The automations MCP (AutomationMCPServer): every agent in the
     /// workspace can list / create / edit / delete / run ITS automations.
-    public static let automationMCPVsockPort: UInt32 = 5833
+    public static let automationMCPVsockPort = GuestPorts.automationMCPVsockPort
     static let automationMCPShimGuestPath = "/mnt/bromure-meta/bromure-automations-mcp.py"
     /// The infrastructure MCP (KubeMCPServer): what clusters / registries
     /// this workspace can use and how, plus creating new ones.
-    public static let kubeMCPVsockPort: UInt32 = 5834
+    public static let kubeMCPVsockPort = GuestPorts.kubeMCPVsockPort
     static let kubeMCPShimGuestPath = "/mnt/bromure-meta/bromure-infra-mcp.py"
     static var kubeMCPClaudeEntry: [String: Any] {
         ["command": "python3", "args": [kubeMCPShimGuestPath]]
@@ -1521,7 +1521,7 @@ public final class SessionDisk {
     }
     /// The delegation MCP (DelegationMCPServer): an agent hands work to
     /// another agent's session and hears back. Every agent tab gets it.
-    public static let delegationMCPVsockPort: UInt32 = 5835
+    public static let delegationMCPVsockPort = GuestPorts.delegationMCPVsockPort
     static let delegationMCPShimGuestPath = "/mnt/bromure-meta/bromure-delegation-mcp.py"
     /// `alwaysLoad`: Claude Code otherwise defers MCP tools behind its
     /// ToolSearch tool, and every agent spent a whole model turn loading
@@ -1546,7 +1546,7 @@ public final class SessionDisk {
     /// The Switchboard's MCP (SwitchboardMCPServer): the delegation shim — same
     /// window announcement, since the host checks the caller is the
     /// Switchboard's tab — on its own port.
-    public static let switchboardMCPVsockPort: UInt32 = 5836
+    public static let switchboardMCPVsockPort = GuestPorts.switchboardMCPVsockPort
     static let switchboardMCPShimGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.py"
     static let switchboardMCPConfigGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.json"
     static var switchboardMCPShimScript: String {
@@ -1617,7 +1617,7 @@ public final class SessionDisk {
     /// v1): guest plan drivers connect here and exchange NDJSON events/
     /// commands with the host's planning UI. One port over from the board
     /// MCP.
-    public static let planStreamVsockPort: UInt32 = 5832
+    public static let planStreamVsockPort = GuestPorts.planStreamVsockPort
 
     /// The built-in `browser` MCP server entry (Claude JSON shape): a stdio
     /// shim the agent launches, which pipes JSON-RPC over vsock to the host.

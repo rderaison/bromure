@@ -1,0 +1,26 @@
+import Foundation
+
+/// The ports a workspace's guest and host meet on: the guest's HTTP proxy
+/// and the host vsock ports the in-VM shims dial (host CID 2). SessionDisk
+/// carries them under the same names (its comments say more); here they
+/// build without the rest of SessionDisk (Linux).
+public enum GuestPorts {
+    /// The guest's cooperative HTTP proxy (bromure-agentd's vm-bridge listener).
+    public static let guestProxyPort: Int = 65534
+    /// What daemons before 65534 listened on.
+    public static let legacyGuestProxyPort: Int = 8080
+    /// The browser MCP (BrowserMCPServer), dialed by the guest's stdio shim.
+    public static let browserMCPVsockPort: UInt32 = 5830
+    /// The coding-board MCP (TaskBoardMCPServer).
+    public static let taskBoardMCPVsockPort: UInt32 = 5831
+    /// The plan-stream channel (plan-stream protocol v1).
+    public static let planStreamVsockPort: UInt32 = 5832
+    /// The automations MCP (AutomationMCPServer).
+    public static let automationMCPVsockPort: UInt32 = 5833
+    /// The infrastructure MCP (KubeMCPServer).
+    public static let kubeMCPVsockPort: UInt32 = 5834
+    /// The delegation MCP (DelegationMCPServer).
+    public static let delegationMCPVsockPort: UInt32 = 5835
+    /// The Switchboard's MCP (SwitchboardMCPServer).
+    public static let switchboardMCPVsockPort: UInt32 = 5836
+}
