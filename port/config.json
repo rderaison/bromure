@@ -64,6 +64,7 @@
     "Sources/AgentCoding/Inference/ProviderModels.swift",
     "Sources/AgentCoding/Inference/ToolCallRepair.swift",
     "Sources/AgentCoding/Inference/Wire.swift",
+    "Sources/AgentCoding/InstructionPresetStore.swift",
     "Sources/AgentCoding/KernelSentryService.swift",
     "Sources/AgentCoding/LiveModelRefresh.swift",
     "Sources/AgentCoding/Mitm/AWSCredentialServer.swift",

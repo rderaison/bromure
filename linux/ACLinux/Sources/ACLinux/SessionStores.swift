@@ -15,6 +15,8 @@ final class SessionStores {
     let delegations: DelegationStore
     let codingTasks: CodingTaskStore
     let automations: ScheduledAutomationStore
+    /// The workspaces' instruction presets (macOS: the app delegate's store).
+    let instructionPresets: InstructionPresetStore
     /// The engines over them (Daemon.startSessionEngine).
     var engine: AgentSessionEngine?
     var codingTaskEngine: CodingTaskEngine?
@@ -30,6 +32,7 @@ final class SessionStores {
         delegations = DelegationStore(fileURL: dir.appendingPathComponent("delegations.json"))
         codingTasks = CodingTaskStore(fileURL: dir.appendingPathComponent("tasks.json"))
         automations = ScheduledAutomationStore(fileURL: dir.appendingPathComponent("automations.json"))
+        instructionPresets = InstructionPresetStore(fileURL: dir.appendingPathComponent("instruction-presets.json"))
     }
 
     /// The /state keys macOS adds on a server with the sessions-first home.
@@ -39,7 +42,19 @@ final class SessionStores {
             "agentSessions": .array(sessions.sessions.compactMap(JSONValue.encoding)),
             "delegations": .array(delegations.delegations.compactMap(JSONValue.encoding)),
             "agentRooms": .array(rooms.rooms.compactMap(JSONValue.encoding)),
-        ].merging(registrationEntries()) { a, _ in a }
+        ].merging(registrationEntries()) { a, _ in a }.merging(instructionPresetEntries()) { a, _ in a }
+    }
+
+    /// `/state`'s `instructionPresets`, as macOS lists them.
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListInstructionPresets h=5b321de5628eebbb @acdf5f11
+    func instructionPresetEntries() -> [String: JSONValue] {
+        ["instructionPresets": JSONValue(foundation: InstructionPresetStore.wire(instructionPresets.presets)) ?? .array([])]
+    }
+
+    /// `POST /instruction-presets {presets}`: the whole list, replaced.
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSetInstructionPresets h=66fc3d516770cc4e @acdf5f11
+    func setInstructionPresets(_ list: [[String: Any]]) {
+        instructionPresets.replace(InstructionPresetStore.fromWire(list))
     }
 
     /// The sign-in a client started, while it runs, and how recent ones

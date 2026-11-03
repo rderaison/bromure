@@ -41,6 +41,10 @@ extension Daemon {
             guard let did = parts.first.flatMap({ $0.removingPercentEncoding }).flatMap(UUID.init(uuidString:)),
                   parts.count > 1 else { return .error(400, "Bad delegation id or action") }
             return reply(await delegationCommand(did, parts[1], doc))
+        case ("POST", "/instruction-presets"):
+            guard let list = doc["presets"] as? [[String: Any]] else { return .error(400, "presets required") }
+            await MainActor.run { SessionStores.shared?.setInstructionPresets(list) }
+            return ControlResponse(200, ["ok": true])
         case ("GET", "/grid-layout"):
             // A server has no window, so no grid (macOS without a window).
             // @port ACAppDelegate.automationGridLayout() h=134aaf841c464fe5 @b10aa434

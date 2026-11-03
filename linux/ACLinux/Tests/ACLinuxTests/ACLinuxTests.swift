@@ -1541,3 +1541,22 @@ struct SignInCaptureProxyTests {
         #expect(text.contains("Accept-Encoding: identity") && !text.contains("gzip"))
     }
 }
+
+@Suite("Instruction presets")
+@MainActor
+struct InstructionPresetTests {
+    @Test("a client's list replaces the presets, persists in the state dir, and comes back in /state's shape")
+    func roundTrip() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let stores = SessionStores(stateDir: d)
+        let wire = InstructionPresetStore.wire([InstructionPreset(name: "Terse", text: "Answer in one line.")])
+        stores.setInstructionPresets(wire)
+        guard case .array(let list)? = stores.instructionPresetEntries()["instructionPresets"] else {
+            Issue.record("no instructionPresets"); return
+        }
+        #expect(list.count == 1 && list[0]["name"]?.stringValue == "Terse")
+        #expect(FileManager.default.fileExists(atPath: d + "/instruction-presets.json"))
+        #expect(SessionStores(stateDir: d).instructionPresets.presets.map(\.name) == ["Terse"], "reloaded from disk")
+    }
+}
