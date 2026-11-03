@@ -34,6 +34,22 @@ public struct VMRecord: Codable, Sendable, Equatable {
     // @port-skip linux-only: VM record
     public var shortId: String { String(id.prefix(8)) }
 
+    /// The VM as a `/state` workspace row (macOS: a profile), the shape a
+    /// fat client's sidebar reads: `state` running, booting, suspended or off.
+    // partial: no profile fields (tool, accent, auth, fonts, tokens, disk sizes)
+    // @port-skip linux-only: macOS builds rows from profiles (ACAppDelegate.automationWorkspaceList)
+    public var workspaceJSON: JSONValue {
+        let s: String
+        switch state {
+        case .running: s = "running"
+        case .starting: s = "booting"
+        case .suspended: s = "suspended"
+        default: s = "off"
+        }
+        return ["id": .string(id), "name": .string(name), "state": .string(s),
+                "memoryGB": .number(Double(memoryMiB) / 1024), "cpuCount": .number(Double(cpus))]
+    }
+
     /// The macOS vmEntry's core keys (`id`, `shortId`, `name`, `state`, `ip`,
     /// `cpuCount`, `memoryGB`, `bootedAt`, `macAddress`) plus Linux ones.
     // @port-skip linux-only: JSON shape for /vms (a subset of macOS's automationVMList entry)
@@ -101,7 +117,7 @@ public struct VMRegistry: Sendable {
     /// By id, short id or name (as macOS matches `/vms/{id}`).
     // @port-skip linux-only: Linux daemon state persistence
     public func find(_ key: String) -> VMRecord? {
-        records.first { $0.id == key || $0.shortId == key || $0.name == key }
+        records.first { $0.id.caseInsensitiveCompare(key) == .orderedSame || $0.shortId == key || $0.name == key }
     }
 
     // @port-skip linux-only: Linux daemon state persistence

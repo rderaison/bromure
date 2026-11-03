@@ -15,6 +15,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.10.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
+        // The shared SSH server (Sources/AgentCoding/RemoteAccessServer.swift), as the app builds it.
+        .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
     ],
     targets: [
         .target(name: "CACLinuxShims"),
@@ -26,7 +28,11 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
-            ]),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+            ],
+            // Shared macOS sources (Sources/ACLinux/_shared) build with their
+            // Linux stand-ins under this flag.
+            swiftSettings: [.define("BROMURE_LINUX")]),
         // The headless Linux daemon and its CLI.
         .executableTarget(
             name: "bromure-ac",

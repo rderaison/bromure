@@ -68,15 +68,15 @@ public actor Daemon {
 
     /// A QEMU VM's stream port, or a Firecracker VM's datagram port, as Live holds it.
     // @port-skip linux-only: Linux daemon VM plumbing
-    static func live(_ machine: any VMMachine, stream port: StreamPort, shell: GuestShell, config: QEMUMachineConfig) -> Live {
+    static func streamLive(_ machine: any VMMachine, stream port: StreamPort, shell: GuestShell, config: QEMUMachineConfig) -> Live {
         Live(machine: machine, port: port, closePort: { await port.close() }, shell: shell, config: config)
     }
 
     public nonisolated let config: DaemonConfig
-    private var registry: VMRegistry
-    private var live: [String: Live] = [:]
+    var registry: VMRegistry
+    var live: [String: Live] = [:]
     private let passt: PasstUplink
-    private let sw: InterimSwitch
+    let sw: InterimSwitch
     private let listener: VsockListener
     /// VMs whose stop is being recorded (vmStopped).
     private var stopping: [String: Task<Void, Never>] = [:]
@@ -110,6 +110,7 @@ public actor Daemon {
             ($0.key.hasPrefix("net-") || ($0.key.hasPrefix("vsock-") && $0.key != "vsock-5800")) && $0.value.count == 1
         }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
+        await d.setUpRemoteAccess()
         return d
     }
 
@@ -148,6 +149,13 @@ public actor Daemon {
         case ("GET", "/vms"): return listVMs()
         case ("POST", "/vms"): return await createVM(req.body)
         case (let m, let p) where p.hasPrefix("/vms/"): return await vmRoute(m, p, req.body)
+        case ("GET", "/remote"): return await remoteStatus()
+        case ("POST", "/remote"): return await remoteApply(req.body)
+        case ("POST", "/remote/keys"): return await remoteAddKey(req.body)
+        case ("POST", "/remote/code"): return remoteCode(req.body)
+        case ("DELETE", let p) where p.hasPrefix("/remote/keys/"):
+            let raw = String(p.dropFirst("/remote/keys/".count))
+            return await remoteRemoveKey(raw.removingPercentEncoding ?? raw)
         default: return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
@@ -162,11 +170,15 @@ public actor Daemon {
     // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, localModels, kubeClusters, generation/epoch, or agent sessions yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
     func state() -> ControlResponse {
-        let vms = records.map(\.json)
+        // As on macOS, `vms` is the running (and booting) VMs and `workspaces`
+        // every workspace; with no profiles here each VM is its own workspace,
+        // same id, which is what a fat client opens a terminal on.
+        let all = records
+        let vms = all.filter { $0.state == .running || $0.state == .starting }.map(\.json)
         return ControlResponse(200, [
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
-            "vms": .array(vms), "workspaces": [], "workspacesListed": true,
+            "vms": .array(vms), "workspaces": .array(all.map(\.workspaceJSON)), "workspacesListed": true,
             "vmnetSubnet": "192.168.64.0/24", "vmnetGateway": "192.168.64.1",
             "uplink": ["kind": "passt", "mtu": .number(Double(passt.mtu))],
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
@@ -378,16 +390,22 @@ public actor Daemon {
     /// "rows"}]`, the client gets a 200 octet-stream header, and from then on
     /// the bytes are pumped both ways unchanged (the frames are between the
     /// CLI and agentd's pty) until either side closes.
-    // partial: a plain pump: no consent gate (no MITM consent on Linux yet), no view/window/sizePassive/guiConsent
+    // partial: a plain pump: no consent gate (no MITM consent on Linux yet; guiConsent is moot)
     // @port ACAutomationServer.handleInteractiveExec(clientFD: Int32, profileID: String, bodyJSON: [String:Any]) h=2d264f1f134ea9eb @7dd92fdf
     func interactiveExec(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         guard let l = live[rec.id], rec.state == .running else {
             let s = rec.state == .stopped ? "off" : rec.state.rawValue
             return .error(409, "VM '\(rec.name)' is \(s)", ["state": .string(s)])
         }
-        let req: JSONValue = .object(["cmd": .string(body["command"]?.stringValue ?? ""), "interactive": .bool(true),
+        var r: [String: JSONValue] = ["cmd": .string(body["command"]?.stringValue ?? ""), "interactive": .bool(true),
                                       "cols": .number(body["cols"]?.numberValue ?? 80),
-                                      "rows": .number(body["rows"]?.numberValue ?? 24)])
+                                      "rows": .number(body["rows"]?.numberValue ?? 24)]
+        // A fat client's terminal: its own grouped tmux view of the session,
+        // on window `window`, sized by another client (sizePassive).
+        if let v = body["view"]?.stringValue { r["view"] = .string(v) }
+        if let w = body["window"]?.numberValue { r["window"] = .number(w) }
+        if body["sizePassive"] == .bool(true) { r["sizePassive"] = .bool(true) }
+        let req: JSONValue = .object(r)
         guard let reqData = try? JSONEncoder().encode(req) else { return .error(500, "Failed to encode request") }
         var conn: VsockConnection?
         for _ in 0..<32 {
@@ -499,7 +517,7 @@ public actor Daemon {
         } else {
             let port = try await StreamPort.listen(path: run + "/net.sock")
             let shell = await GuestShell(cid: rec.cid, listener: listener)
-            l = Self.live(QEMUMachine(config: qc), stream: port, shell: shell, config: qc)
+            l = Self.streamLive(QEMUMachine(config: qc), stream: port, shell: shell, config: qc)
         }
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
@@ -604,7 +622,7 @@ public actor Daemon {
                         await port.close()
                         throw error
                     }
-                    l = Self.live(machine, stream: port, shell: shell, config: qc)
+                    l = Self.streamLive(machine, stream: port, shell: shell, config: qc)
                 }
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
@@ -775,6 +793,7 @@ public actor Daemon {
         FDStore.remove("vsock-5800")
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
+        await MainActor.run { RemoteAccessServer.shared.stop() }
         sw.stop()
         await passt.close()
     }

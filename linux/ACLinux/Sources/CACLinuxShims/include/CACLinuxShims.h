@@ -66,6 +66,15 @@ int acl_sd_notify_fds(const char *state, const int *fds, int nfds);
 /// SO_REUSEADDR: the fd, or -errno.
 int acl_vsock_listen(unsigned int port, int backlog);
 
+/// A blocking AF_VSOCK stream connected to (`cid`, `port`), or -errno
+/// (ETIMEDOUT after `timeout_ms`).
+int acl_vsock_connect(unsigned int cid, unsigned int port, int timeout_ms);
+
+/// Firecracker's hybrid vsock, host -> guest: connects to the VM's vsock Unix
+/// socket `path`, sends `CONNECT <port>\n` and consumes the `OK <n>\n` reply.
+/// Returns the stream (to the guest's `port`), or -errno.
+int acl_hybrid_vsock_connect(const char *path, unsigned int port, int timeout_ms);
+
 /// Unblocks SIGTERM and SIGINT in the calling thread's (and so the
 /// process's future threads') mask: a parent that spawned us with them blocked
 /// (Foundation's Process does) mustn't take away the graceful-stop path.
@@ -82,3 +91,9 @@ int acl_pidfd_open(int pid);
 int acl_pidfd_send_signal(int pidfd, int sig);
 
 #endif
+
+/// PAM authentication of `user` with `password` under `service` (an unknown
+/// service falls back to PAM's "other"): pam_authenticate then pam_acct_mgmt.
+/// libpam is dlopen'ed (libpam.so.0), so nothing links it. Returns 0 when
+/// authenticated, a PAM error code (> 0) when not, -1 when PAM can't be loaded.
+int acl_pam_check(const char *service, const char *user, const char *password);

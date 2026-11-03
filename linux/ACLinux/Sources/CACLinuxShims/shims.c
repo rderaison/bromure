@@ -248,6 +248,9 @@ int acl_pidfd_send_signal(int pidfd, int sig) {
 
 #ifdef __linux__
 #include <linux/vm_sockets.h>
+#include <poll.h>
+#include <stdio.h>
+#include <sys/time.h>
 int acl_vsock_listen(unsigned int port, int backlog) {
     int fd = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -errno;
@@ -265,6 +268,128 @@ int acl_vsock_listen(unsigned int port, int backlog) {
     }
     return fd;
 }
+
+// Connects `fd` to `sa`, giving up after `timeout_ms`; the fd is left blocking.
+static int acl_connect_timeout(int fd, const struct sockaddr *sa, socklen_t len, int timeout_ms) {
+    int fl = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    int r = connect(fd, sa, len);
+    if (r < 0 && errno == EINPROGRESS) {
+        struct pollfd p = { .fd = fd, .events = POLLOUT };
+        r = poll(&p, 1, timeout_ms);
+        if (r == 0) { errno = ETIMEDOUT; r = -1; }
+        else if (r > 0) {
+            int err = 0; socklen_t el = sizeof err;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el);
+            if (err) { errno = err; r = -1; } else r = 0;
+        }
+    }
+    fcntl(fd, F_SETFL, fl);
+    return r;
+}
+
+int acl_vsock_connect(unsigned int cid, unsigned int port, int timeout_ms) {
+    int fd = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    struct sockaddr_vm sa;
+    memset(&sa, 0, sizeof sa);
+    sa.svm_family = AF_VSOCK;
+    sa.svm_cid = cid;
+    sa.svm_port = port;
+    if (acl_connect_timeout(fd, (struct sockaddr *)&sa, sizeof sa, timeout_ms) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    return fd;
+}
 #else
 int acl_vsock_listen(unsigned int port, int backlog) { (void)port; (void)backlog; return -ENOSYS; }
+int acl_vsock_connect(unsigned int cid, unsigned int port, int timeout_ms) { (void)cid; (void)port; (void)timeout_ms; return -ENOSYS; }
 #endif
+
+int acl_hybrid_vsock_connect(const char *path, unsigned int port, int timeout_ms) {
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof sa.sun_path) return -ENAMETOOLONG;
+    strcpy(sa.sun_path, path);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    if (acl_connect_timeout(fd, (struct sockaddr *)&sa, sizeof sa, timeout_ms) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    char req[32];
+    int n = snprintf(req, sizeof req, "CONNECT %u\n", port);
+    if (write(fd, req, (size_t)n) != n) { int e = errno ? errno : EIO; close(fd); return -e; }
+    // "OK <host port>\n", read a byte at a time so nothing past it is consumed.
+    char line[64];
+    size_t got = 0;
+    for (;;) {
+        char c;
+        ssize_t r = read(fd, &c, 1);
+        if (r != 1 || got + 1 >= sizeof line) { close(fd); return r == 0 ? -ECONNREFUSED : -(errno ? errno : EPROTO); }
+        line[got++] = c;
+        if (c == '\n') break;
+    }
+    line[got] = 0;
+    if (strncmp(line, "OK ", 3) != 0) { close(fd); return -ECONNREFUSED; }
+    struct timeval none = { 0, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof none);
+    return fd;
+}
+
+// --- PAM, dlopen'ed (no libpam headers needed) ---
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct acl_pam_message { int msg_style; const char *msg; };
+struct acl_pam_response { char *resp; int resp_retcode; };
+struct acl_pam_conv {
+    int (*conv)(int, const struct acl_pam_message **, struct acl_pam_response **, void *);
+    void *appdata_ptr;
+};
+enum { ACL_PAM_SUCCESS = 0, ACL_PAM_BUF_ERR = 5, ACL_PAM_CONV_ERR = 19,
+       ACL_PAM_PROMPT_ECHO_OFF = 1, ACL_PAM_PROMPT_ECHO_ON = 2 };
+
+// Answers every hidden prompt with the password; anything else gets no answer.
+static int acl_pam_conv_fn(int n, const struct acl_pam_message **msg, struct acl_pam_response **resp, void *data) {
+    if (n <= 0 || n > 32) return ACL_PAM_CONV_ERR;
+    struct acl_pam_response *r = calloc((size_t)n, sizeof *r);
+    if (!r) return ACL_PAM_BUF_ERR;
+    for (int i = 0; i < n; i++) {
+        if (msg[i]->msg_style == ACL_PAM_PROMPT_ECHO_OFF) {
+            r[i].resp = strdup((const char *)data);
+            if (!r[i].resp) {
+                for (int j = 0; j < i; j++) free(r[j].resp);
+                free(r);
+                return ACL_PAM_BUF_ERR;
+            }
+        }
+    }
+    *resp = r;
+    return ACL_PAM_SUCCESS;
+}
+
+int acl_pam_check(const char *service, const char *user, const char *password) {
+    void *h = dlopen("libpam.so.0", RTLD_NOW | RTLD_LOCAL);
+    if (!h) return -1;
+    int (*start)(const char *, const char *, const struct acl_pam_conv *, void **) = dlsym(h, "pam_start");
+    int (*authenticate)(void *, int) = dlsym(h, "pam_authenticate");
+    int (*acct)(void *, int) = dlsym(h, "pam_acct_mgmt");
+    int (*end)(void *, int) = dlsym(h, "pam_end");
+    if (!start || !authenticate || !acct || !end) { dlclose(h); return -1; }
+    struct acl_pam_conv conv = { acl_pam_conv_fn, (void *)password };
+    void *pamh = NULL;
+    int r = start(service, user, &conv, &pamh);
+    if (r == ACL_PAM_SUCCESS) r = authenticate(pamh, 0);
+    if (r == ACL_PAM_SUCCESS) r = acct(pamh, 0);
+    if (pamh) end(pamh, r);
+    dlclose(h);
+    return r;
+}

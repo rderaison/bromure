@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self, StopPost.self])
+        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, StopPost.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -404,5 +404,106 @@ enum ControlClientIO {
             off += n
         }
         return true
+    }
+}
+
+/// `bromure-ac remote`: the embedded SSH server fat clients (the macOS and
+/// iOS apps) connect to.
+// partial: no Preferences pane; status, enable/disable, keys, and Linux's one-time enrollment code
+// @port-skip linux-only: macOS has the same verbs under `bromure-ac remote` driving UserDefaults
+struct Remote: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Remote access for the Bromure apps (an SSH server, port 2222 by default).",
+        subcommands: [Status.self, Enable.self, Disable.self, Code.self, AddKey.self, RmKey.self],
+        defaultSubcommand: Status.self)
+
+    // @port-skip linux-only: CLI plumbing
+    static func show(_ j: JSONValue) {
+        func s(_ k: String) -> String {
+            switch j[k] { case .bool(let b)?: return b ? "yes" : "no"
+                          case .number(let n)?: return String(Int(n))
+                          default: return j[k]?.stringValue ?? "-" }
+        }
+        print("enabled: \(s("enabled"))   running: \(s("running"))   port: \(s("port"))   bind: \(s("bindAddress"))")
+        print("password auth: \(s("passwordAuth"))   public-key auth: \(s("pubkeyAuth"))")
+        print("host key: \(s("fingerprint"))")
+        print("connect: \(s("connect"))")
+        if case .array(let keys)? = j["authorizedKeys"], !keys.isEmpty {
+            print("authorized keys:")
+            for k in keys { print("  \(k["fingerprint"]?.stringValue ?? "?")  \(k["comment"]?.stringValue ?? "")") }
+        }
+    }
+
+    struct Status: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show the server's state, host key and enrolled keys.")
+        @Flag(help: "JSON output.") var json = false
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("GET", "/remote")
+            try check(r, "status")
+            if json { print(r.json) } else { Remote.show(r.json) }
+        }
+    }
+
+    struct Enable: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Start the SSH server (and at every daemon start).")
+        @Option(help: "TCP port (1024-65535).") var port: Int?
+        @Option(help: "Address to listen on (default 0.0.0.0).") var bind: String?
+        @Flag(help: "Refuse password (and enrollment-code) logins.") var noPassword = false
+        @Flag(help: "Refuse public-key logins.") var noPubkey = false
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            var body: [String: JSONValue] = ["enabled": true, "passwordAuth": .bool(!noPassword), "pubkeyAuth": .bool(!noPubkey)]
+            if let port { body["port"] = .number(Double(port)) }
+            if let bind { body["bindAddress"] = .string(bind) }
+            let r = try client().request("POST", "/remote", body: .object(body))
+            try check(r, "enable")
+            Remote.show(r.json)
+        }
+    }
+
+    struct Disable: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Stop the SSH server.")
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("POST", "/remote", body: ["enabled": false])
+            try check(r, "disable")
+            print("Remote access disabled.")
+        }
+    }
+
+    struct Code: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "A one-time code to type as the password when adding this server in a Bromure app.")
+        @Option(help: "Minutes it stays valid (1-60).") var minutes = 10
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("POST", "/remote/code", body: ["minutes": .number(Double(minutes))])
+            try check(r, "code")
+            print("Enrollment code (one use, \(minutes) min): \(r.json["code"]?.stringValue ?? "?")")
+            print("In the app, add this server with user \(r.json["user"]?.stringValue ?? "?") and type the code as the password.")
+        }
+    }
+
+    struct AddKey: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "add-key", abstract: "Authorize an OpenSSH public key.")
+        @Argument(help: "The public key line (ssh-ed25519 AAAA… comment).") var key: String
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("POST", "/remote/keys", body: ["key": .string(key)])
+            try check(r, "add-key")
+            print("Authorized \(r.json["fingerprint"]?.stringValue ?? "key").")
+        }
+    }
+
+    struct RmKey: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "rm-key", abstract: "Revoke a key (by fingerprint or comment).")
+        @Argument(help: "SHA256:… fingerprint, or the key's comment.") var key: String
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("DELETE", "/remote/keys/\(ControlClient.encodeSegment(key))")
+            try check(r, "rm-key")
+            print("Revoked \(key).")
+        }
     }
 }
