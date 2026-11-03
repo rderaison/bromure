@@ -115,6 +115,19 @@ enum HTTPRequestFraming {
         }
         return (status, Data(raw[end.upperBound...]))
     }
+
+    /// A whole response with a chunked body decoded (its Transfer-Encoding
+    /// dropped), as macOS's URLSession hands the trace its response; any
+    /// other response, or one that doesn't decode, as it is.
+    // @port-skip linux-only: the trace's response copy (macOS: URLSession de-chunks)
+    static func dechunkedResponse(_ raw: Data) -> Data {
+        guard let end = raw.range(of: Data("\r\n\r\n".utf8)) else { return raw }
+        let head = String(decoding: raw[raw.startIndex..<end.lowerBound], as: UTF8.self)
+        guard headers(head)["transfer-encoding"]?.lowercased().contains("chunked") == true,
+              case .complete(let body, _) = dechunk(raw[end.upperBound...]) else { return raw }
+        return replacingHeaders(Data(raw[raw.startIndex..<end.upperBound]), drop: ["transfer-encoding"],
+                                add: "Content-Length: \(body.count)") + body
+    }
 }
 
 /// The parts of a TLS ClientHello the proxy needs before it picks a leaf:

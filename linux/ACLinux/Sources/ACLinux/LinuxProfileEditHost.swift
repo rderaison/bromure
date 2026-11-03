@@ -71,8 +71,16 @@ extension LinuxSessionHost: ProfileEditHost {
     /// An edit lands at the workspace's next boot here: the meta share and
     /// home seed are staged at launch.
     // partial: no live edit of a running workspace on Linux (applies at its next boot)
-    // @port-skip linux-only: no live session edit on Linux yet (ACAppDelegate.applyLiveEditToRunningSession)
-    func applyLiveEditToRunningSession(_ new: Profile) {}
+    /// A running workspace's edit: its trace level applies at once (the
+    /// proxy reads it per request), its session id kept so the trace isn't
+    /// split (macOS: applyLiveSessionRefresh's trace step).
+    // partial: only the trace level is applied live on Linux; the rest waits for the next launch
+    // @port ACAppDelegate.applyLiveSessionRefresh(from: Profile, to: Profile, terminalDefaults: TerminalAppDefaults, window: SessionPane?, sandbox: UbuntuSandboxVM?) h=ca482e2c12f5ab30 @7057d502
+    func applyLiveEditToRunningSession(_ new: Profile) {
+        guard let mitm = daemon?.mitm, let cur = mitm.sessionTrace(for: new.id),
+              cur.level != new.traceLevel else { return }
+        mitm.setSessionTrace(TraceSession(sessionID: cur.sessionID, level: new.traceLevel), for: new.id)
+    }
 
     // @port-skip linux-only: Daemon.describe's summary without the actor's VM records
     func automationProfileDescribe(_ key: String) -> [String: Any]? {

@@ -20,9 +20,10 @@ import X509
 /// its subscription stand-ins and fake tokens swapped for the real ones
 /// (SubscriptionAuthRewrite, TokenSwapper), a sign-in's token exchange
 /// answered by the host (SignInCapture), and the response streamed back.
-/// Guardrails, PII, supply-chain, tracing and the egress firewall are
-/// macOS's alone for now.
-// partial: no guardrails, PII, supply-chain, prompt-injection, tracing or egress policy on Linux yet
+/// Each request is traced as macOS traces it (TraceEmitter, at the
+/// workspace's trace level). Guardrails, PII, supply-chain and the egress
+/// firewall are macOS's alone for now.
+// partial: no guardrails, PII, supply-chain, prompt-injection or egress policy on Linux yet
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -41,6 +42,11 @@ final class MitmProxy: @unchecked Sendable {
     let kimiStore: KimiSubscriptionStore
     let kimiRefresher: KimiSubscriptionRefresher
     let captures = SignInCaptureRegistry()
+    /// The trace inspector's records (macOS: MitmEngine.traceStore), made
+    /// on the main actor once the daemon is up (setUpTraceStore).
+    let traces = NIOLockedValueBox<TraceStore?>(nil)
+    /// Each running workspace's trace session (macOS: MitmEngine.sessionTraces).
+    private let sessionTraces = NIOLockedValueBox<[UUID: TraceSession]>([:])
     /// Per-install salt for the fake tokens (macOS: MitmEngine's
     /// `fake-salt.bin` beside the CA); wiping it rotates every fake.
     let fakeTokenSalt: Data
@@ -96,6 +102,54 @@ final class MitmProxy: @unchecked Sendable {
         SubscriptionProviders.grok = { [weak self] in self.map { ($0.grokStore, $0.grokRefresher) } }
         SubscriptionProviders.kimi = { [weak self] in self.map { ($0.kimiStore, $0.kimiRefresher) } }
         SubscriptionProviders.signInCapture = { [weak self] pid in self?.captures.capture(for: pid) }
+    }
+
+    // @port MitmEngine.setSessionTrace(_: SessionTrace, for: UUID) h=488811aacd2e89b1 @8866f904
+    func setSessionTrace(_ trace: TraceSession, for profileID: UUID) {
+        sessionTraces.withLockedValue { $0[profileID] = trace }
+    }
+
+    // @port MitmEngine.sessionTrace(for: UUID) h=554f04c64d0e34c2 @8866f904
+    func sessionTrace(for profileID: UUID) -> TraceSession? {
+        sessionTraces.withLockedValue { $0[profileID] }
+    }
+
+    // @port MitmEngine.clearSessionTrace(for: UUID) h=300943c7759e489b @8866f904
+    func clearSessionTrace(for profileID: UUID) {
+        sessionTraces.withLockedValue { $0[profileID] = nil }
+    }
+
+    /// The trace store under `<state>/traces`, its last records read back.
+    // @port-skip linux-only: MitmEngine.init's TraceStore (macOS: Application Support/BromureAC/traces)
+    @MainActor
+    func setUpTraceStore(rootDir: URL) {
+        let store = TraceStore(rootDir: rootDir)
+        store.reload()
+        traces.withLockedValue { $0 = store }
+    }
+
+    /// Whether `profileID`'s requests are traced at all (the relay keeps a
+    /// response copy only then).
+    // @port-skip linux-only: the Linux relay's gate on its trace copy
+    func traceSession(for profileID: UUID) -> TraceSession? {
+        guard traces.withLockedValue({ $0 }) != nil, let s = sessionTrace(for: profileID),
+              s.level.recordsActivity else { return nil }
+        return s
+    }
+
+    /// One request's trace record (macOS: HTTPMitmConnection.emitTrace),
+    /// off the event loop.
+    // partial: no prompt-injection log scan (onConversation)
+    // @port HTTPMitmConnection.emitTrace(host: String, port: Int, preSwapRequest: Data, upstreamResponse: Data, upstreamWireBytes: Int, responseTruncated: Bool, swaps: [SwapRecord], leaks: [LeakEntry], latencyMs: Double, servedBy: String?) h=22ed0216edbd064f @cb7cdd6a
+    func emitTrace(_ t: RequestReader.Trace, response: Data, wireBytes: Int, truncated: Bool) {
+        guard let store = traces.withLockedValue({ $0 }) else { return }
+        let latency = Date().timeIntervalSince(t.start) * 1000
+        Task {
+            await TraceEmitter.emit(
+                session: t.session, store: store, profileID: t.profileID, host: t.host, port: t.port,
+                preSwapRequest: t.request, upstreamResponse: response, upstreamWireBytes: wireBytes,
+                responseTruncated: truncated, swaps: t.swaps, leaks: t.leaks, latencyMs: latency)
+        }
     }
 
     /// Serves one VM's `<udsPath>_8443` (or `stored`, a restarted daemon's
@@ -408,9 +462,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             let loop = context.eventLoop
             let channel = context.channel
             let (proxy, pid, host, port, tls) = (self.proxy, profileID, self.host, self.port, self.tls)
+            let start = Date()
             Task {
-                let plan = await Self.rewrite(request, proxy: proxy, profileID: pid, host: host, port: port, tls: tls)
-                loop.execute { self.send(plan, channel: channel, host: host, port: port, tls: tls) }
+                var trace = proxy.traceSession(for: pid).map {
+                    Trace(session: $0, profileID: pid, host: host, port: port, start: start, request: request)
+                }
+                let plan = await Self.rewrite(request, proxy: proxy, profileID: pid, host: host, port: port, tls: tls,
+                                              trace: &trace)
+                loop.execute { self.send(plan, trace: trace, channel: channel, host: host, port: port, tls: tls) }
             }
         }
     }
@@ -431,11 +490,25 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool)
     }
 
+    /// What a traced request's record is made of, besides its response.
+    struct Trace {
+        let session: TraceSession
+        let profileID: UUID
+        let host: String
+        let port: Int
+        let start: Date
+        /// The request as the guest sent it (before any swap).
+        let request: Data
+        var swaps: [SwapRecord] = []
+        var leaks: [LeakEntry] = []
+    }
+
     /// The request as it goes upstream, or the host's own answer, in
     /// macOS's order: the subscription swaps (5c–5e), the token map's, then
     /// the 5f sign-in capture on what would go out.
     // @port-skip linux-only: the swap order of HTTPMitmConnection.driveTLS (5c–5f, then TokenSwapper)
-    static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool) async -> Plan {
+    static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
+                        trace: inout Trace?) async -> Plan {
         var req = origin(raw)
         let head = SubscriptionAuthRewrite.rawHeaderSection(of: req) ?? ""
         let line = head.prefix { $0 != "\r" && $0 != "\n" }.split(separator: " ")
@@ -443,6 +516,12 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let path = line.count > 1 ? String(line[1]) : "/"
         let upgrade = SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) != nil
         var injected = SubscriptionAuthRewrite.Injected()
+        // Pre-swap: unswapped Bearer / x-api-key tokens, for the trace
+        // (our own stand-ins aren't leaks).
+        if trace != nil {
+            trace?.leaks = SubscriptionAuthRewrite.filterStandInLeaks(
+                proxy.swapper.detectLeaks(in: req, profileID: profileID), request: req, host: host, profileID: profileID)
+        }
         if tls {
             switch await SubscriptionAuthRewrite.apply(rawRequest: req, host: host, method: method, path: path,
                                                        profileID: profileID, spooledBody: false) {
@@ -450,7 +529,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             case .forward(let r, let i): req = r; injected = i
             }
         }
-        req = await proxy.swapper.swap(rawRequest: req, host: host, port: port, profileID: profileID).modified
+        let swapped = await proxy.swapper.swap(rawRequest: req, host: host, port: port, profileID: profileID)
+        req = swapped.modified
+        trace?.swaps = swapped.swaps
         // 5f. A sign-in this workspace runs: its token exchange is the host's.
         var capture: SignInCapture?
         if tls, let c = SubscriptionProviders.signInCapture?(profileID),
@@ -474,23 +555,31 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
             }
         }
+        // A trace that keeps this host's bodies reads them as text: the
+        // reply is asked for uncompressed (what a guest behind macOS's
+        // URLSession gets; nothing here decodes gzip or br).
+        if capture == nil, !upgrade, let t = trace, t.session.level.capturesBodyForHost(host) {
+            req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
+        }
         return .forward(upgrade ? req : closing(req), injected, capture: capture, upgrade: upgrade)
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
-    private func send(_ plan: Plan, channel: Channel, host: String, port: Int, tls: Bool) {
+    private func send(_ plan: Plan, trace: Trace?, channel: Channel, host: String, port: Int, tls: Bool) {
         switch plan {
         case .answer(let reply):
             write(reply, to: channel, close: true)
+            if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
         case .forward(let req, let injected, let capture, let upgrade):
             proxy.connectUpstream(host: host, port: port, tls: tls, on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):
-                    self.write(Self.simple(502, "Bad Gateway", body: "Bromure couldn't reach \(host):\(port): \(e)\n"),
-                               to: channel, close: true)
+                    let reply = Self.simple(502, "Bad Gateway", body: "Bromure couldn't reach \(host):\(port): \(e)\n")
+                    self.write(reply, to: channel, close: true)
+                    if let trace { self.proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
                 case .success(let up):
                     let relay = ResponseRelay(guest: channel, profileID: self.profileID, injected: injected,
-                                              capture: capture, upgrade: upgrade)
+                                              capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace)
                     up.pipeline.addHandler(relay).whenComplete { _ in
                         self.upstream = up
                         up.write(up.allocator.buffer(bytes: req), promise: nil)
@@ -556,18 +645,41 @@ final class ResponseRelay: ChannelInboundHandler {
     let injected: SubscriptionAuthRewrite.Injected
     let capture: SignInCapture?
     let upgrade: Bool
+    let proxy: MitmProxy?
+    let trace: RequestReader.Trace?
     private var head = ByteBuffer()
     private var headDone = false
     private var whole = Data()
+    /// The trace's copy of what the guest got, up to `traceCap` (macOS:
+    /// relayUpstream's bodyBufferCap); past it the record keeps no body.
+    private var traceCopy = Data()
+    private var traceWire = 0
+    private var traceTruncated = false
+    static let traceCap = 8 * 1024 * 1024
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(guest: Channel, profileID: UUID, injected: SubscriptionAuthRewrite.Injected,
-         capture: SignInCapture?, upgrade: Bool) {
+         capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil) {
         self.guest = guest
         self.profileID = profileID
         self.injected = injected
         self.capture = capture
         self.upgrade = upgrade
+        self.proxy = proxy
+        self.trace = trace
+    }
+
+    /// What reached the guest, for the trace.
+    // @port-skip linux-only: relayUpstream's response buffer for the trace, on NIO
+    private func keepForTrace(_ bytes: Data) {
+        guard trace != nil else { return }
+        traceWire += bytes.count
+        if traceCopy.count + bytes.count <= Self.traceCap {
+            traceCopy.append(bytes)
+        } else {
+            traceCopy.append(bytes.prefix(Self.traceCap - traceCopy.count))
+            traceTruncated = true
+        }
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -579,6 +691,7 @@ final class ResponseRelay: ChannelInboundHandler {
         }
         if headDone || upgrade {
             headDone = true
+            if trace != nil { keepForTrace(Data(b.readableBytesView)) }
             guest.write(b, promise: nil)
             return
         }
@@ -593,7 +706,9 @@ final class ResponseRelay: ChannelInboundHandler {
         let h = HTTPRequestFraming.replacingHeaders(Data(all.prefix(split)),
                                                     drop: ["connection", "keep-alive"], add: "Connection: close")
         noteStatus(h)
-        guest.write(guest.allocator.buffer(bytes: h + all.dropFirst(split)), promise: nil)
+        let out = h + all.dropFirst(split)
+        keepForTrace(out)
+        guest.write(guest.allocator.buffer(bytes: out), promise: nil)
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -607,6 +722,7 @@ final class ResponseRelay: ChannelInboundHandler {
             noteStatus(raw)
             let guest = self.guest
             let encoded = Self.isEncoded(raw)
+            let (proxy, trace) = (self.proxy, self.trace)
             Task {
                 let kept = encoded ? nil : await capture.handle(status, body)
                 // A successful exchange the host didn't keep never reaches
@@ -623,8 +739,15 @@ final class ResponseRelay: ChannelInboundHandler {
                 FileHandle.standardError.write(Data(
                     "[mitm] sign-in exchange → \(status), \(kept != nil ? "kept on the host" : status == 200 ? "NOT kept\(encoded ? " (encoded reply)" : ""): refused to the guest" : "passed through")\n".utf8))
                 guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
+                // The trace keeps what the guest got, never the provider's
+                // reply (its real tokens).
+                if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: raw.count, truncated: false) }
             }
             return
+        }
+        if let proxy, let trace {
+            proxy.emitTrace(trace, response: traceTruncated ? traceCopy : HTTPRequestFraming.dechunkedResponse(traceCopy),
+                            wireBytes: traceWire, truncated: traceTruncated)
         }
         guest.writeAndFlush(guest.allocator.buffer(capacity: 0)).whenComplete { _ in self.guest.close(promise: nil) }
     }

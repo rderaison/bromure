@@ -144,6 +144,10 @@ public actor Daemon {
         }
         if passt.adopted { FileHandle.standardError.write(Data("bromure-ac daemon: took back passt (pid \(passt.pid ?? 0)) from the fd store\n".utf8)) }
         let d = Daemon(config: config, passt: passt)
+        if let mitm = d.mitm {
+            let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
+            await MainActor.run { mitm.setUpTraceStore(rootDir: root) }
+        }
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
         await d.startSessionEngine()
@@ -236,6 +240,7 @@ public actor Daemon {
             if let r = await subscriptionsRoute(req.method, path, req.body) { return r }
             if let r = await workspaceRoute(req.method, req.path, req.body) { return r }
             if let r = await roomsRoute(req.method, req.path, req.body) { return r }
+            if let r = await traceRoute(req.method, req.path) { return r }
             return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
@@ -789,6 +794,7 @@ public actor Daemon {
         var l = Live(machine: FirecrackerMachine(config: qc), port: port, shell: shell, config: qc,
                      vsock: vsock, browser: browser, storedNet: storeName)
         l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
+        startTraceSession(rec)
         l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:])
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
@@ -891,6 +897,7 @@ public actor Daemon {
                              storedNet: storeName)
                 l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath,
                                     stored: storedNet.removeValue(forKey: "mitm-" + rec.shortId))
+                startTraceSession(rec)
                 var storedMCP: [String: Int32] = [:]
                 for name in ["tbmcp-", "amcp-", "dmcp-"] {
                     if let fd = storedNet.removeValue(forKey: name + rec.shortId) { storedMCP[name] = fd }
@@ -1033,6 +1040,8 @@ public actor Daemon {
     private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
+        // macOS: cleanupSessionRegistrations' clearSessionTrace.
+        if let pid = UUID(uuidString: id) { mitm?.clearSessionTrace(for: pid) }
         rec = registry.find(id) ?? rec
         // A resume that failed stays suspended (start() says so too).
         rec.state = info.reason == .suspended || restoring.contains(id) ? .suspended : .stopped
@@ -1055,6 +1064,14 @@ public actor Daemon {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no proxy listener: \(error)\n".utf8))
             return nil
         }
+    }
+
+    /// The level + session id the proxy records this launch's traffic
+    /// under (a fresh session per launch, as macOS's).
+    // @port-skip linux-only: the trace step of ACAppDelegate.launch (engine.setSessionTrace), per Linux launch and re-adoption
+    private func startTraceSession(_ rec: VMRecord) {
+        guard let mitm, let pid = UUID(uuidString: rec.id), let profile = profile(for: rec) else { return }
+        mitm.setSessionTrace(TraceSession(sessionID: UUID(), level: profile.traceLevel), for: pid)
     }
 
     // @port-skip linux-only: Linux daemon VM lifecycle

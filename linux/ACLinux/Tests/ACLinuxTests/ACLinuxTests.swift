@@ -1542,6 +1542,46 @@ struct SignInCaptureProxyTests {
     }
 }
 
+@Suite("Proxy traces")
+@MainActor
+struct ProxyTraceTests {
+    @Test("the trace's response copy is de-chunked as URLSession hands macOS its response; others pass as they are")
+    func dechunked() {
+        let chunked = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n".utf8)
+        let text = String(decoding: HTTPRequestFraming.dechunkedResponse(chunked), as: UTF8.self)
+        #expect(text.hasSuffix("\r\n\r\nhello world") && text.contains("Content-Length: 11"))
+        #expect(!text.lowercased().contains("chunked") && text.contains("Content-Type: text/event-stream"))
+        let plain = Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".utf8)
+        #expect(HTTPRequestFraming.dechunkedResponse(plain) == plain)
+        let partial = Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel".utf8)
+        #expect(HTTPRequestFraming.dechunkedResponse(partial) == partial)
+    }
+
+    @Test("a traced request lands in the store with its method, path, status, bytes and swap count; off records nothing")
+    func record() async throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let store = TraceStore(rootDir: URL(fileURLWithPath: d, isDirectory: true))
+        let pid = UUID()
+        let req = Data("POST /v1/messages HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 2\r\n\r\n{}".utf8)
+        let res = Data("HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\n{}".utf8)
+        let swap = SwapRecord(fakePreview: "brm-…", realPreview: "sk-…", host: "api.example.com")
+        await TraceEmitter.emit(session: TraceSession(sessionID: UUID(), level: .off), store: store, profileID: pid,
+                                host: "api.example.com", port: 443, preSwapRequest: req, upstreamResponse: res,
+                                upstreamWireBytes: res.count, responseTruncated: false, swaps: [swap], leaks: [],
+                                latencyMs: 3)
+        await TraceEmitter.emit(session: TraceSession(sessionID: UUID(), level: .activity), store: store, profileID: pid,
+                                host: "api.example.com", port: 443, preSwapRequest: req, upstreamResponse: res,
+                                upstreamWireBytes: res.count, responseTruncated: false, swaps: [swap], leaks: [],
+                                latencyMs: 3)
+        for _ in 0..<100 where store.recent.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(store.recent.count == 1)
+        let r = try #require(store.recent.first)
+        #expect(r.profileID == pid && r.method == "POST" && r.path == "/v1/messages" && r.statusCode == 201)
+        #expect(r.requestBytes == req.count && r.responseBytes == res.count && r.swaps.count == 1 && !r.bodyStored)
+    }
+}
+
 @Suite("Instruction presets")
 @MainActor
 struct InstructionPresetTests {
