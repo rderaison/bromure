@@ -300,15 +300,26 @@ public actor Daemon {
             guard rec.state == .running else { return (id, nil) }
             return (id, GuestOutbox.parseRoster(GuestOutbox.read(vmDir(rec.id) + "/outbox/tabs.txt") ?? ""))
         }
-        let (prompts, sessionEntries) = await MainActor.run {
+        let (prompts, sessionEntries, statuses) = await MainActor.run {
             for (id, roster) in rosters { LinuxSessionHost.shared?.updateRoster(id, roster) }
-            return (PendingPromptBroker.shared.pendingList(), SessionStores.shared?.stateEntries() ?? [:])
+            return (PendingPromptBroker.shared.pendingList(), SessionStores.shared?.stateEntries() ?? [:],
+                    LinuxSessionHost.shared?.tabStatuses() ?? [:])
         }
         // As on macOS, `vms` is the running (and booting) VMs and `workspaces`
         // every workspace; with no profiles here each VM is its own workspace,
         // same id, which is what a fat client opens a terminal on.
         let all = records
-        let vms = all.filter { $0.state == .running || $0.state == .starting }.map(vmEntry)
+        // Each tab's hook status, as macOS's automationVMList gives it.
+        let vms: [JSONValue] = all.filter { $0.state == .running || $0.state == .starting }.map { rec in
+            guard case .object(var o) = vmEntry(rec), case .array(let tabs)? = o["tabs"],
+                  let id = UUID(uuidString: rec.id) else { return vmEntry(rec) }
+            o["tabs"] = .array(tabs.map { tab in
+                guard case .object(var t) = tab, let i = tab["index"]?.numberValue.map({ Int($0) }) else { return tab }
+                t["agentStatus"] = .string(statuses[id]?[i] ?? AgentStatus.done.rawValue)
+                return .object(t)
+            })
+            return .object(o)
+        }
         return .object([
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
@@ -599,8 +610,18 @@ public actor Daemon {
         HomeSeed.ensureEnvGeneration(in: meta)
         HomeSeed.ensureGenerationCounter(named: "seed.generation", in: meta)
         let seed = meta.appendingPathComponent("home-seed", isDirectory: true)
-        try HomeSeed.writeHomeSeedFiles(into: seed)
-        try HomeSeed.finalizeHomeSeed(seedDir: seed)
+        // The workspace's own seed, as macOS writes it (ProfileStore): its
+        // dotfiles, the agents' hooks (~/.bromure/agent-status.sh, omp's),
+        // settings and the Claude spec. A VM with no Profile gets the
+        // profile-independent subset.
+        if let profile = profile(for: rec) {
+            let store = profileStore
+            try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback)
+            try store.finalizeHomeSeed(for: profile, seedDir: seed)
+        } else {
+            try HomeSeed.writeHomeSeedFiles(into: seed)
+            try HomeSeed.finalizeHomeSeed(seedDir: seed)
+        }
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
 
         var qc = try machineConfig(rec)

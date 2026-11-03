@@ -41,6 +41,7 @@ final class LinuxSessionHost: AgentSessionHost {
                           rootRepo: $0.rootRepo, display: $0.display, repoRoot: $0.repoRoot,
                           id: ids[$0.index] ?? UUID())
         }
+        for tab in model.tabs { tab.agentStatus = agentStatus[id]?[tab.index] ?? .done }
         model.activeIndex = roster.firstIndex(where: \.active) ?? 0
         model.rosterLive = true
         tabs[id] = model
@@ -60,6 +61,64 @@ final class LinuxSessionHost: AgentSessionHost {
         SessionStores.shared?.sessions.reconcile(entries: entries)
         scanLiveSessions()
     }
+
+    /// What the guest's hooks last said per workspace and window (macOS:
+    /// RunningSession.agentStatus).
+    private var agentStatus: [UUID: [Int: AgentStatus]] = [:]
+
+    /// The guest's hook reports, `agent-status-<window>.txt` in the outbox
+    /// (one-shot: read, then removed): line 1 the signal, line 2 the hook's
+    /// conversation, which may move the report to its own tab (Codex's
+    /// shared server). macOS: UbuntuSandboxVM's outbox poll + onAgentStatus.
+    // @port-skip linux-only: the outbox poll of UbuntuSandboxVM.startOutboxPolling for agent-status files, on the host
+    func readAgentStatus() {
+        guard let store = SessionStores.shared?.sessions else { return }
+        let fm = FileManager.default
+        for id in Self.running.withLockedValue({ $0 }) {
+            let outbox = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/"
+            let names = (try? fm.contentsOfDirectory(atPath: outbox)) ?? []
+            for name in names where name.hasPrefix("agent-status-") && name.hasSuffix(".txt") {
+                let raw = GuestOutbox.read(outbox + name)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                try? fm.removeItem(atPath: outbox + name)
+                guard let index = Int(name.dropFirst("agent-status-".count).dropLast(".txt".count)), !raw.isEmpty,
+                      let status = AgentStatus(signal: raw) else { continue }
+                let lines = raw.split(whereSeparator: \.isNewline)
+                let conversation = lines.count > 1 ? String(lines[1]).trimmingCharacters(in: .whitespaces) : nil
+                guard let w = AgentSessionStore.statusWindow(index: index, conversation: conversation,
+                                                             profileID: id, sessions: store.sessions) else { continue }
+                setTabAgentStatus(id, index: w, status)
+            }
+        }
+    }
+
+    /// A tab's hook status, with what the macOS app delegate does around it:
+    /// a turn that ended or a question is a reply (unread on clients), and a
+    /// new turn means no dialog waits any more.
+    // partial: no automation or coding-task "agent finished" routing yet
+    // @port ACAppDelegate.setTabAgentStatus(_: Profile.ID, index: Int, _: AgentStatus) h=7e5b5652a7eb2b64 @9936e30c
+    func setTabAgentStatus(_ id: UUID, index: Int, _ status: AgentStatus) {
+        guard let store = SessionStores.shared?.sessions else { return }
+        let before = agentStatus[id]?[index]
+        agentStatus[id, default: [:]][index] = status
+        let s = store.session(profileID: id, windowIndex: index)
+        if Self.isReply(from: before, to: status), let s { store.noteReply(s.id) }
+        if status == .working, let s, s.awaitingAnswer == true { _ = store.setAwaitingAnswer(s.id, false) }
+        tabs[id]?.tabs.first(where: { $0.index == index })?.agentStatus = status
+    }
+
+    /// ACAppDelegate.isReply: a turn ended, or the agent started asking.
+    // @port-skip linux-only: ACAppDelegate.isReply (a static in the app delegate)
+    static func isReply(from before: AgentStatus?, to now: AgentStatus) -> Bool {
+        switch now {
+        case .done: return before == .working
+        case .needsInput: return before != .needsInput
+        case .working: return false
+        }
+    }
+
+    /// The hook statuses, for /state's tabs (macOS's automationVMList).
+    // @port-skip linux-only: daemon /state plumbing
+    func tabStatuses() -> [UUID: [Int: String]] { agentStatus.mapValues { $0.mapValues(\.rawValue) } }
 
     /// When each session's tab was last read (capped, a few seconds apart).
     private var lastScan: [UUID: Date] = [:]

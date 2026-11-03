@@ -22,6 +22,13 @@ extension Daemon {
                     LinuxSessionHost.shared?.reconcileSessions()
                 }
             }
+            // The guests' hook reports, read as they come (macOS polls 40 ms).
+            Task { @MainActor in
+                while true {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    LinuxSessionHost.shared?.readAgentStatus()
+                }
+            }
         }
     }
 
