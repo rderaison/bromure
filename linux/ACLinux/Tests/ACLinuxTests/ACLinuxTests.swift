@@ -1220,3 +1220,60 @@ struct GuestDiskTests {
         #expect(throws: MachineError.self) { try GuestDisk.rootPartitionOffset(d + "/nogpt") }
     }
 }
+
+@Suite("Browser MCP bridge")
+struct BrowserMCPBridgeTests {
+    static func connect(_ path: String) throws -> Int32 {
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        var a = sockaddr_un()
+        a.sun_family = sa_family_t(AF_UNIX)
+        let b = Array(path.utf8)
+        withUnsafeMutableBytes(of: &a.sun_path) { p in p.copyBytes(from: b); p[b.count] = 0 }
+        let rc = withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Glibc.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        guard rc == 0 else { throw MachineError.io("connect", errno) }
+        return fd
+    }
+
+    /// One line from `fd`, waiting up to `ms`.
+    static func line(_ fd: Int32, ms: Int32 = 3000) -> String? {
+        var out = [UInt8](), c: UInt8 = 0
+        while true {
+            var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            guard poll(&p, 1, ms) == 1, Glibc.read(fd, &c, 1) == 1 else { return nil }
+            if c == 0x0A { return String(decoding: out, as: UTF8.self) }
+            out.append(c)
+        }
+    }
+
+    static func send(_ fd: Int32, _ s: String) { let d = Array((s + "\n").utf8); _ = Glibc.write(fd, d, d.count) }
+
+    @Test("an agent waits for a fat client, then rides its channel; ids are rewritten out and restored back")
+    @MainActor func relay() async throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let bridge = try BrowserMCPBridge(udsPath: d + "/v.sock", fdStoreName: "bmcp-test")
+        defer { bridge.stop() }
+        let agent = try Self.connect(d + "/v.sock_5830")
+        defer { close(agent) }
+        Self.send(agent, #"{"jsonrpc":"2.0","id":"a-1","method":"initialize"}"#)
+        try await Task.sleep(for: .milliseconds(200))   // accepted and parked
+
+        var sp: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &sp) == 0)
+        defer { close(sp[1]) }
+        bridge.attachRemote(fd: sp[0])
+        let client = sp[1]
+        // The parked agent's request reaches the client, with a channel id.
+        let req = try await Task.detached { Self.line(client) }.value
+        let obj = try #require(req.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] })
+        #expect(obj["method"] as? String == "initialize")
+        let mid = try #require(obj["id"] as? Int, "rewritten to a channel id: \(req ?? "nil")")
+        Self.send(client, #"{"jsonrpc":"2.0","id":\#(mid),"result":{"ok":true}}"#)
+        let reply = try await Task.detached { Self.line(agent) }.value
+        #expect(reply?.contains(#""id":"a-1""#) == true, "the agent's own id back: \(reply ?? "nil")")
+        // A notification from the client reaches the agent as is.
+        Self.send(client, #"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#)
+        let note = try await Task.detached { Self.line(agent) }.value
+        #expect(note?.contains("list_changed") == true)
+    }
+}

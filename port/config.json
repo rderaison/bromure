@@ -5,6 +5,7 @@
     "Sources/BrowserBridges"
   ],
   "linuxBuild": [
+    "Sources/AgentCoding/BrowserMCPRelay.swift",
     "Sources/AgentCoding/FatClient.swift",
     "Sources/AgentCoding/FatClientTypes.swift",
     "Sources/AgentCoding/RemoteAccessServer.swift",

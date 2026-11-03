@@ -84,6 +84,8 @@ public actor Daemon {
         let config: MachineConfig
         /// The guest -> host vsock :5800 listener (agentd's shell pool).
         let vsock: HybridVsockListener
+        /// The agents' browser MCP (vsock :5830), relayed to a fat client.
+        let browser: BrowserMCPBridge
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -120,9 +122,10 @@ public actor Daemon {
         let stored = FDStore.take()
         let passt = try await PasstUplink.start(pc, adopting: PasstUplink.Adopted.fromStore(stored))
         // The VMs' network ends (net-<short id>) and vsock listeners
-        // (vsock-<short id>), for adoptRunning; control: systemd's socket
-        // unit (multi-user), the daemon command's. Anything else is stale.
-        let perVM = { (name: String) in name.hasPrefix("net-") || name.hasPrefix("vsock-") }
+        // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
+        // systemd's socket unit (multi-user), the daemon command's. Anything
+        // else is stale.
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -568,9 +571,22 @@ public actor Daemon {
             port.close()
             throw error
         }
+        let browser: BrowserMCPBridge
+        do {
+            browser = try await MainActor.run { [qc] in
+                try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId)
+            }
+        } catch {
+            close(peer)
+            FDStore.remove(storeName)
+            port.close()
+            await vsock.close()
+            FDStore.remove("vsock-" + rec.shortId)
+            throw error
+        }
         let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
         let l = Live(machine: FirecrackerMachine(config: qc), port: port, shell: shell, config: qc,
-                     vsock: vsock, storedNet: storeName)
+                     vsock: vsock, browser: browser, storedNet: storeName)
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
         // the same one back (the guest keeps it).
@@ -641,15 +657,27 @@ public actor Daemon {
                         udsPath: qc.firecrackerVsockPath, port: 5800, cid: rec.cid, fdStoreName: "vsock-" + rec.shortId,
                         stored: storedNet.removeValue(forKey: "vsock-" + rec.shortId))
                 } catch { port.close(); throw error }
+                // A VM started by a daemon from before the browser bridge has
+                // none stored: it gets a fresh listener.
+                let storedBrowser = storedNet.removeValue(forKey: "bmcp-" + rec.shortId)
+                let browser: BrowserMCPBridge
+                do {
+                    browser = try await MainActor.run { [qc] in
+                        try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId,
+                                             stored: storedBrowser)
+                    }
+                } catch { await vsock.close(); port.close(); throw error }
                 let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
                 let machine: FirecrackerMachine
                 do { machine = try await FirecrackerMachine.adopt(config: qc, pid: pid) } catch {
                     await shell.stop()
                     await vsock.close()
+                    await MainActor.run { browser.stop() }
                     port.close()
                     throw error
                 }
-                let l = Live(machine: machine, port: port, shell: shell, config: qc, vsock: vsock, storedNet: storeName)
+                let l = Live(machine: machine, port: port, shell: shell, config: qc, vsock: vsock, browser: browser,
+                             storedNet: storeName)
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id
@@ -803,8 +831,10 @@ public actor Daemon {
         await l.shell.stop()
         l.port.close()
         await l.vsock.close()
+        await MainActor.run { [browser = l.browser] in browser.stop() }
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
+        FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))
     }
 
     /// Stops every VM (killed: systemd's stop is not a graceful shutdown of

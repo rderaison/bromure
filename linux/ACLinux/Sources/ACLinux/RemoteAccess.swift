@@ -79,6 +79,9 @@ extension Daemon {
             RemoteAccessServer.shared.udpForwardResolver = { ip, completion in
                 Task { completion(await resolverBox.daemon?.relayFD(ip: ip, header: "UDP\n") ?? -1) }
             }
+            RemoteAccessServer.shared.browserMCPResolver = { vm, completion in
+                Task { completion(await resolverBox.daemon?.browserMCPFD(vm: vm) ?? -1) }
+            }
         }
         let s = RemoteSettings.load(remoteSettingsPath)
         LinuxAccountPassword.allowPAM.withLockedValue { $0 = s.allowAccountPassword }
@@ -271,6 +274,22 @@ extension Daemon {
             try await MainActor.run { try RemoteAccessServer.shared.removeAuthorizedKey(selector) }
             return ControlResponse(200, ["ok": true])
         } catch { return .error(400, "\(error)") }
+    }
+
+    /// A fat client's `browser-mcp` channel for VM `vm` (its id, any case):
+    /// the VM's browser bridge takes one end of a socketpair and relays its
+    /// agents over it; the SSH channel gets the other.
+    // @port ACAppDelegate.resolveBrowserMCP(vm: String, completion: @escaping@Sendable(Int32)->Void) h=2551198a14f37e59 @7dd92fdf
+    func browserMCPFD(vm: String) async -> Int32 {
+        guard let l = live.first(where: { $0.key.caseInsensitiveCompare(vm) == .orderedSame })?.value else {
+            FatClientLog.log("browser-mcp-resolver: no running VM \(vm)")
+            return -1
+        }
+        var sp: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0, &sp) == 0 else { return -1 }
+        await MainActor.run { [browser = l.browser, fd = sp[0]] in browser.attachRemote(fd: fd) }
+        FatClientLog.log("browser-mcp-resolver: \(vm) attached")
+        return sp[1]
     }
 
     /// A stream to the guest loopback relay (vsock 5010) of the VM leased
