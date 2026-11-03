@@ -567,6 +567,119 @@ final class RemoteHostController {
 #endif
     }
 
+    // MARK: Guest pages
+
+    /// Pages a workspace's guest asked to open, published by a server with
+    /// no screen of its own (Linux: /state `guestPages`), by id → when this
+    /// client took it. Kept past the page's own 10 min: a snapshot that
+    /// still lists a page whose dismiss is on its way mustn't open it twice.
+    private var handledGuestPages: [String: Date] = [:]
+#if os(macOS)
+    private var guestPageAsking = false
+#else
+    struct GuestPageAsk: Identifiable, Equatable {
+        let id: String
+        let url: URL
+        let workspace: String?
+    }
+    /// The page waiting on the user's word (HostMirrorScreen asks).
+    private(set) var guestPageAsk: GuestPageAsk?
+#endif
+
+    private static var appIsActive: Bool {
+#if os(macOS)
+        NSApp.isActive
+#else
+        UIApplication.shared.applicationState == .active
+#endif
+    }
+
+    /// Open or ask about each new page — only while this app is in front, so
+    /// one browser opens rather than one per connected device (a page no
+    /// client takes expires on the server). The server's gate decided; this
+    /// side decides again, as for a sign-in URL.
+    private func applyGuestPages(_ pages: [[String: Any]], now: Date = Date()) {
+        handledGuestPages = handledGuestPages.filter { now.timeIntervalSince($0.value) < 30 * 60 }
+        guard !pages.isEmpty, Self.appIsActive else { return }
+        for p in pages {
+            guard let id = p["id"] as? String, handledGuestPages[id] == nil else { continue }
+            guard let s = p["url"] as? String, let url = URL(string: s) else {
+                handledGuestPages[id] = now
+                dismissGuestPage(id, "declined")
+                continue
+            }
+            let workspace = (p["workspace"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            switch GuestURLGate.disposition(for: url) {
+            case .refuse:
+                handledGuestPages[id] = now
+                FatClientLog.log("guest page: refused one with a local/private host")
+                dismissGuestPage(id, "declined")
+            case .open where (p["disposition"] as? String) != "ask":
+                handledGuestPages[id] = now
+#if os(macOS)
+                NSWorkspace.shared.open(url)
+#else
+                UIApplication.shared.open(url)
+#endif
+                dismissGuestPage(id, "opened")
+            default:
+#if os(macOS)
+                guard !guestPageAsking else { continue }
+                handledGuestPages[id] = now
+                guestPageAsking = true
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = Self.guestPageTitle
+                alert.informativeText = Self.guestPageMessage(url, workspace: workspace)
+                // Cancel is the default: Return doesn't open it.
+                alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+                alert.addButton(withTitle: NSLocalizedString("Open in Browser", comment: "guest URL open prompt"))
+                presentSheet(alert) { [weak self] resp in
+                    self?.guestPageAsking = false
+                    let open = resp == .alertSecondButtonReturn
+                    if open { NSWorkspace.shared.open(url) }
+                    self?.dismissGuestPage(id, open ? "opened" : "declined")
+                }
+#else
+                guard guestPageAsk == nil else { continue }
+                handledGuestPages[id] = now
+                guestPageAsk = GuestPageAsk(id: id, url: url, workspace: workspace)
+#endif
+            }
+        }
+    }
+
+#if !os(macOS)
+    /// The user's word on `guestPageAsk`.
+    func answerGuestPage(open: Bool) {
+        guard let ask = guestPageAsk else { return }
+        guestPageAsk = nil
+        if open { UIApplication.shared.open(ask.url) }
+        dismissGuestPage(ask.id, open ? "opened" : "declined")
+    }
+#endif
+
+    private func dismissGuestPage(_ id: String, _ action: String) {
+        send("POST", "/guest-pages/\(ControlClient.encodeSegment(id))/dismiss",
+             body: ["action": action], then: false)
+    }
+
+    /// The ask's words, the macOS app's own (ACAppDelegate.openGuestRelayedURL).
+    static var guestPageTitle: String {
+        NSLocalizedString("Open a Page from the Workspace?", comment: "guest URL open prompt")
+    }
+
+    static func guestPageMessage(_ url: URL, workspace: String?) -> String {
+        let shown = url.absoluteString.count > 400 ? String(url.absoluteString.prefix(400)) + "…" : url.absoluteString
+        return workspace.map {
+            String(format: NSLocalizedString(
+                "Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+                comment: "guest URL open prompt: workspace name, URL"), $0, shown)
+        } ?? String(format: NSLocalizedString(
+            "Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+            comment: "guest URL open prompt: URL"), shown)
+    }
+
     /// Shared-folder paths per running VM (feeds the remote file browser's
     /// location list — browsed via the guest, since the host dirs live on A).
     private(set) var mounts: [Profile.ID: [String]] = [:]
@@ -1047,6 +1160,7 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
+        applyGuestPages((snapshot["guestPages"] as? [[String: Any]]) ?? [])
         applyRegistrationSnapshot(pending: snapshot["pendingRegistration"] as? [String: Any],
                                   ended: snapshot["registrationEnded"] as? [String: Any],
                                   endedList: snapshot["registrationsEnded"] as? [[String: Any]])
