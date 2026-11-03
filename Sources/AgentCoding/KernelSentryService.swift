@@ -501,7 +501,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
         for (k, v) in frame where !["type", "seq", "t", "kind", "dropped", "rate_limited"].contains(k) {
             switch v {
             case let s as String: data[k] = .string(String(s.prefix(512)))
-            case let n as NSNumber where CFGetTypeID(n) != CFBooleanGetTypeID(): data[k] = .int(n.intValue)
+            case let n as NSNumber where !n.isJSONBoolean: data[k] = .int(n.intValue)
             case let b as Bool: data[k] = .bool(b)
             default: break
             }

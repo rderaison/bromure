@@ -60,7 +60,7 @@ public enum ManagedBundleCrypto {
         // Check NSNumber FIRST — `as? Bool` matches NSNumber-wrapped 0/1,
         // which would misclassify integers coming out of JSONSerialization.
         if let n = value as? NSNumber {
-            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+            if n.isJSONBoolean {
                 return n.boolValue ? "true" : "false"
             }
             return numberString(n)

@@ -249,7 +249,7 @@ extension OpenShellPolicy {
 
     private static func isValidID(_ v: Any) -> Bool {
         if v is String { return true }
-        guard let n = v as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return false }
+        guard let n = v as? NSNumber, !n.isJSONBoolean else { return false }
         return n.doubleValue == n.doubleValue.rounded() && abs(n.doubleValue) < 9.3e18
             && !String(describing: n).contains(".")
     }

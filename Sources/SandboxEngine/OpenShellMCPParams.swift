@@ -155,11 +155,11 @@ fileprivate enum SerdeJSON: Equatable {
             return
         }
         if let number = any as? NSNumber {
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+            if number.isJSONBoolean {
                 self = .bool(number.boolValue)
                 return
             }
-            if number is NSDecimalNumber || CFNumberIsFloatType(number) {
+            if number is NSDecimalNumber || number.isJSONFloat {
                 self = .float(number.doubleValue)
                 return
             }
