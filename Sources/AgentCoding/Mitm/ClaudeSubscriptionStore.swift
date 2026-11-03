@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Host-owned storage + refresh for a Claude **subscription** OAuth credential
 /// that is shared across every VM session.

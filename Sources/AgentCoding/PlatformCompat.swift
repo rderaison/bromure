@@ -43,6 +43,16 @@ func cloneFile(_ src: String, _ dst: String) -> Int32 {
 #endif
 }
 
+/// A file's modification time from stat(2): `st_mtimespec` in Darwin,
+/// `st_mtim` in Glibc.
+func statModificationTime(_ st: stat) -> timespec {
+#if canImport(Darwin)
+    st.st_mtimespec
+#else
+    st.st_mtim
+#endif
+}
+
 /// State behind a lock, with OSAllocatedUnfairLock's `withLock` shape, for
 /// code that also builds where Apple's `os` module isn't there.
 final class LockedState<State>: @unchecked Sendable {

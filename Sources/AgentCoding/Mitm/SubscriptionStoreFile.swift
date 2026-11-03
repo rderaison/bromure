@@ -186,8 +186,9 @@ final class SubscriptionStoreFile<File: Codable> {
     }
 
     private static func stamp(_ st: stat) -> Stamp {
-        Stamp(dev: Int64(st.st_dev), ino: UInt64(st.st_ino), size: Int64(st.st_size),
-              mtimeSec: st.st_mtimespec.tv_sec, mtimeNsec: st.st_mtimespec.tv_nsec)
+        let mtime = statModificationTime(st)
+        return Stamp(dev: Int64(st.st_dev), ino: UInt64(st.st_ino), size: Int64(st.st_size),
+                     mtimeSec: mtime.tv_sec, mtimeNsec: mtime.tv_nsec)
     }
 
     // MARK: Write

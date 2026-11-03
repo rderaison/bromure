@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Kimi Code region. The `@moonshot-ai/kimi-code` CLI ships two region
 /// profiles — `mainland-cn` (the default, `*.kimi.com`) and `global`

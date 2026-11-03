@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Host-owned storage + refresh for an OpenAI **Codex / ChatGPT** subscription
 /// credential, shared across every VM session. The Codex twin of
