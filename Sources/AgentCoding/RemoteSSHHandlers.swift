@@ -892,6 +892,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
             channel.close(promise: nil)
             return
         }
+        // The channel may have closed while the resolver dialed: its teardown
+        // already ran (with no fd to close), so nothing would ever close this
+        // one. On the event loop, like channelInactive, so the two can't cross.
+        guard channel.isActive else {
+            LibC.close(fd)
+            return
+        }
         self.master = fd
         self.childPID = -1
         // Non-blocking before flushing pre-fd bytes, so the write path can't block.

@@ -50,12 +50,18 @@ final class BrowserMCPRelayClient {
         running = true
         let host = self.host, vm = self.vm
         Thread.detachNewThread { [weak self] in
+            // A server that refuses the relay (or drops it at once) is asked
+            // again ever more slowly, up to 30 s; a channel that stayed up
+            // resets it. Retrying every 0.5-1 s flooded a server with no
+            // browser-mcp resolver (thousands of refused channels an hour).
+            var backoff = RelayBackoff()
             while self?.runningSnapshot() == true {
                 // One pool per dial: a raw Thread never drains its implicit pool.
                 let go = autoreleasepool { () -> Bool in
                     guard let raw = RemoteTransport.browserMCPDial(host: host, vm: vm), raw >= 0 else {
-                        Thread.sleep(forTimeInterval: 1.0); return true
+                        Thread.sleep(forTimeInterval: backoff.next(lived: 0)); return true
                     }
+                    let opened = Date()
                     // Atomic vs stop(): if stop() raced the dial, close and exit —
                     // otherwise the fd is adopted with no closer and pump() parks.
                     guard self?.adoptFD(raw) == true else { Darwin.close(raw); return false }
@@ -65,7 +71,9 @@ final class BrowserMCPRelayClient {
                     // this is the sole close — stop() only shuts down.
                     self?.clearFD(raw)
                     FDGuard.close(raw, "browser-mcp-relay")
-                    if self?.runningSnapshot() == true { Thread.sleep(forTimeInterval: 0.5) }
+                    if self?.runningSnapshot() == true {
+                        Thread.sleep(forTimeInterval: backoff.next(lived: Date().timeIntervalSince(opened)))
+                    }
                     return true
                 }
                 if !go { return }
@@ -142,5 +150,26 @@ final class BrowserMCPRelayClient {
             }
             if pending.count > 16 * 1024 * 1024 { break }   // pathological
         }
+    }
+}
+
+/// The relay's redial delay: 0.5 s after a channel that lived, doubling (up
+/// to 30 s) while dials fail or channels drop within 2 s of opening.
+struct RelayBackoff {
+    static let first: TimeInterval = 0.5
+    static let cap: TimeInterval = 30
+    static let lastedLongEnough: TimeInterval = 2
+    private var delay = RelayBackoff.first
+
+    /// The wait before the next dial, given how long the last channel lived
+    /// (0: the dial failed).
+    mutating func next(lived: TimeInterval) -> TimeInterval {
+        if lived >= Self.lastedLongEnough {
+            delay = Self.first
+            return delay
+        }
+        let d = delay
+        delay = min(Self.cap, delay * 2)
+        return d
     }
 }
