@@ -8,6 +8,7 @@
     "Sources/AgentCoding/AgentDelegation.swift",
     "Sources/AgentCoding/AgentLabels.swift",
     "Sources/AgentCoding/AgentScreen.swift",
+    "Sources/AgentCoding/AgentSessionHost.swift",
     "Sources/AgentCoding/AgentSessions.swift",
     "Sources/AgentCoding/AgentWatchdog.swift",
     "Sources/AgentCoding/BACDebug.swift",

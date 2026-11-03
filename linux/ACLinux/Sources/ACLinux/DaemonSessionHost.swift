@@ -31,6 +31,21 @@ extension Daemon {
         return r.stdout
     }
 
+    /// One native file op (`{"file": {...}}`, the file browser's data plane)
+    /// in the workspace's guest: agentd's reply as it came. The op failing
+    /// in the guest throws with its error, as on macOS.
+    // @port-skip linux-only: ACAppDelegate.guestFileOp over VZ vsock; this one is GuestShell's
+    func guestFileOp(profileID: UUID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
+        guard let l = live.first(where: { $0.key.caseInsensitiveCompare(profileID.uuidString) == .orderedSame })?.value else {
+            throw GuestCommandError.unavailable("workspace \(profileID.uuidString.prefix(8)) isn't running")
+        }
+        let o = try await l.shell.request(["file": op, "timeout": timeout], wait: .seconds(10))
+        if let err = o["error"] as? String {
+            throw GuestCommandError.failed(exitCode: o["exit_code"] as? Int ?? 1, stderr: err)
+        }
+        return o
+    }
+
     /// Boots the workspace's VM if it isn't running (macOS: startProfile,
     /// startProfileQuietly, startProfileRemotely, which differ only in where
     /// a boot's questions are asked; a server has no screen to ask on).

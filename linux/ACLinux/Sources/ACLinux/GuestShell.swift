@@ -110,6 +110,15 @@ public actor GuestShell {
                      wait: Duration = .seconds(30)) async throws -> Result {
         var req: [String: Any] = ["cmd": cmd, "timeout": timeout]
         if let workdir { req["workdir"] = workdir }
+        let o = try await request(req, wait: wait)
+        return Result(stdout: o["stdout"] as? String ?? (o["output"] as? String ?? ""),
+                      stderr: o["stderr"] as? String ?? "", exitCode: o["exit_code"] as? Int ?? -1)
+    }
+
+    /// One JSON request to agentd's shell channel (`{"cmd"}`, `{"file"}`,
+    /// …) and its JSON reply, as it came. Same retry rule as exec.
+    // @port-skip linux-only: the request half of ACAppDelegate.guestJSONRequest over NIO vsock
+    public func request(_ req: [String: Any], wait: Duration = .seconds(30)) async throws -> [String: Any] {
         let body = try JSONSerialization.data(withJSONObject: req)
         for _ in 0..<32 {
             guard let c = await connection(timeout: wait) else { throw ShellError.notReady }
@@ -122,7 +131,7 @@ public actor GuestShell {
     }
 
     // @port-skip linux-only: exec over NIO vsock
-    enum Attempt { case deadBeforeWrite, reply(Result) }
+    enum Attempt { case deadBeforeWrite, reply([String: Any]) }
 
     // @port-skip linux-only: exec over NIO vsock
     static func roundTrip(_ conn: VsockConnection, _ body: Data) async throws -> Attempt {
@@ -147,8 +156,7 @@ public actor GuestShell {
                         guard let o = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
                             throw ShellError.noReply("unparseable reply")
                         }
-                        return .reply(Result(stdout: o["stdout"] as? String ?? (o["output"] as? String ?? ""),
-                                             stderr: o["stderr"] as? String ?? "", exitCode: o["exit_code"] as? Int ?? -1))
+                        return .reply(o)
                     }
                 }
             } catch let e as ShellError {
