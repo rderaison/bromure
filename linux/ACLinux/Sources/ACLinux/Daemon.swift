@@ -137,6 +137,7 @@ public actor Daemon {
                                                 attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(atPath: config.runtimeDir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
+        Self.placeEngineKey(stateDir: config.stateDir)
         // Under systemd with a fd store, the previous daemon's passt (and the
         // flows it holds) is taken back rather than replaced.
         var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
@@ -179,6 +180,7 @@ public actor Daemon {
         self.registry = registry
         do {
             mitm = try MitmProxy(caDirectory: URL(fileURLWithPath: config.stateDir + "/mitm", isDirectory: true))
+            mitm?.blocksHostAddresses = config.multiUser
         } catch {
             mitm = nil
             FileHandle.standardError.write(Data("bromure-ac daemon: no intercepting proxy: \(error)\n".utf8))

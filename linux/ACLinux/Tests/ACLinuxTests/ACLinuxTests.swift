@@ -1630,3 +1630,58 @@ struct LocalModelTests {
         #expect((o["unifiedMemGB"]?.numberValue ?? 0) > 0 && o["models"] == .object([:]))
     }
 }
+
+@Suite("Proxy destinations")
+struct ProxyDestinationTests {
+    /// What the proxy answers for `host:port`: nil (allowed) or the refusal.
+    func denial(_ host: String, _ port: Int, hostAddresses: Bool = false) async -> ProxyDestinationDenied? {
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        do {
+            _ = try await MitmProxy.checkDestination(host: host, port: port, hostAddresses: hostAddresses, on: loop).get()
+            return nil
+        } catch { return error as? ProxyDestinationDenied }
+    }
+
+    @Test("loopback, the repair proxy's port, ::1 and the metadata address are refused as macOS refuses them")
+    func refused() async throws {
+        let cases: [(String, Int)] = [("127.0.0.1", 22), ("127.0.0.1", InferenceService.repairProxyPort),
+                                      ("::1", 443), ("[::1]", 443), ("169.254.169.254", 80), ("localhost", 8080),
+                                      ("0.0.0.0", 80), ("::ffff:127.0.0.1", 22)]
+        for (h, p) in cases {
+            let d = try #require(await denial(h, p), "\(h):\(p) must be refused")
+            #expect(d.reason.contains("always-blocked address"), "\(h): \(d.reason)")
+            let reply = String(decoding: MitmProxy.destinationDeniedResponse(host: d.host, port: d.port, reason: d.reason), as: UTF8.self)
+            #expect(reply.hasPrefix("HTTP/1.1 403 Forbidden\r\n") && reply.contains("\"error\":\"destination_denied\""))
+            #expect(reply.contains("\"port\":\(p)"))
+        }
+    }
+
+    @Test("public addresses and the local-inference sentinel pass; the host's own address only on a multi-user server")
+    func allowed() async throws {
+        #expect(await denial("93.184.215.14", 443) == nil)
+        #expect(await denial("2606:4700::1", 443) == nil)
+        #expect(await denial(InferenceService.localMitmHost, 443) == nil)
+        let own = try #require(HostAddresses.read().first { $0 >> 24 != 127 && $0 >> 24 != 0 })
+        let ip = "\(own >> 24).\(own >> 16 & 255).\(own >> 8 & 255).\(own & 255)"
+        #expect(await denial(ip, 2222) == nil, "single-user: the host's LAN address is any LAN address")
+        #expect(await denial(ip, 2222, hostAddresses: true)?.reason.contains("this server's own address") == true)
+    }
+
+    @Test("an older daemon's engine key moves into the state directory, 0600; the key's path follows it")
+    func engineKeyPlace() throws {
+        let d = try shortTempDir(), old = try shortTempDir()
+        defer {
+            EngineKey.directoryOverride = nil
+            for p in [d, old] { try? FileManager.default.removeItem(atPath: p) }
+        }
+        let key = Data((0..<32).map { UInt8($0) })
+        FileManager.default.createFile(atPath: old + "/engine-master.key", contents: key,
+                                       attributes: [.posixPermissions: NSNumber(value: 0o664)])
+        Daemon.placeEngineKey(stateDir: d, from: old + "/engine-master.key")
+        #expect(EngineKey.masterURL.path == d + "/engine-master.key")
+        #expect(FileManager.default.contents(atPath: d + "/engine-master.key") == key)
+        #expect(!FileManager.default.fileExists(atPath: old + "/engine-master.key"))
+        let mode = try FileManager.default.attributesOfItem(atPath: d + "/engine-master.key")[.posixPermissions] as? NSNumber
+        #expect(mode?.intValue == 0o600)
+    }
+}

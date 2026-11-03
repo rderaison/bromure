@@ -81,6 +81,25 @@ extension Daemon {
         }
     }
 
+    /// The local-model engine's master key (every VM's engine key derives
+    /// from it) in the daemon's 0700 state directory, 0600 (macOS:
+    /// Application Support); one an older daemon made in the data home is
+    /// moved there, so running guests' keys stay valid.
+    // @port-skip linux-only: the engine key's place on a Linux server
+    static func placeEngineKey(stateDir: String, from oldPath: String? = nil) {
+        let fm = FileManager.default
+        let old = oldPath ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("BromureAC/engine-master.key").path
+        EngineKey.directoryOverride = URL(fileURLWithPath: stateDir, isDirectory: true)
+        let new = EngineKey.masterURL.path
+        if !fm.fileExists(atPath: new), fm.fileExists(atPath: old) {
+            do { try fm.moveItem(atPath: old, toPath: new) } catch {
+                FileHandle.standardError.write(Data("bromure-ac daemon: couldn't move the engine key: \(error)\n".utf8))
+            }
+        }
+        if fm.fileExists(atPath: new) { chmod(new, 0o600) }
+    }
+
     // @port-skip linux-only: the daemon log's share of InferenceLog
     static func inferenceLog(_ line: String) {
         InferenceLog.shared.record("[inference] " + line)

@@ -57,6 +57,9 @@ final class MitmProxy: @unchecked Sendable {
     private let upstreamContext: NIOSSLContext
     /// Tests: every upstream connection goes here instead (SNI kept), trusting `extraRoots`.
     var routeAllTo: (host: String, port: Int)?
+    /// A multi-user server: the host's own addresses are refused too
+    /// (ProxyDestination.swift), as the switch refuses them.
+    var blocksHostAddresses = false
 
     /// The CA (`<dir>/cert.pem`, `key.pem`, made on first use) and the
     /// subscription stores the stand-in swaps read, wired where the swaps
@@ -215,8 +218,18 @@ final class MitmProxy: @unchecked Sendable {
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
         let routed = Self.route(host: host, port: port, tls: requestedTLS)
-        let tls = routed.tls
-        let target: (host: String, port: Int) = routed.local ? (routed.host, routed.port) : (routeAllTo ?? (host, port))
+        if routed.local { return dial(host: host, to: (routed.host, routed.port), tls: routed.tls, on: loop) }
+        // Only to an address that passed the check: the name isn't looked up
+        // again (a rebinding answer can't slip in between).
+        return checkDestination(host: host, port: port, on: loop).flatMap { [self] resolved in
+            let to = routeAllTo ?? (resolved.first.map { "\($0)" } ?? host, port)
+            return dial(host: host, to: to, tls: routed.tls, on: loop)
+        }
+    }
+
+    /// Connects to `to` for `host` (its SNI and certificate name when `tls`).
+    // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
+    private func dial(host: String, to target: (host: String, port: Int), tls: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
         let ctx = upstreamContext
         let isIP = host.contains(":") || host.split(separator: ".").allSatisfy { UInt8($0) != nil }
         let ready = OncePromise(loop.makePromise(of: Channel.self))
@@ -314,7 +327,7 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
     let proxy: MitmProxy
     let profileID: UUID
     private var buf = ByteBuffer()
-    private enum Phase { case preamble, request, hello(host: String, port: Int), handedOff }
+    private enum Phase { case preamble, request, checking, hello(host: String, port: Int), handedOff }
     private var phase = Phase.preamble
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -357,10 +370,26 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 if parts[0] == "CONNECT" {
                     let (host, port) = Self.split(String(parts[1]), defaultPort: 443)
                     buf.moveReaderIndex(forwardBy: end.upperBound - buf.readerIndex)
-                    phase = .hello(host: host, port: port)
-                    context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
-                        string: "HTTP/1.1 200 Connection Established\r\n\r\n")), promise: nil)
-                    continue
+                    // The destination is checked before the tunnel is
+                    // confirmed (a refusal is the CONNECT's 403).
+                    phase = .checking
+                    proxy.checkDestination(host: host, port: port, on: context.eventLoop).whenComplete { [self] r in
+                        switch r {
+                        case .failure(let e as ProxyDestinationDenied):
+                            phase = .handedOff
+                            context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
+                                bytes: MitmProxy.destinationDeniedResponse(host: host, port: port, reason: e.reason))))
+                                .whenComplete { _ in context.close(promise: nil) }
+                        case .failure:
+                            reject(context, 502, "Bad Gateway")
+                        case .success:
+                            phase = .hello(host: host, port: port)
+                            context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
+                                string: "HTTP/1.1 200 Connection Established\r\n\r\n")), promise: nil)
+                            step(context)
+                        }
+                    }
+                    return
                 }
                 // A plain-HTTP request through the proxy: absolute form.
                 guard let url = URL(string: String(parts[1])), url.scheme?.lowercased() == "http",
@@ -380,7 +409,7 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                                                    port: port, tls: true), tlsHost: name)
                     return
                 }
-            case .handedOff:
+            case .checking, .handedOff:
                 return
             }
         }
@@ -587,7 +616,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             proxy.connectUpstream(host: host, port: port, tls: tls, on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):
-                    let reply = Self.simple(502, "Bad Gateway", body: "Bromure couldn't reach \(host):\(port): \(e)\n")
+                    let reply = (e as? ProxyDestinationDenied).map {
+                        MitmProxy.destinationDeniedResponse(host: $0.host, port: $0.port, reason: $0.reason)
+                    } ?? Self.simple(502, "Bad Gateway", body: "Bromure couldn't reach \(host):\(port): \(e)\n")
                     self.write(reply, to: channel, close: true)
                     if let trace { self.proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
                 case .success(let up):

@@ -60,10 +60,11 @@ extension Daemon {
     }
 
     /// `proxy.env`'s local-inference lines: each agent set to "Local model"
-    /// pinned at the engine through the guest's bridge (127.0.0.1:11434 →
-    /// vsock 8446 → the repair proxy), with the profile's per-VM engine key
-    /// and the active model's real name. 127.0.0.1 is in NO_PROXY, so these
-    /// bypass the intercepting proxy.
+    /// pinned at the engine, with the profile's per-VM engine key and the
+    /// active model's real name. The base the models overlay gives them is
+    /// the `https://bromure.llm` sentinel, reached through the intercepting
+    /// proxy (MitmProxy.route sends it to the repair proxy); a base on the
+    /// guest's own 127.0.0.1:11434 bridge (vsock 8446) works as well.
     // @port-skip linux-only: the local-inference lines of SessionDisk.prepareMetadataShare's proxy.env
     static func localModelEnv(_ profile: Profile) -> String {
         guard let model = profile.localAgentModelName else { return "" }
