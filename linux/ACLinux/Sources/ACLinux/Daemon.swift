@@ -86,6 +86,8 @@ public actor Daemon {
         let vsock: HybridVsockListener
         /// The agents' browser MCP (vsock :5830), relayed to a fat client.
         let browser: BrowserMCPBridge
+        /// The workspace's intercepting proxy (vsock :8443); nil without one.
+        var mitm: MitmListener?
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -99,6 +101,9 @@ public actor Daemon {
     }
     private let passt: PasstUplink
     let sw: InterimSwitch
+    /// The workspaces' intercepting proxy (its CA in `<state>/mitm`); nil
+    /// when it couldn't start, and the guests then go out directly.
+    let mitm: MitmProxy?
     /// VMs whose stop is being recorded (vmStopped).
     private var stopping: [String: Task<Void, Never>] = [:]
 
@@ -129,7 +134,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -152,6 +157,12 @@ public actor Daemon {
         }
         let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurVM)
         self.registry = registry
+        do {
+            mitm = try MitmProxy(caDirectory: URL(fileURLWithPath: config.stateDir + "/mitm", isDirectory: true))
+        } catch {
+            mitm = nil
+            FileHandle.standardError.write(Data("bromure-ac daemon: no intercepting proxy: \(error)\n".utf8))
+        }
     }
 
     // @port-skip linux-only: Linux daemon core
@@ -194,6 +205,7 @@ public actor Daemon {
                 return .error(400, "Bad session id or action")
             }
             return await agentSessionCommand(id, parts[1], req.body)
+        case ("POST", "/debug/sign-in-sim"): return await signInSimulator(req.body)
         case ("GET", "/profiles"): return listProfiles()
         case ("POST", "/profiles"): return await createProfile(req.body)
         case ("GET", "/vms"): return listVMs()
@@ -625,6 +637,7 @@ public actor Daemon {
             try HomeSeed.finalizeHomeSeed(seedDir: seed)
         }
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
+        try writeProxyMeta(meta)
 
         var qc = try machineConfig(rec)
         // The VM's end goes to Firecracker; ours waits in the fd store, so a
@@ -657,8 +670,9 @@ public actor Daemon {
             throw error
         }
         let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
-        let l = Live(machine: FirecrackerMachine(config: qc), port: port, shell: shell, config: qc,
+        var l = Live(machine: FirecrackerMachine(config: qc), port: port, shell: shell, config: qc,
                      vsock: vsock, browser: browser, storedNet: storeName)
+        l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
         // the same one back (the guest keeps it).
@@ -748,8 +762,10 @@ public actor Daemon {
                     port.close()
                     throw error
                 }
-                let l = Live(machine: machine, port: port, shell: shell, config: qc, vsock: vsock, browser: browser,
+                var l = Live(machine: machine, port: port, shell: shell, config: qc, vsock: vsock, browser: browser,
                              storedNet: storeName)
+                l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath,
+                                    stored: storedNet.removeValue(forKey: "mitm-" + rec.shortId))
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id
@@ -896,6 +912,20 @@ public actor Daemon {
         try? registry.upsert(rec)
     }
 
+    /// The VM's proxy listener (`stored`: a restarted daemon's); nil without
+    /// a proxy or when it can't listen (the guest then has no proxy to reach).
+    // @port-skip linux-only: the per-VM proxy listener (macOS: MitmEngine.register)
+    private func serveProxy(_ rec: VMRecord, udsPath: String, stored: Int32?) -> MitmListener? {
+        guard let mitm else { if let stored { close(stored) }; return nil }
+        do {
+            return try mitm.serve(udsPath: udsPath, profileID: UUID(uuidString: rec.id) ?? UUID(),
+                                  fdStoreName: "mitm-" + rec.shortId, stored: stored)
+        } catch {
+            FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no proxy listener: \(error)\n".utf8))
+            return nil
+        }
+    }
+
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func teardown(_ l: Live, mac: String) async {
         sw.detach(mac: mac)
@@ -904,6 +934,8 @@ public actor Daemon {
         l.port.close()
         await l.vsock.close()
         await MainActor.run { [browser = l.browser] in browser.stop() }
+        l.mitm?.stop()
+        FDStore.remove("mitm-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))

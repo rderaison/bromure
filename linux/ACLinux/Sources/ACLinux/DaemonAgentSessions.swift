@@ -8,6 +8,9 @@ extension Daemon {
     // @port-skip linux-only: daemon wiring (macOS: the app delegate's properties)
     func startSessionEngine() async {
         let me = self, state = config.stateDir
+        // Account features on (macOS: a Preferences switch a server has no
+        // window for): Claude signs in with the OAuth stand-in.
+        UserDefaults.standard.register(defaults: [ClaudeStandIn.enabledDefaultsKey: true])
         await MainActor.run {
             let stores = SessionStores(stateDir: state)
             SessionStores.shared = stores
@@ -48,13 +51,14 @@ extension Daemon {
                 while true {
                     try? await Task.sleep(for: .milliseconds(500))
                     LinuxSessionHost.shared?.readAgentStatus()
+                    LinuxSessionHost.shared?.readGuestURLs()
                 }
             }
         }
     }
 
     /// `POST /agent-sessions/start` and `POST /agent-sessions/<id>/<action>`.
-    // partial: no switchboard, read, worktree-open/-discard yet; signin refuses (no MITM stand-in)
+    // partial: no switchboard, read, worktree-open/-discard yet
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionCommand h=bf7e30bfb1cc500a @9936e30c
     func agentSessionCommand(_ id: UUID?, _ action: String, _ body: JSONValue) async -> ControlResponse {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
@@ -120,10 +124,11 @@ extension Daemon {
                     + keys.map { "tmux send-keys -t \"$_bt\" \($0)" }.joined(separator: " && sleep 0.15 && ") + "; fi"
                 Task { @MainActor in _ = try? await host.guestExec(profileID: s.profileID, command: cmd, timeout: 15) }
                 return ["ok": true]
-            case (_?, "signin"):
-                // macOS signs in on a throwaway VM and swaps in a stand-in
-                // credential through its MITM proxy, which bromure-ac hasn't yet.
-                return ["error": "Sign the agent in inside the workspace's terminal for now: this server can't do it for you yet."]
+            case (let sid?, "signin"):
+                // The card's sign-in: in the session's own tab, published for
+                // the client (LinuxSessionHost.remoteSignIn).
+                guard let host = LinuxSessionHost.shared else { return ["error": "no session host"] }
+                return host.remoteSignIn(sid)
             case (let sid?, "resume"):
                 guard store.session(sid) != nil else { return ["error": "unknown session"] }
                 engine.resume(sid, message: doc["message"] as? String, remotely: true)

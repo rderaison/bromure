@@ -37,7 +37,20 @@ final class SessionStores {
             "agentSessions": .array(sessions.sessions.compactMap(JSONValue.encoding)),
             "delegations": .array(delegations.delegations.compactMap(JSONValue.encoding)),
             "agentRooms": .array(rooms.rooms.compactMap(JSONValue.encoding)),
-        ]
+        ].merging(registrationEntries()) { a, _ in a }
+    }
+
+    /// The sign-in a client started, while it runs, and how recent ones
+    /// ended (macOS: the same keys, from RemoteRegistrationBroker).
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onPendingRegistration h=037369d21d9ebaf2 @dd7ba30d
+    func registrationEntries() -> [String: JSONValue] {
+        let broker = RemoteRegistrationBroker.shared
+        var out: [String: JSONValue] = [:]
+        if let p = broker.stateDict() { out["pendingRegistration"] = JSONValue(foundation: p) }
+        if let e = broker.endedDict() { out["registrationEnded"] = JSONValue(foundation: e) }
+        let list = broker.endedList()
+        if !list.isEmpty { out["registrationsEnded"] = JSONValue(foundation: list) }
+        return out
     }
 }
 

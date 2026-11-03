@@ -1369,3 +1369,62 @@ struct BoardRouteTests {
         #expect(FileManager.default.fileExists(atPath: d + "/automations.json"))
     }
 }
+
+@Suite("Proxy request framing")
+struct ProxyFramingTests {
+    @Test("Content-Length and chunked requests are whole only when complete; chunked is re-framed with a length")
+    func framing() throws {
+        let head = "POST /v1 HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\n"
+        #expect(HTTPRequestFraming.complete(Data((head + "abc").utf8)) == .needMore)
+        #expect(HTTPRequestFraming.complete(Data((head + "abcdeXY").utf8))
+                == .complete(Data((head + "abcde").utf8), extra: Data("XY".utf8)))
+        let chunked = "POST /v1 HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2;x=1\r\nde\r\n"
+        #expect(HTTPRequestFraming.complete(Data(chunked.utf8)) == .needMore)
+        guard case .complete(let req, let extra) = HTTPRequestFraming.complete(Data((chunked + "0\r\n\r\n").utf8)) else {
+            Issue.record("chunked request not complete"); return
+        }
+        let text = String(decoding: req, as: UTF8.self)
+        #expect(text.hasSuffix("\r\n\r\nabcde") && text.contains("Content-Length: 5") && !text.lowercased().contains("chunked"))
+        #expect(extra.isEmpty)
+        #expect(HTTPRequestFraming.complete(Data("GET / HTTP/1.1\r\nContent-Length: x\r\n\r\n".utf8)) == .invalid)
+        #expect(HTTPRequestFraming.complete(Data("GET / HTTP/1.1\r\nHost: a\r\n\r\n".utf8))
+                == .complete(Data("GET / HTTP/1.1\r\nHost: a\r\n\r\n".utf8), extra: Data()))
+    }
+
+    @Test("one request per connection: Connection headers replaced; absolute-form to origin-form; a response's status and dechunked body")
+    func edits() {
+        let closed = String(decoding: RequestReader.closing(Data(
+            "GET / HTTP/1.1\r\nHost: a\r\nConnection: keep-alive\r\nProxy-Connection: keep-alive\r\nKeep-Alive: 5\r\n\r\nbody".utf8)), as: UTF8.self)
+        #expect(closed == "GET / HTTP/1.1\r\nConnection: close\r\nHost: a\r\n\r\nbody")
+        #expect(String(decoding: RequestReader.origin(Data("GET http://example.com/a/b?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n".utf8)),
+                       as: UTF8.self) == "GET /a/b?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n")
+        let resp = Data("HTTP/1.1 401 Unauthorized\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n1\r\n}\r\n0\r\n\r\n".utf8)
+        let (status, body) = HTTPRequestFraming.responseStatusAndBody(resp)
+        #expect(status == 401 && String(decoding: body, as: UTF8.self) == "{\"a\"}")
+    }
+
+    @Test("the ClientHello parser finds the SNI and ALPN, and waits for a whole record")
+    func clientHello() throws {
+        // A minimal TLS 1.2 ClientHello: SNI example.com, ALPN http/1.1.
+        func u16(_ n: Int) -> [UInt8] { [UInt8(n >> 8), UInt8(n & 0xff)] }
+        let name = Array("example.com".utf8)
+        let sni = u16(0) + u16(name.count + 5) + u16(name.count + 3) + [0] + u16(name.count) + name
+        let proto = Array("http/1.1".utf8)
+        let alpn = u16(16) + u16(proto.count + 3) + u16(proto.count + 1) + [UInt8(proto.count)] + proto
+        let ext = sni + alpn
+        let hello: [UInt8] = [3, 3] + [UInt8](repeating: 0, count: 32) + [0] + u16(2) + [0x13, 0x01] + [1, 0] + u16(ext.count) + ext
+        let hs: [UInt8] = [1, 0] + u16(hello.count) + hello
+        let rec: [UInt8] = [0x16, 3, 1] + u16(hs.count) + hs
+        #expect(ClientHelloInfo.parse(ByteBuffer(bytes: rec.prefix(20))) == .needMore)
+        #expect(ClientHelloInfo.parse(ByteBuffer(bytes: rec)) == .hello(ClientHelloInfo(serverName: "example.com", alpn: ["http/1.1"])))
+        #expect(ClientHelloInfo.parse(ByteBuffer(bytes: Array("GET / HTTP/1.1".utf8))) == .notTLS)
+    }
+
+    @Test("proxy.env points the guest at the bridge port and the CA bundles")
+    func proxyEnv() {
+        let env = Daemon.proxyEnv(port: 65534, noProxy: ["localhost", "192.168.64.0/24"])
+        #expect(env.contains("export HTTPS_PROXY=http://127.0.0.1:65534\n"))
+        #expect(env.contains("export NO_PROXY=localhost,192.168.64.0/24\n"))
+        #expect(env.contains("export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem\n"))
+    }
+}

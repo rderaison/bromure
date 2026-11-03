@@ -16,9 +16,11 @@ final class LinuxSessionHost: AgentSessionHost {
     nonisolated static let running = NIOLockedValueBox<Set<UUID>>([])
 
     private(set) weak var daemon: Daemon?
-    private let stateDir: String
+    let stateDir: String
     /// Running workspaces' rosters (nil: not running, as macOS's "attached").
     private(set) var tabs: [UUID: TabsModel] = [:]
+    /// The proxy sign-ins in flight, one per workspace (ProxySignInHost).
+    var proxySignIns: [UUID: ProxySignIn] = [:]
 
     // @port-skip linux-only: daemon wiring
     init(daemon: Daemon, stateDir: String) {

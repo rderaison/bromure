@@ -58,15 +58,32 @@ extension Daemon {
         return r.status < 300 ? nil : (r.body["error"]?.stringValue ?? "couldn't start (\(r.status))")
     }
 
-    /// The Codex and Claude sign-in stand-ins (macOS writes the bogus tokens
-    /// its MITM proxy swaps for the real ones). bromure-ac has no MITM proxy
-    /// yet: nothing to write, as on macOS without a stored login; the agent
-    /// uses its own sign-in inside the VM.
-    // partial: no MITM credential swap on Linux yet
-    // @port-skip linux-only: no MITM stand-in credentials to push (ACAppDelegate.pushCodexAuth)
+    /// The workspace's guest address on the switch, while it runs: what a
+    /// client's `forward <ip> <port>` dials.
+    // @port-skip linux-only: the daemon's DHCP lease for a workspace
+    func guestIP(_ id: UUID) -> String? {
+        guard let rec = registry.find(id.uuidString.lowercased()), rec.state == .running else { return nil }
+        return sw.dhcp.leasedIP(for: rec.mac)
+    }
+
+    /// Codex's stand-in `~/.codex/auth.json` (macOS mints it from the
+    /// stored login and registers its bogus tokens with the proxy).
+    // partial: no Codex stand-in on Linux yet
+    // @port-skip linux-only: no Codex stand-in on Linux yet (ACAppDelegate.pushCodexAuth)
     func pushCodexAuth(profileID: UUID) async -> Bool { false }
 
-    // partial: no MITM credential swap on Linux yet
-    // @port-skip linux-only: no MITM stand-in credentials to push (ACAppDelegate.pushClaudeStandIn)
-    func pushClaudeStandIn(profileID: UUID) async -> Bool { false }
+    /// Claude with account features, into a running machine: its OAuth
+    /// stand-in (`~/.claude/.credentials.json`), which the proxy swaps for
+    /// the host's live token.
+    // @port ACAppDelegate.pushClaudeStandIn(profileID: UUID) h=dc39248e17ca452c @5f46a841
+    func pushClaudeStandIn(profileID: UUID) async -> Bool {
+        guard ClaudeStandIn.isEnabled, mitm?.claudeStore.hasCredential(for: profileID) == true else { return false }
+        let b64 = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profileID)).base64EncodedString()
+        let out = try? await guestExec(
+            profileID: profileID,
+            command: "mkdir -p ~/.claude && chmod 700 ~/.claude && umask 077 && echo \(b64) | base64 -d > ~/.claude/.credentials.json.tmp "
+                + "&& mv -f ~/.claude/.credentials.json.tmp ~/.claude/.credentials.json && echo ok",
+            timeout: 15)
+        return out?.contains("ok") == true
+    }
 }

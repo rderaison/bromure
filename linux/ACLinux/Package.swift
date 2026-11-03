@@ -19,6 +19,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
         // Enrollment's X.509 handling, as the app builds it.
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
+        // The workspaces' intercepting proxy (TLS termination for the stand-in swaps).
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.29.0"),
         // SandboxEngine's policy parser, as the app builds it.
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     ],
@@ -46,6 +48,8 @@ let package = Package(
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
                 .product(name: "X509", package: "swift-certificates"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOTLS", package: "swift-nio"),
             ],
             // Shared macOS sources (Sources/ACLinux/_shared) build with their
             // Linux stand-ins under this flag, in Swift 5 mode as the app
