@@ -5033,6 +5033,7 @@ enum CodingTaskEngine {
     /// the exact name misses. We fall back to the freshest pq written in the
     /// last few minutes (one plan runs at a time per VM), so a live planning
     /// question still surfaces.
+    // @port-skip other-platform: the fat client's own copy (no TranscriptPin), not the macOS engine's twin
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
                                                   agent: String? = nil,
                                                   pinnedWindow: Int? = nil) -> String? {
