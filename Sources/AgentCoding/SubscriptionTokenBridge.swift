@@ -47,11 +47,9 @@ public final class SubscriptionTokenBridge: NSObject, @unchecked Sendable {
 
     private weak var socketDevice: VZVirtioSocketDevice?
     private var listenerDelegate: ListenerDelegate?
-    private var connection: VZVirtioSocketConnection?
-    private var readSource: DispatchSourceRead?
-    private var pending: [(req: Data, cont: CheckedContinuation<[String: Any], Error>)] = []
-    private var rxBuffer = Data()
-    public private(set) var isConnected: Bool = false
+    /// The line channel to the agent (TokenAgentChannel.swift).
+    private let channel = TokenAgentChannel(disconnectedError: BridgeError.notConnected)
+    public var isConnected: Bool { channel.isConnected }
 
     public init(socketDevice: VZVirtioSocketDevice) {
         self.socketDevice = socketDevice
@@ -66,16 +64,8 @@ public final class SubscriptionTokenBridge: NSObject, @unchecked Sendable {
     }
 
     public func stop() {
-        readSource?.cancel()
-        readSource = nil
-        connection = nil
-        isConnected = false
         socketDevice?.removeSocketListener(forPort: Self.port)
-        // Unblock any callers still waiting.
-        for entry in pending {
-            entry.cont.resume(throwing: BridgeError.notConnected)
-        }
-        pending.removeAll()
+        channel.stop()
     }
 
     // MARK: - RPCs
@@ -114,73 +104,11 @@ public final class SubscriptionTokenBridge: NSObject, @unchecked Sendable {
     // MARK: - Wire
 
     private func rpc(_ payload: [String: Any]) async throws -> [String: Any] {
-        guard isConnected, let conn = connection else {
-            throw BridgeError.notConnected
-        }
-        let body = try JSONSerialization.data(withJSONObject: payload)
-        var line = body
-        line.append(0x0a)  // newline-delimited
-
-        return try await withCheckedThrowingContinuation { cont in
-            pending.append((req: line, cont: cont))
-            let fd = conn.fileDescriptor
-            line.withUnsafeBytes { ptr in
-                var offset = 0
-                while offset < line.count {
-                    let n = Darwin.write(fd, ptr.baseAddress! + offset, line.count - offset)
-                    if n <= 0 { break }
-                    offset += n
-                }
-            }
-        }
+        try await channel.rpc(payload)
     }
 
     private func accept(_ conn: VZVirtioSocketConnection) {
-        readSource?.cancel()
-        readSource = nil
-        connection = conn
-        isConnected = true
-        rxBuffer = Data()
-
-        let fd = conn.fileDescriptor
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
-        source.setEventHandler { [weak self] in
-            var buf = [UInt8](repeating: 0, count: 64 * 1024)
-            let n = Darwin.read(fd, &buf, buf.count)
-            guard n > 0 else { source.cancel(); return }
-            self?.rxBuffer.append(contentsOf: buf[0..<n])
-            self?.drainLines()
-        }
-        source.setCancelHandler { [weak self] in
-            guard let self else { return }
-            self.connection = nil
-            self.isConnected = false
-            // Fail any in-flight request — caller can retry once the
-            // agent reconnects (it auto-reconnects every 2s).
-            for entry in self.pending {
-                entry.cont.resume(throwing: BridgeError.notConnected)
-            }
-            self.pending.removeAll()
-            self.readSource = nil
-        }
-        source.resume()
-        readSource = source
-    }
-
-    private func drainLines() {
-        while let nl = rxBuffer.firstIndex(of: 0x0a) {
-            let line = rxBuffer[rxBuffer.startIndex..<nl]
-            rxBuffer = Data(rxBuffer[(nl + 1)...])
-            let response: [String: Any]
-            if let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
-                response = obj
-            } else {
-                response = ["ok": false, "reason": "malformed json from agent"]
-            }
-            if pending.isEmpty { continue }
-            let entry = pending.removeFirst()
-            entry.cont.resume(returning: response)
-        }
+        channel.accept(fd: conn.fileDescriptor, owner: conn)
     }
 }
 
