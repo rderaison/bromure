@@ -72,6 +72,7 @@
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
 		FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */; };
 		F3188ED7F3EED8B10F60EB70 /* Inference__ModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */; };
+		0DABC2F1788E78D6B3574910 /* InstructionPresetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69D91A1FBBB65181675C0C41 /* InstructionPresetStore.swift */; };
 		CB303ECEE71062E6A832A82E /* InstructionPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB3F332F6F0778503324D9BD /* InstructionPresets.swift */; };
 		10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DD18B9BFD8961799C389C4D /* KubeCluster.swift */; };
 		C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */; };
@@ -237,6 +238,7 @@
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
 		C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelCatalog.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelCatalog.swift"; sourceTree = "<group>"; };
 		0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelSettings.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelSettings.swift"; sourceTree = "<group>"; };
+		69D91A1FBBB65181675C0C41 /* InstructionPresetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "InstructionPresetStore.swift"; path = "Sources/BromureRemote/_shared/InstructionPresetStore.swift"; sourceTree = "<group>"; };
 		CB3F332F6F0778503324D9BD /* InstructionPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "InstructionPresets.swift"; path = "Sources/BromureRemote/_shared/InstructionPresets.swift"; sourceTree = "<group>"; };
 		8DD18B9BFD8961799C389C4D /* KubeCluster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeCluster.swift"; path = "Sources/BromureRemote/_shared/KubeCluster.swift"; sourceTree = "<group>"; };
 		8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeDashboard.swift"; path = "Sources/BromureRemote/_shared/KubeDashboard.swift"; sourceTree = "<group>"; };
@@ -426,6 +428,7 @@
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
 				C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */,
 				0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */,
+				69D91A1FBBB65181675C0C41 /* InstructionPresetStore.swift */,
 				CB3F332F6F0778503324D9BD /* InstructionPresets.swift */,
 				8DD18B9BFD8961799C389C4D /* KubeCluster.swift */,
 				8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */,
@@ -669,6 +672,7 @@
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
 				FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */,
 				F3188ED7F3EED8B10F60EB70 /* Inference__ModelSettings.swift in Sources */,
+				0DABC2F1788E78D6B3574910 /* InstructionPresetStore.swift in Sources */,
 				CB303ECEE71062E6A832A82E /* InstructionPresets.swift in Sources */,
 				10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */,
 				C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */,

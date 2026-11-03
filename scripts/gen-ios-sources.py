@@ -67,6 +67,7 @@ SHARED = [
     "AgentSessionViews.swift",  # shared row/section views (sessions home)
     "SubscriptionNotifications.swift",  # bromureSubscriptionStoresChanged (the profile editor observes it)
     "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)
+    "InstructionPresetStore.swift",  # the presets and their store (the editor is InstructionPresets.swift)
     "AgentDelegation.swift",    # delegation records + store + notice text (the engine/MCP stay macOS-only)
     "SquelchViews.swift",       # Squelch header popover (numbers from the host)
     "SessionStageViews.swift",  # header / launch / rest / new-session screens (AppKit bits #if'd)
