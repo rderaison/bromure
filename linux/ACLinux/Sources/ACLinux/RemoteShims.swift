@@ -43,4 +43,6 @@ enum SessionDisk {
     static let kubeMCPVsockPort = GuestPorts.kubeMCPVsockPort
     static let delegationMCPVsockPort = GuestPorts.delegationMCPVsockPort
     static let switchboardMCPVsockPort = GuestPorts.switchboardMCPVsockPort
+    static let switchboardMCPShimGuestPath = GuestMetaPaths.switchboardMCPShimGuestPath
+    static let switchboardMCPConfigGuestPath = GuestMetaPaths.switchboardMCPConfigGuestPath
 }
