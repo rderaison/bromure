@@ -24,3 +24,12 @@ public enum GuestPorts {
     /// The Switchboard's MCP (SwitchboardMCPServer).
     public static let switchboardMCPVsockPort: UInt32 = 5836
 }
+
+/// Guest paths in the meta share (/mnt/bromure-meta) that launch commands
+/// name; SessionDisk stages the files and carries the same names.
+public enum GuestMetaPaths {
+    /// The Switchboard's MCP shim.
+    public static let switchboardMCPShimGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.py"
+    /// The Switchboard's MCP config, for Claude's --mcp-config.
+    public static let switchboardMCPConfigGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.json"
+}

@@ -1547,8 +1547,8 @@ public final class SessionDisk {
     /// window announcement, since the host checks the caller is the
     /// Switchboard's tab — on its own port.
     public static let switchboardMCPVsockPort = GuestPorts.switchboardMCPVsockPort
-    static let switchboardMCPShimGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.py"
-    static let switchboardMCPConfigGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.json"
+    static let switchboardMCPShimGuestPath = GuestMetaPaths.switchboardMCPShimGuestPath
+    static let switchboardMCPConfigGuestPath = GuestMetaPaths.switchboardMCPConfigGuestPath
     static var switchboardMCPShimScript: String {
         delegationMCPShimScript
             .replacingOccurrences(of: "PORT = \(delegationMCPVsockPort)", with: "PORT = \(switchboardMCPVsockPort)")
