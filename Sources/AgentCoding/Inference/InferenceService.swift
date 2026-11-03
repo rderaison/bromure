@@ -377,11 +377,11 @@ public actor InferenceService {
     /// bind retry; picking a *currently-free* port is the whole point (vs.
     /// squatting Ollama's 11434). Returns 0 only if the socket calls fail.
     static func allocateLoopbackPort() -> Int {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        let fd = tcpSocket()
         guard fd >= 0 else { return 0 }
         defer { close(fd) }
         var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        setSockaddrLength(&addr)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = 0   // kernel-assigned ephemeral port
         _ = inet_pton(AF_INET, engineHost, &addr.sin_addr)
@@ -552,4 +552,20 @@ public actor InferenceService {
         p.arguments = ["-f", "_mlx-engine --config"]
         try? p.run(); p.waitUntilExit()
     }
+}
+
+/// An IPv4 TCP socket: SOCK_STREAM is an Int32 in Darwin, an enum in Glibc.
+private func tcpSocket() -> Int32 {
+#if os(Linux)
+    socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+#else
+    socket(AF_INET, SOCK_STREAM, 0)
+#endif
+}
+
+/// BSD's sockaddr_in starts with its length; Linux's has no such field.
+private func setSockaddrLength(_ addr: inout sockaddr_in) {
+#if !os(Linux)
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+#endif
 }
