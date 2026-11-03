@@ -86,17 +86,19 @@ final class LinuxSessionHost: AgentSessionHost {
                 let conversation = lines.count > 1 ? String(lines[1]).trimmingCharacters(in: .whitespaces) : nil
                 guard let w = AgentSessionStore.statusWindow(index: index, conversation: conversation,
                                                              profileID: id, sessions: store.sessions) else { continue }
-                setTabAgentStatus(id, index: w, status)
+                setTabAgentStatus(id, index: w, status, turnEnded: AgentStatus.endsTurn(signal: raw))
             }
         }
     }
 
     /// A tab's hook status, with what the macOS app delegate does around it:
     /// a turn that ended or a question is a reply (unread on clients), and a
-    /// new turn means no dialog waits any more.
+    /// new turn means no dialog waits any more. `turnEnded` false: a done
+    /// that is only the agent idle at its prompt (an interrupt, a session
+    /// end, an idle notification): the tab shows it, no run or task finishes.
     // partial: no delegation engine (promptFreed) on Linux yet
-    // @port ACAppDelegate.setTabAgentStatus(_: Profile.ID, index: Int, _: AgentStatus) h=7e5b5652a7eb2b64 @9936e30c
-    func setTabAgentStatus(_ id: UUID, index: Int, _ status: AgentStatus) {
+    // @port ACAppDelegate.setTabAgentStatus(_: Profile.ID, index: Int, _: AgentStatus, turnEnded: Bool) h=122def8726c0a46e @5f46a841
+    func setTabAgentStatus(_ id: UUID, index: Int, _ status: AgentStatus, turnEnded: Bool = true) {
         guard let store = SessionStores.shared?.sessions else { return }
         let before = agentStatus[id]?[index]
         agentStatus[id, default: [:]][index] = status
@@ -107,7 +109,7 @@ final class LinuxSessionHost: AgentSessionHost {
         tab.agentStatus = status
         // A finished tab may be an automation run (its transcript is saved,
         // its tab closed) or a coding task, which moves to Testing.
-        if status == .done, let stores = SessionStores.shared {
+        if status == .done, turnEnded, let stores = SessionStores.shared {
             stores.automationEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
             stores.codingTaskEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
         }

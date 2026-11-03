@@ -64,19 +64,23 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
 
     /// A Stop-hook "done" held until the session's transcript has been
     /// quiet for `quiet` seconds (background subagents may still write);
-    /// an unreadable probe counts as quiet, `cap` bounds the wait. False
-    /// only when the cap ran out first.
-    // @port ACAppDelegate.waitForSessionQuiet(profileID: Profile.ID, branch: String, quiet: Int, cap: TimeInterval) h=44b125ad00bed826 @9936e30c
+    /// an unreadable probe counts as quiet, `cap` bounds the wait. `tool`
+    /// picks the agent's transcript store. Whether the probe read the
+    /// transcript's age at all: false, nothing was watched.
+    // @port ACAppDelegate.waitForSessionQuiet(profileID: Profile.ID, branch: String, tool: Profile.Tool?, quiet: Int, cap: TimeInterval) h=5c4cf5a05ff45dd8 @5f46a841
+    @discardableResult
     func waitForSessionQuiet(profileID: Profile.ID, branch: String, tool: Profile.Tool?,
                              quiet: Int, cap: TimeInterval) async -> Bool {
         guard branch.hasPrefix("wt/"),
-              let cmd = CodingTaskEngine.transcriptAgeCommand(slug: String(branch.dropFirst(3))) else { return true }
+              let cmd = CodingTaskEngine.transcriptAgeCommand(slug: String(branch.dropFirst(3)), agent: tool)
+        else { return false }
         let deadline = Date().addingTimeInterval(cap)
-        var held = false
+        var held = false, read = false
         while Date() < deadline {
             guard let out = try? await guestExec(profileID: profileID, command: cmd, timeout: 10),
                   let age = Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
-            else { return true }
+            else { return read }
+            read = true
             if age >= quiet {
                 if held { BACDebug.log("session", "\(branch): transcript quiet — completing") }
                 return true
@@ -90,7 +94,7 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
             try? await Task.sleep(nanoseconds: UInt64(max(quiet - age, 5)) * 1_000_000_000)
         }
         BACDebug.log("session", "\(branch): settle cap reached — completing anyway")
-        return false
+        return read
     }
 
     /// A finished run's transcript, copied out of the guest into the run's
