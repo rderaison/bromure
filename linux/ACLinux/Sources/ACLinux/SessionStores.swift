@@ -13,6 +13,8 @@ final class SessionStores {
     let sessions: AgentSessionStore
     let rooms: AgentRoomStore
     let delegations: DelegationStore
+    /// The session engine over them (Daemon.startSessionEngine).
+    var engine: AgentSessionEngine?
 
     // @port-skip linux-only: daemon layout
     init(stateDir: String) {

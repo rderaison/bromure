@@ -92,7 +92,11 @@ public actor Daemon {
 
     public nonisolated let config: DaemonConfig
     var registry: VMRegistry
-    var live: [String: Live] = [:]
+    // @port-skip linux-only: the daemon's running VMs
+    var live: [String: Live] = [:] {
+        // The session host reads which workspaces are up without a hop here.
+        didSet { LinuxSessionHost.running.withLockedValue { $0 = Set(live.keys.compactMap { UUID(uuidString: $0) }) } }
+    }
     private let passt: PasstUplink
     let sw: InterimSwitch
     /// VMs whose stop is being recorded (vmStopped).
@@ -133,7 +137,7 @@ public actor Daemon {
         let d = Daemon(config: config, passt: passt)
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
-        await MainActor.run { SessionStores.shared = SessionStores(stateDir: config.stateDir) }
+        await d.startSessionEngine()
         await d.setUpRemoteAccess()
         return d
     }
@@ -179,6 +183,17 @@ public actor Daemon {
         case ("GET", "/state/subscribe"): return stateSubscribe()
         case ("POST", let p) where p.hasPrefix("/sessions/") && p.hasSuffix("/tab"):
             return tabCommand(String(p.dropFirst("/sessions/".count).dropLast("/tab".count)), req.body)
+        case ("POST", "/agent-sessions/start"): return await agentSessionCommand(nil, "start", req.body)
+        case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"):
+            guard let id = UUID(uuidString: String(p.dropFirst("/agent-sessions/".count).dropLast("/transcript".count))
+                .removingPercentEncoding ?? "") else { return .error(400, "Bad session id") }
+            return await agentSessionTranscript(id)
+        case ("POST", let p) where p.hasPrefix("/agent-sessions/"):
+            let parts = p.dropFirst("/agent-sessions/".count).split(separator: "/", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let id = UUID(uuidString: parts[0].removingPercentEncoding ?? parts[0]) else {
+                return .error(400, "Bad session id or action")
+            }
+            return await agentSessionCommand(id, parts[1], req.body)
         case ("GET", "/profiles"): return listProfiles()
         case ("POST", "/profiles"): return await createProfile(req.body)
         case ("GET", "/vms"): return listVMs()
@@ -278,8 +293,16 @@ public actor Daemon {
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListPendingPrompts h=7f92140cb6125056 @7dd92fdf
     func stateBody() async -> JSONValue {
         // Decision prompts waiting for a fat client's answer (PendingPromptBroker).
+        // The session engine's tab rosters (LinuxSessionHost.tabsModel), from
+        // what agentd writes to each running workspace's outbox.
+        let rosters: [(UUID, [GuestTab]?)] = records.compactMap { rec in
+            guard let id = UUID(uuidString: rec.id) else { return nil }
+            guard rec.state == .running else { return (id, nil) }
+            return (id, GuestOutbox.parseRoster(GuestOutbox.read(vmDir(rec.id) + "/outbox/tabs.txt") ?? ""))
+        }
         let (prompts, sessionEntries) = await MainActor.run {
-            (PendingPromptBroker.shared.pendingList(), SessionStores.shared?.stateEntries() ?? [:])
+            for (id, roster) in rosters { LinuxSessionHost.shared?.updateRoster(id, roster) }
+            return (PendingPromptBroker.shared.pendingList(), SessionStores.shared?.stateEntries() ?? [:])
         }
         // As on macOS, `vms` is the running (and booting) VMs and `workspaces`
         // every workspace; with no profiles here each VM is its own workspace,

@@ -46,3 +46,13 @@ enum SessionDisk {
     static let switchboardMCPShimGuestPath = GuestMetaPaths.switchboardMCPShimGuestPath
     static let switchboardMCPConfigGuestPath = GuestMetaPaths.switchboardMCPConfigGuestPath
 }
+
+/// The machine links (Bromure Sidecar / agent hosts attached to this
+/// server) the session engine asks about: bromure-ac has none, so no
+/// workspace is a linked machine.
+// @port-skip linux-only: stand-in for MachineLinks.swift's MachineLinkHub (no machine links on Linux)
+final class MachineLinkHub: Sendable {
+    static let shared = MachineLinkHub()
+    // @port-skip linux-only: stand-in
+    func name(_ id: UUID) -> String? { nil }
+}
