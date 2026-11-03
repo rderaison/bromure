@@ -18,7 +18,7 @@ import Glibc
 
 /// libc by name, for calls made inside types that have same-named methods
 /// (close, read, write…): `Darwin.close` on macOS/iOS, `Glibc.close` on Linux.
-private enum LibC {
+enum LibC {
     #if canImport(Darwin)
     @discardableResult static func close(_ fd: Int32) -> Int32 { Darwin.close(fd) }
     @discardableResult static func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ n: Int) -> Int { Darwin.read(fd, buf, n) }
