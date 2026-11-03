@@ -105,7 +105,7 @@ struct DaemonTests {
         return st[st.index(after: close)...].split(separator: " ").first != "Z"
     }
 
-    @Test("run, ls, exec, exec -i, kill; suspend refused; a SIGKILLed daemon's Firecracker is ended by the next one (no fd store outside systemd); SIGTERM ends everything")
+    @Test("run, ls, exec, exec -i, suspend/resume, kill; a SIGKILLed daemon's Firecracker is ended by the next one (no fd store outside systemd); SIGTERM ends everything")
     func lifecycle() async throws {
         let w = try World()
         defer { try? FileManager.default.removeItem(atPath: w.root) }
@@ -130,10 +130,30 @@ struct DaemonTests {
         #expect(iout.contains("/dev/pts/") && iout.contains("24 80") && iout.contains("in-42"), "exec -i: \(iout)")
         let (lsrc, ls, _) = try w.cli("vm", "ls")
         #expect(lsrc == 0 && ls.contains("dm1") && ls.contains("running"))
-        // No snapshots yet: suspend is refused with a reason, and the VM runs on.
+        // Suspend and resume (a snapshot, the shares' virtiofsd state in it):
+        // a process started before runs on after, and the shares still work.
+        #expect(try w.cli("vm", "exec", "dm1", "--", "sh", "-c",
+                          "nohup sh -c 'while true; do date +%s > /tmp/tick; sleep 1; done' >/dev/null 2>&1 & "
+                          + "echo before > /mnt/bromure-outbox/snap.txt").0 == 0)
+        let t4 = ContinuousClock.now
         let (src, _, serr) = try w.cli("vm", "suspend", "dm1")
-        #expect(src != 0 && serr.contains("aren't available"), "suspend: \(serr)")
+        print("TIMING [daemon] suspend \(ms(ContinuousClock.now - t4))")
+        #expect(src == 0, "suspend: \(serr)")
+        #expect(try w.state(of: "dm1") == "suspended")
+        let t5 = ContinuousClock.now
+        let (rrc, _, rerr) = try w.cli("vm", "resume", "dm1")
+        print("TIMING [daemon] resume \(ms(ContinuousClock.now - t5))")
+        #expect(rrc == 0, "resume: \(rerr)")
         #expect(try w.state(of: "dm1") == "running")
+        var after = ""
+        for _ in 0..<20 {
+            let r = try w.cli("vm", "exec", "dm1", "--", "sh", "-c",
+                              "a=$(cat /tmp/tick); sleep 2; b=$(cat /tmp/tick); [ \"$b\" -gt \"$a\" ] && cat /mnt/bromure-outbox/snap.txt")
+            after = r.1
+            if r.0 == 0 { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        #expect(after.contains("before"), "after resume: the ticker runs and the outbox reads (\(after))")
         #expect(try w.cli("vm", "kill", "--force", "dm1").0 == 0)
         #expect(try w.state(of: "dm1") == "stopped")
         // QEMU machine types are gone.

@@ -410,7 +410,8 @@ public actor Daemon {
         case ("GET", ""): return getVM(rec)
         case ("DELETE", ""): return await deleteVM(rec, action: body["action"]?.stringValue ?? "shutdown")
         case ("POST", "exec"): return await exec(rec, body)
-        case ("POST", "resume"): return Self.noSuspend(rec)
+        case ("POST", "resume"): return await start(rec, body, resumeOnly: true)
+        case ("POST", "suspend"): return await suspend(rec)
         case ("POST", "start"): return await start(rec, body)
         case ("POST", "remove"): return remove(rec)
         default: return .error(405, "Method not allowed")
@@ -424,18 +425,63 @@ public actor Daemon {
     /// The record's machine type: Firecracker is the only backend.
     static let machineType = "firecracker"
 
-    /// Suspend/resume: not until Firecracker can snapshot a VM with
-    /// vhost-user-fs shares (device-state migration, in the fork).
-    // @port-skip linux-only: no suspend on Linux yet
-    static func noSuspend(_ rec: VMRecord) -> ControlResponse {
-        .error(409, "Suspend and resume aren't available yet (Firecracker can't snapshot VMs with shared folders yet); stop and start '\(rec.name)' instead",
-               ["state": .string(rec.state.rawValue)])
+    /// Where a suspended VM's snapshot is kept (`vm.snap`, `vm.mem`, and the
+    /// disks' identities beside `vm.snap`).
+    // @port-skip linux-only: Linux daemon VM layout
+    func snapshotDir(_ id: String) -> String { vmDir(id) + "/snapshot" }
+
+    /// Suspend: a full snapshot of the running VM (its virtiofsds' state with
+    /// it), its two disks' identities recorded, then the VM ends suspended.
+    // @port-skip linux-only: Firecracker snapshot suspend (macOS: requestStopSession(.suspend) saves VZ state)
+    func suspend(_ rec: VMRecord) async -> ControlResponse {
+        guard let l = live[rec.id] else {
+            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
+        }
+        let dir = snapshotDir(rec.id)
+        try? FileManager.default.removeItem(atPath: dir)
+        do {
+            try await l.machine.snapshot(into: dir)
+            let state = dir + "/vm.snap"
+            try SnapshotIdentity.of(overlay: l.config.overlay).write(forState: state)
+            try SnapshotIdentity.of(overlay: vmDir(rec.id) + "/home.img").write(forState: state, disk: 1)
+        } catch {
+            // A VM the snapshot ended (a refusal past the rings' stop) is
+            // stopped: no half state is kept.
+            if live[rec.id] == nil { try? FileManager.default.removeItem(atPath: dir) }
+            return .error(500, "Suspend failed: \(error)")
+        }
+        await vmStopped(rec.id, await l.machine.waitUntilStopped())
+        return ControlResponse(200, ["status": "suspended"])
+    }
+
+    /// The snapshot in `dir` still pairs with the VM's disks.
+    // @port-skip linux-only: snapshot identity for both disks
+    func snapshotUsable(_ rec: VMRecord, _ dir: String) -> String? {
+        let state = dir + "/vm.snap"
+        guard FileManager.default.fileExists(atPath: state), FileManager.default.fileExists(atPath: dir + "/vm.mem") else {
+            return "no saved state"
+        }
+        do {
+            try SnapshotIdentity.verify(state: state, overlay: (try machineConfig(rec)).overlay)
+            try SnapshotIdentity.verify(state: state, overlay: vmDir(rec.id) + "/home.img", disk: 1)
+            return nil
+        } catch {
+            return "\(error)"
+        }
     }
 
     /// `DELETE /vms/{id}` with `{"action": "shutdown"|"suspend"|"kill"}`.
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=eaa996c40011d353 @7dd92fdf
     func deleteVM(_ rec: VMRecord, action: String) async -> ControlResponse {
-        if action == "suspend" { return Self.noSuspend(rec) }
+        if action == "suspend" { return await suspend(rec) }
+        // A suspended VM shut down: its saved state goes, it's stopped.
+        if live[rec.id] == nil, rec.state == .suspended {
+            try? FileManager.default.removeItem(atPath: snapshotDir(rec.id))
+            var r = rec
+            r.state = .stopped
+            try? registry.upsert(r)
+            return ControlResponse(200, ["status": "stopped"])
+        }
         guard let l = live[rec.id] else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
         }
@@ -453,7 +499,7 @@ public actor Daemon {
     /// `POST /vms/{id}/start` (Linux): boot a stopped VM again, on its own
     /// overlay and home image.
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
-    func start(_ rec: VMRecord, _ body: JSONValue = .object([:])) async -> ControlResponse {
+    func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false) async -> ControlResponse {
         guard rec.state == .stopped || rec.state == .suspended else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
         }
@@ -469,12 +515,29 @@ public actor Daemon {
             }
             r.homeGB = gb
         }
+        // A suspended VM resumes from its snapshot while it still pairs with
+        // its disks; otherwise `resume` refuses and `start` boots it fresh.
+        var restoreFrom: String?
+        if rec.state == .suspended {
+            let dir = snapshotDir(rec.id)
+            if let why = snapshotUsable(rec, dir) {
+                if resumeOnly { return .error(409, "Can't resume '\(rec.name)': \(why); start it instead") }
+                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': saved state not used (\(why)); booting fresh\n".utf8))
+                try? FileManager.default.removeItem(atPath: dir)
+            } else {
+                restoreFrom = dir
+            }
+        } else if resumeOnly {
+            return .error(409, "VM '\(rec.name)' isn't suspended", ["state": .string(rec.state.rawValue)])
+        }
         if !CIDAllocator.shared.claim(rec.cid) {
+            // The snapshot's vsock device keeps its CID.
+            if restoreFrom != nil { return .error(503, "VM '\(rec.name)''s vsock CID \(rec.cid) is taken; can't resume it") }
             guard let fresh = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
             r.cid = fresh
         }
         do {
-            try await launch(&r)
+            try await launch(&r, restoreFrom: restoreFrom)
             return ControlResponse(200, ["status": "running"])
         } catch {
             CIDAllocator.shared.release(r.cid)
@@ -588,7 +651,7 @@ public actor Daemon {
 
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // @port-skip linux-only: Linux daemon VM lifecycle
-    private func launch(_ rec: inout VMRecord) async throws {
+    private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
         let dir = vmDir(rec.id)
         let run = config.runtimeDir + "/vms/" + rec.shortId
         let fm = FileManager.default
@@ -597,7 +660,7 @@ public actor Daemon {
         }
         // 0777 as on macOS: every guest uid (the workspace's, a run_as user's)
         // writes there through plain DAC. The VM directory above it stays 0700.
-        try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: false)
+        try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: restoreFrom != nil)
         try? fm.removeItem(atPath: dir + "/meta/bromure-agentd.py")
         try fm.copyItem(atPath: config.agentdPath, toPath: dir + "/meta/bromure-agentd.py")
         for tag in ["bromure-meta", "bromure-outbox"] {
@@ -646,6 +709,7 @@ public actor Daemon {
         try writeProxyMeta(meta)
 
         var qc = try machineConfig(rec)
+        qc.restoreFrom = restoreFrom
         // The VM's end goes to Firecracker; ours waits in the fd store, so a
         // restarted daemon takes the same link back.
         let (port, peer) = try DgramPort.pair(name: "vm-" + rec.shortId)
@@ -696,7 +760,15 @@ public actor Daemon {
             throw error
         }
         rec.state = .running
-        rec.bootedAt = Date()
+        if let restoreFrom {
+            // The resumed guest sets its clock from this (agentd's resume
+            // watcher; its clock stood still while it was saved), and the
+            // snapshot is spent: its memory file is the guest's memory now.
+            try? "\(Int(Date().timeIntervalSince1970))".write(toFile: dir + "/meta/.resume-signal", atomically: true, encoding: .utf8)
+            try? FileManager.default.removeItem(atPath: restoreFrom)
+        } else {
+            rec.bootedAt = Date()
+        }
         if let pid = await machine.pid {
             rec.pid = pid
             rec.pidStart = Self.processStartTime(pid)
@@ -916,7 +988,7 @@ public actor Daemon {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
         rec = registry.find(id) ?? rec
-        rec.state = .stopped
+        rec.state = info.reason == .suspended ? .suspended : .stopped
         rec.ip = nil
         rec.pid = nil
         rec.pidStart = nil

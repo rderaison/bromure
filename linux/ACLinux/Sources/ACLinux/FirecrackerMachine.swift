@@ -17,8 +17,10 @@ import Foundation
 /// `start()` brings every share's virtiofsd up and waits for its socket
 /// first, and a virtiofsd that dies before then fails the start cleanly
 /// (`virtiofsdNotReady`, or Firecracker's own exit with its log).
-/// No suspend/restore yet: Firecracker refuses to snapshot a VM with
-/// vhost-user-fs devices (device-state migration is to come in the fork).
+/// Suspend is a full snapshot (`snapshot(into:)`: the vCPUs paused, each
+/// share's virtiofsd handing its state over through the fork's vhost-user-fs
+/// device), then the processes end; resume (`config.restoreFrom`) starts
+/// fresh virtiofsds and loads the snapshot into a new Firecracker.
 // @port-skip linux-only: Firecracker backend (macOS: UbuntuSandboxVM on Virtualization.framework)
 public actor FirecrackerMachine {
     // @port-skip linux-only: VM backend
@@ -32,6 +34,8 @@ public actor FirecrackerMachine {
         case virtiofsdExited(tag: String)
         /// Firecracker exited on its own with a failure.
         case crashed
+        /// `snapshot(into:)`: saved, then ended.
+        case suspended
     }
 
     // @port-skip linux-only: VM backend
@@ -123,15 +127,21 @@ public actor FirecrackerMachine {
             }
             try await startDaemons()
             for p in [config.firecrackerAPISocketPath, config.firecrackerVsockPath] { try? fm.removeItem(atPath: p) }
-            let json = try JSONEncoder().encode(config.firecrackerConfig(netFD: peerFD >= 0 ? 3 : nil))
-            let cfgPath = (config.runDirectory as NSString).appendingPathComponent("firecracker.json")
-            try json.write(to: URL(fileURLWithPath: cfgPath))
             let log = (config.runDirectory as NSString).appendingPathComponent("firecracker.log")
             try? fm.removeItem(atPath: log)
+            var args = ["--id", config.name, "--api-sock", config.firecrackerAPISocketPath,
+                        "--log-path", log, "--level", "Warning"]
+            // A resume loads its snapshot through the API once it's up; a
+            // boot is configured from the start.
+            if config.restoreFrom == nil {
+                let json = try JSONEncoder().encode(config.firecrackerConfig(netFD: peerFD >= 0 ? 3 : nil))
+                let cfgPath = (config.runDirectory as NSString).appendingPathComponent("firecracker.json")
+                try json.write(to: URL(fileURLWithPath: cfgPath))
+                args += ["--config-file", cfgPath]
+            }
             // stdout is the guest's serial console.
             let p = try ChildProcess(name: "firecracker", executable: config.firecrackerBinary,
-                                     arguments: ["--id", config.name, "--api-sock", config.firecrackerAPISocketPath,
-                                                 "--config-file", cfgPath, "--log-path", log, "--level", "Warning"],
+                                     arguments: args,
                                      logPath: config.serialLog, standardInput: pipes?.input,
                                      standardOutput: pipes?.output, inheritedFDs: peerFD >= 0 ? [peerFD] : [])
             try p.start()
@@ -140,6 +150,7 @@ public actor FirecrackerMachine {
                 let status = await p.waitForExit()
                 await self?.exited(status)
             }
+            if let dir = config.restoreFrom { try await loadSnapshot(dir, p, log: log) }
             try await waitRunning(p, log: log)
             state = .running
         } catch {
@@ -163,6 +174,61 @@ public actor FirecrackerMachine {
             if ContinuousClock.now > deadline { throw MachineError.io("firecracker API \(config.firecrackerAPISocketPath)", ETIMEDOUT) }
             try await Task.sleep(for: .milliseconds(10))
         }
+    }
+
+    /// The snapshot in `dir` into the Firecracker just started, resumed. Its
+    /// network is the backend the snapshot names (`fd:3`, inherited again).
+    // @port-skip linux-only: Firecracker snapshot load (macOS: VZVirtualMachine.restoreMachineStateFrom)
+    private func loadSnapshot(_ dir: String, _ p: ChildProcess, log: String) async throws {
+        let deadline = ContinuousClock.now + .seconds(15)
+        while !FileManager.default.fileExists(atPath: config.firecrackerAPISocketPath) {
+            if let status = p.exitStatus {
+                let out = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+                throw MachineError.exitedDuringStart(status, String(out.suffix(2000)))
+            }
+            if ContinuousClock.now > deadline { throw MachineError.io("firecracker API \(config.firecrackerAPISocketPath)", ETIMEDOUT) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let r = try await api.request("PUT", "/snapshot/load", [
+            "snapshot_path": .string(dir + "/vm.snap"),
+            "mem_backend": ["backend_type": "File", "backend_path": .string(dir + "/vm.mem")],
+            "resume_vm": true,
+        ], timeout: .seconds(300))
+        guard r.ok else { throw MachineError.toolFailed("firecracker snapshot load", Int32(r.status), r.fault) }
+    }
+
+    /// Suspend: the vCPUs paused, a full snapshot (`vm.snap`, `vm.mem`) into
+    /// `dir`, every share's virtiofsd handing its state over, then
+    /// Firecracker and the virtiofsds end (`.suspended`). A failed snapshot
+    /// leaves the VM running.
+    // @port-skip linux-only: Firecracker snapshot (macOS: VZVirtualMachine.saveMachineStateTo)
+    public func snapshot(into dir: String) async throws {
+        guard state == .running, let process else { throw MachineError.notRunning }
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try await pause()
+        let r: FirecrackerAPI.Response
+        do {
+            r = try await api.request("PUT", "/snapshot/create", [
+                "snapshot_type": "Full",
+                "snapshot_path": .string(dir + "/vm.snap"),
+                "mem_file_path": .string(dir + "/vm.mem"),
+            ], timeout: .seconds(300))
+        } catch {
+            try? await resume()
+            throw error
+        }
+        guard r.ok else {
+            // The vhost-user-fs rings are stopped once their state was taken:
+            // a refusal after that can't resume cleanly, so the VM ends.
+            pendingReason = .crashed
+            process.signal(SIGKILL)
+            _ = await waitUntilStopped()
+            throw MachineError.toolFailed("firecracker snapshot create", Int32(r.status), r.fault)
+        }
+        pendingReason = .suspended
+        state = .stopping
+        process.signal(SIGKILL)
+        _ = await waitUntilStopped()
     }
 
     /// Ctrl-Alt-Del, SIGKILL after `timeout`.

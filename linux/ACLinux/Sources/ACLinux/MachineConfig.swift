@@ -85,6 +85,9 @@ public struct MachineConfig: Sendable {
     public var overlay: String
     /// The image bake writes `baseImage` itself (no copy).
     public var writeBaseInPlace = false
+    /// A snapshot to resume instead of booting (`vm.snap` and `vm.mem` in
+    /// this directory, made by FirecrackerMachine.snapshot).
+    public var restoreFrom: String?
     public var extraDisks: [Disk] = []
     public var shares: [Share] = []
     public var network: Network = .none

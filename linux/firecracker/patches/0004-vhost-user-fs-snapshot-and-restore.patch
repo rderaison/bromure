@@ -1,0 +1,713 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Renaud Deraison <rderaison@gmail.com>
+Date: Tue, 3 Nov 2026 06:11:30 -0500
+Subject: [PATCH] vhost-user-fs: snapshot and restore
+
+A VM with vhost-user-fs shares can be snapshotted, and restored onto a
+fresh backend at the same socket:
+
+- Before the state is saved (vCPUs paused), each fs device stops its rings
+  (GET_VRING_BASE) and takes its backend's state through
+  VHOST_USER_PROTOCOL_F_DEVICE_STATE (SET_DEVICE_STATE_FD save +
+  CHECK_DEVICE_STATE), now negotiated. A backend without it refuses the
+  snapshot.
+- The saved device: its virtio state, each ring's base, the backend's
+  state blob. On restore it connects to the backend, gets its rings set up
+  at the saved bases (not the guest's avail index), the state loaded while
+  the rings are stopped, then kicked.
+- With fs devices the snapshot's memory file is mapped shared: the backend
+  maps guest memory through the same file, and must see the guest's writes
+  (resume such a snapshot once).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../seccomp/aarch64-unknown-linux-musl.json   |  13 ++
+ .../seccomp/x86_64-unknown-linux-musl.json    |  13 ++
+ src/vmm/src/device_manager/mod.rs             |   4 +-
+ src/vmm/src/device_manager/persist.rs         |  35 +++-
+ src/vmm/src/devices/virtio/fs/device.rs       |  48 ++++-
+ src/vmm/src/devices/virtio/fs/mod.rs          |   7 +-
+ src/vmm/src/devices/virtio/fs/persist.rs      |  83 +++++++++
+ src/vmm/src/devices/virtio/vhost_user.rs      | 168 +++++++++++++++++-
+ src/vmm/src/persist.rs                        |  51 ++++--
+ src/vmm/src/vstate/memory.rs                  |  14 +-
+ 10 files changed, 404 insertions(+), 32 deletions(-)
+ create mode 100644 src/vmm/src/devices/virtio/fs/persist.rs
+
+diff --git a/resources/seccomp/aarch64-unknown-linux-musl.json b/resources/seccomp/aarch64-unknown-linux-musl.json
+index faf26e2..925a937 100644
+--- a/resources/seccomp/aarch64-unknown-linux-musl.json
++++ b/resources/seccomp/aarch64-unknown-linux-musl.json
+@@ -98,6 +98,19 @@
+                 "syscall": "ftruncate",
+                 "comment": "Used for snapshotting"
+             },
++            {
++                "syscall": "pipe2",
++                "comment": "vhost-user-fs device state transfer when snapshotting",
++                "args": [
++                    {
++                        "index": 1,
++                        "type": "dword",
++                        "op": "eq",
++                        "val": 524288,
++                        "comment": "libc::O_CLOEXEC"
++                    }
++                ]
++            },
+             {
+                 "syscall": "lseek",
+                 "comment": "Used by the block device"
+diff --git a/resources/seccomp/x86_64-unknown-linux-musl.json b/resources/seccomp/x86_64-unknown-linux-musl.json
+index 8ecbc1c..85d2bd9 100644
+--- a/resources/seccomp/x86_64-unknown-linux-musl.json
++++ b/resources/seccomp/x86_64-unknown-linux-musl.json
+@@ -98,6 +98,19 @@
+                 "syscall": "ftruncate",
+                 "comment": "Used for snapshotting"
+             },
++            {
++                "syscall": "pipe2",
++                "comment": "vhost-user-fs device state transfer when snapshotting",
++                "args": [
++                    {
++                        "index": 1,
++                        "type": "dword",
++                        "op": "eq",
++                        "val": 524288,
++                        "comment": "libc::O_CLOEXEC"
++                    }
++                ]
++            },
+             {
+                 "syscall": "lseek",
+                 "comment": "Used by the block device"
+diff --git a/src/vmm/src/device_manager/mod.rs b/src/vmm/src/device_manager/mod.rs
+index 37d00db..a462975 100644
+--- a/src/vmm/src/device_manager/mod.rs
++++ b/src/vmm/src/device_manager/mod.rs
+@@ -438,7 +438,7 @@ impl DeviceManager {
+         }
+     }
+ 
+-    fn for_each_virtio_device_mut(
++    pub(crate) fn for_each_virtio_device_mut(
+         &self,
+         mut f: impl FnMut(VirtioDeviceType, &mut dyn VirtioDevice),
+     ) {
+@@ -645,6 +645,8 @@ pub enum DevicePersistError {
+     Pmem(#[from] PmemPersistError),
+     /// virtio-mem: {0}
+     VirtioMem(#[from] VirtioMemPersistError),
++    /// vhost-user-fs: {0}
++    Fs(#[from] crate::devices::virtio::fs::VhostUserFsError),
+     /// Could not activate device: {0}
+     DeviceActivation(#[from] ActivateError),
+     /// Resource allocator error: {0}
+diff --git a/src/vmm/src/device_manager/persist.rs b/src/vmm/src/device_manager/persist.rs
+index ebdff5b..63540c2 100644
+--- a/src/vmm/src/device_manager/persist.rs
++++ b/src/vmm/src/device_manager/persist.rs
+@@ -22,6 +22,8 @@ use crate::devices::virtio::balloon::persist::{BalloonConstructorArgs, BalloonSt
+ use crate::devices::virtio::block::device::Block;
+ use crate::devices::virtio::block::persist::{BlockConstructorArgs, BlockState};
+ use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
++use crate::devices::virtio::fs::VhostUserFs;
++use crate::devices::virtio::fs::persist::{FsConstructorArgs, VhostUserFsState};
+ use crate::devices::virtio::mem::VirtioMem;
+ use crate::devices::virtio::mem::persist::{VirtioMemConstructorArgs, VirtioMemState};
+ use crate::devices::virtio::net::Net;
+@@ -129,6 +131,9 @@ pub struct DeviceStates {
+     pub pmem_devices: Vec<VirtioDeviceState<PmemState>>,
+     /// Memory device state.
+     pub memory_device: Option<VirtioDeviceState<VirtioMemState>>,
++    /// vhost-user-fs device states.
++    #[serde(default)]
++    pub fs_devices: Vec<VirtioDeviceState<VhostUserFsState>>,
+ }
+ 
+ pub struct MMIODevManagerConstructorArgs<'a> {
+@@ -287,7 +292,14 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
+ 
+             match locked_device.device_type() {
+                 VirtioDeviceType::Fs => {
+-                    unreachable!("create_snapshot refuses vhost-user-fs devices");
++                    let fs = locked_device.as_mut_any().downcast_mut::<VhostUserFs>().unwrap();
++                    let device_state = fs.save();
++                    states.fs_devices.push(VirtioDeviceState {
++                        device_id,
++                        device_state,
++                        transport_state,
++                        device_info,
++                    });
+                 }
+                 VirtioDeviceType::Balloon => {
+                     let device_state = locked_device
+@@ -476,6 +488,27 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
+             )?;
+         }
+ 
++        // vhost-user-fs: each connects to a fresh backend at its socket (the
++        // caller started it), and is handed its saved state on activation.
++        for fs_state in &state.fs_devices {
++            let device = Arc::new(Mutex::new(VhostUserFs::restore(
++                FsConstructorArgs { mem: mem.clone() },
++                &fs_state.device_state,
++            )?));
++
++            constructor_args.vm_resources.fs.devices.push(device.clone());
++
++            restore_helper(
++                device,
++                fs_state.device_state.virtio_state.activated,
++                true,
++                &fs_state.device_id,
++                &fs_state.transport_state,
++                &fs_state.device_info,
++                constructor_args.event_manager,
++            )?;
++        }
++
+         for block_state in &state.block_devices {
+             let device = Arc::new(Mutex::new(Block::restore(
+                 BlockConstructorArgs { mem: mem.clone() },
+diff --git a/src/vmm/src/devices/virtio/fs/device.rs b/src/vmm/src/devices/virtio/fs/device.rs
+index 8aba1bc..99446e7 100644
+--- a/src/vmm/src/devices/virtio/fs/device.rs
++++ b/src/vmm/src/devices/virtio/fs/device.rs
+@@ -57,6 +57,15 @@ pub struct VhostUserFsImpl<T: VhostUserHandleBackend> {
+     pub tag: String,
+ 
+     pub vu_handle: VhostUserHandleImpl<T>,
++    /// The protocol features the backend accepted (DEVICE_STATE: it can be
++    /// snapshotted).
++    pub acked_protocol_features: u64,
++
++    /// Taken by `prepare_snapshot` (the rings stopped): each ring's base and
++    /// the backend's state, for `save`.
++    pub saved_backend: Option<(Vec<u16>, Vec<u8>)>,
++    /// Set by `restore`: what `activate` hands back to the new backend.
++    pub restore_backend: Option<(Vec<u16>, Vec<u8>)>,
+ }
+ 
+ impl<T: VhostUserHandleBackend> std::fmt::Debug for VhostUserFsImpl<T> {
+@@ -77,10 +86,10 @@ impl<T: VhostUserHandleBackend> VhostUserFsImpl<T> {
+         let config_space = config_space(&config.tag)?;
+         let mut vu_handle = VhostUserHandleImpl::<T>::new(&config.socket, NUM_QUEUES)
+             .map_err(VhostUserFsError::VhostUser)?;
+-        // No protocol features needed: the config space is ours (virtiofsd
+-        // has none to offer) and the queue count is fixed.
+-        let (acked_features, _) = vu_handle
+-            .negotiate_features(AVAILABLE_FEATURES, VhostUserProtocolFeatures::empty())
++        // DEVICE_STATE only (the config space is ours and the queue count
++        // fixed): a backend that offers it can be snapshotted.
++        let (acked_features, acked_protocol_features) = vu_handle
++            .negotiate_features(AVAILABLE_FEATURES, VhostUserProtocolFeatures::DEVICE_STATE)
+             .map_err(VhostUserFsError::VhostUser)?;
+         let queue_evts = [
+             EventFd::new(libc::EFD_NONBLOCK).map_err(VhostUserFsError::EventFd)?,
+@@ -98,9 +107,31 @@ impl<T: VhostUserHandleBackend> VhostUserFsImpl<T> {
+             id: config.fs_id.clone(),
+             tag: config.tag.clone(),
+             vu_handle,
++            acked_protocol_features,
++            saved_backend: None,
++            restore_backend: None,
+         })
+     }
+ 
++    /// Before a snapshot (the vCPUs paused): stop the rings and take the
++    /// backend's state. An inactive device has nothing to take. Fails when
++    /// the backend can't hand its state over (no DEVICE_STATE).
++    pub fn prepare_snapshot(&mut self) -> Result<(), VhostUserFsError> {
++        if !self.device_state.is_activated() {
++            self.saved_backend = Some((Vec::new(), Vec::new()));
++            return Ok(());
++        }
++        if self.acked_protocol_features & VhostUserProtocolFeatures::DEVICE_STATE.bits() == 0 {
++            return Err(VhostUserFsError::SnapshottingNotSupported);
++        }
++        let saved = self
++            .vu_handle
++            .save_backend(self.queues.len())
++            .map_err(VhostUserFsError::VhostUser)?;
++        self.saved_backend = Some(saved);
++        Ok(())
++    }
++
+     pub fn config(&self) -> FsDeviceConfig {
+         FsDeviceConfig {
+             fs_id: self.id.clone(),
+@@ -177,11 +208,16 @@ where
+             .enumerate()
+             .map(|(i, (q, e))| (i, q, e))
+             .collect();
++        let restore = self.restore_backend.take();
+         self.vu_handle
+             .set_features(self.acked_features)
+             .and_then(|()| {
+-                self.vu_handle
+-                    .setup_backend(&mem, &queues, interrupt.clone())
++                self.vu_handle.setup_backend_with(
++                    &mem,
++                    &queues,
++                    interrupt.clone(),
++                    restore.as_ref().map(|(b, s)| (b.as_slice(), s.as_slice())),
++                )
+             })
+             .map_err(ActivateError::VhostUser)?;
+         self.device_state = DeviceState::Activated(ActiveState { mem, interrupt });
+diff --git a/src/vmm/src/devices/virtio/fs/mod.rs b/src/vmm/src/devices/virtio/fs/mod.rs
+index 4a5c28e..6f65db9 100644
+--- a/src/vmm/src/devices/virtio/fs/mod.rs
++++ b/src/vmm/src/devices/virtio/fs/mod.rs
+@@ -7,6 +7,7 @@
+ 
+ pub mod device;
+ pub mod event_handler;
++pub mod persist;
+ 
+ pub use self::device::{VhostUserFs, VhostUserFsImpl};
+ use crate::devices::virtio::vhost_user::VhostUserError;
+@@ -26,8 +27,12 @@ pub const TAG_LEN: usize = 36;
+ pub enum VhostUserFsError {
+     /// Invalid tag {0:?}: 1 to 36 bytes, no NUL
+     Tag(String),
+-    /// Snapshotting of vhost-user-fs devices is not supported
++    /// The vhost-user-fs backend can't be snapshotted (it doesn't offer VHOST_USER_PROTOCOL_F_DEVICE_STATE; virtiofsd needs migration support)
+     SnapshottingNotSupported,
++    /// Snapshot state was not taken before saving
++    NotPrepared,
++    /// Invalid saved state: {0}
++    Persist(crate::devices::virtio::persist::PersistError),
+     /// Vhost-user error: {0}
+     VhostUser(VhostUserError),
+     /// Error opening eventfd: {0}
+diff --git a/src/vmm/src/devices/virtio/fs/persist.rs b/src/vmm/src/devices/virtio/fs/persist.rs
+new file mode 100644
+index 0000000..3ce22b3
+--- /dev/null
++++ b/src/vmm/src/devices/virtio/fs/persist.rs
+@@ -0,0 +1,83 @@
++// Copyright 2026 Bromure. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++//! Saving and restoring vhost-user-fs devices: the virtio state, each
++//! ring's base and the backend's own state (virtiofsd's, through
++//! VHOST_USER_PROTOCOL_F_DEVICE_STATE). The restored device connects to a
++//! fresh backend at the same socket path, which the caller has started.
++
++use serde::{Deserialize, Serialize};
++
++use super::device::VhostUserFs;
++use super::{NUM_QUEUES, QUEUE_SIZE, VhostUserFsError};
++use crate::devices::virtio::device::{DeviceState, VirtioDeviceType};
++use crate::devices::virtio::persist::VirtioDeviceState;
++use crate::snapshot::Persist;
++use crate::utils::u64_to_usize;
++use crate::vmm_config::fs::FsDeviceConfig;
++use crate::vstate::memory::GuestMemoryMmap;
++
++/// vhost-user-fs device state.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct VhostUserFsState {
++    pub id: String,
++    pub tag: String,
++    pub socket_path: String,
++    pub virtio_state: VirtioDeviceState,
++    /// Where each ring's backend stopped.
++    pub vring_bases: Vec<u16>,
++    /// The backend's state blob.
++    pub backend_state: Vec<u8>,
++}
++
++/// What a restored fs device needs.
++#[derive(Debug)]
++pub struct FsConstructorArgs {
++    pub mem: GuestMemoryMmap,
++}
++
++impl Persist<'_> for VhostUserFs {
++    type State = VhostUserFsState;
++    type ConstructorArgs = FsConstructorArgs;
++    type Error = VhostUserFsError;
++
++    fn save(&self) -> Self::State {
++        // create_snapshot ran prepare_snapshot on every fs device first.
++        let (vring_bases, backend_state) = self.saved_backend.clone().unwrap_or_default();
++        VhostUserFsState {
++            id: self.id.clone(),
++            tag: self.tag.clone(),
++            socket_path: self.vu_handle.socket_path.clone(),
++            virtio_state: VirtioDeviceState::from_device(self),
++            vring_bases,
++            backend_state,
++        }
++    }
++
++    fn restore(
++        constructor_args: Self::ConstructorArgs,
++        state: &Self::State,
++    ) -> Result<Self, Self::Error> {
++        let mut fs = VhostUserFs::new(&FsDeviceConfig {
++            fs_id: state.id.clone(),
++            tag: state.tag.clone(),
++            socket: state.socket_path.clone(),
++        })?;
++        fs.queues = state
++            .virtio_state
++            .build_queues_checked(
++                &constructor_args.mem,
++                VirtioDeviceType::Fs,
++                u64_to_usize(NUM_QUEUES),
++                QUEUE_SIZE,
++            )
++            .map_err(VhostUserFsError::Persist)?;
++        fs.avail_features = state.virtio_state.avail_features;
++        fs.acked_features = state.virtio_state.acked_features;
++        if state.virtio_state.activated {
++            fs.restore_backend = Some((state.vring_bases.clone(), state.backend_state.clone()));
++        }
++        fs.device_state = DeviceState::Inactive;
++        Ok(fs)
++    }
++}
+diff --git a/src/vmm/src/devices/virtio/vhost_user.rs b/src/vmm/src/devices/virtio/vhost_user.rs
+index 1792824..3051d5d 100644
+--- a/src/vmm/src/devices/virtio/vhost_user.rs
++++ b/src/vmm/src/devices/virtio/vhost_user.rs
+@@ -4,7 +4,9 @@
+ // Portions Copyright 2019 Intel Corporation. All Rights Reserved.
+ // SPDX-License-Identifier: Apache-2.0
+ 
+-use std::os::fd::AsRawFd;
++use std::fs::File;
++use std::io::{Read, Write};
++use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+ use std::os::unix::net::UnixStream;
+ use std::sync::Arc;
+ 
+@@ -55,6 +57,12 @@ pub enum VhostUserError {
+     VhostUserNoMemoryRegion,
+     /// Invalid used address
+     UsedAddress(GuestMemoryError),
++    /// Get vring base failed: {0}
++    VhostUserGetVringBase(VhostError),
++    /// Device state transfer failed: {0}
++    VhostUserDeviceState(VhostError),
++    /// Device state transfer pipe failed: {0}
++    DeviceStatePipe(std::io::Error),
+ }
+ 
+ // Trait with all methods we use from `Frontend` from vhost crate.
+@@ -160,6 +168,23 @@ pub trait VhostUserHandleBackend: Sized {
+     ) -> Result<(), vhost::Error> {
+         unimplemented!()
+     }
++
++    fn get_vring_base(&self, _queue_index: usize) -> Result<u32, vhost::Error> {
++        unimplemented!()
++    }
++
++    fn set_device_state_fd(
++        &self,
++        _direction: VhostTransferStateDirection,
++        _phase: VhostTransferStatePhase,
++        _fd: OwnedFd,
++    ) -> Result<Option<File>, vhost::Error> {
++        unimplemented!()
++    }
++
++    fn check_device_state(&self) -> Result<(), vhost::Error> {
++        unimplemented!()
++    }
+ }
+ 
+ impl VhostUserHandleBackend for Frontend {
+@@ -260,6 +285,23 @@ impl VhostUserHandleBackend for Frontend {
+     ) -> Result<(), vhost::Error> {
+         <Frontend as VhostUserFrontend>::set_config(self, offset, flags, buf)
+     }
++
++    fn get_vring_base(&self, queue_index: usize) -> Result<u32, vhost::Error> {
++        <Frontend as VhostBackend>::get_vring_base(self, queue_index)
++    }
++
++    fn set_device_state_fd(
++        &self,
++        direction: VhostTransferStateDirection,
++        phase: VhostTransferStatePhase,
++        fd: OwnedFd,
++    ) -> Result<Option<File>, vhost::Error> {
++        <Frontend as VhostUserFrontend>::set_device_state_fd(self, direction, phase, fd)
++    }
++
++    fn check_device_state(&self) -> Result<(), vhost::Error> {
++        <Frontend as VhostUserFrontend>::check_device_state(self)
++    }
+ }
+ 
+ pub type VhostUserHandle = VhostUserHandleImpl<Frontend>;
+@@ -399,6 +441,96 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
+         mem: &GuestMemoryMmap,
+         queues: &[(usize, &Queue, &EventFd)],
+         interrupt: Arc<dyn VirtioInterrupt>,
++    ) -> Result<(), VhostUserError> {
++        self.setup_backend_with(mem, queues, interrupt, None)
++    }
++
++    /// Stops every ring (GET_VRING_BASE: the backend finishes what it took,
++    /// then reports where it stopped) and takes the backend's internal state
++    /// (SET_DEVICE_STATE_FD save + CHECK_DEVICE_STATE): what a restore hands
++    /// back. The rings stay stopped: the VM is going away.
++    pub fn save_backend(&self, num_queues: usize) -> Result<(Vec<u16>, Vec<u8>), VhostUserError> {
++        let mut bases = Vec::with_capacity(num_queues);
++        for i in 0..num_queues {
++            let base = self
++                .vu
++                .get_vring_base(i)
++                .map_err(VhostUserError::VhostUserGetVringBase)?;
++            bases.push(u16::try_from(base).unwrap_or(u16::MAX));
++        }
++        let (mut ours, theirs) = Self::pipe()?;
++        let reply = self
++            .vu
++            .set_device_state_fd(
++                VhostTransferStateDirection::SAVE,
++                VhostTransferStatePhase::STOPPED,
++                theirs,
++            )
++            .map_err(VhostUserError::VhostUserDeviceState)?;
++        // The backend may hand back a pipe of its own to read from instead.
++        if let Some(file) = reply {
++            ours = file;
++        }
++        let mut state = Vec::new();
++        ours.read_to_end(&mut state)
++            .map_err(VhostUserError::DeviceStatePipe)?;
++        self.vu
++            .check_device_state()
++            .map_err(VhostUserError::VhostUserDeviceState)?;
++        Ok((bases, state))
++    }
++
++    /// A pipe: (read end, write end).
++    fn pipe() -> Result<(File, OwnedFd), VhostUserError> {
++        let mut fds = [0i32; 2];
++        // SAFETY: fds is a valid 2-element array for pipe2 to fill.
++        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
++            return Err(VhostUserError::DeviceStatePipe(std::io::Error::last_os_error()));
++        }
++        // SAFETY: pipe2 just returned these two fds, owned by nobody else.
++        Ok(unsafe { (File::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
++    }
++
++    /// Writes `state` back into a restored backend (SET_DEVICE_STATE_FD
++    /// load + CHECK_DEVICE_STATE), while its rings are still stopped.
++    fn load_backend_state(&self, state: &[u8]) -> Result<(), VhostUserError> {
++        let (ours, theirs) = Self::pipe()?;
++        let (read_end, mut write_end): (OwnedFd, File) = {
++            // For a load the backend reads: hand it the read end, write ours.
++            let r: OwnedFd = ours.into();
++            let w: File = File::from(theirs);
++            (r, w)
++        };
++        let reply = self
++            .vu
++            .set_device_state_fd(
++                VhostTransferStateDirection::LOAD,
++                VhostTransferStatePhase::STOPPED,
++                read_end,
++            )
++            .map_err(VhostUserError::VhostUserDeviceState)?;
++        if let Some(file) = reply {
++            write_end = file;
++        }
++        write_end
++            .write_all(state)
++            .map_err(VhostUserError::DeviceStatePipe)?;
++        drop(write_end);
++        self.vu
++            .check_device_state()
++            .map_err(VhostUserError::VhostUserDeviceState)
++    }
++
++    /// `setup_backend`, or with `restore` (the saved ring bases and backend
++    /// state) the restore of a snapshotted device: each ring resumes where
++    /// the backend stopped, and the backend's state is loaded before any
++    /// ring is kicked.
++    pub fn setup_backend_with(
++        &mut self,
++        mem: &GuestMemoryMmap,
++        queues: &[(usize, &Queue, &EventFd)],
++        interrupt: Arc<dyn VirtioInterrupt>,
++        restore: Option<(&[u16], &[u8])>,
+     ) -> Result<(), VhostUserError> {
+         // Provide the memory table to the backend.
+         self.update_mem_table(mem)?;
+@@ -433,8 +565,12 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
+             self.vu
+                 .set_vring_addr(*queue_index, &config_data)
+                 .map_err(VhostUserError::VhostUserSetVringAddr)?;
++            let base = match restore {
++                Some((bases, _)) => bases.get(*queue_index).copied().unwrap_or(0),
++                None => queue.avail_ring_idx_get(),
++            };
+             self.vu
+-                .set_vring_base(*queue_index, queue.avail_ring_idx_get())
++                .set_vring_base(*queue_index, base)
+                 .map_err(VhostUserError::VhostUserSetVringBase)?;
+ 
+             // No matter the queue, we set irq_evt for signaling the guest that buffers were
+@@ -453,13 +589,29 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
+                 )
+                 .map_err(VhostUserError::VhostUserSetVringCall)?;
+ 
+-            self.vu
+-                .set_vring_kick(*queue_index, queue_evt)
+-                .map_err(VhostUserError::VhostUserSetVringKick)?;
++            if restore.is_none() {
++                self.vu
++                    .set_vring_kick(*queue_index, queue_evt)
++                    .map_err(VhostUserError::VhostUserSetVringKick)?;
+ 
+-            self.vu
+-                .set_vring_enable(*queue_index, true)
+-                .map_err(VhostUserError::VhostUserSetVringEnable)?;
++                self.vu
++                    .set_vring_enable(*queue_index, true)
++                    .map_err(VhostUserError::VhostUserSetVringEnable)?;
++            }
++        }
++
++        // A restore: the backend's state goes in while every ring is still
++        // stopped (a ring starts at its kick), then the rings start.
++        if let Some((_, state)) = restore {
++            self.load_backend_state(state)?;
++            for (queue_index, _, queue_evt) in queues.iter() {
++                self.vu
++                    .set_vring_kick(*queue_index, queue_evt)
++                    .map_err(VhostUserError::VhostUserSetVringKick)?;
++                self.vu
++                    .set_vring_enable(*queue_index, true)
++                    .map_err(VhostUserError::VhostUserSetVringEnable)?;
++            }
+         }
+ 
+         Ok(())
+diff --git a/src/vmm/src/persist.rs b/src/vmm/src/persist.rs
+index b872240..41d50b1 100644
+--- a/src/vmm/src/persist.rs
++++ b/src/vmm/src/persist.rs
+@@ -171,18 +171,23 @@ pub fn create_snapshot(
+     vm_info: &VmInfo,
+     params: &CreateSnapshotParams,
+ ) -> Result<(), CreateSnapshotError> {
+-    // A snapshot without the vhost-user-fs devices would restore a guest
+-    // whose mounts point at nothing: refuse it.
+-    let mut has_fs = false;
+-    vmm.device_manager.for_each_virtio_device(|t, _| {
+-        has_fs |= t == crate::devices::virtio::device::VirtioDeviceType::Fs
++    // vhost-user-fs devices: their rings stopped and their backends' state
++    // taken first (the vCPUs are paused); a backend that can't hand its
++    // state over refuses the snapshot.
++    let mut fs_error = None;
++    vmm.device_manager.for_each_virtio_device_mut(|t, device| {
++        if t == crate::devices::virtio::device::VirtioDeviceType::Fs
++            && fs_error.is_none()
++            && let Some(fs) = device
++                .as_mut_any()
++                .downcast_mut::<crate::devices::virtio::fs::VhostUserFs>()
++            && let Err(e) = fs.prepare_snapshot()
++        {
++            fs_error = Some(e.to_string());
++        }
+     });
+-    if has_fs {
+-        return Err(CreateSnapshotError::MicrovmState(
+-            MicrovmStateError::NotAllowed(
+-                "vhost-user-fs devices do not support snapshotting".into(),
+-            ),
+-        ));
++    if let Some(e) = fs_error {
++        return Err(CreateSnapshotError::MicrovmState(MicrovmStateError::NotAllowed(e)));
+     }
+     let microvm_state = vmm
+         .save_state(vm_info)
+@@ -473,12 +478,21 @@ pub fn restore_from_snapshot(
+                 )
+                 .into());
+             }
++            // vhost-user-fs backends map guest memory through its file:
++            // a private mapping of the snapshot would hide the guest's writes
++            // from them. With fs devices the snapshot file is mapped shared
++            // (it becomes the running guest's memory: resume it once).
++            let shared = matches!(
++                &microvm_state.device_states.virtio_state,
++                crate::device_manager::VirtioDevicesState::Mmio(m) if !m.fs_devices.is_empty()
++            );
+             (
+                 guest_memory_from_file(
+                     mem_backend_path,
+                     mem_state,
+                     track_dirty_pages,
+                     vm_resources.machine_config.huge_pages,
++                    shared,
+                 )
+                 .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
+                 None,
+@@ -543,10 +557,19 @@ fn guest_memory_from_file(
+     mem_state: &GuestMemoryState,
+     track_dirty_pages: bool,
+     huge_pages: HugePageConfig,
++    shared: bool,
+ ) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
+-    let mem_file = File::open(mem_file_path)?;
+-    let guest_mem =
+-        memory::snapshot_file(mem_file, mem_state.regions(), track_dirty_pages, huge_pages)?;
++    let mem_file = std::fs::OpenOptions::new()
++        .read(true)
++        .write(shared)
++        .open(mem_file_path)?;
++    let guest_mem = memory::snapshot_file_with(
++        mem_file,
++        mem_state.regions(),
++        track_dirty_pages,
++        huge_pages,
++        shared,
++    )?;
+     Ok(guest_mem)
+ }
+ 
+diff --git a/src/vmm/src/vstate/memory.rs b/src/vmm/src/vstate/memory.rs
+index 888e8c5..f23a8ab 100644
+--- a/src/vmm/src/vstate/memory.rs
++++ b/src/vmm/src/vstate/memory.rs
+@@ -966,6 +966,18 @@ pub fn snapshot_file(
+     regions: impl Iterator<Item = (GuestAddress, usize)>,
+     track_dirty_pages: bool,
+     huge_pages: HugePageConfig,
++) -> Result<Vec<GuestRegionMmap>, MemoryError> {
++    snapshot_file_with(file, regions, track_dirty_pages, huge_pages, false)
++}
++
++/// `snapshot_file`, mapped shared when `shared` (the guest's writes land in
++/// the file, where a vhost-user backend mapping it sees them).
++pub fn snapshot_file_with(
++    file: File,
++    regions: impl Iterator<Item = (GuestAddress, usize)>,
++    track_dirty_pages: bool,
++    huge_pages: HugePageConfig,
++    shared: bool,
+ ) -> Result<Vec<GuestRegionMmap>, MemoryError> {
+     let regions: Vec<_> = regions.collect();
+     let memory_size = regions
+@@ -982,7 +994,7 @@ pub fn snapshot_file(
+ 
+     create(
+         regions.into_iter(),
+-        libc::MAP_PRIVATE,
++        if shared { libc::MAP_SHARED } else { libc::MAP_PRIVATE },
+         Some(file),
+         track_dirty_pages,
+         huge_pages.madvise_flags(),
