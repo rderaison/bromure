@@ -397,5 +397,10 @@ extension ACAppDelegate {
         }
         s.onEvent?(.finished(success: success, message: message))
         s.onEvent = nil
+        // Its CLI may still exchange a code finished late in the browser:
+        // turned away for a while, never relayed (SignInCapture.spent).
+        let endpoint = Self.tokenEndpoint(for: s.provider)
+        mitmEngine?.signInCaptures.arm(.spentMarker(profileID: s.profileID, hosts: endpoint.hosts,
+                                                      pathPrefix: endpoint.path))
     }
 }

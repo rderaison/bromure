@@ -22,6 +22,27 @@ struct SignInCaptureFailClosedTests {
         let guardRange = try #require(block.range(of: "if reply == nil, status == 200 {"))
         let write = try #require(block.range(of: "try tls.write(reply ?? upstream)"))
         #expect(guardRange.lowerBound < write.lowerBound)
-        #expect(block.contains("\"error\": \"bromure_not_kept\""))
+        #expect(block.contains("reply = SignInCapture.notKeptReply"))
+    }
+
+    @Test("an ended sign-in leaves a spent marker: its late exchange is refused before the provider, then it expires")
+    func spentMarker() throws {
+        let pid = UUID(), t0 = Date()
+        let reg = SignInCaptureRegistry()
+        reg.arm(.spentMarker(profileID: pid, hosts: ["platform.claude.com"], pathPrefix: "/v1/oauth/token", now: t0))
+        let c = try #require(reg.capture(for: pid, now: t0.addingTimeInterval(60)))
+        #expect(c.spent)
+        #expect(c.matches(host: "platform.claude.com", method: "POST", path: "/v1/oauth/token",
+                          body: Data(#"{"grant_type":"authorization_code","code":"x"}"#.utf8)))
+        #expect(reg.capture(for: pid, now: t0.addingTimeInterval(SignInCapture.spentFor + 1)) == nil)
+        // The proxy turns a spent capture away before any upstream request.
+        let p = try Self.src("Sources/AgentCoding/Mitm/HTTPProxy.swift")
+        let spent = try #require(p.range(of: "if capture.spent {"))
+        let relay = try #require(p.range(of: "upstream = try await relayUpstreamCollecting("))
+        #expect(spent.lowerBound < relay.lowerBound)
+        // And every end leaves one.
+        let ss = try Self.src("Sources/AgentCoding/SessionSignIn.swift")
+        let end = try #require(ss.range(of: "func endProxySignIn(_ s: ProxySignIn, success: Bool, message: String?) {"))
+        #expect(ss[end.upperBound...].prefix(1400).contains("signInCaptures.arm(.spentMarker("))
     }
 }

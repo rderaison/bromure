@@ -25,6 +25,35 @@ struct SignInCapture: Sendable {
     /// response): the proxy answers the exchange with it instead of
     /// contacting the provider. nil for every real sign-in.
     var simulatedReply: Data? = nil
+    /// A sign-in that ended (finished, refused, timed out): its CLI may
+    /// still exchange a code the user completes late in the browser, and
+    /// that exchange would bring real tokens to the guest with nothing left
+    /// to keep them. A spent capture answers it with `notKeptReply` without
+    /// contacting the provider (the code is never redeemed), until
+    /// `expiresAt`.
+    var spent = false
+    var expiresAt: Date? = nil
+
+    /// How long an ended sign-in still turns its exchange away.
+    static let spentFor: TimeInterval = 15 * 60
+
+    /// What the guest hears for a token exchange the host doesn't keep.
+    static var notKeptReply: Data {
+        response(status: 400, reason: "Bad Request", json: [
+            "error": "bromure_not_kept",
+            "error_description": "Bromure didn't keep this sign-in. Start it again from the session's sign-in card.",
+        ])
+    }
+
+    /// The marker an ended sign-in leaves on its endpoint.
+    static func spentMarker(profileID: UUID, hosts: Set<String>, pathPrefix: String,
+                            now: Date = Date()) -> SignInCapture {
+        var c = SignInCapture(profileID: profileID, hosts: hosts, pathPrefix: pathPrefix,
+                              handle: { _, _ in nil })
+        c.spent = true
+        c.expiresAt = now.addingTimeInterval(spentFor)
+        return c
+    }
 
     /// The token exchange — not a refresh, which the guest never needs in
     /// subscription mode and which must not be swallowed if it happens.
@@ -65,8 +94,12 @@ final class SignInCaptureRegistry: @unchecked Sendable {
         captures[profileID] = nil
     }
 
-    func capture(for profileID: UUID) -> SignInCapture? {
+    func capture(for profileID: UUID, now: Date = Date()) -> SignInCapture? {
         lock.lock(); defer { lock.unlock() }
+        if let c = captures[profileID], let until = c.expiresAt, now >= until {
+            captures[profileID] = nil
+            return nil
+        }
         return captures[profileID]
     }
 }
