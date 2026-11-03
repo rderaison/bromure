@@ -1,5 +1,7 @@
 import Foundation
-import Security
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import SandboxEngine
 
 /// Ships detailed per-request HTTP logs from the MITM proxy to the
@@ -54,8 +56,7 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
     // MARK: State (all touched only on `queue`)
     private let queue = DispatchQueue(label: "io.bromure.ac.trace-upload", qos: .utility)
     private let endpoint: URL
-    private let session: URLSession
-    private let delegate: BACMTLSDelegate
+    private let session: BACMTLSClient
     /// Buffered events keyed by "\(sessionID)|\(profileID)".
     private var groups: [String: Group] = [:]
     /// Envelopes converted from `groups` and awaiting a successful POST.
@@ -81,11 +82,7 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
 
     public init(endpoint: URL? = nil) {
         self.endpoint = endpoint ?? Self.defaultHTTPIngestURL
-        self.delegate = BACMTLSDelegate()
-        let config = URLSessionConfiguration.ephemeral
-        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        config.timeoutIntervalForRequest = 30
-        self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        self.session = BACMTLS.makeClient(timeout: 30)
         startFlushTimer()
     }
 
@@ -127,7 +124,7 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
             self.flushTimer?.cancel()
             self.flushTimer = nil
         }
-        session.finishTasksAndInvalidate()
+        session.shutdown(cancelling: false)
     }
 
     // MARK: Buffering / flush (queue-isolated)
@@ -204,7 +201,7 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
         req.setValue(install.orgSlug, forHTTPHeaderField: "X-Bromure-Org")
         req.httpBody = body
 
-        let task = session.dataTask(with: req) { [weak self] _, resp, err in
+        session.send(req) { [weak self] _, resp, err in
             guard let self else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             let ok = err == nil && (200...299).contains(code)
@@ -232,7 +229,6 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
                 }
             }
         }
-        task.resume()
     }
 
     private func encodeEnvelope(_ env: Envelope, install: BACInstall) -> Data {

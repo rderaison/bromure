@@ -1,8 +1,17 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import _CryptoExtras
 import SandboxEngine
+#if canImport(Security)
 import Security
+#endif
 import X509
 import SwiftASN1
 
@@ -45,7 +54,7 @@ public enum BACEnrollmentHealth: String, Codable, Sendable {
 }
 
 public enum BACEnrollmentError: Error, LocalizedError {
-    case keychainFailure(OSStatus, String)
+    case keychainFailure(Int32, String)   // an OSStatus on Apple platforms
     case alreadyEnrolled
     case wrongApp(String)
     case notEnrolled
@@ -215,6 +224,7 @@ public enum BACEnrollmentStore {
     // "different" binary — the user gets an access prompt per build. The
     // data-protection keychain is app-scoped with no UI (same choice as
     // SecretsVault).
+    #if canImport(Security)
     private static func storeKeychain(account: String, data: Data) throws {
         deleteKeychain(account: account)
         let attrs: [String: Any] = [
@@ -275,6 +285,21 @@ public enum BACEnrollmentStore {
             SecItemDelete(query as CFDictionary)
         }
     }
+    #else
+    // Off Apple platforms: the daemon's secret store (ACLinux provides
+    // BACSecretStore; per-user and 0600, see linux/SECRET_STORE.md).
+    private static func storeKeychain(account: String, data: Data) throws {
+        try BACSecretStore.store(service: keychainService, account: account, data: data)
+    }
+
+    private static func readKeychain(account: String) -> Data? {
+        BACSecretStore.read(service: keychainService, account: account)
+    }
+
+    private static func deleteKeychain(account: String) {
+        BACSecretStore.delete(service: keychainService, account: account)
+    }
+    #endif
 }
 
 /// High-level orchestrator: redeem a code → store install + bearer →
@@ -440,7 +465,7 @@ public final class BACEnrollment {
         OpenShellGovernance.shared.setManaged(nil)
         // Drop any cached SecIdentity so the next enrollment doesn't reuse
         // the previous leaf for an mTLS handshake.
-        BACMTLSIdentity.purge()
+        BACMTLS.purgeIdentity()
         await MainActor.run { Self.onStateChange?() }
     }
 
@@ -482,7 +507,7 @@ public final class BACEnrollment {
         )
         // New material → drop any cached SecIdentity so subsequent uploads
         // present the freshly-issued leaf.
-        BACMTLSIdentity.purge()
+        BACMTLS.purgeIdentity()
         // A signed CSR proves the bearer token still works, so clear a
         // stale `.tokenRejected` (e.g. the user hit "Renew certificate"
         // after the server re-accepted them). Don't override `.revoked`.
@@ -620,11 +645,8 @@ public final class BACIPRegister {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = Data("{\"schemaVersion\":1}".utf8)
 
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 15
-        let delegate = BACMTLSDelegate()
-        let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
+        let session = BACMTLS.makeClient(timeout: 15)
+        defer { session.shutdown(cancelling: true) }
         do {
             let (_, resp) = try await session.data(for: req)
             if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {

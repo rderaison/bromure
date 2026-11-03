@@ -1,5 +1,7 @@
 import Foundation
-import Security
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import SandboxEngine
 
 /// Batches `BACCloudEvent`s and POSTs them to the analytics service's
@@ -36,12 +38,11 @@ public final class BACCloudUploader: @unchecked Sendable {
     /// Endpoint to POST batches to. Defaults to `analytics.bromure.io`,
     /// overridable via `BROMURE_AC_INGEST_URL` for dev/staging.
     private let endpoint: URL
-    /// URLSession configured with the mTLS challenge handler. Held by
-    /// the uploader so the connection pool / TLS session cache survives
-    /// across flushes — re-handshaking on every batch would defeat the
-    /// point of keeping the session warm.
-    private let session: URLSession
-    private let delegate: BACMTLSDelegate
+    /// The mTLS client (BACMTLSClient). Held by the uploader so the
+    /// connection pool / TLS session cache survives across flushes —
+    /// re-handshaking on every batch would defeat the point of keeping the
+    /// session warm.
+    private let session: BACMTLSClient
 
     public convenience init() {
         self.init(endpoint: BACEnrollment.defaultAnalyticsURL)
@@ -49,11 +50,7 @@ public final class BACCloudUploader: @unchecked Sendable {
 
     public init(endpoint: URL) {
         self.endpoint = endpoint
-        self.delegate = BACMTLSDelegate()
-        let config = URLSessionConfiguration.ephemeral
-        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        config.timeoutIntervalForRequest = 30
-        self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        self.session = BACMTLS.makeClient(timeout: 30)
         flushTask = Task { [weak self] in
             await self?.flushLoop()
         }
@@ -87,7 +84,7 @@ public final class BACCloudUploader: @unchecked Sendable {
         stopped = true
         lock.unlock()
         flushTask?.cancel()
-        session.finishTasksAndInvalidate()
+        session.shutdown(cancelling: false)
     }
 
     private func flushLoop() async {
@@ -177,36 +174,5 @@ public final class BACCloudUploader: @unchecked Sendable {
             throw NSError(domain: "BAC.Uploader", code: status,
                           userInfo: [NSLocalizedDescriptionKey: "HTTP \(status)"])
         }
-    }
-}
-
-/// URLSession delegate that answers TLS client-cert challenges with the
-/// install's leaf cert via `BACMTLSIdentity`. Server trust is left to
-/// the system default — the analytics service uses an ACME-issued
-/// public cert, so the regular root-store path applies.
-/// mTLS challenge handler that authenticates as the install. Shared
-/// across `BACCloudUploader` (event ingest) and `BACIPRegister`
-/// (egress IP heartbeat); both target analytics.bromure.io which
-/// trusts the workspace's org-CA-signed leaf.
-internal final class BACMTLSDelegate: NSObject, URLSessionDelegate {
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void,
-    ) {
-        let method = challenge.protectionSpace.authenticationMethod
-        if method == NSURLAuthenticationMethodClientCertificate {
-            do {
-                let identity = try BACMTLSIdentity.current()
-                let cred = URLCredential(identity: identity, certificates: nil, persistence: .forSession)
-                completionHandler(.useCredential, cred)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[bac/uploader] no mTLS identity: \(error)\n".utf8))
-                completionHandler(.cancelAuthenticationChallenge, nil)
-            }
-            return
-        }
-        completionHandler(.performDefaultHandling, nil)
     }
 }
