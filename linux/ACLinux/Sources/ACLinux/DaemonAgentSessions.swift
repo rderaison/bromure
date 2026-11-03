@@ -77,7 +77,7 @@ extension Daemon {
     }
 
     /// `POST /agent-sessions/start` and `POST /agent-sessions/<id>/<action>`.
-    // partial: no switchboard, read, worktree-open/-discard yet
+    // partial: no switchboard or read yet
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionCommand h=bf7e30bfb1cc500a @9936e30c
     func agentSessionCommand(_ id: UUID?, _ action: String, _ body: JSONValue) async -> ControlResponse {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
@@ -142,6 +142,27 @@ extension Daemon {
                 let cmd = PaneTypeGuard.prelude(target) + "if _bg; then "
                     + keys.map { "tmux send-keys -t \"$_bt\" \($0)" }.joined(separator: " && sleep 0.15 && ") + "; fi"
                 Task { @MainActor in _ = try? await host.guestExec(profileID: s.profileID, command: cmd, timeout: 15) }
+                return ["ok": true]
+            case (nil, "worktree-open"):
+                // A fat client's Branches window: {profile, entry fields, tool?}.
+                guard let pid = (doc["profile"] as? String).flatMap(UUID.init(uuidString:)),
+                      let dir = doc["dir"] as? String, let branch = doc["branch"] as? String
+                else { return ["error": "profile, dir and branch required"] }
+                let e = WorktreeEntry(dir: dir, root: doc["root"] as? String ?? "", branch: branch,
+                                      parent: doc["parent"] as? String ?? "", ahead: 0, changed: 0,
+                                      lastCommit: nil, display: doc["display"] as? String ?? "")
+                let tool = (doc["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
+                    ?? LinuxSessionHost.shared?.profile(for: pid)?.tool ?? .claude
+                let id = engine.openBranchSession(profileID: pid, entry: e, tool: tool, remotely: true)
+                return ["ok": true, "id": id.uuidString]
+            case (nil, "worktree-discard"):
+                guard let pid = (doc["profile"] as? String).flatMap(UUID.init(uuidString:)),
+                      let root = doc["root"] as? String, let branch = doc["branch"] as? String
+                else { return ["error": "profile, root and branch required"] }
+                let e = WorktreeEntry(dir: "", root: root, branch: branch, parent: "", ahead: 0, changed: 0,
+                                      lastCommit: nil, display: "")
+                engine.discardWorktree(profileID: pid, entry: e,
+                                       session: (doc["session"] as? String).flatMap(UUID.init(uuidString:)))
                 return ["ok": true]
             case (let sid?, "signin"):
                 // The card's sign-in: in the session's own tab, published for
@@ -272,5 +293,18 @@ extension Daemon {
         }
         BACDebug.log("delegation", "withheld (\(hit.signal)): \(hit.detail)")
         return flagged.count > 4000 ? String(flagged.prefix(4000)) + "\n…(truncated)" : flagged
+    }
+
+    /// `POST /agent-sessions/git-state {id}`: whether the session's folder
+    /// is a git repository (the new-worktree sheet offers `git init` if not).
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionGitState h=cbf91830d3252fa3 @b10aa434
+    func agentSessionGitState(_ body: JSONValue) async -> ControlResponse {
+        guard let sid = body["id"]?.stringValue.flatMap(UUID.init(uuidString:)) else { return .error(400, "id required") }
+        let st: GitFolderState? = await { @MainActor in
+            guard let stores = SessionStores.shared, let engine = stores.engine, let s = stores.sessions.session(sid) else { return nil }
+            return await engine.gitState(profileID: s.profileID, cwd: s.cwd)
+        }()
+        guard let st, let v = JSONValue(foundation: st.json) else { return .error(404, "The machine can't be asked right now") }
+        return ControlResponse(200, v)
     }
 }
