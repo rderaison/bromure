@@ -1,6 +1,10 @@
 import Foundation
 import Observation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 
 /// Process-lifetime sink for `TraceRecord`s emitted by the MITM
 /// proxy. Two layers:

@@ -49,6 +49,7 @@
 		269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */; };
 		9812CE45C9409E65735954A9 /* ConsolePresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5174CD6006782AF31EFAF494 /* ConsolePresence.swift */; };
 		F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */; };
+		8E457A83AB41E210BF09C3C6 /* Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6B5B14E7A18F5F6E0EC08A4 /* Conversation.swift */; };
 		B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC7578E83999395F752CAF /* ConversationView.swift */; };
 		43636D2E8824B12B1EA42A4A /* DisplayCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = A306DC4F346D7C5344F297CD /* DisplayCards.swift */; };
 		80A7DD4B862AF33797677E08 /* DisplayRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23839A2A7E1C4775C3108F39 /* DisplayRequest.swift */; };
@@ -215,6 +216,7 @@
 		395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingTasks.swift"; path = "Sources/BromureRemote/_shared/CodingTasks.swift"; sourceTree = "<group>"; };
 		5174CD6006782AF31EFAF494 /* ConsolePresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConsolePresence.swift"; path = "Sources/BromureRemote/_shared/ConsolePresence.swift"; sourceTree = "<group>"; };
 		A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ControlClient.swift"; path = "Sources/BromureRemote/_shared/ControlClient.swift"; sourceTree = "<group>"; };
+		F6B5B14E7A18F5F6E0EC08A4 /* Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Conversation.swift"; path = "Sources/BromureRemote/_shared/Conversation.swift"; sourceTree = "<group>"; };
 		EDCC7578E83999395F752CAF /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConversationView.swift"; path = "Sources/BromureRemote/_shared/ConversationView.swift"; sourceTree = "<group>"; };
 		A306DC4F346D7C5344F297CD /* DisplayCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DisplayCards.swift"; path = "Sources/BromureRemote/_shared/DisplayCards.swift"; sourceTree = "<group>"; };
 		23839A2A7E1C4775C3108F39 /* DisplayRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DisplayRequest.swift"; path = "Sources/BromureRemote/_shared/DisplayRequest.swift"; sourceTree = "<group>"; };
@@ -405,6 +407,7 @@
 				395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */,
 				5174CD6006782AF31EFAF494 /* ConsolePresence.swift */,
 				A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */,
+				F6B5B14E7A18F5F6E0EC08A4 /* Conversation.swift */,
 				EDCC7578E83999395F752CAF /* ConversationView.swift */,
 				A306DC4F346D7C5344F297CD /* DisplayCards.swift */,
 				23839A2A7E1C4775C3108F39 /* DisplayRequest.swift */,
@@ -649,6 +652,7 @@
 				269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */,
 				9812CE45C9409E65735954A9 /* ConsolePresence.swift in Sources */,
 				F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */,
+				8E457A83AB41E210BF09C3C6 /* Conversation.swift in Sources */,
 				B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */,
 				43636D2E8824B12B1EA42A4A /* DisplayCards.swift in Sources */,
 				80A7DD4B862AF33797677E08 /* DisplayRequest.swift in Sources */,

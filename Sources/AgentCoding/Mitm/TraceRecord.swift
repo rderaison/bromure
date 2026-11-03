@@ -251,3 +251,15 @@ private func legacyPreviewRedacted(_ s: String) -> String {
     s
     #endif
 }
+
+/// A workspace session's trace settings, as the proxy reads them per request
+/// (MitmEngine.SessionTrace on macOS): which session its records file under,
+/// and how much it records.
+public struct TraceSession: Sendable {
+    public let sessionID: UUID
+    public let level: TraceLevel
+    public init(sessionID: UUID, level: TraceLevel) {
+        self.sessionID = sessionID
+        self.level = level
+    }
+}

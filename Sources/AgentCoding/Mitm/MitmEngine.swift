@@ -88,14 +88,7 @@ public final class MitmEngine {
     /// decide whether to record + capture bodies. Lock-protected
     /// (rather than @MainActor) because the proxy hot path runs on
     /// a detached Task — `MainActor.assumeIsolated` would trap there.
-    public struct SessionTrace: Sendable {
-        public let sessionID: UUID
-        public let level: TraceLevel
-        public init(sessionID: UUID, level: TraceLevel) {
-            self.sessionID = sessionID
-            self.level = level
-        }
-    }
+    public typealias SessionTrace = TraceSession
     private let sessionTraceLock = NSLock()
     nonisolated(unsafe) private var sessionTraces: [UUID: SessionTrace] = [:]
 
