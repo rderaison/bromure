@@ -52,6 +52,9 @@ final class LinuxSessionHost: AgentSessionHost {
     /// Bind launching sessions to their tabs, end those whose tab went away,
     /// adopt unregistered agent tabs (AgentSessionStore.reconcile), from the
     /// running workspaces' rosters; macOS does it from its session list.
+    /// Then the liveness probe (which agent runs in which tab: what a
+    /// delegation notice waits for before it's typed), as macOS's session
+    /// list timer does (UnifiedSessionWindow.startSessionReconcile).
     // @port ACAppDelegate.sessionEntries(for: SessionListModel) h=f7d00b98aad3ae2a @9936e30c
     func reconcileSessions() {
         let profiles = Dictionary(ProfileStore().loadAll().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -61,6 +64,7 @@ final class LinuxSessionHost: AgentSessionHost {
                 return SessionListModel.VMEntry(id: id, name: p.name, accentHex: p.color.hexInUI, model: model)
             }
         SessionStores.shared?.sessions.reconcile(entries: entries)
+        SessionStores.shared?.engine?.probeLiveness(entries: entries)
         scanLiveSessions()
     }
 
