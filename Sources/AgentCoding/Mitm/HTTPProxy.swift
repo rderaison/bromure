@@ -1323,6 +1323,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
            let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
            capture.matches(host: host, method: reqMethod, path: reqPath,
                            body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
+            // An ended sign-in's late exchange: refused here, the provider
+            // never sees the code.
+            if capture.spent {
+                try tls.write(SignInCapture.notKeptReply)
+                FileHandle.standardError.write(Data(
+                    "[mitm] sign-in exchange \(host)\(reqPath) after its sign-in ended: refused, not sent on\n".utf8))
+                return
+            }
             let upstream: Data
             if let sim = capture.simulatedReply {
                 // The sign-in simulator (e2e): the provider's reply is canned,
@@ -1349,10 +1357,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // provider's error) goes on.
             if reply == nil, status == 200 {
                 refused = true
-                reply = SignInCapture.response(status: 400, reason: "Bad Request", json: [
-                    "error": "bromure_not_kept",
-                    "error_description": "Bromure didn't keep this sign-in. Start it again from the session's sign-in card.",
-                ])
+                reply = SignInCapture.notKeptReply
             }
             try tls.write(reply ?? upstream)
             FileHandle.standardError.write(Data(
