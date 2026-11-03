@@ -2,15 +2,47 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOSSH
+#if canImport(OpenDirectory)
 import OpenDirectory
+#endif
 // The agent host (Sources/AgentHost) compiles this file too, with small
 // stand-ins for SandboxEngine / ProfileStore / SupplyChainLog.
-#if !AGENT_HOST
+#if !AGENT_HOST && !BROMURE_LINUX
 import SandboxEngine
 #endif
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
+
+/// libc by name, for calls made inside types that have same-named methods
+/// (close, read, write…): `Darwin.close` on macOS/iOS, `Glibc.close` on Linux.
+private enum LibC {
+    #if canImport(Darwin)
+    @discardableResult static func close(_ fd: Int32) -> Int32 { Darwin.close(fd) }
+    @discardableResult static func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ n: Int) -> Int { Darwin.read(fd, buf, n) }
+    @discardableResult static func write(_ fd: Int32, _ buf: UnsafeRawPointer?, _ n: Int) -> Int { Darwin.write(fd, buf, n) }
+    @discardableResult static func shutdown(_ fd: Int32, _ how: Int32) -> Int32 { Darwin.shutdown(fd, how) }
+    static func connect(_ fd: Int32, _ a: UnsafePointer<sockaddr>?, _ l: socklen_t) -> Int32 { Darwin.connect(fd, a, l) }
+    static let sockStream = SOCK_STREAM
+    static func socket(_ d: Int32, _ t: Int32, _ p: Int32) -> Int32 { Darwin.socket(d, t, p) }
+    #else
+    // @port-skip linux-only: the Glibc side of LibC (this file is shared with the Linux build)
+    @discardableResult static func close(_ fd: Int32) -> Int32 { Glibc.close(fd) }
+    // @port-skip linux-only: the Glibc side of LibC
+    @discardableResult static func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ n: Int) -> Int { Glibc.read(fd, buf, n) }
+    // @port-skip linux-only: the Glibc side of LibC
+    @discardableResult static func write(_ fd: Int32, _ buf: UnsafeRawPointer?, _ n: Int) -> Int { Glibc.write(fd, buf, n) }
+    // @port-skip linux-only: the Glibc side of LibC
+    @discardableResult static func shutdown(_ fd: Int32, _ how: Int) -> Int32 { Glibc.shutdown(fd, Int32(how)) }
+    // @port-skip linux-only: the Glibc side of LibC
+    static func connect(_ fd: Int32, _ a: UnsafePointer<sockaddr>?, _ l: socklen_t) -> Int32 { Glibc.connect(fd, a, l) }
+    static let sockStream = Int32(SOCK_STREAM.rawValue)
+    // @port-skip linux-only: the Glibc side of LibC
+    static func socket(_ d: Int32, _ t: Int32, _ p: Int32) -> Int32 { Glibc.socket(d, t, p) }
+    #endif
+}
 
 enum RemoteSSHError: Error { case invalidChannelType }
 
@@ -30,6 +62,13 @@ final class RemoteErrorHandler: ChannelInboundHandler {
 enum SystemPassword {
     static func verify(user: String, password: String) -> Bool {
         guard !password.isEmpty else { return false }
+        return accountPasswordMatches(user: user, password: password)
+    }
+
+    /// The platform's check: OpenDirectory on macOS; on Linux, ACLinux's
+    /// LinuxAccountPassword (a one-time enrollment code, or PAM).
+    private static func accountPasswordMatches(user: String, password: String) -> Bool {
+        #if canImport(OpenDirectory)
         do {
             let node = try ODNode(session: ODSession.default(), type: ODNodeType(kODNodeTypeAuthentication))
             let record = try node.record(withRecordType: kODRecordTypeUsers, name: user, attributes: nil)
@@ -38,6 +77,9 @@ enum SystemPassword {
         } catch {
             return false
         }
+        #else
+        return LinuxAccountPassword.verify(user: user, password: password)
+        #endif
     }
 }
 
@@ -373,7 +415,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         // Writability may have come back between the check and the suspend
         // (its event only fires on a change): look again from the loop.
         channel.eventLoop.execute { [weak self] in
-            if channel.isWritable { self?.ioQueue.async { self?.resumeReadPump() } }
+            guard let self, channel.isWritable else { return }
+            self.ioQueue.async { self.resumeReadPump() }
         }
     }
 
@@ -566,7 +609,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     private func drainOut() {
         guard master >= 0 else { return }
         while !outBuffer.isEmpty {
-            let n = outBuffer.withUnsafeBytes { Darwin.write(master, $0.baseAddress, outBuffer.count) }
+            let n = outBuffer.withUnsafeBytes { LibC.write(master, $0.baseAddress, outBuffer.count) }
             if n > 0 {
                 outBuffer.removeFirst(n)
             } else if n < 0 && errno == EINTR {
@@ -586,7 +629,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     private func forwardEOFIfDrained() {
         guard inputEOF, !eofForwarded, master >= 0, outBuffer.isEmpty, pendingInbound.isEmpty else { return }
         eofForwarded = true
-        Darwin.shutdown(master, SHUT_WR)
+        LibC.shutdown(master, SHUT_WR)
     }
 
     private func armWriteSource() {
@@ -638,7 +681,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         src.setEventHandler { [weak self] in
             guard let self else { return }
             var buf = [UInt8](repeating: 0, count: 1 << 15)
-            let n = Darwin.read(masterFD, &buf, buf.count)
+            let n = LibC.read(masterFD, &buf, buf.count)
             if n > 0 {
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
@@ -692,9 +735,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         }
         if let preamble {
             // Small, and the socket is still blocking: written whole.
-            let ok = preamble.withUnsafeBytes { Darwin.write(sockFD, $0.baseAddress, $0.count) } == preamble.count
+            let ok = preamble.withUnsafeBytes { LibC.write(sockFD, $0.baseAddress, $0.count) } == preamble.count
             guard ok else {
-                Darwin.close(sockFD)
+                LibC.close(sockFD)
                 if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
                 channel.close(promise: nil)
                 return
@@ -718,7 +761,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         src.setEventHandler { [weak self] in
             guard let self else { return }
             var buf = [UInt8](repeating: 0, count: 1 << 15)
-            let n = Darwin.read(sockFD, &buf, buf.count)
+            let n = LibC.read(sockFD, &buf, buf.count)
             if n > 0 {
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
@@ -757,7 +800,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         let el = channel.eventLoop
         resolver(ip, port) { [weak self] fd in
             el.execute {
-                guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+                guard let self else { if fd >= 0 { LibC.close(fd) }; return }
                 FatClientLog.log("forward: resolver \(ip):\(port) -> fd=\(fd)")
                 self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
             }
@@ -781,7 +824,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         let el = channel.eventLoop
         resolver(ip) { [weak self] fd in
             el.execute {
-                guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+                guard let self else { if fd >= 0 { LibC.close(fd) }; return }
                 FatClientLog.log("forward-udp: resolver \(ip) -> fd=\(fd)")
                 self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
             }
@@ -805,7 +848,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         let el = channel.eventLoop
         resolver(vm) { [weak self] fd in
             el.execute {
-                guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+                guard let self else { if fd >= 0 { LibC.close(fd) }; return }
                 FatClientLog.log("browser-mcp: resolver \(vm) -> fd=\(fd)")
                 self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
             }
@@ -833,7 +876,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
             // stream goes to the next one.
             guard self != nil, channel.isActive else { return false }
             el.execute {
-                guard let self else { Darwin.close(fd); return }
+                guard let self else { LibC.close(fd); return }
                 FatClientLog.log("delegation-mcp: stream -> fd=\(fd)")
                 self.wireResolvedFD(channel: channel, wantReply: false, fd: fd)
             }
@@ -860,7 +903,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         src.setEventHandler { [weak self] in
             guard let self else { return }
             var buf = [UInt8](repeating: 0, count: 1 << 15)
-            let n = Darwin.read(fd, &buf, buf.count)
+            let n = LibC.read(fd, &buf, buf.count)
             if n > 0 {
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
@@ -875,13 +918,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
 
     /// Connect a blocking AF_UNIX stream socket to `path`. Returns -1 on failure.
     private static func connectUnix(path: String) -> Int32 {
-        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = LibC.socket(AF_UNIX, LibC.sockStream, 0)
         guard fd >= 0 else { return -1 }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)
         let cap = MemoryLayout.size(ofValue: addr.sun_path)
-        guard bytes.count < cap else { Darwin.close(fd); return -1 }
+        guard bytes.count < cap else { LibC.close(fd); return -1 }
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
             ptr.withMemoryRebound(to: UInt8.self, capacity: cap) { dst in
                 for (i, b) in bytes.enumerated() { dst[i] = b }
@@ -890,17 +933,17 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         }
         let rc = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                LibC.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        if rc != 0 { Darwin.close(fd); return -1 }
+        if rc != 0 { LibC.close(fd); return -1 }
         return fd
     }
 
     private func applyWinsize() {
         guard master >= 0 else { return }
         var w = winsize(ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0)
-        _ = ioctl(master, TIOCSWINSZ, &w)
+        _ = ioctl(master, UInt(TIOCSWINSZ), &w)
     }
 
     /// Child exited (PTY EOF): reap it, report exit status, close the channel.
@@ -908,7 +951,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         guard !terminated else { return }
         terminated = true
         cancelReadSource()
-        Darwin.close(master)
+        LibC.close(master)
         var status: Int32 = 0
         if pid > 0 { waitpid(pid, &status, 0) }
         let code = (status & 0x7f) == 0 ? Int((status >> 8) & 0xff) : 0
@@ -925,7 +968,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         cancelReadSource()
         writeSource?.cancel()
         writeSource = nil
-        if master >= 0 { Darwin.close(master) }
+        if master >= 0 { LibC.close(master) }
         if pid > 0 {
             kill(pid, SIGHUP)
             var st: Int32 = 0
@@ -942,7 +985,7 @@ enum PTYSpawn {
     /// multithreaded process.
     static func spawn(path: String, argv: [String], env: [String],
                       win: inout winsize) -> (pid_t, Int32) {
-        let cPath = strdup(path)
+        guard let cPath = strdup(path) else { return (-1, -1) }
         var cArgv: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
         cArgv.append(nil)
         var cEnv: [UnsafeMutablePointer<CChar>?] = env.map { strdup($0) }
@@ -965,7 +1008,7 @@ enum PTYSpawn {
                     // 0/1/2. macOS has no closefrom(), so loop.
                     var fd = Int32(3)
                     let maxFD = getdtablesize()
-                    while fd < maxFD { Darwin.close(fd); fd += 1 }
+                    while fd < maxFD { LibC.close(fd); fd += 1 }
                     // The app ignores SIGPIPE (its socket writes want EPIPE);
                     // an ignored signal survives exec, and a shell leaves it
                     // ignored for what it runs: `yes | head` never stopped.
