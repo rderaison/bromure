@@ -1,4 +1,6 @@
+#if canImport(Combine)
 import Combine
+#endif
 import Foundation
 
 // MARK: - Live model / credential refresh — no VM restart
@@ -72,6 +74,7 @@ enum LiveModelRefresh {
     }
 }
 
+#if os(macOS)   // the app's watch on the Models settings (Combine)
 extension ACAppDelegate {
 
     /// Watch the global Models settings and the host-side logins; a change
@@ -156,6 +159,7 @@ extension ACAppDelegate {
         agentSessionEngine.restartAgentsInPlace(profileID: profileID, tools: tools)
     }
 }
+#endif
 
 extension AgentSessionEngine {
     /// Restart every live session of `tools` on `profileID` in its own tab,

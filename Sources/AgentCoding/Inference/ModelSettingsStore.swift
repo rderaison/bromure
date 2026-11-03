@@ -12,12 +12,19 @@ import Combine
 /// Global by design: a workspace picks *which* agent to run, but the models and
 /// credentials all come from here, so every agent is configured everywhere.
 @MainActor
-public final class ModelSettingsStore: ObservableObject {
+public final class ModelSettingsStore {
     public static let shared = ModelSettingsStore()
 
+    #if canImport(Combine)
     @Published public var settings: ModelSettings {
         didSet { if publishesEnvironment { ClaudeAutoMode.userText = settings.agentEnvironment } }
     }
+    #else
+    // No Combine (the Linux daemon): nothing observes the settings there.
+    public var settings: ModelSettings {
+        didSet { if publishesEnvironment { ClaudeAutoMode.userText = settings.agentEnvironment } }
+    }
+    #endif
 
     private let url: URL
     /// The app's own store (not a test's): its environment text is what
@@ -139,3 +146,7 @@ public final class ModelSettingsStore: ObservableObject {
         return global
     }
 }
+
+#if canImport(Combine)
+extension ModelSettingsStore: ObservableObject {}
+#endif
