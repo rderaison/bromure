@@ -30,6 +30,9 @@ public struct VMRecord: Codable, Sendable, Equatable {
     /// The VM's own home size in GiB (nil: the daemon's default); a raise
     /// grows home.img at the next cold boot.
     public var homeGB: Int?
+    /// A registration sign-in's throwaway VM (LinuxRegistration): no
+    /// workspace, never listed, never taken back by a restarted daemon.
+    public var registration: Bool?
 
     // @port-skip linux-only: VM record
     public var shortId: String { String(id.prefix(8)) }

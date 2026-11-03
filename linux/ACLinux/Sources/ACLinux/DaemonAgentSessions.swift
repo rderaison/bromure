@@ -165,8 +165,8 @@ extension Daemon {
                                        session: (doc["session"] as? String).flatMap(UUID.init(uuidString:)))
                 return ["ok": true]
             case (let sid?, "signin"):
-                // The card's sign-in: in the session's own tab, published for
-                // the client (LinuxSessionHost.remoteSignIn).
+                // The card's sign-in: the registration machine, its page
+                // published for the client (LinuxSessionHost.remoteSignIn).
                 guard let host = LinuxSessionHost.shared else { return ["error": "no session host"] }
                 return host.remoteSignIn(sid)
             case (let sid?, "resume"):

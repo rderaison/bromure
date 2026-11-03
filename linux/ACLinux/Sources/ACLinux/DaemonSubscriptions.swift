@@ -11,11 +11,18 @@ extension Daemon {
         let pid = body["profileId"]?.stringValue.flatMap(UUID.init(uuidString:))
         switch (method, path) {
         case ("POST", "/subscriptions/register"):
-            // macOS signs in on a throwaway machine from Preferences; here a
-            // sign-in runs in a session's own tab (its card).
-            // partial: no Preferences sign-in on Linux (the session card's sign-in is the path)
-            return ControlResponse(409, ["ok": false, "error": .string(
-                "Sign in from a session on this server: its card's \"Sign in\" runs the login in that session's tab.")])
+            // The throwaway machine runs here; the page comes back through
+            // /state's pendingRegistration, and the run's id names how it
+            // ended in `registrationEnded`. A refusal says why.
+            guard !provider.isEmpty else { return .error(400, "Missing 'provider'") }
+            let (refused, run) = await MainActor.run { () -> (String?, String?) in
+                guard let host = LinuxSessionHost.shared else { return ("registration unavailable", nil) }
+                let refused = host.beginRemoteRegistration(provider: provider, profileID: pid?.uuidString)
+                return (refused, refused == nil ? RemoteRegistrationBroker.shared.pending?.id.uuidString : nil)
+            }
+            var reply: [String: JSONValue] = ["ok": .bool(refused == nil), "error": .string(refused ?? "")]
+            if let run { reply["registration"] = .string(run) }
+            return ControlResponse(refused == nil ? 202 : 409, .object(reply))
         case ("POST", "/subscriptions/forget"):
             guard let p = SubscriptionProvider(rawValue: provider) else { return .error(400, "Missing 'provider'") }
             let ok = await MainActor.run { () -> Bool in

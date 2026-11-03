@@ -1,12 +1,12 @@
 import Foundation
 
 /// The daemon as the proxy sign-in's host (macOS: SessionSignIn+App.swift),
-/// and a fat client's sign-in card on a Linux server: the session's own
-/// machine runs its CLI's login in its tab (SessionSignIn), the provider's
-/// page is published for the client (RemoteRegistrationBroker in /state),
-/// the client opens it and tunnels the callback into the guest's loopback
-/// (`forward <vmIP> <port>`, the vsock 5010 relay), and the proxy's capture
-/// keeps the credential. guestExec and proxySignIns are the session host's.
+/// and where a fat client's sign-ins start: the card's and Preferences'
+/// both run the registration machine (LinuxRegistration), whose page is
+/// published for the client (RemoteRegistrationBroker in /state); the
+/// client opens it and tunnels the callback into the guest's loopback
+/// (`forward <vmIP> <port>`, the vsock 5010 relay). guestExec and
+/// proxySignIns are the session host's.
 extension LinuxSessionHost: ProxySignInHost {
     /// The proxy's side; nil while the daemon has no proxy.
     // @port-skip linux-only: ACAppDelegate.proxySignInBackend over the daemon's MitmProxy
@@ -16,35 +16,64 @@ extension LinuxSessionHost: ProxySignInHost {
                                   grok: mitm.grokStore, kimi: mitm.kimiStore)
     }
 
-    /// `POST /agent-sessions/<id>/signin`: the session's agent signs in in
-    /// its own tab, published for the client through the broker. The reply
-    /// names the run (`registration`); its end reaches the client through
-    /// /state's `registrationEnded`.
-    // @port-skip linux-only: the card's sign-in on a Linux server (macOS runs a throwaway registration VM: ACAppDelegate.beginSubscriptionRegistration)
+    /// `POST /agent-sessions/<id>/signin`, a fat client's sign-in card: the
+    /// throwaway machine runs here (LinuxRegistration), the client opens the
+    /// page (RemoteRegistrationBroker via /state) and tunnels the callback;
+    /// once the credential lands, the session's agent restarts on the
+    /// stand-in key. The reply names the run (`registration`); its end
+    /// reaches the client through /state's `registrationEnded`.
+    // @port-skip linux-only: the "signin" case of ACAppDelegate's onAgentSessionCommand, over LinuxRegistration
     func remoteSignIn(_ sid: UUID) -> [String: Any] {
-        let store = agentSessionStore
-        guard let s = store.session(sid) else { return ["error": "unknown session"] }
+        guard let s = agentSessionStore.session(sid) else { return ["error": "unknown session"] }
         guard let provider = SubscriptionProvider(rawValue: s.tool.rawValue) else {
             return ["error": "no account sign-in for \(s.tool.rawValue)"]
         }
-        guard let w = s.windowIndex, !s.hasEnded else { return ["error": "That session has no live tab to sign in from."] }
-        let broker = RemoteRegistrationBroker.shared
-        guard broker.pending == nil else {
+        guard registration == nil else {
             return ["error": NSLocalizedString("Another sign-in is already in progress.", comment: "sign-in")]
         }
-        broker.begin(provider: provider.rawValue)
         let pid = s.profileID
-        beginProxySignIn(provider: provider, profileID: pid, windowIndex: w) { [weak self] event in
+        // A start that fails at once says why in the reply; a later end
+        // reaches the client's card through /state's `registrationEnded`.
+        var refused: String?
+        beginSubscriptionRegistration(provider: provider, scope: .alwaysShared, events: { [weak self] event in
             guard case .finished(let ok, let message) = event else { return }
-            broker.finish(success: ok, message: message)
-            guard ok, let self else { return }
-            self.applyRegisteredSubscription(provider: provider, profileID: pid)
-            SessionStores.shared?.engine?.relaunchAfterSignIn(sid)
-        }
-        guard let run = broker.pending?.id else {
-            return ["error": broker.ended?.message ?? "the sign-in couldn't start"]
+            guard ok else { refused = message; return }
+            Task { @MainActor in
+                guard let self else { return }
+                self.applyRegisteredSubscription(provider: provider, profileID: pid)
+                SessionStores.shared?.engine?.relaunchAfterSignIn(sid)
+            }
+        })
+        guard let run = RemoteRegistrationBroker.shared.pending?.id else {
+            return ["error": refused ?? RemoteRegistrationBroker.shared.ended?.message ?? "the sign-in couldn't start"]
         }
         return ["ok": true, "registration": run.uuidString]
+    }
+
+    /// `POST /subscriptions/register {provider, profileId?}` (Preferences or
+    /// a workspace's editor): nil when started, else why not. With a
+    /// workspace, the client is asked whether the login is for every
+    /// workspace or just that one.
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onBeginRegistration h=1ec1fe4d5d722db0 @7057d502
+    func beginRemoteRegistration(provider: String, profileID: String?) -> String? {
+        guard let p = SubscriptionProvider(rawValue: provider) else { return "unknown provider \(provider)" }
+        guard registration == nil else {   // one at a time
+            return NSLocalizedString("Another sign-in is already in progress.", comment: "sign-in")
+        }
+        let scope: SubscriptionRegistrationScope = profileID
+            .flatMap(UUID.init(uuidString:)).map { .askPerSession($0) } ?? .alwaysShared
+        var refused: String?
+        beginSubscriptionRegistration(provider: p, scope: scope, events: { event in
+            if case .finished(false, let message) = event { refused = message }
+        })
+        // Only the synchronous refusal; a later end reaches the client
+        // through /state.
+        registration?.onEvent = nil
+        guard RemoteRegistrationBroker.shared.pending != nil else {
+            return refused ?? RemoteRegistrationBroker.shared.ended?.message
+                ?? NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
+        }
+        return nil
     }
 
     /// The workspace runs the agent on its subscription now (macOS: the
@@ -99,6 +128,11 @@ extension LinuxSessionHost: ProxySignInHost {
     // partial: a page that isn't a sign-in's is dropped (a macOS server opens it on its own screen)
     // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=1e83b10fabd16924 @b10aa434
     func guestOpenedURL(_ url: URL, profileID pid: UUID) {
+        // The registration machine's login: its page goes to the client.
+        if let reg = registration, reg.scratchProfile.id == pid, !reg.finished {
+            registrationOpenedURL(url, state: reg)
+            return
+        }
         guard let signIn = proxySignIns[pid], !signIn.finished else {
             // Any other page: a macOS server shows it on its own screen; a
             // Linux server has none (the agents' browsing rides the browser

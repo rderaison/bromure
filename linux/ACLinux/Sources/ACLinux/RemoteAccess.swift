@@ -182,7 +182,13 @@ extension Daemon {
         else { return .error(400, "Missing 'port' (or 'udp': true)") }
         let fd = await relayFD(ip: ip, header: header)
         guard fd >= 0 else { return .error(404, "No running VM at \(ip)") }
-        return .streaming { client in await Self.pump(client, fd) }
+        // Counted while open: a sign-in VM's teardown waits for its
+        // callback relay to drain (hasActiveLoopbackRelays).
+        activeRelays[ip, default: 0] += 1
+        return .streaming { [weak self] client in
+            await Self.pump(client, fd)
+            await self?.relayEnded(ip)
+        }
     }
 
     /// Bytes both ways between a control stream and `fd` until both sides
@@ -321,7 +327,15 @@ extension Daemon {
         guard fd >= 0 else { FatClientLog.log("forward-resolver: dial \(ip) vsock 5010 failed (\(-fd))"); return -1 }
         let ok = header.utf8CString.withUnsafeBufferPointer { b in write(fd, b.baseAddress, b.count - 1) == b.count - 1 }
         guard ok else { close(fd); return -1 }
+        relayOpened[ip] = Date()
         return fd
+    }
+
+    /// A /fatclient/forward relay closed.
+    // @port-skip linux-only: LoopbackCallbackForwarder.activeRelays' count, over /fatclient/forward
+    func relayEnded(_ ip: String) {
+        let n = (activeRelays[ip] ?? 1) - 1
+        activeRelays[ip] = n > 0 ? n : nil
     }
 
 

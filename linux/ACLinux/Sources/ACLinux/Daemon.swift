@@ -110,6 +110,13 @@ public actor Daemon {
     private var stopping: [String: Task<Void, Never>] = [:]
     /// VMs being resumed from a snapshot: a failure leaves them suspended.
     private var restoring: Set<String> = []
+    /// The sign-in VMs' Profiles (never saved), by VM id.
+    var registrationProfiles: [String: Profile] = [:]
+    /// Open client callback relays (/fatclient/forward), by guest address.
+    var activeRelays: [String: Int] = [:]
+    /// When a callback relay last opened, by guest address: an SSH-forwarded
+    /// one is the shared server's to close, so its end isn't seen here.
+    var relayOpened: [String: Date] = [:]
 
     /// The soft open-file limit up to the hard one: systemd starts services at
     /// 1024, and every VM, SSH session and forward holds several.
@@ -359,7 +366,8 @@ public actor Daemon {
         return .object([
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
-            "vms": .array(vms), "workspaces": .array(all.map(\.workspaceJSON)), "workspacesListed": true,
+            "vms": .array(vms), "workspaces": .array(all.filter { $0.registration != true }.map(\.workspaceJSON)),
+            "workspacesListed": true,
             "supportsPush": true,
             "vmnetSubnet": "192.168.64.0/24", "vmnetGateway": "192.168.64.1",
             "uplink": ["kind": "passt", "mtu": .number(Double(passt.mtu))],
@@ -380,7 +388,8 @@ public actor Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/vms"): h=7a7b62405e4c0dbe @7dd92fdf
     /// `id`: a workspace Profile's (POST /profiles), else a new one; `boot`
     /// false only registers it (stopped).
-    func createVM(_ body: JSONValue, id fixedID: String? = nil, boot: Bool = true) async -> ControlResponse {
+    func createVM(_ body: JSONValue, id fixedID: String? = nil, boot: Bool = true,
+                  registration: Bool = false) async -> ControlResponse {
         let id = fixedID?.lowercased() ?? UUID().uuidString.lowercased()
         let name = body["name"]?.stringValue ?? "vm-\(id.prefix(8))"
         // `find` matches id, short id and name: a name equal to any of them
@@ -403,6 +412,7 @@ public actor Daemon {
         var rec = VMRecord(id: id, name: name, machine: machine, cid: cid, mac: mac, state: .starting, ip: nil,
                            cpus: cpus, memoryMiB: memMiB, createdAt: Date(), bootedAt: nil, statePath: nil)
         rec.homeGB = homeGB
+        if registration { rec.registration = true }
         if !boot {
             rec.state = .stopped
             CIDAllocator.shared.release(cid)
@@ -740,12 +750,16 @@ public actor Daemon {
             let store = profileStore
             // The stand-ins the proxy turns into the real logins (Claude's in
             // the token plan, Codex's file beside the seed's), as macOS seeds them.
-            let plan = sessionTokenPlan(for: profile)
+            // A sign-in VM has none and no swap map: the real OAuth
+            // handshake reaches upstream untouched (macOS: tokenPlan nil).
+            let plan = rec.registration == true ? nil : sessionTokenPlan(for: profile)
             try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan)
             // The agents' MCP configs (the built-ins and the workspace's own
             // servers, their tokens as stand-ins), as macOS writes them.
             try SessionDisk.writeMCPConfigs(into: meta, profile: profile, tokenPlan: plan)
-            seedCodexAuthFile(for: profile, homeRoot: seed.appendingPathComponent("files", isDirectory: true))
+            if rec.registration != true {
+                seedCodexAuthFile(for: profile, homeRoot: seed.appendingPathComponent("files", isDirectory: true))
+            }
             try store.finalizeHomeSeed(for: profile, seedDir: seed)
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)
@@ -853,6 +867,7 @@ public actor Daemon {
     func adoptRunning(storedNet: [String: Int32] = [:]) async {
         var storedNet = storedNet
         defer { for (_, fd) in storedNet { close(fd) } }
+        dropLeftoverRegistrations()
         for rec in registry.records where rec.state == .running || rec.state == .starting {
             var r = rec
             do {
@@ -1042,6 +1057,10 @@ public actor Daemon {
         await teardown(l, mac: rec.mac)
         // macOS: cleanupSessionRegistrations' clearSessionTrace.
         if let pid = UUID(uuidString: id) { mitm?.clearSessionTrace(for: pid) }
+        // A sign-in VM that stopped on its own ends its sign-in.
+        if rec.registration == true, let pid = UUID(uuidString: id) {
+            await MainActor.run { LinuxSessionHost.shared?.registrationVMStopped(pid) }
+        }
         rec = registry.find(id) ?? rec
         // A resume that failed stays suspended (start() says so too).
         rec.state = info.reason == .suspended || restoring.contains(id) ? .suspended : .stopped

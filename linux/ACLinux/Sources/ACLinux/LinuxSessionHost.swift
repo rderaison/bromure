@@ -16,6 +16,9 @@ final class LinuxSessionHost: AgentSessionHost {
     nonisolated static let running = NIOLockedValueBox<Set<UUID>>([])
 
     private(set) weak var daemon: Daemon?
+    /// The registration sign-in in flight (LinuxRegistration; macOS:
+    /// ACAppDelegate.claudeRegistration).
+    var registration: LinuxRegistrationState?
     let stateDir: String
     /// Running workspaces' rosters (nil: not running, as macOS's "attached").
     private(set) var tabs: [UUID: TabsModel] = [:]
