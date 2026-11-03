@@ -99,6 +99,7 @@
 		7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */; };
 		FF560ED82A0B2A56BA508F9E /* P2P__TurnTLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */; };
 		3A21079C2F6D4C95C1ABB6EA /* P2P__TurnUDP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */; };
+		6CE6F798CD034F642319C07A /* PlatformCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DE157DC969981AF49458519 /* PlatformCompat.swift */; };
 		E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */; };
 		3B15992E5BD329D249A9D27D /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2368064077094F44DF16B8E /* Profile.swift */; };
 		51EE9DAD2EADCE068EFAA010 /* ProfileViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */; };
@@ -256,6 +257,7 @@
 		1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTCP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTCP.swift"; sourceTree = "<group>"; };
 		7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTLS.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTLS.swift"; sourceTree = "<group>"; };
 		03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnUDP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnUDP.swift"; sourceTree = "<group>"; };
+		7DE157DC969981AF49458519 /* PlatformCompat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformCompat.swift"; path = "Sources/BromureRemote/_shared/PlatformCompat.swift"; sourceTree = "<group>"; };
 		1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformShims.swift"; path = "Sources/BromureRemote/_shared/PlatformShims.swift"; sourceTree = "<group>"; };
 		C2368064077094F44DF16B8E /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Profile.swift"; path = "Sources/BromureRemote/_shared/Profile.swift"; sourceTree = "<group>"; };
 		1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ProfileViews.swift"; path = "Sources/BromureRemote/_shared/ProfileViews.swift"; sourceTree = "<group>"; };
@@ -437,6 +439,7 @@
 				1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */,
 				7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */,
 				03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */,
+				7DE157DC969981AF49458519 /* PlatformCompat.swift */,
 				1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */,
 				C2368064077094F44DF16B8E /* Profile.swift */,
 				1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */,
@@ -672,6 +675,7 @@
 				7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */,
 				FF560ED82A0B2A56BA508F9E /* P2P__TurnTLS.swift in Sources */,
 				3A21079C2F6D4C95C1ABB6EA /* P2P__TurnUDP.swift in Sources */,
+				6CE6F798CD034F642319C07A /* PlatformCompat.swift in Sources */,
 				E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */,
 				3B15992E5BD329D249A9D27D /* Profile.swift in Sources */,
 				51EE9DAD2EADCE068EFAA010 /* ProfileViews.swift in Sources */,
