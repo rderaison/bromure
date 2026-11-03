@@ -176,6 +176,8 @@ public actor Daemon {
         case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"):
             return await answerPrompt(String(p.dropFirst("/prompts/".count).dropLast("/answer".count)), req.body)
         case ("GET", "/state/subscribe"): return stateSubscribe()
+        case ("POST", let p) where p.hasPrefix("/sessions/") && p.hasSuffix("/tab"):
+            return tabCommand(String(p.dropFirst("/sessions/".count).dropLast("/tab".count)), req.body)
         case ("GET", "/profiles"): return listProfiles()
         case ("POST", "/profiles"): return await createProfile(req.body)
         case ("GET", "/vms"): return listVMs()

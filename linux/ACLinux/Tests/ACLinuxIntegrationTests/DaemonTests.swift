@@ -348,5 +348,33 @@ struct DaemonTests {
         }
         #expect(try await api.request("POST", "/prompts/\(UUID().uuidString)/answer", ["choice": 1]).status == 404)
     }
+
+    @Test("POST /sessions/<workspace>/tab: agentd opens and closes the tab (tmux windows, read back from tabs.txt)")
+    func tabs() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        let api = FirecrackerAPI(socketPath: w.socket)
+        #expect(try w.cli("vm", "run", "--name", "t1").0 == 0)
+        func tabCount() throws -> Int {
+            guard case .array(let tabs)? = try w.vm("t1")?["tabs"] else { return -1 }
+            return tabs.count
+        }
+        var before = -1
+        for _ in 0..<120 { before = try tabCount(); if before > 0 { break }; try await Task.sleep(for: .milliseconds(500)) }
+        #expect(before > 0, "agentd reported its tmux windows")
+        #expect(try await api.request("POST", "/sessions/t1/tab", ["action": "new"]).status == 200)
+        var after = before
+        for _ in 0..<40 { after = try tabCount(); if after == before + 1 { break }; try await Task.sleep(for: .milliseconds(500)) }
+        #expect(after == before + 1, "a new tab (\(before) -> \(after))")
+        #expect(try await api.request("POST", "/sessions/t1/tab", ["action": "close", "index": .number(Double(after - 1))]).status == 200)
+        var closed = after
+        for _ in 0..<40 { closed = try tabCount(); if closed == before { break }; try await Task.sleep(for: .milliseconds(500)) }
+        #expect(closed == before, "the tab closed again (\(after) -> \(closed))")
+        #expect(try await api.request("POST", "/sessions/t1/tab", ["action": "rename"]).status == 400)
+        #expect(try await api.request("POST", "/sessions/nope/tab", ["action": "new"]).status == 400)
+        _ = try w.cli("vm", "kill", "--force", "t1")
+    }
 }
 

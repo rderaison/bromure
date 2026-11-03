@@ -101,4 +101,29 @@ extension Daemon {
         return ControlResponse(201, ["ok": true, "id": .string(created.id.uuidString), "name": .string(name),
                                      "shortId": .string(String(created.id.uuidString.lowercased().prefix(8)))])
     }
+
+    /// POST /sessions/<workspace>/tab {"action": new|select|close, "index"}:
+    /// a command file in the workspace's outbox, which agentd acts on (as
+    /// macOS does). 400 for an unknown or stopped workspace, or a bad action.
+    // @port ACAppDelegate.automationTabCommand(profileNameOrID: String, action: String, index: Int) h=c2e37c629f0f1cea @7dd92fdf
+    func tabCommand(_ key: String, _ body: JSONValue) -> ControlResponse {
+        let action = body["action"]?.stringValue ?? "new"
+        let index = body["index"]?.numberValue.map { Int($0) } ?? body["index"]?.stringValue.flatMap { Int($0) } ?? 0
+        let line: String
+        switch action {
+        case "new": line = "new-tab"
+        case "select": line = "select-tab \(index)"
+        case "close": line = "close-tab \(index)"
+        default: return ControlResponse(400, ["ok": false, "error": "unknown session or bad action"])
+        }
+        guard let rec = registry.find(key) ?? registry.records.first(where: { $0.id.caseInsensitiveCompare(key) == .orderedSame }),
+              live[rec.id] != nil else {
+            return ControlResponse(400, ["ok": false, "error": "unknown session or bad action"])
+        }
+        let file = vmDir(rec.id) + "/outbox/cmd-\(UUID().uuidString).txt"
+        guard (try? (line + "\n").write(toFile: file, atomically: true, encoding: .utf8)) != nil else {
+            return ControlResponse(500, ["ok": false, "error": "couldn't write to the workspace's outbox"])
+        }
+        return ControlResponse(200, ["ok": true])
+    }
 }
