@@ -454,20 +454,25 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // 5f. A sign-in this workspace runs: its token exchange is the host's.
         var capture: SignInCapture?
         if tls, let c = SubscriptionProviders.signInCapture?(profileID),
-           let bodyStart = req.range(of: Data("\r\n\r\n".utf8)),
-           c.matches(host: host, method: method, path: path, body: req.subdata(in: bodyStart.upperBound..<req.count)) {
-            // An ended sign-in's late exchange: refused, never redeemed with
-            // the provider (the code would be spent on a login nobody keeps).
-            if c.spent { return .answer(SignInCapture.notKeptReply) }
-            if let sim = c.simulatedReply {
-                // The sign-in simulator (e2e): the provider's reply is canned.
-                let (status, body) = HTTPRequestFraming.responseStatusAndBody(sim)
-                return .answer(await c.handle(status, body) ?? sim)
+           let bodyStart = req.range(of: Data("\r\n\r\n".utf8)) {
+            let body = req.subdata(in: bodyStart.upperBound..<req.count)
+            // An ended sign-in's late exchange (this capture spent, or any
+            // of its spent endpoints): refused, never redeemed with the
+            // provider (the code would be spent on a login nobody keeps).
+            if c.refusesExchange(host: host, method: method, path: path, body: body) {
+                return .answer(SignInCapture.notKeptReply)
             }
-            capture = c
-            // The exchange's reply is read here, not relayed: ask for it
-            // uncompressed (nothing here decodes gzip or br).
-            req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
+            if !c.spent, c.matches(host: host, method: method, path: path, body: body) {
+                if let sim = c.simulatedReply {
+                    // The sign-in simulator (e2e): the provider's reply is canned.
+                    let (status, body) = HTTPRequestFraming.responseStatusAndBody(sim)
+                    return .answer(await c.handle(status, body) ?? sim)
+                }
+                capture = c
+                // The exchange's reply is read here, not relayed: ask for it
+                // uncompressed (nothing here decodes gzip or br).
+                req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
+            }
         }
         return .forward(upgrade ? req : closing(req), injected, capture: capture, upgrade: upgrade)
     }
