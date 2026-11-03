@@ -229,19 +229,31 @@ private final class RelayedAgent {
 
     func cancel() { readSource?.cancel(); readSource = nil }
 
+    /// Reads while more is waiting, so an EOF that came in with the last
+    /// line is seen now: Linux's libdispatch doesn't fire again for it, and
+    /// the agent's fd would stay open until the relay dropped. The fd may
+    /// be blocking (a VZ connection's is): `readableNow` asks first.
     private func readAvailable() {
         var buf = [UInt8](repeating: 0, count: 65536)
-        let n = LibC.read(fd, &buf, buf.count)
-        if n <= 0 { cancel(); return }
-        pending.append(contentsOf: buf[0..<n])
-        if pending.count > 16 * 1024 * 1024 { cancel(); return }   // pathological
-        while let nl = pending.firstIndex(of: 0x0A) {
-            let lineData = pending[pending.startIndex..<nl]
-            pending = Data(pending[(nl + 1)...])
-            guard !lineData.isEmpty,
-                  let line = String(data: Data(lineData), encoding: .utf8) else { continue }
-            mux?.send(from: self, line: line)
-        }
+        repeat {
+            let n = LibC.read(fd, &buf, buf.count)
+            if n <= 0 { cancel(); return }
+            pending.append(contentsOf: buf[0..<n])
+            if pending.count > 16 * 1024 * 1024 { cancel(); return }   // pathological
+            while let nl = pending.firstIndex(of: 0x0A) {
+                let lineData = pending[pending.startIndex..<nl]
+                pending = Data(pending[(nl + 1)...])
+                guard !lineData.isEmpty,
+                      let line = String(data: Data(lineData), encoding: .utf8) else { continue }
+                mux?.send(from: self, line: line)
+            }
+        } while readSource != nil && Self.readableNow(fd)
+    }
+
+    /// Data or an EOF is waiting on `fd` (a zero-timeout poll).
+    private static func readableNow(_ fd: Int32) -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        return poll(&p, 1, 0) == 1
     }
 
     func write(_ s: String) {
