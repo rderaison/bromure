@@ -103,6 +103,10 @@ final class RemoteAccessServer {
     typealias StreamResolver = @Sendable (_ offer: @escaping @Sendable (Int32) -> Bool) -> Void
     var delegationMCPResolver: StreamResolver?
 
+    /// Several accounts behind this one server (the Linux multi-user gateway,
+    /// see RemoteAccountRouter). nil: this process's own account, as ever.
+    var accountRouter: RemoteAccountRouter?
+
     init(paths: Paths = .default) { self.paths = paths }
 
     enum RemoteError: LocalizedError {
@@ -141,6 +145,7 @@ final class RemoteAccessServer {
         let udpForwardResolver = self.udpForwardResolver
         let browserMCPResolver = self.browserMCPResolver
         let delegationMCPResolver = self.delegationMCPResolver
+        let router = self.accountRouter
 
         let g = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         // Shared across all connections: the per-source-IP password rate
@@ -153,7 +158,8 @@ final class RemoteAccessServer {
             allowPubkey: config.pubkeyAuth,
             authorizedKeys: authorized,
             machineOnlyKeys: machineOnly,
-            throttle: throttle)
+            throttle: throttle,
+            router: router)
         self.authFactory = authFactory   // for hot-reloading keys without a restart
 
         // NOTE: swift-nio-ssh (0.13.0, latest) offers no post-quantum key
@@ -203,7 +209,7 @@ final class RemoteAccessServer {
                                                              udpForwardResolver: udpForwardResolver,
                                                              browserMCPResolver: browserMCPResolver,
                                                              delegationMCPResolver: delegationMCPResolver,
-                                                             grant: grant))
+                                                             grant: grant, router: router))
                                 }
                             }),
                         RemoteErrorHandler(),

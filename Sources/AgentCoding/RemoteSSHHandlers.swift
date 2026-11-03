@@ -83,10 +83,35 @@ enum SystemPassword {
     }
 }
 
+/// One server in front of several accounts (the Linux multi-user gateway):
+/// which keys and passwords open which account, and where its requests go.
+/// Unset (macOS, a single-user Linux daemon): this process's own account, as
+/// ever. A routed connection only reaches its account's control socket and
+/// its guests (forwards); no shell, menu or machine link runs in the server.
+protocol RemoteAccountRouter: AnyObject, Sendable {
+    /// The keys `user` may log in with; nil when there is no such account.
+    func authorizedKeys(user: String) -> Set<NIOSSHPublicKey>?
+    /// Whether `password` (an enrollment code) opens `user`'s account; false
+    /// for an unknown user, taking about as long.
+    func verifyPassword(user: String, password: String) -> Bool
+    /// The control socket `user`'s requests are bridged to.
+    func controlSocketPath(user: String) -> String
+    /// A stream to `ip:port` (`port` nil: the UDP relay) in `user`'s guest
+    /// network, or -1: the account's own daemon decides.
+    func forward(user: String, ip: String, port: Int?, completion: @escaping @Sendable (Int32) -> Void)
+}
+
 /// What a connection may do once authenticated. Filled in by its
 /// `RemoteAuthDelegate`, read by its channels (`SSHPTYSessionHandler`).
 final class RemoteGrant: @unchecked Sendable {
     private let lock = NSLock()
+    private var _account: String?
+    /// Set when a `RemoteAccountRouter` authenticated the connection: the
+    /// account it was let into.
+    var account: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _account }
+        set { lock.lock(); _account = newValue; lock.unlock() }
+    }
     private var _machineOnly: String?
     /// Set when the key is a Bromure Agent Host's: the account device it
     /// belongs to. Such a connection may only attach that machine
@@ -114,10 +139,13 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
     private let throttle: RemoteAuthThrottle
     /// This connection's source IP, for the per-IP bucket.
     private let peerIP: String
+    /// Several accounts behind this server (see RemoteAccountRouter).
+    private let router: RemoteAccountRouter?
 
     init(username: String, allowPassword: Bool, allowPubkey: Bool,
          authorizedKeys: Set<NIOSSHPublicKey>, machineOnlyKeys: [NIOSSHPublicKey: String] = [:],
-         throttle: RemoteAuthThrottle, peerIP: String) {
+         throttle: RemoteAuthThrottle, peerIP: String, router: RemoteAccountRouter? = nil) {
+        self.router = router
         self.username = username
         self.allowPassword = allowPassword
         self.allowPubkey = allowPubkey
@@ -143,6 +171,10 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
         // misconfiguration in security reviews. The P2P dialer's can't-know-
         // the-name problem is handled client-side (editable user field,
         // remembered per peer device).
+        if let router {
+            routedRequest(request, router: router, responsePromise: responsePromise)
+            return
+        }
         switch request.request {
         case .publicKey(let pk):
             // NIO-SSH has already verified the signature; we only decide if
@@ -195,6 +227,44 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
     }
 }
 
+extension RemoteAuthDelegate {
+    /// requestReceived with a router: the user name picks the account, whose
+    /// keys or enrollment codes decide, asked off the event loop (the account
+    /// may have to start). Passwords go through the same throttle; an unknown
+    /// account fails like a wrong key or code.
+    fileprivate func routedRequest(_ request: NIOSSHUserAuthenticationRequest, router: RemoteAccountRouter,
+                                   responsePromise: EventLoopPromise<NIOSSHUserAuthenticationOutcome>) {
+        let user = request.username, grant = self.grant
+        switch request.request {
+        case .publicKey(let pk):
+            guard allowPubkey else { responsePromise.succeed(.failure); return }
+            let key = pk.publicKey
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ok = router.authorizedKeys(user: user)?.contains(key) ?? false
+                if ok { grant.account = user }
+                FatClientLog.log("srv-auth: routed publickey user=\(user) → \(ok ? "SUCCESS" : "FAILURE")")
+                responsePromise.succeed(ok ? .success : .failure)
+            }
+        case .password(let pw):
+            guard allowPassword, let delay = throttle.reserve(ip: peerIP), throttle.beginVerification() else {
+                responsePromise.succeed(.failure)
+                return
+            }
+            let throttle = self.throttle, password = pw.password
+            let work: @Sendable () -> Void = {
+                defer { throttle.endVerification() }
+                let ok = router.verifyPassword(user: user, password: password)
+                if ok { grant.account = user }
+                responsePromise.succeed(ok ? .success : .failure)
+            }
+            let q = DispatchQueue.global(qos: .utility)
+            if delay > 0 { q.asyncAfter(deadline: .now() + delay, execute: work) } else { q.async(execute: work) }
+        default:
+            responsePromise.succeed(.failure)
+        }
+    }
+}
+
 /// Builds a per-connection `RemoteAuthDelegate` (each carries its peer's IP for
 /// the rate limiter) from the listener-wide config + shared throttle. Wrapping
 /// the non-Sendable `authorizedKeys` here keeps it out of the bootstrap's
@@ -207,10 +277,12 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
     private var authorizedKeys: Set<NIOSSHPublicKey>
     private var machineOnlyKeys: [NIOSSHPublicKey: String]
     private let throttle: RemoteAuthThrottle
+    private let router: RemoteAccountRouter?
 
     init(username: String, allowPassword: Bool, allowPubkey: Bool,
          authorizedKeys: Set<NIOSSHPublicKey>, machineOnlyKeys: [NIOSSHPublicKey: String] = [:],
-         throttle: RemoteAuthThrottle) {
+         throttle: RemoteAuthThrottle, router: RemoteAccountRouter? = nil) {
+        self.router = router
         self.username = username
         self.allowPassword = allowPassword
         self.allowPubkey = allowPubkey
@@ -232,7 +304,7 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
         lock.lock(); let keys = authorizedKeys; let machine = machineOnlyKeys; lock.unlock()
         return RemoteAuthDelegate(username: username, allowPassword: allowPassword,
                                   allowPubkey: allowPubkey, authorizedKeys: keys, machineOnlyKeys: machine,
-                                  throttle: throttle, peerIP: peerIP)
+                                  throttle: throttle, peerIP: peerIP, router: router)
     }
 }
 
@@ -352,6 +424,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// to this socket (no PTY, no menu) so the client can speak the control-plane
     /// HTTP API — including the hijacked interactive-exec pump for terminals.
     private let controlSocketPath: String
+    /// Several accounts behind this server: a routed connection's requests
+    /// go to its account (`grant.account`), see RemoteAccountRouter.
+    private let router: RemoteAccountRouter?
     /// Resolves a `forward <ip> <port>` to a guest-loopback-relay fd (vsock).
     private let forwardResolver: RemoteAccessServer.ForwardResolver?
     private let udpForwardResolver: RemoteAccessServer.UDPForwardResolver?
@@ -504,7 +579,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
          udpForwardResolver: RemoteAccessServer.UDPForwardResolver? = nil,
          browserMCPResolver: RemoteAccessServer.BrowserMCPResolver? = nil,
          delegationMCPResolver: RemoteAccessServer.StreamResolver? = nil,
-         grant: RemoteGrant? = nil) {
+         grant: RemoteGrant? = nil, router: RemoteAccountRouter? = nil) {
+        self.router = router
         self.menuExe = menuExe
         self.user = user
         self.controlSocketPath = controlSocketPath
@@ -558,9 +634,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
                 context.channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil)
             }
         case let e as SSHChannelRequestEvent.ShellRequest:
-            guard grant?.machineOnly == nil else { refuse(context, e.wantReply, "a shell"); return }
+            guard grant?.machineOnly == nil, grant?.account == nil else { refuse(context, e.wantReply, "a shell"); return }
             startMenu(context: context, wantReply: e.wantReply)
         case let e as SSHChannelRequestEvent.ExecRequest:
+            if let account = grant?.account, let router {
+                routedExec(context: context, e, account: account, router: router)
+                return
+            }
             // A Bromure Agent Host's key attaches its machine, and that's all.
             let owner = grant?.machineOnly.map { "device:" + $0 }
             if let link = FatClient.parseMachineLink(e.command) {
@@ -716,6 +796,30 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// The SSH `authorized_keys` gate stands in for the socket's owner-only
     /// (0600) file mode. Reuses the same read-pump machinery as the menu path,
     /// with `childPID = -1` so teardown/finish skip the process reap.
+    /// An exec on a routed connection: the account's control bridge and its
+    /// guest forwards; nothing else runs here (the server's own user isn't
+    /// the account's).
+    private func routedExec(context: ChannelHandlerContext, _ e: SSHChannelRequestEvent.ExecRequest,
+                            account: String, router: RemoteAccountRouter) {
+        if e.command == FatClient.controlVerb {
+            startControlBridge(context: context, wantReply: e.wantReply, socketPath: router.controlSocketPath(user: account))
+            return
+        }
+        let target: (ip: String, port: Int?)
+        if let fwd = FatClient.parseForward(e.command) { target = (fwd.ip, fwd.port) }
+        else if let ip = FatClient.parseForwardUDP(e.command) { target = (ip, nil) }
+        else { refuse(context, e.wantReply, e.command); return }
+        guard !started else { return }
+        started = true
+        let channel = context.channel, el = channel.eventLoop
+        router.forward(user: account, ip: target.ip, port: target.port) { [weak self] fd in
+            el.execute {
+                guard let self else { if fd >= 0 { LibC.close(fd) }; return }
+                self.wireResolvedFD(channel: channel, wantReply: e.wantReply, fd: fd)
+            }
+        }
+    }
+
     private func refuse(_ context: ChannelHandlerContext, _ wantReply: Bool, _ what: String) {
         FatClientLog.log("srv: refused \(what.prefix(60)) — an agent host's key may only attach its machine")
         if wantReply { context.channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
@@ -735,12 +839,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         startControlBridge(context: context, wantReply: wantReply, preamble: Data(head.utf8) + payload)
     }
 
-    private func startControlBridge(context: ChannelHandlerContext, wantReply: Bool, preamble: Data? = nil) {
+    private func startControlBridge(context: ChannelHandlerContext, wantReply: Bool, preamble: Data? = nil,
+                                    socketPath: String? = nil) {
         guard !started else { return }
         started = true
         let channel = context.channel
 
-        let sockFD = Self.connectUnix(path: controlSocketPath)
+        let sockFD = Self.connectUnix(path: socketPath ?? controlSocketPath)
         guard sockFD >= 0 else {
             if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
             channel.close(promise: nil)
