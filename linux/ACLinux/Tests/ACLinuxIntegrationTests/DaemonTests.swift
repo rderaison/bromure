@@ -311,4 +311,36 @@ struct DaemonTests {
         #expect(again == a, "kept across kill/start")
         for v in ["m1", "m2"] { _ = try w.cli("vm", "kill", "--force", v) }
     }
+
+    @Test("workspaces are Profiles: POST /profiles makes one from the template with its VM registered (stopped); GET lists it")
+    func profiles() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        let api = FirecrackerAPI(socketPath: w.socket)
+
+        let made = try await api.request("POST", "/profiles", ["name": "p1", "tool": "codex", "color": "blue"])
+        #expect(made.status == 201, "\(String(describing: made.body))")
+        let id = try #require(made.body?["id"]?.stringValue)
+        #expect(UUID(uuidString: id) != nil)
+        #expect(FileManager.default.fileExists(atPath: w.root + "/state/bromure-ac/profiles/" + id + "/profile.json"),
+                "saved through ProfileStore in the state dir")
+        #expect(try w.vm("p1")?["state"]?.stringValue == "stopped", "its VM is registered, not booted")
+        #expect(try w.vm("p1")?["id"]?.stringValue == id.lowercased(), "with the profile's id")
+
+        let list = try await api.request("GET", "/profiles")
+        guard case .array(let rows)? = list.body?["profiles"] else { Issue.record("no profiles array"); return }
+        let row = try #require(rows.first { $0["id"]?.stringValue == id })
+        #expect(row["name"]?.stringValue == "p1")
+        #expect(row["tool"]?.stringValue == "codex", "the document's fields over the template's")
+        #expect(row["color"]?.stringValue == "blue")
+        #expect(row["state"]?.stringValue == "off")
+
+        #expect(try await api.request("POST", "/profiles", ["name": "p1"]).status == 409, "names are unique")
+        #expect(try await api.request("POST", "/profiles", ["tool": "claude"]).status == 400, "a name is required")
+        #expect(try await api.request("POST", "/profiles", ["name": "p2", "tool": "no-such-tool"]).status == 400,
+                "a bad field is refused (ProfileDocument)")
+    }
 }
+

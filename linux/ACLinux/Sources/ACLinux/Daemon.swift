@@ -170,6 +170,8 @@ public actor Daemon {
         case ("GET", "/health"): return health()
         case ("GET", "/state"): return state()
         case ("GET", "/state/subscribe"): return stateSubscribe()
+        case ("GET", "/profiles"): return listProfiles()
+        case ("POST", "/profiles"): return await createProfile(req.body)
         case ("GET", "/vms"): return listVMs()
         case ("POST", "/vms"): return await createVM(req.body)
         case (let m, let p) where p.hasPrefix("/vms/"): return await vmRoute(m, p, req.body)
@@ -289,8 +291,10 @@ public actor Daemon {
     /// `machine?` (q35|microvm), `memoryGB?`, `cpus?`. 201 `{id, shortId, name, detached}`.
     // partial: no profile, tool, auth, apiKey, mounts or rm; takes name/machine/memoryGB/cpus; always detached
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/vms"): h=7a7b62405e4c0dbe @7dd92fdf
-    func createVM(_ body: JSONValue) async -> ControlResponse {
-        let id = UUID().uuidString.lowercased()
+    /// `id`: a workspace Profile's (POST /profiles), else a new one; `boot`
+    /// false only registers it (stopped).
+    func createVM(_ body: JSONValue, id fixedID: String? = nil, boot: Bool = true) async -> ControlResponse {
+        let id = fixedID?.lowercased() ?? UUID().uuidString.lowercased()
         let name = body["name"]?.stringValue ?? "vm-\(id.prefix(8))"
         // `find` matches id, short id and name: a name equal to any of them
         // would make lookups ambiguous.
@@ -312,9 +316,13 @@ public actor Daemon {
         var rec = VMRecord(id: id, name: name, machine: machine, cid: cid, mac: mac, state: .starting, ip: nil,
                            cpus: cpus, memoryMiB: memMiB, createdAt: Date(), bootedAt: nil, statePath: nil)
         rec.homeGB = homeGB
+        if !boot {
+            rec.state = .stopped
+            CIDAllocator.shared.release(cid)
+        }
         do {
             try registry.upsert(rec)
-            try await launch(&rec)
+            if boot { try await launch(&rec) }
             return ControlResponse(201, ["id": .string(id), "shortId": .string(rec.shortId),
                                          "name": .string(name), "tool": .null, "detached": true])
         } catch {

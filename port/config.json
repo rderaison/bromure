@@ -66,6 +66,7 @@
     "Sources/AgentCoding/PlatformCompat.swift",
     "Sources/AgentCoding/PolicySteering.swift",
     "Sources/AgentCoding/Profile.swift",
+    "Sources/AgentCoding/ProfileDocument.swift",
     "Sources/AgentCoding/RemoteAccessServer.swift",
     "Sources/AgentCoding/RemoteSSHHandlers.swift",
     "Sources/AgentCoding/RepoGitPrograms.swift",

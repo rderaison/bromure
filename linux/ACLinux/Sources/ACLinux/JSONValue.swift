@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 
 /// Any JSON value: QMP's arguments, replies and event payloads are open-ended.
 // @port-skip linux-only: QMP plumbing; VZ has no JSON control protocol
@@ -82,4 +83,42 @@ extension JSONValue: ExpressibleByStringLiteral, ExpressibleByIntegerLiteral, Ex
     }
     // @port-skip linux-only: QMP plumbing
     public init(arrayLiteral elements: JSONValue...) { self = .array(elements) }
+}
+
+extension JSONValue {
+    /// As JSONSerialization's objects (what the shared code's documents are).
+    // @port-skip linux-only: daemon JSON plumbing
+    public var foundationObject: Any {
+        switch self {
+        case .null: return NSNull()
+        case .bool(let b): return b
+        case .number(let n): return n == n.rounded() && abs(n) < 9e15 ? Int(n) as Any : n as Any
+        case .string(let s): return s
+        case .array(let a): return a.map(\.foundationObject)
+        case .object(let o): return o.mapValues(\.foundationObject)
+        }
+    }
+
+    /// From JSONSerialization's objects; nil for anything JSON can't hold.
+    /// A JSON boolean stays a boolean (NSNumber.isJSONBoolean), not 0/1.
+    // @port-skip linux-only: daemon JSON plumbing
+    public init?(foundation v: Any) {
+        switch v {
+        case is NSNull: self = .null
+        case let s as String: self = .string(s)
+        case let n as NSNumber: self = n.isJSONBoolean ? .bool(n.boolValue) : .number(n.doubleValue)
+        case let b as Bool: self = .bool(b)
+        case let i as Int: self = .number(Double(i))
+        case let d as Double: self = .number(d)
+        case let a as [Any]:
+            var out: [JSONValue] = []
+            for e in a { guard let j = JSONValue(foundation: e) else { return nil }; out.append(j) }
+            self = .array(out)
+        case let o as [String: Any]:
+            var out: [String: JSONValue] = [:]
+            for (k, e) in o { guard let j = JSONValue(foundation: e) else { return nil }; out[k] = j }
+            self = .object(out)
+        default: return nil
+        }
+    }
 }
