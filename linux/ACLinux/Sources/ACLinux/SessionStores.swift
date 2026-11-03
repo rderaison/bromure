@@ -18,6 +18,9 @@ final class SessionStores {
     /// The repository watches and their findings (macOS: the app
     /// delegate's findingStore).
     let findings: FindingStore
+    /// Kubernetes clusters and container registries (macOS: the app
+    /// delegate's kubeClusterStore), at `<state>/kube/clusters.json`.
+    let kube: KubeClusterStore
     /// The workspaces' instruction presets (macOS: the app delegate's store).
     let instructionPresets: InstructionPresetStore
     /// The engines over them (Daemon.startSessionEngine).
@@ -39,6 +42,8 @@ final class SessionStores {
         codingTasks = CodingTaskStore(fileURL: dir.appendingPathComponent("tasks.json"))
         automations = ScheduledAutomationStore(fileURL: dir.appendingPathComponent("automations.json"))
         findings = FindingStore(fileURL: dir.appendingPathComponent("findings.json"))
+        kube = KubeClusterStore(fileURL: dir.appendingPathComponent("kube", isDirectory: true)
+            .appendingPathComponent("clusters.json"))
         instructionPresets = InstructionPresetStore(fileURL: dir.appendingPathComponent("instruction-presets.json"))
     }
 

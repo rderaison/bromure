@@ -256,6 +256,7 @@ public actor Daemon {
             if let r = await workspaceRoute(req.method, req.path, req.body) { return r }
             if let r = await roomsRoute(req.method, req.path, req.body) { return r }
             if let r = await traceRoute(req.method, req.path) { return r }
+            if let r = await kubeRoute(req.method, path) { return r }
             return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
@@ -267,7 +268,7 @@ public actor Daemon {
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
-    // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, kubeClusters, generation/epoch, or agent sessions yet
+    // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, generation/epoch, or agent sessions yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
     func state() async -> ControlResponse { ControlResponse(200, await stateBody()) }
 
@@ -353,6 +354,7 @@ public actor Daemon {
                 .merging([
                     "subscriptions": JSONValue(foundation: Daemon.subscriptionStatus(mitm: mitmProxy)) ?? .object([:]),
                     "securityTimeline": JSONValue(foundation: Daemon.securityTimelineRows()) ?? .array([]),
+                    "kubeClusters": JSONValue(foundation: SessionStores.shared?.kube.snapshot() ?? ["clusters": [], "status": [:]]) ?? .object([:]),
                 ]) { a, _ in a },
                     LinuxSessionHost.shared?.tabStatuses() ?? [:])
         }
