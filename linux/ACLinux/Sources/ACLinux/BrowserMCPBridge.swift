@@ -67,6 +67,7 @@ final class BrowserMCPBridge {
     }
 
     /// Tests: agents on the client's channel now.
+    // @port-skip linux-only: test hook
     var relayedAgentCount: Int { relay?.agentCount ?? 0 }
 
     /// A fat client's `browser-mcp` channel (`fd`, now the bridge's): every
