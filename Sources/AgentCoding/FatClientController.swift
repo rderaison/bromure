@@ -576,6 +576,10 @@ final class RemoteHostController {
     private var handledGuestPages: [String: Date] = [:]
 #if os(macOS)
     private var guestPageAsking = false
+    /// The mirror window's way to open a guest page in the workspace's own
+    /// browser VM (true: it's on its way there). Unset, or false (the
+    /// browser's tunnel isn't up yet), the user is asked instead.
+    var onGuestPage: ((_ profileID: Profile.ID, _ url: URL, _ workspace: String?) -> Bool)?
 #else
     struct GuestPageAsk: Identifiable, Equatable {
         let id: String
@@ -624,6 +628,14 @@ final class RemoteHostController {
                 dismissGuestPage(id, "opened")
             default:
 #if os(macOS)
+                // Not a sign-in page: the workspace's own browser VM, which
+                // reaches the workspace's network, not this Mac's.
+                if let pid = (p["profile"] as? String).flatMap(UUID.init(uuidString:)),
+                   onGuestPage?(pid, url, workspace) == true {
+                    handledGuestPages[id] = now
+                    dismissGuestPage(id, "opened")
+                    continue
+                }
                 // A sheet, never a modal (this runs on the /state stream's
                 // delivery): no window to hang it on yet, the page waits for
                 // the next snapshot.
@@ -3756,6 +3768,9 @@ final class RemoteHostWindow: NSWindow {
         observeSending()
         showGrid()
         controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }
+        controller.onGuestPage = { [weak self] id, url, workspace in
+            self?.openGuestPage(url, in: id, workspace: workspace) ?? false
+        }
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
             self.syncSessionsHome()
@@ -6653,6 +6668,12 @@ final class RemoteHostWindow: NSWindow {
             selectWorkspaceName(id)
             return ["ok": true, "selectedID": controller.listModel.selectedID?.uuidString ?? "",
                     "dashboardShown": shownDashboard?.id == id]
+        case "activate":
+            // Bring this app and the mirror window to the front (what a
+            // client in front does on its own: guest pages, prompts).
+            NSApp.activate(ignoringOtherApps: true)
+            makeKeyAndOrderFront(nil)
+            return ["ok": true]
         case "shot":
             // Just render the window as it is to "shot" (a PNG path).
             guard let shot = p["shot"] as? String else { return ["error": "shot path required"] }
@@ -7134,7 +7155,19 @@ final class RemoteHostWindow: NSWindow {
         else { setBrowserOpen(id, true) }
     }
 
-    private func setBrowserOpen(_ id: Profile.ID, _ open: Bool) {
+    /// A guest page in the workspace's browser VM: shown when the workspace
+    /// is on stage, else opened in the background. False while the browser's
+    /// tunnel isn't up (no subnet / SOCKS port yet).
+    private func openGuestPage(_ url: URL, in id: Profile.ID, workspace: String?) -> Bool {
+        guard let ctl = browserController(for: id) else { return false }
+        let onStage = (liveSessionOnStage?.profileID ?? controller.listModel.selectedID) == id
+        if onStage { setBrowserOpen(id, true, offerVPN: false) }
+        FatClientLog.log("guest page: opening in \(workspace ?? id.uuidString.prefix(8).description)'s browser (onStage=\(onStage))")
+        ctl.openWhenReady(url.absoluteString)
+        return true
+    }
+
+    private func setBrowserOpen(_ id: Profile.ID, _ open: Bool, offerVPN: Bool = true) {
         if open {
             if shownBrowser == id, browserWidthConstraint.constant > 0 { return }   // already shown
             guard let ctl = browserController(for: id) else {
@@ -7171,7 +7204,8 @@ final class RemoteHostWindow: NSWindow {
             ensureBrowserRelay(id)
             // First browser opened this session: offer the VPN to the remote
             // host so its VMs are reachable system-wide, not just from the pane.
-            offerBrowserVPNIfNeeded()
+            // Not for a page the workspace opened: the user didn't ask for it.
+            if offerVPN { offerBrowserVPNIfNeeded() }
         } else {
             browserOpen.remove(id)
             browserOpenSessions = browserOpenSessions.filter { $0.value != id }

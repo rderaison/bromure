@@ -4354,3 +4354,6 @@
 
 /* guest URL open prompt */
 "Open in Browser" = "在瀏覽器中打開";
+
+/* guest page opened in a background workspace's browser */
+"Opened a page in “%@”’s browser." = "已在「%@」的瀏覽器中開啟頁面。";

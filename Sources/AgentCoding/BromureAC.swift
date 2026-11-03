@@ -3579,7 +3579,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// forwarder itself); any other page -- a public name can resolve to the
     /// LAN, a public page can redirect there -- opens only once the user says
     /// so (`GuestURLGate.disposition`).
-    static func openGuestRelayedURL(_ url: URL, workspace: String? = nil) {
+    /// A page a workspace's guest asked to open. An agent's sign-in page opens
+    /// in this Mac's browser (its callback comes back here); any other web
+    /// page opens in the workspace's own browser, which can't reach this Mac
+    /// or its network; with no window to show it in, the user is asked first.
+    static func openGuestRelayedURL(_ url: URL, workspace: String? = nil, profileID: Profile.ID? = nil) {
         switch GuestURLGate.disposition(for: url) {
         case .refuse:
             FileHandle.standardError.write(Data(
@@ -3587,7 +3591,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case .open:
             NSWorkspace.shared.open(url)
         case .ask:
-            askBeforeOpeningGuestURL(url, workspace: workspace)
+            if let profileID, let window = (NSApp.delegate as? ACAppDelegate)?.unifiedWindow {
+                window.openGuestPage(url, in: profileID, workspace: workspace)
+            } else {
+                askBeforeOpeningGuestURL(url, workspace: workspace)
+            }
         }
     }
 
@@ -15987,7 +15995,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }
-                Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name)
+                Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name, profileID: pid)
             }
         }
         sandbox.onTabList = { [weak self] tabs in

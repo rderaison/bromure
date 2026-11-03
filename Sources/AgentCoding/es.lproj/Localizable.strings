@@ -4353,3 +4353,6 @@
 
 /* guest URL open prompt */
 "Open in Browser" = "Abrir en el navegador";
+
+/* guest page opened in a background workspace's browser */
+"Opened a page in “%@”’s browser." = "Página abierta en el navegador de «%@».";
