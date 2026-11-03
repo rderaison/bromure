@@ -1,5 +1,3 @@
-#if os(macOS)
-import AppKit
 import Foundation
 
 // MARK: - Agent session engine (macOS)
@@ -28,14 +26,14 @@ extension Profile.Tool {
 
 @MainActor
 final class AgentSessionEngine {
-    weak var delegate: ACAppDelegate?
+    weak var delegate: (any AgentSessionHost)?
     let store: AgentSessionStore
 
     private var pendingBoots: Set<UUID> = []
     private static let bootTimeout: TimeInterval = 180
     private static let bootPollInterval: UInt64 = 3_000_000_000
 
-    init(store: AgentSessionStore, delegate: ACAppDelegate?) {
+    init(store: AgentSessionStore, delegate: (any AgentSessionHost)?) {
         self.store = store
         self.delegate = delegate
         // A session that leaves the store takes its transcript copy along.
@@ -43,8 +41,7 @@ final class AgentSessionEngine {
         // A new agent run in an ended session's tab became a session of its
         // own: the window showing the old one follows the run.
         store.onSucceeded = { [weak self] old, new in
-            guard let w = self?.delegate?.unifiedWindow, w.selectedSessionID == old else { return }
-            w.selectSession(new)
+            self?.delegate?.followSucceededSession(old: old, new: new)
         }
         // A merge that was being followed when the app quit.
         DispatchQueue.main.async { [weak self] in self?.resumeMergeWatches() }
@@ -117,7 +114,7 @@ final class AgentSessionEngine {
     /// thumbnails), and give back their guest paths. Best effort: a file that
     /// fails to land is left out, the rest still reach the agent.
     private func stageAttachments(_ files: [DroppedFile], sessionID: UUID,
-                                  profileID: UUID, delegate: ACAppDelegate) async -> [String] {
+                                  profileID: UUID, delegate: any AgentSessionHost) async -> [String] {
         guard !files.isEmpty else { return [] }
         func op(_ dict: [String: Any]) async -> Bool {
             (try? await delegate.guestFileOp(profileID: profileID, op: dict, timeout: 60)) != nil
@@ -259,7 +256,7 @@ final class AgentSessionEngine {
                 }
                 return
             }
-            if let w = s.windowIndex, let tab = delegate.pane(for: s.profileID)?.model.tabs
+            if let w = s.windowIndex, let tab = delegate.tabsModel(for: s.profileID)?.tabs
                 .first(where: { $0.index == w }) {
                 // Alive or not? A probe's verdict when there is one; before
                 // the first probe (the app just launched) ask the guest now —
@@ -509,7 +506,7 @@ final class AgentSessionEngine {
         ChatQueueStore.Driver(
             isWorking: { [weak self] in
                 guard let self, self.store.session(id)?.windowIndex == window else { return nil }
-                return self.delegate?.pane(for: profileID)?.chatIsWorking(window: window)
+                return self.delegate?.chatIsWorking(profileID: profileID, window: window)
             },
             deliver: { [weak self] text, target in
                 guard let delegate = self?.delegate else { return .unreachable }
@@ -558,8 +555,8 @@ final class AgentSessionEngine {
     /// under Ended so it can be resumed later.
     func close(_ id: UUID) {
         guard let s = store.session(id), let delegate else { return }
-        if let w = s.windowIndex, let pane = delegate.pane(for: s.profileID) {
-            delegate.requestCloseTab(index: w, in: pane)
+        if let w = s.windowIndex, delegate.tabsModel(for: s.profileID) != nil {
+            delegate.requestCloseTab(index: w, profileID: s.profileID)
         }
         store.mutate(id) { $0.windowIndex = nil; $0.endedAt = Date(); $0.launchingSince = nil }
     }
@@ -577,7 +574,7 @@ final class AgentSessionEngine {
     func archive(_ id: UUID) {
         guard let s = store.session(id) else { return }
         BACDebug.log("sessions", "archive “\(s.title)”")
-        if tabClosableNow(s), delegate?.pane(for: s.profileID) != nil { close(id) }
+        if tabClosableNow(s), delegate?.tabsModel(for: s.profileID) != nil { close(id) }
         store.mutate(id) { $0.launchingSince = nil }
         store.setArchived(id, true)
     }
@@ -631,11 +628,11 @@ final class AgentSessionEngine {
     /// binding; the roster catching up is what ends the record.
     private var killSent: Set<String> = []
     private func killTabIfShown(_ s: AgentSession) {
-        guard let w = s.windowIndex, let delegate, let pane = delegate.pane(for: s.profileID) else { return }
+        guard let w = s.windowIndex, let delegate, delegate.tabsModel(for: s.profileID) != nil else { return }
         let key = "\(s.id.uuidString)#\(w)"
         guard !killSent.contains(key) else { return }
         killSent.insert(key)
-        delegate.requestCloseTab(index: w, in: pane)
+        delegate.requestCloseTab(index: w, profileID: s.profileID)
     }
 
     // MARK: Launch
@@ -889,8 +886,8 @@ final class AgentSessionEngine {
 
     /// Which tabs are there before a launch, so the new one can be told
     /// apart — the roster may lag right after a boot, so ask tmux too.
-    private func tabBaseline(profileID: UUID, delegate: ACAppDelegate) async -> Int {
-        var baseline = delegate.pane(for: profileID)?.model.tabs.map(\.index).max() ?? -1
+    private func tabBaseline(profileID: UUID, delegate: any AgentSessionHost) async -> Int {
+        var baseline = delegate.tabsModel(for: profileID)?.tabs.map(\.index).max() ?? -1
         if let out = try? await delegate.guestExec(
             profileID: profileID,
             command: "tmux list-windows -t bromure -F '#{window_index}' 2>/dev/null | sort -n | tail -1",
@@ -937,7 +934,7 @@ final class AgentSessionEngine {
             // An attached Mac's agent: the one-shot tail (the chunk reader
             // needs python3, which a plain Mac may not have). The cache
             // keeps whole records and merges, so this can't shrink it.
-            if delegate.attachedMachines[s.profileID] != nil {
+            if delegate.isAttachedMachine(s.profileID) {
                 guard let raw = await delegate.fetchSessionTranscript(s), !raw.isEmpty else { return }
                 self.transcripts.save(s.id, Data(raw.utf8))
                 return
@@ -1720,7 +1717,7 @@ final class AgentSessionEngine {
             guard let w = s.windowIndex, let tab = entry.model.tabs.first(where: { $0.index == w })
             else { continue }
             let owned = tab.worktreeBranch.map {
-                delegate.codingTaskEngine.ownsLiveTab(profileID: profileID, branch: $0)
+                delegate.codingTaskOwnsLiveTab(profileID: profileID, branch: $0)
             } ?? false
             switch Self.archivedTabVerdict(sessionBoot: s.bootID, probeBoot: boot,
                                            sessionWindowID: s.windowID, probeWindowID: windowIDs[w],
@@ -1932,4 +1929,3 @@ final class AgentSessionEngine {
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
 }
-#endif

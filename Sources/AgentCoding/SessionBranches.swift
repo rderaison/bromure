@@ -330,9 +330,8 @@ extension AgentSessionEngine {
         guard let delegate, let s = store.session(id) ?? delegate.sessionRecord(id) else { return nil }
         let cmd = TaskReviewData.sessionCommand(dir: ScheduledAutomationEngine.guestPath(s.cwd), base: base,
                                                 focusFiles: focusFiles)
-        let machine = delegate.machine(forSession: id)
         let run: () async throws -> String = {
-            if let machine { return try await machine.hostExec(cmd, timeout: 30) }
+            if let out = try await delegate.attachedMachineExec(sessionID: id, command: cmd, timeout: 30) { return out }
             return try await delegate.guestExec(profileID: s.profileID, command: cmd, timeout: 30)
         }
         guard let out = try? await run()

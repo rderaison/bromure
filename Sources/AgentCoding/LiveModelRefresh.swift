@@ -213,7 +213,7 @@ extension AgentSessionEngine {
             BACDebug.log("models", "restart “\(s.title)” refused (\(r.rawValue)) — nothing typed")
             return
         }
-        if let tab = delegate.pane(for: pid)?.model.tabs.first(where: { $0.index == w }) {
+        if let tab = delegate.tabsModel(for: pid)?.tabs.first(where: { $0.index == w }) {
             tab.agentStatus = .done
         }
         // Same bookkeeping as a resume: the "exited" verdict waits until the
