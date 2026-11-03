@@ -2886,7 +2886,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// workspaces; see KubeCluster.swift / KubeClusterEngine.swift.
     let kubeClusterStore = KubeClusterStore()
     private(set) lazy var kubeClusterEngine: KubeClusterEngine = {
-        let e = KubeClusterEngine(app: self, store: kubeClusterStore)
+        let e = KubeClusterEngine(host: self, store: kubeClusterStore)
+        // LAN service IPs (MetalLB-style ARP) relay through the same vsock path.
+        KubeLANAnnouncer.shared.relayOpener = { [weak e] nodeID, header, completion in
+            MainActor.assumeIsolated {
+                guard let e else { completion(-1); return }
+                e.openRelay(nodeID: nodeID, target: header, completion: completion)
+            }
+        }
         // The user's phone and Slack (messaging connector) talk to the Switchboard.
         e.onConnectorMessage = { [weak self] kind, text in
             self?.switchboardEngine.phoneMessage(kind, text)

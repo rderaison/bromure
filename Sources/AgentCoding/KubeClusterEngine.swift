@@ -1,8 +1,5 @@
-#if os(macOS)
-import AppKit
 import Foundation
 import SandboxEngine
-import Virtualization
 
 // MARK: - Kubernetes cluster engine (host side)
 //
@@ -18,10 +15,79 @@ import Virtualization
 // the quit drain all see it. Node state lives under
 // ~/Library/Application Support/BromureAC/kube/<cluster-id>/nodes/<node-id>/.
 
+/// What the cluster engine needs from the machine host: booting and
+/// stopping the managed machines (nodes, registries, the connector),
+/// reaching into them, and the scripts they run (macOS: ACAppDelegate over
+/// UbuntuSandboxVM, KubeClusterEngine+VZ.swift; the Linux daemon: its VM
+/// records).
+@MainActor
+protocol KubeEngineHost: AnyObject {
+    /// Make the machine (its disks) and wire it: its IP to `runtime.ip`,
+    /// its stop to `engine.nodeStopped`, a boot dying on filesystem errors
+    /// to `fsFailure`. Sets `runtime.machine`. Nothing runs yet.
+    func makeKubeMachine(_ m: KubeClusterEngine.MachineSpec, runtime: KubeClusterEngine.NodeRuntime,
+                         fsFailure: KubeClusterEngine.BootFSFailure, engine: KubeClusterEngine) throws
+    /// Lay it out (home, meta share with `m.scripts`) and start it —
+    /// resuming its saved state when allowed — registered with the host so
+    /// its shell channel, the proxy and the CLI see it. Returns once started
+    /// (not yet answering).
+    func startKubeMachine(_ m: KubeClusterEngine.MachineSpec, runtime: KubeClusterEngine.NodeRuntime,
+                          repairAttempted: Bool, engine: KubeClusterEngine) async throws
+    /// The machine's shell channel has a connection (the boot signal).
+    func kubeMachineAnswers(_ nodeID: UUID) -> Bool
+    /// The machine's IP, once known, for the host's own records.
+    func setKubeMachineIP(_ nodeID: UUID, _ ip: String)
+    /// Take a machine wedged at boot down for a disk repair, forgetting
+    /// any saved state.
+    func stopKubeMachineForRepair(_ runtime: KubeClusterEngine.NodeRuntime) async
+    /// Quick repair of the machine's disks (journal replay, error flags).
+    /// True when every disk came out clean or repaired.
+    func repairKubeMachineDisks(_ m: KubeClusterEngine.MachineSpec) async -> Bool
+    /// The full e2fsck, for damage the quick repair can't fix.
+    func deepRepairKubeMachineDisks(_ m: KubeClusterEngine.MachineSpec, engine: KubeClusterEngine) async throws
+    /// Shut the machine down.
+    func stopKubeMachine(_ nodeID: UUID) async
+    /// The machine stopped: drop the host's records of it.
+    func kubeMachineStopped(_ nodeID: UUID)
+    func guestExec(profileID: Profile.ID, command: String, timeout: Int) async throws -> String
+    func guestFileOp(profileID: Profile.ID, op: [String: Any], timeout: Int) async throws -> [String: Any]
+    /// A connection to `target` ("ip:port") from inside the machine (its
+    /// loopback relay): the host-side fd to splice, or -1.
+    func openKubeRelay(nodeID: UUID, target: String, completion: @escaping @Sendable (Int32) -> Void)
+    /// The workspaces' kubeconfigs changed: restage the running ones.
+    func refreshKubeAccessForRunningWorkspaces()
+    /// This host's LAN IPv4 (where LoadBalancer services are answered).
+    func kubeHostIPv4() -> String?
+    /// A cluster's LAN address pool ("a-b", CIDR or single addresses),
+    /// host order; nil on garbage.
+    func parseKubeLANPool(_ text: String) -> [UInt32]?
+    /// The cluster's Bromure load balancer; nil where the host has none.
+    func makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID,
+                              serverIP: String, hostIP: String?, pool: [UInt32]) -> (any KubeServicePublisher)?
+    var kubeNodeScriptURL: URL? { get }
+    var kubeProbeScriptURL: URL? { get }
+    var kubeRegistryScriptURL: URL? { get }
+    var connectorScriptURL: URL? { get }
+    var connectorRelayURL: URL? { get }
+}
+
+/// A cluster's LoadBalancer services, published on the host (macOS:
+/// KubeLoadBalancer).
+@MainActor
+protocol KubeServicePublisher: AnyObject {
+    /// The host address services are answered on when they have no pool IP.
+    var hostIP: String? { get }
+    /// Bring the listeners in line with `services`; their endpoints.
+    func reconcile(services: [KubeProbe.Service]) -> [KubeLBEndpoint]
+    func stopAll()
+}
+
 @MainActor
 final class KubeClusterEngine {
-    unowned let app: ACAppDelegate
+    unowned let host: any KubeEngineHost
     let store: KubeClusterStore
+    /// Where clusters keep their nodes, kubeconfigs and secrets.
+    let rootDirectory: URL
 
     var runtimes: [UUID: ClusterRuntime] = [:]
     /// Clusters (and registries) whose dashboard is on screen: full probes
@@ -45,25 +111,17 @@ final class KubeClusterEngine {
     /// Set when pairing was called off for too many wrong codes.
     var slackPairingAborted = false
 
-    init(app: ACAppDelegate, store: KubeClusterStore) {
-        self.app = app
+    init(host: any KubeEngineHost, store: KubeClusterStore, rootDirectory: URL? = nil) {
+        self.host = host
         self.store = store
+        self.rootDirectory = rootDirectory ?? KubeClusterStore.defaultDirectory
         for c in store.clusters { store.setStatus(c.id) { $0.phase = .stopped } }
-        // LAN service IPs (MetalLB-style ARP) relay through the same vsock path.
-        KubeLANAnnouncer.shared.relayOpener = { [weak self] nodeID, header, completion in
-            MainActor.assumeIsolated {
-                guard let self else { completion(-1); return }
-                self.openRelay(nodeID: nodeID, target: header, completion: completion)
-            }
-        }
     }
 
     // MARK: Paths
 
-    static var rootDirectory: URL { KubeClusterStore.defaultDirectory }
-
     func clusterDirectory(_ id: UUID) -> URL {
-        Self.rootDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+        rootDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
     }
 
     /// The node VMs' own ProfileStore — disks, homes and meta shares live
@@ -80,17 +138,11 @@ final class KubeClusterEngine {
 
     final class NodeRuntime {
         let record: KubeNodeRecord
-        let profile: Profile
-        let sessionDisk: SessionDisk
-        let sandbox: UbuntuSandboxVM
+        /// The host's handle on the machine (macOS: its UbuntuSandboxVM).
+        var machine: AnyObject?
         var ip: String?
         var up = false
-        init(record: KubeNodeRecord, profile: Profile, sessionDisk: SessionDisk, sandbox: UbuntuSandboxVM) {
-            self.record = record
-            self.profile = profile
-            self.sessionDisk = sessionDisk
-            self.sandbox = sandbox
-        }
+        init(record: KubeNodeRecord) { self.record = record }
     }
 
     final class ClusterRuntime {
@@ -98,7 +150,7 @@ final class KubeClusterEngine {
         var nodes: [UUID: NodeRuntime] = [:]
         var lifecycleTask: Task<Void, Never>?
         var probeTask: Task<Void, Never>?
-        var loadBalancer: KubeLoadBalancer?
+        var loadBalancer: (any KubeServicePublisher)?
         var direct: KubeDirectCluster?
         /// Services already stamped with the host IP (ns/name).
         var patchedServices: Set<String> = []
@@ -226,7 +278,7 @@ final class KubeClusterEngine {
         let ordered = rt.nodes.values.sorted { ($0.record.role == .server ? 1 : 0) < ($1.record.role == .server ? 1 : 0) }
         for node in ordered {
             await quiesceForShutdown(node.record.id)
-            await app.stopSession(node.record.id, action: .shutdown)
+            await host.stopKubeMachine(node.record.id)
             node.up = false
         }
         rt.nodes.removeAll()
@@ -377,7 +429,7 @@ final class KubeClusterEngine {
     }
 
     func pushKubeconfigsToWorkspaces() {
-        app.refreshKubeAccessForRunningWorkspaces()
+        host.refreshKubeAccessForRunningWorkspaces()
     }
 
     // MARK: Logging
@@ -608,16 +660,16 @@ final class KubeClusterEngine {
             $0.step = nil
             $0.message = nil
             $0.startedAt = Date()
-            $0.hostIP = HostNetwork.primaryIPv4()
+            $0.hostIP = host.kubeHostIPv4()
         }
         if cluster.spec.loadBalancer == .bromure, let server = cluster.server {
-            let hostIP = HostNetwork.primaryIPv4()
-            let pool = cluster.spec.lanPool.flatMap(KubeLANPool.parse) ?? []
+            let hostIP = host.kubeHostIPv4()
+            let pool = cluster.spec.lanPool.flatMap { host.parseKubeLANPool($0) } ?? []
             if hostIP == nil && pool.isEmpty {
                 log(id, "This Mac has no LAN IPv4 address — LoadBalancer services stay pending")
             } else {
-                rt.loadBalancer = KubeLoadBalancer(engine: self, clusterID: id, serverNodeID: server.id,
-                                                   serverIP: serverIP, hostIP: hostIP, pool: pool)
+                rt.loadBalancer = host.makeKubeLoadBalancer(engine: self, clusterID: id, serverNodeID: server.id,
+                                                            serverIP: serverIP, hostIP: hostIP, pool: pool)
                 if !pool.isEmpty {
                     log(id, "LAN address pool: \(cluster.spec.lanPool ?? "") (\(pool.count) address(es), answered by ARP)")
                 }
@@ -679,7 +731,7 @@ final class KubeClusterEngine {
             memoryGB: cluster.spec.memoryGBPerNode,
             dataDiskGB: cluster.spec.storageEnabled ? cluster.spec.storageDiskGB : nil,
             comment: "Kubernetes node of cluster “\(cluster.name)” — managed by Bromure.",
-            scripts: [("bromure-k8s-node.sh", app.kubeNodeScriptURL), ("bromure-k8s-probe.py", app.kubeProbeScriptURL)],
+            scripts: [("bromure-k8s-node.sh", host.kubeNodeScriptURL), ("bromure-k8s-probe.py", host.kubeProbeScriptURL)],
             ipCommand: "bash \(Self.scriptPath) ip",
             restoreSavedState: cluster.provisioned), rt: rt)
     }
@@ -717,105 +769,15 @@ final class KubeClusterEngine {
     func bootMachine(_ m: MachineSpec, rt: ClusterRuntime, repairAttempted: Bool = false) async throws -> String {
         let id = m.ownerID
         let node = m.record
-        let nodes = nodeStore(id)
-        var profile = Profile(id: node.id, name: node.name, tool: .claude, authMode: .token,
-                              homeModel: .virtiofs)
-        profile.memoryGB = m.memoryGB
-        profile.memoryMB = m.memoryMB
-        // Quitting the app suspends the machine (RAM snapshot, like a
-        // workspace), and the next start resumes it. It used to shut down on
-        // quit with the workspace's 15 s grace: a k3s node (containerd, etcd,
-        // Longhorn) routinely takes longer, was force-stopped mid-shutdown,
-        // and came back with a dirty filesystem. An explicit Stop still
-        // shuts down (with a longer grace — see stopSession).
-        profile.closeAction = .suspend
-        profile.color = .gray
-        profile.nativeTerminal = true
-        profile.comments = m.comment
-        profile.folderPaths = m.folders
-
-        let sessionDisk = SessionDisk(profile: profile, store: nodes, baseDiskURL: app.imageManager.baseDiskURL)
-        sessionDisk.tokenPlan = nil
-        if let engine = app.mitmEngine, let scriptURL = app.bridgeScriptURL {
-            sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
-                caCertificatePEM: engine.ca.certificatePEM,
-                bridgeScriptURL: scriptURL,
-                awsCredsHelperURL: app.awsCredsHelperURL,
-                claudeTokenAgentURL: app.claudeTokenAgentURL,
-                codexTokenAgentURL: app.codexTokenAgentURL,
-                shellAgentURL: app.shellAgentURL,
-                loopbackRelayAgentURL: app.loopbackRelayAgentURL,
-                agentdURL: app.agentdURL)
-        }
-        let sandbox = UbuntuSandboxVM(imageManager: app.imageManager, sessionDisk: sessionDisk)
-        sandbox.cpuCountOverride = m.cpus
-        if let gb = m.dataDiskGB {
-            let dataURL = nodes.profileDirectory(for: profile).appendingPathComponent("data.img")
-            try Self.ensureSparseImage(at: dataURL, gigabytes: gb)
-            sandbox.extraDiskURLs = [dataURL]
-        }
-        let runtime = NodeRuntime(record: node, profile: profile, sessionDisk: sessionDisk, sandbox: sandbox)
-        rt.nodes[node.id] = runtime
-
-        sandbox.onIPUpdate = { [weak self] ip in
-            Task { @MainActor in
-                guard let self else { return }
-                runtime.ip = ip
-                self.app.runningSessions[node.id]?.lastIP = ip
-            }
-        }
-        sandbox.onStopped = { [weak self] error in
-            Task { @MainActor in self?.nodeStopped(clusterID: id, nodeID: node.id, error: error) }
-        }
+        let runtime = NodeRuntime(record: node)
         // A boot-time fsck the guest's initramfs can't finish drops it to an
-        // emergency shell nobody can answer; the console scanner catches it
-        // (the workspace path's detector) and the wait below repairs the
-        // disks on the Mac and boots again.
+        // emergency shell nobody can answer; the host's console scanner
+        // catches it and the wait below repairs the disks and boots again.
         let fsFailure = BootFSFailure()
-        sandbox.onBootFilesystemFailure = { detail in
-            Task { @MainActor in if fsFailure.detail == nil { fsFailure.detail = detail } }
-        }
-
+        try host.makeKubeMachine(m, runtime: runtime, fsFailure: fsFailure, engine: self)
+        rt.nodes[node.id] = runtime
         log(id, "Booting \(node.name)…")
-        try nodes.prepareHomeDirectory(for: profile, terminalDefaults: app.terminalDefaults)
-        try sandbox.prepare()
-        try stageScripts(m.scripts, into: nodes.profileDirectory(for: profile))
-        if sandbox.hasSavedState, m.restoreSavedState, !repairAttempted {
-            do {
-                try await sandbox.restore()
-                log(id, "\(node.name) resumed from its saved state")
-            } catch {
-                // Same fallback as a workspace: a snapshot that won't restore
-                // (an app or base-image update since the quit, VZ refused)
-                // can't come back by any path — boot fresh from the disk.
-                let drift = sandbox.lastRestoreDrift.map { " (configuration changed: \($0))" }
-                    ?? " (\(error.localizedDescription))"
-                log(id, "\(node.name): saved state didn't restore\(drift) — booting fresh")
-                sessionDisk.clearSavedState()
-                // Stop the failed instance first: it may hold the disk, and
-                // its late stop mustn't read as the fresh boot's.
-                await sandbox.discardFailedRestore()
-                try sandbox.prepare()
-                // prepare() lays the meta share out again: the scripts staged
-                // above are gone with it (a connector booted without its
-                // bromure-msgbridge.sh can't start).
-                try stageScripts(m.scripts, into: nodes.profileDirectory(for: profile))
-                try await sandbox.start()
-            }
-        } else {
-            sessionDisk.clearSavedState()
-            try await sandbox.start()
-        }
-
-        guard let dev = sandbox.socketDevice else {
-            throw KubeError.message("\(node.name): no vsock device")
-        }
-        // Egress through the host MITM (apt, the k3s installer, image pulls)
-        // with an empty swap map — nothing to substitute on a node.
-        app.mitmEngine?.register(socketDevice: dev, profileID: node.id)
-        app.shellBridges[node.id] = ShellBridge(socketDevice: dev)
-        let session = app.registerSession(sandbox, profile: profile)
-        session.kubeClusterID = id
+        try await host.startKubeMachine(m, runtime: runtime, repairAttempted: repairAttempted, engine: self)
 
         // The shell agent dials out once agentd is up; the first pooled
         // connection is the boot signal.
@@ -823,7 +785,7 @@ final class KubeClusterEngine {
         for _ in 0..<360 {   // ≤ 3 minutes
             try Task.checkCancellation()
             if fsFailure.detail != nil { break }
-            if (app.shellBridges[node.id]?.poolSize ?? 0) > 0,
+            if host.kubeMachineAnswers(node.id),
                (try? await exec(node.id, "true", timeout: 10)) != nil {
                 alive = true
                 break
@@ -832,16 +794,19 @@ final class KubeClusterEngine {
         }
         if let detail = fsFailure.detail, !alive {
             log(id, "✗ \(node.name) failed its boot-time filesystem check: \(detail)")
-            await stopForRepair(node.id, sandbox: sandbox, rt: rt)
+            // Out of the runtime first, so its stop isn't read as the
+            // cluster losing a node.
+            rt.nodes.removeValue(forKey: node.id)
+            await host.stopKubeMachineForRepair(runtime)
             guard !repairAttempted else {
                 throw KubeError.message("\(node.name)'s disk still fails its filesystem check after a repair")
             }
             step(id, "Repairing \(node.name)'s disks")
-            if await !repairDisks(of: profile, in: nodes, ownerID: id) {
+            if await !host.repairKubeMachineDisks(m) {
                 // Damage past a journal replay / error-flag clear (a corrupt
-                // inode, bad bitmaps): the real e2fsck -y, in a throwaway VM.
+                // inode, bad bitmaps): the real e2fsck -y.
                 step(id, "Repairing \(node.name)'s disks with e2fsck")
-                try await fsckInRescueVM(profile: profile, in: nodes, ownerID: id)
+                try await host.deepRepairKubeMachineDisks(m, engine: self)
             }
             return try await bootMachine(m, rt: rt, repairAttempted: true)
         }
@@ -863,123 +828,10 @@ final class KubeClusterEngine {
         }
         guard let ip, !ip.isEmpty else { throw KubeError.message("\(node.name) got no IP address") }
         runtime.ip = ip
-        app.runningSessions[node.id]?.lastIP = ip
+        host.setKubeMachineIP(node.id, ip)
         store.setStatus(id) { $0.nodesUp = rt.nodes.values.filter(\.up).count }
         log(id, "\(node.name) is up at \(ip)")
         return ip
-    }
-
-    /// Take a machine wedged in its emergency shell down for a disk repair:
-    /// drop it from the runtime first, so its stop isn't read as the
-    /// cluster losing a node, and forget any snapshot (it's worthless, and
-    /// invalid once the disk changes).
-    private func stopForRepair(_ nodeID: UUID, sandbox: UbuntuSandboxVM, rt: ClusterRuntime) async {
-        rt.nodes.removeValue(forKey: nodeID)
-        sandbox.sessionDisk?.clearSavedState()
-        if let vm = sandbox.vm, vm.state != .stopped {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                vm.stop { _ in cont.resume() }
-            }
-        }
-        app.handleSessionStopped(profileID: nodeID)
-    }
-
-    /// Replay the journal and repair the machine's system disk — and its
-    /// data disk (Longhorn / registry storage), which the guest checks at
-    /// boot too — with the Mac-side ext4 checker the workspaces use.
-    /// True when every ext4 image came out clean or repaired.
-    @discardableResult
-    private func repairDisks(of profile: Profile, in nodes: ProfileStore, ownerID: UUID) async -> Bool {
-        var ok = true
-        var images = [nodes.diskURL(for: profile)]
-        let data = nodes.profileDirectory(for: profile).appendingPathComponent("data.img")
-        if FileManager.default.fileExists(atPath: data.path) { images.append(data) }
-        for url in images {
-            let path = url.path
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<Ext4Fsck.Result, Error> in
-                do { return .success(try Ext4Fsck.check(imagePath: path, autoFix: true)) }
-                catch { return .failure(error) }
-            }.value
-            switch result {
-            case .success(let r):
-                if !(r.clean || r.repaired) { ok = false }
-                log(ownerID, "fsck \(url.lastPathComponent): \(r.summary)")
-                FileHandle.standardError.write(Data(
-                    "[kube] fsck \(profile.name) \(url.lastPathComponent): \(r.summary)\n\(r.output)\n".utf8))
-            case .failure(let error):
-                // A data disk the guest never formatted is not ext4 yet —
-                // nothing to check there.
-                log(ownerID, "fsck \(url.lastPathComponent): skipped (\(error))")
-            }
-        }
-        return ok
-    }
-
-    /// e2fsck in the guest, over every ext4 filesystem in the images it is
-    /// given (whole-disk or partitioned, attached as loop devices AFTER boot).
-    /// Exit 0-3 = consistent now; 4+ = errors left.
-    static let rescueFsckScript = #"""
-    set -u
-    rc=0
-    for img in "$@"; do
-      [ -f "$img" ] || continue
-      L=$(sudo losetup -fP --show "$img") || { echo "fsck: cannot attach $img"; rc=8; continue; }
-      sudo udevadm settle 2>/dev/null || sleep 1
-      for dev in "$L" "$L"p*; do
-        [ -b "$dev" ] || continue
-        [ "$(sudo blkid -p -o value -s TYPE "$dev" 2>/dev/null)" = ext4 ] || continue
-        sudo e2fsck -fy "$dev" >/tmp/bromure-fsck.log 2>&1; r=$?
-        echo "fsck: $(basename "$img") $(basename "$dev") exit=$r"
-        tail -n 3 /tmp/bromure-fsck.log | sed 's/^/  /'
-        [ "$r" -ge 4 ] && rc=4
-      done
-      sudo losetup -d "$L"
-    done
-    sync
-    exit $rc
-    """#
-
-    /// The Mac-side checker only replays journals and clears the error flag;
-    /// anything past that needs the real e2fsck. Boot a throwaway machine
-    /// from the base image with the damaged machine's folder shared in, and
-    /// check its images through loop devices set up after boot — never as
-    /// block devices at boot: every clone of the base carries the same
-    /// filesystem UUID and label, so the rescue could come up on the damaged
-    /// disk. The throwaway is deleted afterwards either way.
-    private func fsckInRescueVM(profile: Profile, in nodes: ProfileStore, ownerID: UUID) async throws {
-        let dir = nodes.profileDirectory(for: profile)
-        var names = ["disk.img"]
-        if FileManager.default.fileExists(atPath: dir.appendingPathComponent("data.img").path) {
-            names.append("data.img")
-        }
-        let rescue = KubeNodeRecord(name: "rescue-\(profile.name)", role: .agent, index: 0)
-        let scratch = ClusterRuntime(id: ownerID)   // keep it out of the cluster's node list
-        defer {
-            try? FileManager.default.removeItem(at: nodes.profileDirectory(
-                for: Profile(id: rescue.id, name: rescue.name, tool: .claude, authMode: .token, homeModel: .virtiofs)))
-            MACBindings.shared.release(profileID: rescue.id)
-        }
-        do {
-            _ = try await bootMachine(MachineSpec(
-                ownerID: ownerID, record: rescue, cpus: 2, memoryGB: 2, dataDiskGB: nil,
-                comment: "Disk repair for \(profile.name) — managed by Bromure, deleted when done.",
-                scripts: [], ipCommand: "hostname -I | awk '{print $1}'",
-                restoreSavedState: false, folders: [dir.path]), rt: scratch, repairAttempted: true)
-            let args = names.map { "/mnt/bromure-share-1/\($0)" }.joined(separator: " ")
-            let b64 = Data(Self.rescueFsckScript.utf8).base64EncodedString()
-            let out = try await exec(rescue.id,
-                "echo \(b64) | base64 -d > /tmp/bromure-rescue-fsck.sh && bash /tmp/bromure-rescue-fsck.sh \(args); echo \"rc=$?\"",
-                timeout: 900)
-            for line in out.split(separator: "\n") where line.hasPrefix("fsck:") { log(ownerID, String(line)) }
-            FileHandle.standardError.write(Data("[kube] rescue e2fsck for \(profile.name):\n\(out)\n".utf8))
-            await app.stopSession(rescue.id, action: .shutdown)
-            if out.contains("rc=4") || out.contains("rc=8") {
-                throw KubeError.message("e2fsck couldn't make \(profile.name)'s disk consistent")
-            }
-        } catch {
-            if app.runningSessions[rescue.id] != nil { await app.stopSession(rescue.id, action: .shutdown) }
-            throw error
-        }
     }
 
     /// Before the power button: stop what makes a machine's own shutdown
@@ -998,7 +850,7 @@ final class KubeClusterEngine {
     }
 
     func nodeStopped(clusterID: UUID, nodeID: UUID, error: Error?) {
-        app.handleSessionStopped(profileID: nodeID)
+        host.kubeMachineStopped(nodeID)
         guard let rt = runtimes[clusterID], let node = rt.nodes[nodeID] else { return }
         node.up = false
         let phase = store.status(clusterID).phase
@@ -1023,7 +875,7 @@ final class KubeClusterEngine {
 
     /// Copy scripts into the VM's (read-only in the guest) meta share.
     /// Re-done after every `prepare()`, which wipes the share.
-    private func stageScripts(_ files: [(String, URL?)], into profileDir: URL) throws {
+    static func stageScripts(_ files: [(String, URL?)], into profileDir: URL) throws {
         let meta = profileDir.appendingPathComponent("meta-share", isDirectory: true)
         try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
         for (name, url) in files {
@@ -1059,7 +911,7 @@ final class KubeClusterEngine {
     private func script(_ args: String) -> String { "bash \(Self.scriptPath) \(args)" }
 
     func exec(_ nodeID: UUID, _ command: String, timeout: Int) async throws -> String {
-        try await app.guestExec(profileID: nodeID, command: command, timeout: timeout)
+        try await host.guestExec(profileID: nodeID, command: command, timeout: timeout)
     }
 
     static func shellQuote(_ s: String) -> String {
@@ -1187,7 +1039,7 @@ final class KubeClusterEngine {
             svc.ports.map { KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: $0.port, nodePort: $0.nodePort,
                                            protocolName: $0.protocolName, bound: false, error: error, scope: "vm") }
         }
-        guard let range = cluster.metallbRange, let pool = KubeLANPool.parse(range) else {
+        guard let range = cluster.metallbRange, let pool = host.parseKubeLANPool(range) else {
             for svc in vmServices { endpoints += pending(svc, "no VM-network pool") }
             return
         }
@@ -1326,28 +1178,8 @@ final class KubeClusterEngine {
 
     /// Open a relay into `nodeID` that connects, inside the guest, to
     /// `target` ("ip:port"); returns the host-side fd to splice, or -1.
-    /// Same path the fat-client forward resolver uses (the app process can't
-    /// TCP-dial its own guests; the guest's loopback relay can).
     func openRelay(nodeID: UUID, target: String, completion: @escaping @Sendable (Int32) -> Void) {
-        guard let session = app.runningSessions[nodeID], let dev = session.sandbox.socketDevice else {
-            completion(-1); return
-        }
-        dev.connect(toPort: 5010) { result in
-            switch result {
-            case .success(let conn):
-                let vfd = conn.fileDescriptor
-                let header = "\(target)\n"
-                let sent = header.withCString { Darwin.write(vfd, $0, strlen($0)) }
-                guard sent > 0 else { completion(-1); return }
-                let dupFD = dup(vfd)
-                // Keep the VZ connection object alive for as long as the
-                // splice uses the dup'd descriptor.
-                KubeRelayRetain.hold(conn, forFD: dupFD)
-                completion(dupFD)
-            case .failure:
-                completion(-1)
-            }
-        }
+        host.openKubeRelay(nodeID: nodeID, target: target, completion: completion)
     }
 
     enum KubeError: LocalizedError {
@@ -1369,405 +1201,3 @@ enum KubeRelayRetain {
         lock.lock(); held[fd] = nil; lock.unlock()
     }
 }
-
-// MARK: - Load balancer
-
-/// Bromure's LoadBalancer implementation. Two ways to answer for a Service:
-/// - a LAN pool address (`spec.lanPool`, or the Service's own
-///   `spec.loadBalancerIP`): the announcer answers ARP for it on the wire
-///   and terminates its flows in userspace, MetalLB-style — nothing on the
-///   Mac is exposed;
-/// - otherwise the Mac's own address: one host listener per (service, port)
-///   on 0.0.0.0.
-/// Either way each connection is relayed over vsock into the control-plane
-/// node and on to the Service's NodePort; the cluster never leaves the VM LAN.
-@MainActor
-final class KubeLoadBalancer {
-    unowned let engine: KubeClusterEngine
-    let clusterID: UUID
-    let serverNodeID: UUID
-    let serverIP: String
-    /// The Mac's LAN address (nil = none; only pool addresses can work).
-    let hostIP: String?
-    /// Spare LAN addresses (host order) handed out to Services.
-    let pool: [UInt32]
-    /// Service key → LAN address it was given.
-    private var assigned: [String: UInt32] = [:]
-    /// Addresses the LAN refused (someone else answers), so we don't retry
-    /// them on every probe.
-    private var refused: [UInt32: String] = [:]
-
-    private final class Listener {
-        let fd: Int32
-        let key: String
-        let target: String
-        var thread: Thread?
-        init(fd: Int32, key: String, target: String) { self.fd = fd; self.key = key; self.target = target }
-    }
-
-    private var listeners: [String: Listener] = [:]
-    /// Ports that failed to bind, with the reason — shown in the dashboard.
-    private var failures: [String: String] = [:]
-
-    /// UDP on the Mac's own address: one bound socket per (service, port);
-    /// every datagram rides the one framed relay into the control-plane
-    /// node, and replies come back by NodePort to the socket that owns it.
-    private final class UDPListener {
-        let fd: Int32
-        let key: String
-        let nodePort: UInt16
-        var thread: Thread?
-        init(fd: Int32, key: String, nodePort: UInt16) { self.fd = fd; self.key = key; self.nodePort = nodePort }
-    }
-    private var udpListeners: [String: UDPListener] = [:]
-    private var udpByNodePort: [UInt16: UDPListener] = [:]
-    private var udpRelay: KubeUDPRelay?
-
-    init(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID, serverIP: String,
-         hostIP: String?, pool: [UInt32] = []) {
-        self.engine = engine
-        self.clusterID = clusterID
-        self.serverNodeID = serverNodeID
-        self.serverIP = serverIP
-        self.hostIP = hostIP
-        self.pool = pool
-    }
-
-    /// Bring the listener set in line with the cluster's LoadBalancer
-    /// services. Returns the endpoint list for the status snapshot.
-    func reconcile(services allServices: [KubeProbe.Service]) -> [KubeLBEndpoint] {
-        // `bromure.io/scope: vm` Services live on the VM network (the
-        // engine's reconcileVMScope); nothing of theirs touches the LAN.
-        let services = allServices.filter { !$0.isVMScoped }
-        var desired: [String: (svc: KubeProbe.Service, port: KubeProbe.ServicePort)] = [:]
-        var endpoints: [KubeLBEndpoint] = []
-        // Services that get their own LAN address are answered by the
-        // announcer, not by host listeners.
-        let lanServices = reconcileLAN(services: services, endpoints: &endpoints)
-        var desiredUDP: [String: (svc: KubeProbe.Service, port: KubeProbe.ServicePort)] = [:]
-        for svc in services where !lanServices.contains("\(svc.namespace)/\(svc.name)") {
-            for p in svc.ports {
-                let key = "\(svc.namespace)/\(svc.name):\(p.port)"
-                if p.protocolName.uppercased() == "UDP" {
-                    if p.nodePort > 0 { desiredUDP[key] = (svc, p) }
-                    else {
-                        endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
-                                                        nodePort: 0, protocolName: p.protocolName,
-                                                        bound: false, error: "no NodePort allocated"))
-                    }
-                    continue
-                }
-                guard p.protocolName.uppercased() == "TCP" else {
-                    endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
-                                                    nodePort: p.nodePort, protocolName: p.protocolName,
-                                                    bound: false, error: "\(p.protocolName) isn't relayed"))
-                    continue
-                }
-                guard p.nodePort > 0 else {
-                    endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
-                                                    nodePort: 0, protocolName: p.protocolName,
-                                                    bound: false, error: "no NodePort allocated"))
-                    continue
-                }
-                desired[key] = (svc, p)
-            }
-        }
-        // Close what's gone (or whose NodePort changed).
-        for (key, l) in listeners {
-            if let d = desired[key], d.port.nodePort == Int(l.target.split(separator: ":").last ?? "") { continue }
-            close(l)
-            listeners[key] = nil
-            failures[key] = nil
-        }
-        // Open what's new.
-        for (key, d) in desired where listeners[key] == nil {
-            guard hostIP != nil else {
-                failures[key] = "this Mac has no LAN address"
-                continue
-            }
-            let target = "\(serverIP):\(d.port.nodePort)"
-            let fd = FatForward.listen(port: d.port.port, bindAll: true)
-            if fd < 0 {
-                failures[key] = "port \(d.port.port) is in use on this Mac"
-                continue
-            }
-            let l = Listener(fd: fd, key: key, target: target)
-            listeners[key] = l
-            failures[key] = nil
-            startAccepting(l)
-        }
-        for (key, d) in desired {
-            endpoints.append(KubeLBEndpoint(namespace: d.svc.namespace, service: d.svc.name, port: d.port.port,
-                                            nodePort: d.port.nodePort, protocolName: d.port.protocolName,
-                                            bound: listeners[key] != nil, error: failures[key]))
-        }
-        reconcileUDP(desiredUDP, endpoints: &endpoints)
-        return endpoints.sorted { ($0.namespace, $0.service, $0.port) < ($1.namespace, $1.service, $1.port) }
-    }
-
-    private func reconcileUDP(_ desired: [String: (svc: KubeProbe.Service, port: KubeProbe.ServicePort)],
-                              endpoints: inout [KubeLBEndpoint]) {
-        for (key, l) in udpListeners {
-            if let d = desired[key], d.port.nodePort == Int(l.nodePort) { continue }
-            closeUDP(l)
-            udpListeners[key] = nil
-            udpByNodePort[l.nodePort] = nil
-            failures[key] = nil
-        }
-        for (key, d) in desired where udpListeners[key] == nil {
-            guard hostIP != nil else { failures[key] = "this Mac has no LAN address"; continue }
-            let fd = Self.bindUDP(port: d.port.port)
-            if fd < 0 {
-                failures[key] = "UDP port \(d.port.port) is in use on this Mac"
-                continue
-            }
-            let l = UDPListener(fd: fd, key: key, nodePort: UInt16(d.port.nodePort))
-            udpListeners[key] = l
-            udpByNodePort[l.nodePort] = l
-            failures[key] = nil
-            startReceiving(l)
-        }
-        for (key, d) in desired {
-            endpoints.append(KubeLBEndpoint(namespace: d.svc.namespace, service: d.svc.name, port: d.port.port,
-                                            nodePort: d.port.nodePort, protocolName: d.port.protocolName,
-                                            bound: udpListeners[key] != nil, error: failures[key]))
-        }
-    }
-
-    private static func bindUDP(port: Int) -> Int32 {
-        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0 else { return -1 }
-        var yes: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(UInt16(port).bigEndian)
-        addr.sin_addr.s_addr = INADDR_ANY
-        let rc = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard rc == 0 else { Darwin.close(fd); return -1 }
-        return fd
-    }
-
-    private func closeUDP(_ l: UDPListener) {
-        Darwin.shutdown(l.fd, SHUT_RDWR)
-        Darwin.close(l.fd)
-    }
-
-    /// The one relay for every host-port UDP service of this cluster.
-    private func ensureUDPRelay() -> KubeUDPRelay {
-        if let r = udpRelay, !r.isClosed { return r }
-        let engine = self.engine, nodeID = serverNodeID, header = "UDP \(serverIP)"
-        let relay = KubeUDPRelay(
-            dial: {
-                let fd = KubeLANAnnouncer.openRelay({ n, h, done in
-                    DispatchQueue.main.async { MainActor.assumeIsolated { engine.openRelay(nodeID: n, target: h, completion: done) } }
-                }, nodeID: nodeID, header: header)
-                return fd >= 0 ? fd : nil
-            },
-            onReply: { [weak self] srcIP, srcPort, dstPort, payload in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.deliverUDP(clientIP: srcIP, clientPort: srcPort, nodePort: dstPort, payload: payload) }
-                }
-            },
-            onClosed: { fd in if fd >= 0 { KubeRelayRetain.release(fd: fd) } })
-        udpRelay = relay
-        return relay
-    }
-
-    private func deliverUDP(clientIP: UInt32, clientPort: UInt16, nodePort: UInt16, payload: ArraySlice<UInt8>) {
-        guard let l = udpByNodePort[nodePort] else { return }
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(clientPort.bigEndian)
-        addr.sin_addr.s_addr = clientIP.bigEndian
-        let bytes = Array(payload)
-        _ = bytes.withUnsafeBytes { raw in
-            withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.sendto(l.fd, raw.baseAddress, raw.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-        }
-    }
-
-    private func startReceiving(_ l: UDPListener) {
-        let fd = l.fd, nodePort = l.nodePort
-        let t = Thread { [weak self] in
-            var buf = [UInt8](repeating: 0, count: 65535)
-            while true {
-                var addr = sockaddr_in()
-                var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-                let n = withUnsafeMutablePointer(to: &addr) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { recvfrom(fd, &buf, buf.count, 0, $0, &len) }
-                }
-                if n < 0 { if errno == EINTR { continue }; return }   // socket closed
-                guard n > 0 else { continue }
-                let clientIP = UInt32(bigEndian: addr.sin_addr.s_addr)
-                let clientPort = UInt16(bigEndian: addr.sin_port)
-                let payload = Array(buf[0..<n])
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        self?.ensureUDPRelay().send(srcIP: clientIP, srcPort: clientPort, dstPort: nodePort, payload: payload[...])
-                    }
-                }
-            }
-        }
-        t.name = "kube-lb-udp:\(l.key)"
-        t.start()
-        l.thread = t
-    }
-
-    func stopAll() {
-        for (_, l) in listeners { close(l) }
-        listeners.removeAll()
-        for (_, l) in udpListeners { closeUDP(l) }
-        udpListeners.removeAll()
-        udpByNodePort.removeAll()
-        udpRelay?.close()
-        udpRelay = nil
-        failures.removeAll()
-        KubeLANAnnouncer.shared.withdrawAll(owner: clusterID)
-        KubeLANAnnouncer.shared.closeRelays(nodeID: serverNodeID)
-        assigned.removeAll()
-    }
-
-    // MARK: LAN pool addresses
-
-    /// Give every Service that asks for (or qualifies for) a LAN address its
-    /// own IP on the wire. Returns the keys of the Services handled here.
-    private func reconcileLAN(services: [KubeProbe.Service], endpoints: inout [KubeLBEndpoint]) -> Set<String> {
-        var handled = Set<String>()
-        let live = Set(services.map { "\($0.namespace)/\($0.name)" })
-        // Services gone → give their addresses back.
-        for (key, ip) in assigned where !live.contains(key) {
-            KubeLANAnnouncer.shared.withdraw(ip: ip, owner: clusterID, service: key)
-            assigned[key] = nil
-        }
-        // Explicit requests first, then Services already holding one of our
-        // addresses (so a restart keeps assignments stable), then the rest —
-        // an automatic assignment never grabs an address someone else has a
-        // claim to.
-        func rank(_ s: KubeProbe.Service) -> Int {
-            if !(s.lbIP ?? "").isEmpty { return 0 }
-            if s.ingress.contains(where: { ip in VMNetSwitch.parseIPv4(ip).map(pool.contains) ?? false }) { return 1 }
-            return 2
-        }
-        let ordered = services.sorted { a, b in
-            let ra = rank(a), rb = rank(b)
-            if ra != rb { return ra < rb }
-            return (a.namespace, a.name) < (b.namespace, b.name)
-        }
-        for svc in ordered {
-            let key = "\(svc.namespace)/\(svc.name)"
-            guard let ip = resolveLANIP(for: svc, key: key) else { continue }
-            handled.insert(key)
-            let ipText = VMNetSwitch.ipString(ip)
-            var ports: [KubeLANAnnouncer.PortKey: KubeLANAnnouncer.Target] = [:]
-            for p in svc.ports {
-                let proto = p.protocolName.uppercased()
-                guard proto == "TCP" || proto == "UDP" else {
-                    endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
-                                                    nodePort: p.nodePort, protocolName: p.protocolName,
-                                                    bound: false, error: "\(p.protocolName) isn't relayed", ip: ipText))
-                    continue
-                }
-                guard p.nodePort > 0, p.port > 0, p.port <= 65535 else {
-                    endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
-                                                    nodePort: 0, protocolName: p.protocolName,
-                                                    bound: false, error: "no NodePort allocated", ip: ipText))
-                    continue
-                }
-                ports[KubeLANAnnouncer.PortKey(port: UInt16(p.port), udp: proto == "UDP")] =
-                    KubeLANAnnouncer.Target(nodeID: serverNodeID, nodeIP: serverIP, nodePort: UInt16(p.nodePort))
-            }
-            var error: String?
-            var conflicts: [KubeLANAnnouncer.PortKey] = []
-            if let why = refused[ip] {
-                error = why
-            } else {
-                do {
-                    conflicts = try KubeLANAnnouncer.shared.publish(ip: ip, ports: ports, owner: clusterID, service: key)
-                    assigned[key] = ip
-                } catch {
-                    let msg = "\(ipText): \(error.localizedDescription)"
-                    refused[ip] = msg
-                    if case KubeLANAnnouncer.PublishError.inUse = error { assigned[key] = nil }
-                }
-                error = refused[ip]
-            }
-            for p in svc.ports where ["TCP", "UDP"].contains(p.protocolName.uppercased()) && p.nodePort > 0 {
-                let clash = conflicts.contains(KubeLANAnnouncer.PortKey(port: UInt16(p.port), udp: p.protocolName.uppercased() == "UDP"))
-                endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
-                                                nodePort: p.nodePort, protocolName: p.protocolName,
-                                                bound: error == nil && !clash,
-                                                error: error ?? (clash ? "port \(p.port) already used on \(ipText)" : nil),
-                                                ip: ipText))
-            }
-        }
-        return handled
-    }
-
-    /// Which LAN address a Service gets: the one it asks for, the one it
-    /// already holds (ours, or the ingress it was left with before a
-    /// restart), else the next free pool address. nil = share the Mac's IP.
-    private func resolveLANIP(for svc: KubeProbe.Service, key: String) -> UInt32? {
-        if let requested = svc.lbIP, !requested.isEmpty {
-            // A requested address is honoured even outside the pool — it's
-            // the operator's call, as with metallb.io/loadBalancerIPs.
-            if let ip = VMNetSwitch.parseIPv4(requested) { return ip }
-        }
-        if let ip = assigned[key] { return ip }
-        guard !pool.isEmpty else { return nil }
-        let taken = Set(assigned.values)
-        // Re-adopt the address the Service already shows (stable across app
-        // restarts) when it's from our pool and free.
-        for ingress in svc.ingress {
-            if let ip = VMNetSwitch.parseIPv4(ingress), pool.contains(ip), !taken.contains(ip) { return ip }
-        }
-        return pool.first { !taken.contains($0) && refused[$0] == nil }
-    }
-
-    private func close(_ l: Listener) {
-        Darwin.shutdown(l.fd, SHUT_RDWR)
-        Darwin.close(l.fd)
-    }
-
-    private func startAccepting(_ l: Listener) {
-        let fd = l.fd, target = l.target, nodeID = serverNodeID
-        let engine = self.engine
-        let t = Thread { [engine] in
-            while true {
-                var addr = sockaddr_in()
-                var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-                let client = withUnsafeMutablePointer(to: &addr) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { accept(fd, $0, &len) }
-                }
-                if client < 0 {
-                    if errno == EINTR { continue }
-                    return   // listener closed
-                }
-                var one: Int32 = 1
-                setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        engine.openRelay(nodeID: nodeID, target: target) { vfd in
-                            guard vfd >= 0 else { Darwin.close(client); return }
-                            Thread.detachNewThread {
-                                FatForward.splice(vfd, client)
-                                KubeRelayRetain.release(fd: vfd)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        t.name = "kube-lb:\(l.key)"
-        t.start()
-        l.thread = t
-    }
-}
-#endif

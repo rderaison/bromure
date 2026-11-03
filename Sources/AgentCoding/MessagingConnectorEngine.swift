@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import SandboxEngine
 
@@ -108,8 +107,8 @@ extension KubeClusterEngine {
                     memoryMB: c.effectiveMemoryMB,
                     dataDiskGB: c.diskGB,
                     comment: "Messaging connector (Signal, WhatsApp, Slack) — managed by Bromure.",
-                    scripts: [("bromure-msgbridge.sh", app.connectorScriptURL),
-                              ("bromure-msgbridge.py", app.connectorRelayURL)],
+                    scripts: [("bromure-msgbridge.sh", host.connectorScriptURL),
+                              ("bromure-msgbridge.py", host.connectorRelayURL)],
                     ipCommand: "bash \(Self.connectorScriptPath) ip",
                     restoreSavedState: c.provisioned), rt: rt)
             }
@@ -556,7 +555,7 @@ extension KubeClusterEngine {
 
     private func app_writeFile(_ nodeID: UUID, path: String, data: Data) async throws -> Bool {
         for op in GuestDrop.writeOps(guestPath: path, data: data) {
-            _ = try await app.guestFileOp(profileID: nodeID, op: op, timeout: 30)
+            _ = try await host.guestFileOp(profileID: nodeID, op: op, timeout: 30)
         }
         return true
     }
@@ -647,4 +646,3 @@ extension KubeClusterEngine {
         log(c.id, "\(kind.displayName) disconnected")
     }
 }
-#endif
