@@ -1591,19 +1591,23 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     store and the guest hears what the host decides (an error, or a
         //     reply carrying stand-in tokens). Buffered — a small JSON
         //     document; a pending device-code poll passes through untouched.
+        // An ended sign-in's late exchange (this agent's or another's in the
+        // same workspace): refused here, the provider never sees the code.
         if !insecure, bodyFile == nil,
            let capture = Self.signInCaptureProvider?(profileID),
            let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
+           capture.refusesExchange(host: host, method: reqMethod, path: reqPath,
+                                   body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
+            try tls.write(SignInCapture.notKeptReply)
+            FileHandle.standardError.write(Data(
+                "[mitm] sign-in exchange \(host)\(reqPath) after its sign-in ended: refused, not sent on\n".utf8))
+            return
+        }
+        if !insecure, bodyFile == nil,
+           let capture = Self.signInCaptureProvider?(profileID), !capture.spent,
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
            capture.matches(host: host, method: reqMethod, path: reqPath,
                            body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
-            // An ended sign-in's late exchange: refused here, the provider
-            // never sees the code.
-            if capture.spent {
-                try tls.write(SignInCapture.notKeptReply)
-                FileHandle.standardError.write(Data(
-                    "[mitm] sign-in exchange \(host)\(reqPath) after its sign-in ended: refused, not sent on\n".utf8))
-                return
-            }
             let upstream: Data
             if let sim = capture.simulatedReply {
                 // The sign-in simulator (e2e): the provider's reply is canned,
