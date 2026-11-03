@@ -1445,3 +1445,45 @@ struct CodexStandInTests {
         #expect(Daemon.codexAccountID(fromIDToken: "not.a-jwt") == nil)
     }
 }
+
+@Suite("MCP line listener")
+@MainActor
+struct MCPLineListenerTests {
+    final class Echo: MCPLineHandler {
+        func handle(line: String, branch: String?) async -> String? { "\(branch ?? "-")|\(line)" }
+    }
+
+    @Test("one connection: the hello binds the branch, each line is answered in order; an EOF with the data still gets its answers")
+    func lines() async throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let l = try MCPLineListener(udsPath: d + "/v.sock", port: 5831, server: Echo(), fdStoreName: "test-mcp")
+        defer { l.stop(); FDStore.remove("test-mcp") }
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in
+            for (i, b) in l.path.utf8.enumerated() { p[i] = b }
+        }
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        #expect(rc == 0)
+        let msg = "bromure-hello wt/fix-it\n{\"id\":1}\n{\"id\":2}\n"
+        _ = msg.withCString { write(fd, $0, strlen($0)) }
+        shutdown(fd, Int32(SHUT_WR))
+        // Reads whatever arrives within 2 s.
+        let got: String = await Task.detached {
+            var out = Data(), buf = [UInt8](repeating: 0, count: 4096)
+            var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            while poll(&p, 1, 2000) > 0 {
+                let n = read(fd, &buf, buf.count)
+                if n <= 0 { break }
+                out.append(contentsOf: buf[0..<n])
+            }
+            return String(decoding: out, as: UTF8.self)
+        }.value
+        close(fd)
+        #expect(got.contains("wt/fix-it|{\"id\":1}\n") && got.contains("wt/fix-it|{\"id\":2}\n"), "\(got)")
+    }
+}

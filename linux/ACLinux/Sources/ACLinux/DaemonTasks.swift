@@ -280,3 +280,33 @@ extension SessionStores {
         return try? dec.decode(T.self, from: data)
     }
 }
+
+extension Daemon {
+    /// The workspace's MCP sockets for its agents (macOS: the board's and the
+    /// automations' TaskMCPVsockBridge per VM): the coding board on 5831,
+    /// the workspace's own automations on 5833 once its server builds here
+    /// (it takes macOS's RepoWatchEngine). `stored`: a restarted
+    /// daemon's listeners, by fd-store prefix. One that can't listen is
+    /// left out (its tools then fail in the guest), logged.
+    // partial: no automations MCP (5833) yet: AutomationMCPServer takes RepoWatchEngine (AppKit)
+    // @port-skip linux-only: the per-VM MCP listeners (macOS: in ACAppDelegate's VM start, on the VZ socket device)
+    func serveMCP(_ rec: VMRecord, udsPath: String, stored: [String: Int32]) async -> [MCPLineListener] {
+        let pid = UUID(uuidString: rec.id) ?? UUID()
+        let short = rec.shortId, name = rec.name
+        return await MainActor.run {
+            var out: [MCPLineListener] = []
+            let board = TaskBoardMCPServer(profileID: pid,
+                                           store: { SessionStores.shared?.codingTasks },
+                                           engine: { SessionStores.shared?.codingTaskEngine })
+            for (prefix, port, server) in [("tbmcp-", GuestPorts.taskBoardMCPVsockPort, board as any MCPLineHandler)] {
+                do {
+                    out.append(try MCPLineListener(udsPath: udsPath, port: port, server: server,
+                                                   fdStoreName: prefix + short, stored: stored[prefix]))
+                } catch {
+                    FileHandle.standardError.write(Data("bromure-ac daemon: '\(name)': no MCP listener on \(port): \(error)\n".utf8))
+                }
+            }
+            return out
+        }
+    }
+}

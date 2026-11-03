@@ -88,6 +88,8 @@ public actor Daemon {
         let browser: BrowserMCPBridge
         /// The workspace's intercepting proxy (vsock :8443); nil without one.
         var mitm: MitmListener?
+        /// The agents' MCP sockets: the coding board (:5831), automations (:5833).
+        var mcp: [MCPLineListener] = []
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -134,7 +136,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -677,6 +679,7 @@ public actor Daemon {
         var l = Live(machine: FirecrackerMachine(config: qc), port: port, shell: shell, config: qc,
                      vsock: vsock, browser: browser, storedNet: storeName)
         l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
+        l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:])
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
         // the same one back (the guest keeps it).
@@ -770,6 +773,11 @@ public actor Daemon {
                              storedNet: storeName)
                 l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath,
                                     stored: storedNet.removeValue(forKey: "mitm-" + rec.shortId))
+                var storedMCP: [String: Int32] = [:]
+                for name in ["tbmcp-", "amcp-"] {
+                    if let fd = storedNet.removeValue(forKey: name + rec.shortId) { storedMCP[name] = fd }
+                }
+                l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP)
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id
@@ -939,7 +947,8 @@ public actor Daemon {
         await l.vsock.close()
         await MainActor.run { [browser = l.browser] in browser.stop() }
         l.mitm?.stop()
-        FDStore.remove("mitm-" + l.storedNet.dropFirst("net-".count))
+        await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
+        for name in ["mitm-", "tbmcp-", "amcp-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))

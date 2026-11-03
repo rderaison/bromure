@@ -98,6 +98,7 @@
     "Sources/AgentCoding/SessionStartCoalescer.swift",
     "Sources/AgentCoding/SubscriptionTokenSwapState.swift",
     "Sources/AgentCoding/SwitchboardBrief.swift",
+    "Sources/AgentCoding/TaskBoardMCPServer.swift",
     "Sources/AgentCoding/TaskReviewData.swift",
     "Sources/AgentCoding/TaskTranscriptArchive.swift",
     "Sources/AgentCoding/TerminalAppDefaults.swift",
