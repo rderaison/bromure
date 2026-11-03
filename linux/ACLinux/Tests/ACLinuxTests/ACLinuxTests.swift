@@ -1646,7 +1646,11 @@ struct ProxyDestinationTests {
     func refused() async throws {
         let cases: [(String, Int)] = [("127.0.0.1", 22), ("127.0.0.1", InferenceService.repairProxyPort),
                                       ("::1", 443), ("[::1]", 443), ("169.254.169.254", 80), ("localhost", 8080),
-                                      ("0.0.0.0", 80), ("::ffff:127.0.0.1", 22)]
+                                      ("0.0.0.0", 80), ("::ffff:127.0.0.1", 22),
+                                      ("2130706433", 80), ("0x7f000001", 80), ("017700000001", 80), ("127.1", 80),
+                                      ("::ffff:7f00:1", 80), ("::127.0.0.1", 80), ("64:ff9b::7f00:1", 80),
+                                      ("64:ff9b::a9fe:a9fe", 80), ("64:ff9b:1::7f00:1", 80),
+                                      ("2002:7f00:1::1", 80), ("2002:a9fe:a9fe::", 80)]
         for (h, p) in cases {
             let d = try #require(await denial(h, p), "\(h):\(p) must be refused")
             #expect(d.reason.contains("always-blocked address"), "\(h): \(d.reason)")
@@ -1665,6 +1669,48 @@ struct ProxyDestinationTests {
         let ip = "\(own >> 24).\(own >> 16 & 255).\(own >> 8 & 255).\(own & 255)"
         #expect(await denial(ip, 2222) == nil, "single-user: the host's LAN address is any LAN address")
         #expect(await denial(ip, 2222, hostAddresses: true)?.reason.contains("this server's own address") == true)
+        // Every IPv6 address of the host's too (link-local and ::1 are refused anyway).
+        for b in HostAddresses.read6() {
+            let a = MitmProxy.IPAddress.v6(b)
+            #expect(MitmProxy.destinationDenial(host: "\(a)", resolved: [a], hostAddresses: true) != nil, "\(a)")
+        }
+        // A public address carried in a NAT64 or 6to4 prefix passes.
+        #expect(await denial("64:ff9b::5db8:d70e", 443) == nil)
+        #expect(await denial("2002:5db8:d70e::1", 443) == nil)
+    }
+
+    @Test("a name that doesn't resolve is refused, never dialed by name")
+    func unresolved() async throws {
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let f = MitmProxy.checkDestination(host: "rebinding.example", port: 443, hostAddresses: false,
+                                           resolver: { _, _ in [] }, on: loop)
+        do {
+            let addrs = try await f.get()
+            Issue.record("allowed with \(addrs)")
+        } catch {
+            #expect(error is ProxyDestinationUnresolved, "\(error)")
+        }
+    }
+
+    @Test("the host's own IPv6 (a stubbed GUA and ULA) is refused on a multi-user server only")
+    func hostIPv6() async throws {
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let gua = try #require(MitmProxy.IPAddress("2001:db8:1234::10")), ula = try #require(MitmProxy.IPAddress("fd12:3456::1"))
+        let own: @Sendable (MitmProxy.IPAddress) -> Bool = { $0 == gua || $0 == ula }
+        for ip in [gua, ula] {
+            let multi = MitmProxy.checkDestination(host: "\(ip)", port: 22, hostAddresses: true,
+                                                   resolver: { _, _ in [ip] }, hostOwn: own, on: loop)
+            do { _ = try await multi.get(); Issue.record("\(ip) allowed on a multi-user server") } catch {
+                #expect((error as? ProxyDestinationDenied)?.reason.contains("this server's own address") == true)
+            }
+            let single = MitmProxy.checkDestination(host: "\(ip)", port: 22, hostAddresses: false,
+                                                    resolver: { _, _ in [ip] }, hostOwn: own, on: loop)
+            #expect(try await single.get() == [ip])
+        }
+        // A mapped form of a stubbed own IPv4 is refused the same way.
+        let v4own: @Sendable (MitmProxy.IPAddress) -> Bool = { $0 == .v4(0x0A0B0C0D) }
+        #expect(MitmProxy.destinationDenial(host: "x", resolved: [try #require(MitmProxy.IPAddress("::ffff:10.11.12.13"))],
+                                            hostAddresses: true, hostOwn: v4own) != nil)
     }
 
     @Test("an older daemon's engine key moves into the state directory, 0600; the key's path follows it")

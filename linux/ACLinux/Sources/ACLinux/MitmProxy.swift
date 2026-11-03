@@ -218,18 +218,38 @@ final class MitmProxy: @unchecked Sendable {
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
         let routed = Self.route(host: host, port: port, tls: requestedTLS)
-        if routed.local { return dial(host: host, to: (routed.host, routed.port), tls: routed.tls, on: loop) }
-        // Only to an address that passed the check: the name isn't looked up
-        // again (a rebinding answer can't slip in between).
+        if routed.local {
+            guard let to = try? SocketAddress(ipAddress: routed.host, port: routed.port) else {
+                return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: port))
+            }
+            return dial(host: host, to: [to], tls: routed.tls, on: loop)
+        }
+        // Only to the addresses that passed the check, in order: the name is
+        // never looked up again (a rebinding answer can't slip in between).
         return checkDestination(host: host, port: port, on: loop).flatMap { [self] resolved in
-            let to = routeAllTo ?? (resolved.first.map { "\($0)" } ?? host, port)
-            return dial(host: host, to: to, tls: routed.tls, on: loop)
+            if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
+                return dial(host: host, to: [to], tls: routed.tls, on: loop)
+            }
+            let addrs = resolved.compactMap { try? SocketAddress(ipAddress: "\($0)", port: port) }
+            return dial(host: host, to: addrs, tls: routed.tls, on: loop)
         }
     }
 
-    /// Connects to `to` for `host` (its SNI and certificate name when `tls`).
+    /// Connects to the first of `addresses` that answers, for `host` (its
+    /// SNI and certificate name when `tls`).
+    // @port-skip linux-only: NIO upstream (macOS: UpstreamPinning.connect's race over the checked addresses)
+    private func dial(host: String, to addresses: [SocketAddress], tls: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
+        guard let first = addresses.first else {
+            return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: 0))
+        }
+        return dialOne(host: host, to: first, tls: tls, on: loop).flatMapError { [self] e in
+            addresses.count > 1 ? dial(host: host, to: Array(addresses.dropFirst()), tls: tls, on: loop)
+                                : loop.makeFailedFuture(e)
+        }
+    }
+
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
-    private func dial(host: String, to target: (host: String, port: Int), tls: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
+    private func dialOne(host: String, to target: SocketAddress, tls: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
         let ctx = upstreamContext
         let isIP = host.contains(":") || host.split(separator: ".").allSatisfy { UInt8($0) != nil }
         let ready = OncePromise(loop.makePromise(of: Channel.self))
@@ -245,7 +265,7 @@ final class MitmProxy: @unchecked Sendable {
                     ])
                 } catch { return ch.eventLoop.makeFailedFuture(error) }
             }
-            .connect(host: target.host, port: target.port)
+            .connect(to: target)
             .whenComplete { r in
                 switch r {
                 case .failure(let e): ready.fail(e)
@@ -380,7 +400,10 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                             context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
                                 bytes: MitmProxy.destinationDeniedResponse(host: host, port: port, reason: e.reason))))
                                 .whenComplete { _ in context.close(promise: nil) }
-                        case .failure:
+                        case .failure(let e):
+                            if !(e is ProxyDestinationUnresolved) {
+                                FileHandle.standardError.write(Data("[mitm] CONNECT \(host):\(port) not checked: \(e)\n".utf8))
+                            }
                             reject(context, 502, "Bad Gateway")
                         case .success:
                             phase = .hello(host: host, port: port)

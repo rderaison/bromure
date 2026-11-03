@@ -9,6 +9,7 @@ import NIOConcurrencyHelpers
 public final class HostAddresses: Sendable {
     public static let shared = HostAddresses()
     private let cache = NIOLockedValueBox<(set: Set<UInt32>, at: ContinuousClock.Instant)>(([], .now - .seconds(60)))
+    private let cache6 = NIOLockedValueBox<(set: Set<[UInt8]>, at: ContinuousClock.Instant)>(([], .now - .seconds(60)))
 
     // @port-skip linux-only: multi-user isolation
     public func contains(_ ip: UInt32) -> Bool {
@@ -18,6 +19,33 @@ public final class HostAddresses: Sendable {
             return c.set
         }
         return set.contains(ip)
+    }
+
+    /// The host's own IPv6 addresses (`b`: 16 bytes), the same way.
+    // @port-skip linux-only: multi-user isolation
+    public func contains6(_ b: [UInt8]) -> Bool {
+        let set = cache6.withLockedValue { c -> Set<[UInt8]> in
+            if ContinuousClock.now - c.at > .seconds(5) { c = (Self.read6(), .now) }
+            return c.set
+        }
+        return set.contains(b)
+    }
+
+    // @port-skip linux-only: multi-user isolation
+    static func read6() -> Set<[UInt8]> {
+        var out = Set<[UInt8]>()
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0 else { return out }
+        defer { freeifaddrs(head) }
+        var p = head
+        while let ifa = p {
+            if let sa = ifa.pointee.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET6) {
+                let a = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee.sin6_addr }
+                out.insert(withUnsafeBytes(of: a) { Array($0) })
+            }
+            p = ifa.pointee.ifa_next
+        }
+        return out
     }
 
     // @port-skip linux-only: multi-user isolation
