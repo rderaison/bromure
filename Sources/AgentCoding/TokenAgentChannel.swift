@@ -54,7 +54,10 @@ final class TokenAgentChannel {
             if ownsFD { close(fd) }
             MainActor.assumeIsolated {
                 // A replaced connection's cancel mustn't end its successor.
-                guard let self, self.readSource === source || self.readSource == nil else { return }
+                // As objects: off Apple platforms DispatchSourceRead isn't
+                // class-constrained, so `===` needs the boxes spelled out.
+                guard let self, (self.readSource as AnyObject?) === (source as AnyObject)
+                        || self.readSource == nil else { return }
                 self.owner = nil
                 self.isConnected = false
                 // Fail any in-flight request — caller can retry once the
