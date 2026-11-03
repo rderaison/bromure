@@ -316,6 +316,7 @@ public enum InterimBake {
         return ordered.map(\.uuid)
     }
 
+    // @port-skip linux-only: the Linux bake fetches Alpine's netboot kernel itself
     static func downloadAlpineNetboot(cacheDir: String, releasesBase base: String,
                                       kernel: String, initrd: String) async throws {
         let tarballName = "alpine-netboot-\(alpineRelease)-\(alpineArch).tar.gz"
