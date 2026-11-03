@@ -3060,9 +3060,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // handshake before they hit the trace store.
         let req = captureBody ? Self.redactSensitiveHeaders(preSwapRequest) : nil
         let res = captureBody ? Self.redactSensitiveHeaders(responseBlob) : nil
-        await MainActor.run {
-            store.record(record, requestBody: req, responseBody: res)
-        }
+        store.record(record, requestBody: req, responseBody: res)
     }
 
     /// Pull the numeric status code out of a raw response header

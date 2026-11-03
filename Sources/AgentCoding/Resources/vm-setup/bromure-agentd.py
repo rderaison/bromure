@@ -3260,6 +3260,11 @@ def _worktree_include(main_root, wt_dir):
 # One branch per line ("wt/<slug>"): the host's automation runs.
 _RETIRED_WORKTREES = "/mnt/bromure-meta/retired-worktrees.txt"
 
+# At most this many worktree tabs come back per repo per boot (the newest
+# registered): each one starts an agent, and a registry left full of old
+# branches must not bring back dozens of them at once and exhaust the guest.
+_WT_RESTORE_MAX = 6
+
 
 def _restore_worktrees(repo_root, repo_name):
     """Reboot restore: re-open a tab for each registered worktree of this repo
@@ -3295,11 +3300,14 @@ def _restore_worktrees(repo_root, repo_name):
     open_branches = set(
         _capture([*_tmux_argv(), "list-windows", "-t", TMUX_S, "-F",
                   "#{@worktree}"]).splitlines())
-    for r_branch, r_parent, r_display, r_tool in rows:
+    restored = 0
+    for r_branch, r_parent, r_display, r_tool in reversed(rows):
         if not r_branch:
             continue
         if r_branch in open_branches:   # already open
             continue
+        if restored >= _WT_RESTORE_MAX:
+            break
         wdir = _worktree_dir_for_branch(repo_root, r_branch)
         if not wdir or not os.path.isdir(wdir):   # git worktree gone
             continue
@@ -3316,6 +3324,7 @@ def _restore_worktrees(repo_root, repo_name):
         _set_window_option(win, "@root_repo", repo_root)
         _set_window_option(win, "@label", r_tool)
         _set_window_option(win, "@display", r_display)
+        restored += 1
 
 
 # Per-tool CLI flags that make an unattended run skip the tool's interactive

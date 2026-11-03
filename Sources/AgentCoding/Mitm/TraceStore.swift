@@ -136,36 +136,18 @@ public final class TraceStore {
 
     /// Add a record + persist. Body data is optional — pass nil when
     /// the level/host doesn't authorize body capture.
-    public func record(_ record: TraceRecord,
-                       requestBody: Data? = nil,
-                       responseBody: Data? = nil) {
-        // In-memory ring update — defer to a fresh runloop tick.
-        // `Task { @MainActor in }` from MainActor context can drain
-        // within the same iteration, which still trips AppKit's
-        // "reentrant operation in NSTableView delegate" warning
-        // when the inspector List is open. `DispatchQueue.main.async`
-        // strictly waits for the current runloop pass to complete,
-        // so the table delegate has fully unwound before we mutate
-        // the @Observable property.
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated {
-                self.recent.insert(record, at: 0)
-                if self.recent.count > self.ringCapacity {
-                    self.recent.removeLast(self.recent.count - self.ringCapacity)
-                }
-                // "Agent is working" = any request to a known model host (or a
-                // parsed conversation). Using the host (not just `isConversation`,
-                // which needs body capture at a high trace level) keeps the
-                // signal working at the default level too.
-                let host = record.host.lowercased()
-                if record.isConversation
-                    || TraceLevel.aiHosts.contains(where: { host.contains($0) }) {
-                    self.onConversationActivity?(record.profileID)
-                    self.onConversationResult?(record.profileID, record.host, record.statusCode)
-                }
-            }
-        }
-
+    ///
+    /// Callable from any thread: the proxy records from its connection
+    /// tasks without waiting on the main thread. The in-memory ring, the
+    /// conversation hooks and the uploader run on main, batched: one
+    /// main-queue job per burst of records, not one per request. The main
+    /// queue is also where Virtualization.framework delivers the guests'
+    /// vsock connections, and a job per request there (each an
+    /// @Observable mutation of a 5000-record array) queued those accepts
+    /// behind it under parallel load.
+    public nonisolated func record(_ record: TraceRecord,
+                                   requestBody: Data? = nil,
+                                   responseBody: Data? = nil) {
         // Disk write — off the main thread.
         let root = rootDir
         queue.async { [weak self] in
@@ -184,11 +166,78 @@ public final class TraceStore {
             self?.queue_periodicCleanup()
         }
 
-        // Streaming hook — fire-and-forget. The bodies are handed
-        // straight through (already header-redacted by the proxy) so
-        // the uploader never has to race the async disk write above to
-        // reload them from `traces/`.
-        uploader?.upload(record, requestBody: requestBody, responseBody: responseBody)
+        let scheduleFlush = pending.add(.init(record: record, requestBody: requestBody,
+                                              responseBody: responseBody))
+        guard scheduleFlush else { return }
+        // A fresh runloop tick, not `Task { @MainActor in }`: that can drain
+        // within the same iteration, which trips AppKit's "reentrant
+        // operation in NSTableView delegate" warning when the inspector List
+        // is open. `DispatchQueue.main.async` strictly waits for the current
+        // runloop pass to complete, so the table delegate has fully unwound
+        // before we mutate the @Observable property.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.flushPending() }
+        }
+    }
+
+    /// Records waiting for the main thread, oldest first.
+    private struct PendingRecord: @unchecked Sendable {
+        let record: TraceRecord
+        let requestBody: Data?
+        let responseBody: Data?
+    }
+    /// Lock-guarded: filled from the proxy's threads, drained on main.
+    private final class Pending: @unchecked Sendable {
+        private let lock = NSLock()
+        private var records: [PendingRecord] = []
+        private var flushScheduled = false
+
+        /// Queue `r`; true when the caller must schedule the flush.
+        func add(_ r: PendingRecord) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            records.append(r)
+            guard !flushScheduled else { return false }
+            flushScheduled = true
+            return true
+        }
+
+        /// Everything queued, oldest first; the next add schedules anew.
+        func take() -> [PendingRecord] {
+            lock.lock(); defer { lock.unlock() }
+            let out = records
+            records.removeAll()
+            flushScheduled = false
+            return out
+        }
+    }
+    nonisolated private let pending = Pending()
+
+    /// Everything recorded since the last flush, in one ring mutation.
+    private func flushPending() {
+        let batch = pending.take()
+        guard !batch.isEmpty else { return }
+        recent.insert(contentsOf: batch.reversed().map(\.record), at: 0)
+        if recent.count > ringCapacity {
+            recent.removeLast(recent.count - ringCapacity)
+        }
+        for item in batch {
+            let record = item.record
+            // "Agent is working" = any request to a known model host (or a
+            // parsed conversation). Using the host (not just `isConversation`,
+            // which needs body capture at a high trace level) keeps the
+            // signal working at the default level too.
+            let host = record.host.lowercased()
+            if record.isConversation
+                || TraceLevel.aiHosts.contains(where: { host.contains($0) }) {
+                onConversationActivity?(record.profileID)
+                onConversationResult?(record.profileID, record.host, record.statusCode)
+            }
+            // Streaming hook — fire-and-forget. The bodies are handed
+            // straight through (already header-redacted by the proxy) so
+            // the uploader never has to race the async disk write above to
+            // reload them from `traces/`.
+            uploader?.upload(record, requestBody: item.requestBody, responseBody: item.responseBody)
+        }
     }
 
     // MARK: - Reading (called from UI)

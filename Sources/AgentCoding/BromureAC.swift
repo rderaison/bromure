@@ -3855,6 +3855,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Main-queue stalls delay every guest's vsock accepts: log them.
+        MainThreadLagMonitor.shared.start()
         // The chat reads a shared folder's mount (/mnt/bromure-share-N) as
         // the folder the user knows (~/<name>).
         GuestSharePaths.resolver = { [weak self] id in

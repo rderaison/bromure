@@ -142,14 +142,8 @@ enum TraceEmitter {
         let res = canStoreResponseBody
             ? HTTPFrames.bodyForTrace(upstreamResponse).map { HTTPFrames.redactSensitiveHeaders($0) }
             : nil
-        let storeT0 = Date()
-        BACDebug.log("[mitm/trace]",
-                     "store.record hop->main start host=\(host) reqBodyBytes=\(req?.count ?? 0) resBodyBytes=\(res?.count ?? 0)")
-        await MainActor.run {
-            store.record(record, requestBody: req, responseBody: res)
-        }
-        BACDebug.log("[mitm/trace]",
-                     "store.record hop->main done host=\(host) took=\(BACDebug.ms(storeT0))")
+        // No wait on the main thread: the store batches its ring update.
+        store.record(record, requestBody: req, responseBody: res)
     }
 }
 
