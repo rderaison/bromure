@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc    // open / write / rename / unlink: not re-exported by Foundation everywhere
+#endif
 #if canImport(CryptoKit)
 import CryptoKit
 #else
