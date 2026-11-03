@@ -5,7 +5,7 @@ import Foundation
 // App-delegate glue for the repository watches: the hub's actions, the
 // control-socket routes (the fat client's and the debug hooks'), and the
 // workspace list the watch editor offers.
-extension ACAppDelegate {
+extension ACAppDelegate: RepoWatchHost {
     /// Workspaces as the watch editor needs them. `tools` = the agents
     /// ready to run unattended there (set up in the workspace, or reachable
     /// through the Models settings / a shared sign-in) — the same set a new

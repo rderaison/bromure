@@ -1,7 +1,21 @@
-#if os(macOS)
-import AppKit
 import Foundation
-import UserNotifications
+
+/// What the watch engine needs from the app: the automations and the
+/// coding board it drives (macOS: ACAppDelegate; the Linux daemon: its
+/// session host).
+@MainActor
+protocol RepoWatchHost: AnyObject {
+    var scheduledAutomationStore: ScheduledAutomationStore { get }
+    var scheduledAutomationEngine: ScheduledAutomationEngine { get }
+    var codingTaskStore: CodingTaskStore { get }
+    var codingTaskEngine: CodingTaskEngine { get }
+    var taskDispatcher: TaskDispatcher { get }
+    var delegationEngine: DelegationEngine { get }
+    func profile(for id: Profile.ID) -> Profile?
+    func saveAutomation(_ automation: ScheduledAutomation)
+    /// The workspace's github.com token.
+    func githubToken(profileID: UUID) -> String?
+}
 
 /// Drives the repository watches (RepoWatch.swift): keeps each watch's
 /// automations in line with it, takes findings from the MCP, turns findings
@@ -10,13 +24,13 @@ import UserNotifications
 @MainActor
 final class RepoWatchEngine {
     let store: FindingStore
-    private weak var delegate: ACAppDelegate?
+    private weak var delegate: (any RepoWatchHost)?
     private var timer: Timer?
     /// Fix tasks started automatically per watch, still running — the
     /// auto-fix cap keys off it.
     static let maxConcurrentAutoFixes = 3
 
-    init(store: FindingStore, delegate: ACAppDelegate?) {
+    init(store: FindingStore, delegate: (any RepoWatchHost)?) {
         self.store = store
         self.delegate = delegate
     }
@@ -89,7 +103,7 @@ final class RepoWatchEngine {
         store.upsertWatch(w)
         // Event scans are refused without the injection screen's model.
         if w.scans.contains(.commits) || w.scans.contains(.pullRequests) {
-            PromptInjectionModels.ensureInstalledInBackground(.promptGuard)
+            Self.ensurePromptGuard()
         }
         BACDebug.log("watch", "saved watch on \(w.repo) — scans: \(w.scans.map(\.rawValue))")
         return w
@@ -295,15 +309,32 @@ final class RepoWatchEngine {
     nonisolated static func screen(_ r: FindingReport) async -> String? {
         let text = [r.title, r.summary, r.evidence ?? "", r.recommendation ?? ""]
             .joined(separator: "\n")
-        let hits = RulesFileScanner.scanHiddenUnicode(text)
-            + RulesFileScanner.scanInstructionContent(text)
+        let hits = InstructionHeuristics.scanHiddenUnicode(text)
+            + InstructionHeuristics.scanInstructionContent(text)
         if let hit = hits.first { return "\(hit.signal) — \(hit.detail)" }
-        if PromptInjectionModels.isInstalled(.promptGuard),
-           await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: text)]) != nil {
+        if await promptGuardFlags(text) {
             return NSLocalizedString("PromptGuard flagged the text as prompt injection",
                                      comment: "finding screen warning")
         }
         return nil
+    }
+
+    /// PromptGuard's verdict on `text`; false when the model isn't
+    /// installed, or the platform has no ONNX runtime.
+    nonisolated static func promptGuardFlags(_ text: String) async -> Bool {
+        #if canImport(OnnxRuntimeBindings)
+        guard PromptInjectionModels.isInstalled(.promptGuard) else { return false }
+        return await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: text)]) != nil
+        #else
+        return false
+        #endif
+    }
+
+    /// Fetch the PromptGuard model, where there is one to run.
+    static func ensurePromptGuard() {
+        #if canImport(OnnxRuntimeBindings)
+        PromptInjectionModels.ensureInstalledInBackground(.promptGuard)
+        #endif
     }
 
     /// An agent says a finding is gone. Only open findings of this
@@ -372,7 +403,7 @@ final class RepoWatchEngine {
     }
 
     /// The coding task that fixes `f`, in Backlog.
-    private func fixTask(_ f: RepoFinding, delegate: ACAppDelegate) -> CodingTask {
+    private func fixTask(_ f: RepoFinding, delegate: any RepoWatchHost) -> CodingTask {
         let watch = f.watchID.flatMap { store.watch($0) }
         let brief = RepoWatchPrompts.fixTask(f)
         return CodingTask(
@@ -436,92 +467,5 @@ final class RepoWatchEngine {
     }
 }
 
-// MARK: - Notifications
-
-/// macOS notifications for the watches: a scan that found something, and
-/// every new critical finding. Clicking one opens the Automations hub.
-@MainActor
-final class RepoWatchNotifier: NSObject, UNUserNotificationCenterDelegate {
-    static let shared = RepoWatchNotifier()
-
-    /// Where a click lands: the hub, on a finding when there is one.
-    var onOpen: ((UUID?) -> Void)?
-
-    private var authorized: Bool?
-    private var installed = false
-
-    /// Notifications need a real bundle (not the raw build binary).
-    private var available: Bool {
-        Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
-    }
-
-    private func install() {
-        guard available, !installed else { return }
-        installed = true
-        UNUserNotificationCenter.current().delegate = self
-    }
-
-    private func post(title: String, body: String, findingID: UUID?) {
-        guard available else { return }
-        install()
-        let center = UNUserNotificationCenter.current()
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        if let findingID { content.userInfo = ["findingID": findingID.uuidString] }
-        let req = UNNotificationRequest(identifier: UUID().uuidString,
-                                        content: content, trigger: nil)
-        Task {
-            if self.authorized == nil {
-                self.authorized = (try? await center.requestAuthorization(
-                    options: [.alert, .sound, .badge])) ?? false
-            }
-            guard self.authorized == true else { return }
-            try? await center.add(req)
-        }
-    }
-
-    func notifyScanFinished(watch: WatchedRepo, run: AutomationRunRecord,
-                            newFindings: [RepoFinding], reported: Int) {
-        guard !newFindings.isEmpty else { return }
-        let worst = newFindings.sortedForTriage().first
-        let title = String(format: NSLocalizedString("%1$d new finding(s) in %2$@",
-                                                     comment: "scan notification title"),
-                           newFindings.count, watch.repo)
-        var body = worst.map { "\($0.severity.displayName): \($0.title)" } ?? ""
-        if newFindings.count > 1 {
-            body += "\n" + String(format: NSLocalizedString("…and %d more", comment: "scan notification"),
-                                  newFindings.count - 1)
-        }
-        post(title: title, body: body, findingID: worst?.id)
-    }
-
-    func notifyCritical(_ f: RepoFinding) {
-        post(title: String(format: NSLocalizedString("Critical finding in %@", comment: "notification title"),
-                           f.repo),
-             body: f.title + (f.location.isEmpty ? "" : " — " + f.location),
-             findingID: f.id)
-    }
-
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
-    }
-
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse) async {
-        let id = (response.notification.request.content.userInfo["findingID"] as? String)
-            .flatMap(UUID.init(uuidString:))
-        await MainActor.run {
-            NSApp.activate(ignoringOtherApps: true)
-            self.onOpen?(id)
-        }
-    }
-}
 /// The automations MCP's findings tools run on the watches' engine.
 extension RepoWatchEngine: FindingsBackend {}
-
-#endif
