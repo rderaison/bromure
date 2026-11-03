@@ -99,6 +99,9 @@ protocol RemoteAccountRouter: AnyObject, Sendable {
     /// A stream to `ip:port` (`port` nil: the UDP relay) in `user`'s guest
     /// network, or -1: the account's own daemon decides.
     func forward(user: String, ip: String, port: Int?, completion: @escaping @Sendable (Int32) -> Void)
+    /// The browser-MCP stream of `user`'s VM `vm` (its agents' browser
+    /// tools, relayed to this client), or -1.
+    func browserMCP(user: String, vm: String, completion: @escaping @Sendable (Int32) -> Void)
 }
 
 /// What a connection may do once authenticated. Filled in by its
@@ -789,30 +792,29 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
 
     // MARK: Fat-client control bridge
 
-    /// Bridge the SSH channel to the app's owner-only control socket: no PTY, no
-    /// menu — the channel becomes a raw byte pipe to `control.sock`, so the
-    /// fat client speaks the existing control-plane HTTP API (state polling,
-    /// commands, and the hijacked interactive-exec pump for terminals) over SSH.
-    /// The SSH `authorized_keys` gate stands in for the socket's owner-only
-    /// (0600) file mode. Reuses the same read-pump machinery as the menu path,
-    /// with `childPID = -1` so teardown/finish skip the process reap.
-    /// An exec on a routed connection: the account's control bridge and its
-    /// guest forwards; nothing else runs here (the server's own user isn't
-    /// the account's).
+    /// An exec on a routed connection: the account's control bridge, its
+    /// guest forwards and its VMs' browser-MCP streams; nothing else runs
+    /// here (the server's own user isn't the account's).
     private func routedExec(context: ChannelHandlerContext, _ e: SSHChannelRequestEvent.ExecRequest,
                             account: String, router: RemoteAccountRouter) {
         if e.command == FatClient.controlVerb {
             startControlBridge(context: context, wantReply: e.wantReply, socketPath: router.controlSocketPath(user: account))
             return
         }
-        let target: (ip: String, port: Int?)
-        if let fwd = FatClient.parseForward(e.command) { target = (fwd.ip, fwd.port) }
-        else if let ip = FatClient.parseForwardUDP(e.command) { target = (ip, nil) }
-        else { refuse(context, e.wantReply, e.command); return }
+        let open: (@escaping @Sendable (Int32) -> Void) -> Void
+        if let fwd = FatClient.parseForward(e.command) {
+            open = { router.forward(user: account, ip: fwd.ip, port: fwd.port, completion: $0) }
+        } else if let ip = FatClient.parseForwardUDP(e.command) {
+            open = { router.forward(user: account, ip: ip, port: nil, completion: $0) }
+        } else if let vm = FatClient.parseBrowserMCP(e.command) {
+            open = { router.browserMCP(user: account, vm: vm, completion: $0) }
+        } else {
+            refuse(context, e.wantReply, e.command); return
+        }
         guard !started else { return }
         started = true
         let channel = context.channel, el = channel.eventLoop
-        router.forward(user: account, ip: target.ip, port: target.port) { [weak self] fd in
+        open { [weak self] fd in
             el.execute {
                 guard let self else { if fd >= 0 { LibC.close(fd) }; return }
                 self.wireResolvedFD(channel: channel, wantReply: e.wantReply, fd: fd)
@@ -839,6 +841,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         startControlBridge(context: context, wantReply: wantReply, preamble: Data(head.utf8) + payload)
     }
 
+    /// Bridge the SSH channel to the app's owner-only control socket: no PTY, no
+    /// menu — the channel becomes a raw byte pipe to `control.sock`, so the
+    /// fat client speaks the existing control-plane HTTP API (state polling,
+    /// commands, and the hijacked interactive-exec pump for terminals) over SSH.
+    /// The SSH `authorized_keys` gate stands in for the socket's owner-only
+    /// (0600) file mode. Reuses the same read-pump machinery as the menu path,
+    /// with `childPID = -1` so teardown/finish skip the process reap.
     private func startControlBridge(context: ChannelHandlerContext, wantReply: Bool, preamble: Data? = nil,
                                     socketPath: String? = nil) {
         guard !started else { return }
