@@ -95,13 +95,15 @@ extension LinuxSessionHost: ProxySignInHost {
 
     /// A page the guest opened. A server has no browser: the one it acts on
     /// is a sign-in's, published for the client that asked for it, with the
-    /// guest port its callback comes back to.
-    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=d249db054a08a5ca @5ba53c17
+    /// guest port its callback comes back to; any other is logged, dropped.
+    // partial: a page that isn't a sign-in's is dropped (a macOS server opens it on its own screen)
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=1e83b10fabd16924 @b10aa434
     func guestOpenedURL(_ url: URL, profileID pid: UUID) {
         guard let signIn = proxySignIns[pid], !signIn.finished else {
-            // Any other page: offered to the fat client (GuestPageBroker).
-            let name = ProfileStore().loadAll().first { $0.id == pid }?.name ?? ""
-            GuestPageBroker.shared.publish(url, profileID: pid, workspace: name)
+            // Any other page: a macOS server shows it on its own screen; a
+            // Linux server has none (the agents' browsing rides the browser
+            // MCP relay to the client instead).
+            FileHandle.standardError.write(Data("bromure-ac daemon: guest page not opened (no browser here): \(url.host ?? "?")\n".utf8))
             return
         }
         guard GuestURLGate.opensInRealBrowser(url) else {

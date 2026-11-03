@@ -210,8 +210,6 @@ public actor Daemon {
             }
             return await agentSessionCommand(id, parts[1], req.body)
         case ("POST", "/debug/sign-in-sim"): return await signInSimulator(req.body)
-        case ("POST", let p) where p.hasPrefix("/guest-pages/") && p.hasSuffix("/dismiss"):
-            return await dismissGuestPage(String(p.dropFirst("/guest-pages/".count).dropLast("/dismiss".count)), req.body)
         case ("GET", "/profiles"): return listProfiles()
         case ("POST", "/profiles"): return await createProfile(req.body)
         case ("GET", "/vms"): return listVMs()

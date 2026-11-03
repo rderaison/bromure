@@ -52,8 +52,6 @@ final class SessionStores {
         if let e = broker.endedDict() { out["registrationEnded"] = JSONValue(foundation: e) }
         let list = broker.endedList()
         if !list.isEmpty { out["registrationsEnded"] = JSONValue(foundation: list) }
-        let pages = GuestPageBroker.shared.stateList()
-        if !pages.isEmpty { out["guestPages"] = .array(pages) }
         return out
     }
 }
