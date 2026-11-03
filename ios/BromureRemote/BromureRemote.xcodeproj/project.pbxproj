@@ -110,6 +110,7 @@
 		465BC25D7D2C8913821F4960 /* SessionStageViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */; };
 		435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */; };
 		F508C137A218C5B85B9A5B09 /* SquelchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8B3ECA30D79673393D2C03A /* SquelchViews.swift */; };
+		5A7824EB8C68A0DBDE6D8629 /* SubscriptionNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */; };
 		A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */; };
 		4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */; };
 		87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */; };
@@ -265,6 +266,7 @@
 		507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionStageViews.swift"; path = "Sources/BromureRemote/_shared/SessionStageViews.swift"; sourceTree = "<group>"; };
 		17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SharedStatusViews.swift"; path = "Sources/BromureRemote/_shared/SharedStatusViews.swift"; sourceTree = "<group>"; };
 		A8B3ECA30D79673393D2C03A /* SquelchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SquelchViews.swift"; path = "Sources/BromureRemote/_shared/SquelchViews.swift"; sourceTree = "<group>"; };
+		1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionNotifications.swift"; path = "Sources/BromureRemote/_shared/SubscriptionNotifications.swift"; sourceTree = "<group>"; };
 		39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionTokenSwapState.swift"; path = "Sources/BromureRemote/_shared/SubscriptionTokenSwapState.swift"; sourceTree = "<group>"; };
 		11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewWindow.swift"; path = "Sources/BromureRemote/_shared/TaskReviewWindow.swift"; sourceTree = "<group>"; };
 		A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptArchive.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptArchive.swift"; sourceTree = "<group>"; };
@@ -444,6 +446,7 @@
 				507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */,
 				17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */,
 				A8B3ECA30D79673393D2C03A /* SquelchViews.swift */,
+				1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */,
 				39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */,
 				11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */,
 				A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */,
@@ -677,6 +680,7 @@
 				465BC25D7D2C8913821F4960 /* SessionStageViews.swift in Sources */,
 				435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */,
 				F508C137A218C5B85B9A5B09 /* SquelchViews.swift in Sources */,
+				5A7824EB8C68A0DBDE6D8629 /* SubscriptionNotifications.swift in Sources */,
 				A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */,
 				4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */,
 				87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */,

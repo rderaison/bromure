@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Security)
 import Security
+#endif
 
 // MARK: - Host credential discovery
 //
@@ -576,6 +578,7 @@ enum ConfigScan {
     /// `kSecReturnData`, so macOS does NOT prompt for access. Presence is all a
     /// scan needs; the secret is fetched later, once the user ticks the row.
     static func keychainItemExists(service: String) -> Bool {
+        #if canImport(Security)
         let q: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -584,11 +587,15 @@ enum ConfigScan {
         ]
         var out: AnyObject?
         return SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess
+        #else
+        return false   // no host keychain to scan off macOS
+        #endif
     }
 
     /// Read a generic password. This is what raises the access prompt, so call
     /// it only from `apply` — after the user has chosen to import.
     static func keychainSecret(service: String) -> String? {
+        #if canImport(Security)
         let q: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -599,6 +606,9 @@ enum ConfigScan {
         guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
               let data = out as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+        #else
+        return nil
+        #endif
     }
 
     /// Pull an OAuth pair out of a provider's stored JSON. Claude Code uses the

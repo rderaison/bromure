@@ -50,16 +50,21 @@ struct DeviceRecord: Codable, Equatable {
 /// NEVER be mistaken for "not enrolled" (that would silently orphan the
 /// device on the control plane and force a re-enroll after a screen lock).
 enum DeviceIdentityStore {
-#if AGENT_HOST
+#if AGENT_HOST || BROMURE_LINUX
     // The agent host (Sources/AgentHost) is a separate device with no keychain
     // access group (ad-hoc signed), which the data-protection keychain refuses:
     // its record is an owner-only file in its support directory instead.
     enum LoadResult: Equatable {
         case found(DeviceRecord)
         case notEnrolled
-        case unavailable(OSStatus)
+        case unavailable(Int32)   // an OSStatus on Apple platforms
     }
+    #if AGENT_HOST
     private static var fileURL: URL { AgentHostPaths.support.appendingPathComponent("device-record.json") }
+    #else
+    // The Linux daemon's per-user state dir (it supplies BromureLinuxPaths).
+    private static var fileURL: URL { BromureLinuxPaths.state.appendingPathComponent("device-record.json") }
+    #endif
 
     static func load() -> LoadResult {
         guard let data = try? Data(contentsOf: fileURL) else { return .notEnrolled }
@@ -83,7 +88,7 @@ enum DeviceIdentityStore {
     enum LoadResult: Equatable {
         case found(DeviceRecord)
         case notEnrolled
-        case unavailable(OSStatus)
+        case unavailable(Int32)   // an OSStatus on Apple platforms
     }
 
     static func load() -> LoadResult {

@@ -69,12 +69,6 @@ public extension Notification.Name {
     /// spec string: "picker", "editor:<type>", or "envimport").
     static let bromureACPresentCredentialSheet =
         Notification.Name("io.bromure.ac.presentCredentialSheet")
-    /// Posted after a subscription credential is registered or forgotten, so
-    /// open editors re-read their per-tool registration status. (Posted by the
-    /// mac registration coordinator; declared here so the editor observing it
-    /// compiles on iOS too.)
-    static let bromureSubscriptionStoresChanged =
-        Notification.Name("bromureSubscriptionStoresChanged")
 }
 
 /// Another workspace, as the editor lists it (the reach policy picks

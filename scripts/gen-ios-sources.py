@@ -62,6 +62,7 @@ SHARED = [
     "FatClientConnect.swift",
     "AgentSessions.swift",      # session model/store (sessions home)
     "AgentSessionViews.swift",  # shared row/section views (sessions home)
+    "SubscriptionNotifications.swift",  # bromureSubscriptionStoresChanged (the profile editor observes it)
     "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)
     "AgentDelegation.swift",    # delegation records + store + notice text (the engine/MCP stay macOS-only)
     "SquelchViews.swift",       # Squelch header popover (numbers from the host)

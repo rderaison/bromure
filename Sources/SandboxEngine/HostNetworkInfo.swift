@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(SystemConfiguration)
 import SystemConfiguration
+#endif
 
 /// Snapshot of the host Mac's primary network configuration.
 public struct HostNetworkInfo {
@@ -19,6 +21,7 @@ public struct HostNetworkInfo {
     /// Detect the current host network configuration.
     /// Returns nil if no active network interface is found.
     public static func detect() -> HostNetworkInfo? {
+        #if canImport(SystemConfiguration)
         guard let store = SCDynamicStoreCreate(nil, "Bromure" as CFString, nil, nil) else { return nil }
 
         // Get primary interface and router from global IPv4 state
@@ -61,6 +64,9 @@ public struct HostNetworkInfo {
             subnet: subnet,
             dnsServers: dnsServers
         )
+        #else
+        return nil   // the Linux daemon's guests sit behind passt, not the host's LAN
+        #endif
     }
 
     /// Third octets of every local IPv4 interface that sits inside

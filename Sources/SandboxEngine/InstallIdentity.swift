@@ -1,6 +1,12 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
+#if canImport(Security)
 import Security
+#endif
 
 /// Per-machine enrollment into the managed-profiles control plane. A single
 /// Bromure install may be enrolled in multiple orgs at the same time, one
@@ -26,7 +32,7 @@ public struct InstallIdentity: Codable, Equatable, Identifiable {
 }
 
 public enum InstallIdentityError: Error {
-    case keychainFailure(OSStatus, String)
+    case keychainFailure(Int32, String)   // an OSStatus on Apple platforms
     case notFound
     case invalidState(String)
 }
@@ -184,6 +190,7 @@ public enum InstallIdentityStore {
 
     // MARK: - Keychain wrappers
 
+    #if canImport(Security)
     private static func storeKeychain(account: String, data: Data) throws {
         deleteKeychain(account: account)
         let attrs: [String: Any] = [
@@ -221,6 +228,20 @@ public enum InstallIdentityStore {
         ]
         SecItemDelete(query as CFDictionary)
     }
+    #else
+    // Off Apple platforms: the daemon's per-user secret store.
+    private static func storeKeychain(account: String, data: Data) throws {
+        try BACSecretStore.store(service: service, account: account, data: data)
+    }
+
+    private static func readKeychain(account: String) -> Data? {
+        BACSecretStore.read(service: service, account: account)
+    }
+
+    private static func deleteKeychain(account: String) {
+        BACSecretStore.delete(service: service, account: account)
+    }
+    #endif
 }
 
 public extension Curve25519.KeyAgreement.PrivateKey {
