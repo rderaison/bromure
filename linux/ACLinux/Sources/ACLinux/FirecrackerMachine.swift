@@ -176,6 +176,11 @@ public actor FirecrackerMachine {
         }
     }
 
+    /// What a resume maps as the guest's memory: a copy of `vm.mem` (mapped
+    /// shared, the running guest writes into it), so a failed resume leaves
+    /// the snapshot as it was.
+    static let liveMemoryFile = "vm.mem.live"
+
     /// The snapshot in `dir` into the Firecracker just started, resumed. Its
     /// network is the backend the snapshot names (`fd:3`, inherited again).
     // @port-skip linux-only: Firecracker snapshot load (macOS: VZVirtualMachine.restoreMachineStateFrom)
@@ -191,7 +196,7 @@ public actor FirecrackerMachine {
         }
         let r = try await api.request("PUT", "/snapshot/load", [
             "snapshot_path": .string(dir + "/vm.snap"),
-            "mem_backend": ["backend_type": "File", "backend_path": .string(dir + "/vm.mem")],
+            "mem_backend": ["backend_type": "File", "backend_path": .string(dir + "/" + Self.liveMemoryFile)],
             "resume_vm": true,
         ], timeout: .seconds(300))
         guard r.ok else { throw MachineError.toolFailed("firecracker snapshot load", Int32(r.status), r.fault) }

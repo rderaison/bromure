@@ -159,7 +159,12 @@ public struct MachineConfig: Sendable {
     func virtiofsdArguments(_ index: Int) -> [String] {
         let s = shares[index]
         var a = ["--shared-dir", s.hostPath, "--socket-path", shareSocketPath(index),
-                 "--sandbox", "namespace", "--migration-mode", "find-paths"]
+                 "--sandbox", "namespace", "--migration-mode", "find-paths",
+                 // A snapshot of a share whose files the host removes under the
+                 // guest (the outbox's one-shot reports) can't name every inode
+                 // the guest holds: those few fail in the guest after a resume,
+                 // instead of the whole restore.
+                 "--migration-on-error", "guest-error"]
         if s.readOnly { a.append("--readonly") }
         if let o = s.guestOwner {
             // Every guest id writes as the user running virtiofsd; that user's

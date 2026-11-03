@@ -108,6 +108,8 @@ public actor Daemon {
     let mitm: MitmProxy?
     /// VMs whose stop is being recorded (vmStopped).
     private var stopping: [String: Task<Void, Never>] = [:]
+    /// VMs being resumed from a snapshot: a failure leaves them suspended.
+    private var restoring: Set<String> = []
 
     /// The soft open-file limit up to the hard one: systemd starts services at
     /// 1024, and every VM, SSH session and forward holds several.
@@ -538,11 +540,34 @@ public actor Daemon {
             guard let fresh = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
             r.cid = fresh
         }
+        if let dir = restoreFrom {
+            // The resume runs on a copy of the memory (free with reflinks):
+            // the snapshot survives a resume that fails.
+            let live = dir + "/" + FirecrackerMachine.liveMemoryFile
+            try? FileManager.default.removeItem(atPath: live)
+            do {
+                try await ChildProcess.run("/usr/bin/cp", ["--reflink=auto", "--sparse=always", dir + "/vm.mem", live])
+            } catch {
+                CIDAllocator.shared.release(r.cid)
+                return .error(500, "Can't resume '\(rec.name)': copying its memory failed: \(error)")
+            }
+            restoring.insert(rec.id)
+        }
+        defer { restoring.remove(rec.id) }
         do {
             try await launch(&r, restoreFrom: restoreFrom)
             return ControlResponse(200, ["status": "running"])
         } catch {
             CIDAllocator.shared.release(r.cid)
+            if let dir = restoreFrom {
+                // Still suspended, its snapshot as it was: a retry, or a
+                // fresh start, is the user's call.
+                try? FileManager.default.removeItem(atPath: dir + "/" + FirecrackerMachine.liveMemoryFile)
+                var s = registry.find(rec.id) ?? rec
+                s.state = .suspended
+                try? registry.upsert(s)
+                return .error(500, "Resume failed (still suspended; resume again, or start it fresh with stop then start): \(error)")
+            }
             return .error(500, "Start failed: \(error)")
         }
     }
@@ -998,7 +1023,8 @@ public actor Daemon {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
         rec = registry.find(id) ?? rec
-        rec.state = info.reason == .suspended ? .suspended : .stopped
+        // A resume that failed stays suspended (start() says so too).
+        rec.state = info.reason == .suspended || restoring.contains(id) ? .suspended : .stopped
         rec.ip = nil
         rec.pid = nil
         rec.pidStart = nil
