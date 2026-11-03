@@ -174,7 +174,8 @@ public actor Daemon {
 
     /// `GET /state/subscribe`: the octet-stream header, then a `/state`
     /// frame `[u32be len][u8 flag][json]` (len counts flag + json; flag 0,
-    /// never compressed) whenever it changes, checked every 0.5 s, and at
+    /// never compressed) whenever it changes (a running VM's uptime ticking
+    /// doesn't count; frames still carry it), checked every 0.5 s, and at
     /// least every 15 s (a client resubscribes after 45 s of silence). Ends
     /// when a write fails; the client half-closing (the SSH bridge forwards
     /// its EOF) doesn't end it.
@@ -189,19 +190,33 @@ public actor Daemon {
             var last = Data()
             var lastSent = ContinuousClock.now - .seconds(60)
             while !Task.isCancelled {
-                guard let d = me.daemon, let json = try? enc.encode(await d.stateBody()) else { return }
-                if json != last || ContinuousClock.now - lastSent >= .seconds(15) {
+                guard let d = me.daemon else { return }
+                let body = await d.stateBody()
+                guard let json = try? enc.encode(body), let key = try? enc.encode(Self.withoutUptime(body)) else { return }
+                if key != last || ContinuousClock.now - lastSent >= .seconds(15) {
                     var frame = ByteBuffer()
                     frame.writeInteger(UInt32(json.count + 1))
                     frame.writeInteger(UInt8(0))
                     frame.writeBytes(json)
                     do { try await client.write(frame) } catch { return }
-                    last = json
+                    last = key
                     lastSent = .now
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
         }
+    }
+
+    /// `/state` as the push compares it: without the VMs' `uptimeSeconds`.
+    // @port-skip linux-only: change test for stateSubscribe
+    static func withoutUptime(_ state: JSONValue) -> JSONValue {
+        guard case .object(var o) = state, case .array(let vms)? = o["vms"] else { return state }
+        o["vms"] = .array(vms.map { v in
+            guard case .object(var e) = v else { return v }
+            e["uptimeSeconds"] = nil
+            return .object(e)
+        })
+        return .object(o)
     }
 
     /// The `/state` snapshot.

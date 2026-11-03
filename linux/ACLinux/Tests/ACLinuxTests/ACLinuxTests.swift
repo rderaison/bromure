@@ -1428,3 +1428,16 @@ struct RemotePasswordTests {
         #expect(s.enabled && s.port == 2300 && !s.allowAccountPassword)
     }
 }
+
+@Suite("State push")
+struct StatePushTests {
+    @Test("the push's change test ignores the VMs' uptime, nothing else")
+    func uptime() {
+        let a: JSONValue = ["vms": [["id": "x", "uptimeSeconds": 10]], "workspaces": [["id": "x", "state": "running"]]]
+        let b: JSONValue = ["vms": [["id": "x", "uptimeSeconds": 11]], "workspaces": [["id": "x", "state": "running"]]]
+        let c: JSONValue = ["vms": [["id": "x", "uptimeSeconds": 11]], "workspaces": [["id": "x", "state": "off"]]]
+        #expect(Daemon.withoutUptime(a) == Daemon.withoutUptime(b))
+        #expect(Daemon.withoutUptime(b) != Daemon.withoutUptime(c))
+        #expect(Daemon.withoutUptime(a)["vms"] == [["id": "x"]])
+    }
+}
