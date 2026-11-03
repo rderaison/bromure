@@ -58,6 +58,9 @@ public final class ControlServer: Sendable {
         unlink(path)
         let me = getuid()
         let ch = try await ServerBootstrap(group: group)
+            // A client may send its request and half-close (the SSH control
+            // bridge forwards the fat client's EOF): it still gets the reply.
+            .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelInitializer { ch in
                 ch.eventLoop.makeCompletedFuture {
                     try ch.pipeline.syncOperations.addHandler(ControlConnection(owner: me, handler: handler))
@@ -139,6 +142,8 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     private var streamIn: AsyncStream<ByteBuffer>.Continuation?
     /// nil until SO_PEERCRED has answered: nothing is served before that.
     private var authorized: Bool?
+    /// The client sent EOF: an incomplete request can't complete any more.
+    private var inputClosed = false
 
     // @port-skip linux-only: NIO request framing
     init(owner: uid_t, handler: @escaping @Sendable (ControlRequest) async -> ControlResponse) {
@@ -174,6 +179,20 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         process(context)
     }
 
+    /// The client half-closed: a stream's inbound ends; otherwise what was
+    /// sent is all there is, so process() answers it if it's complete and
+    /// closes if not (also once the peer check, which may still be pending,
+    /// lets it run).
+    // @port-skip linux-only: NIO half-close
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if case ChannelEvent.inputClosed = event {
+            inputClosed = true
+            if let streamIn { streamIn.finish() } else { process(context) }
+            return
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+
     // @port-skip linux-only: NIO stream handoff
     func channelInactive(context: ChannelHandlerContext) {
         streamIn?.finish()
@@ -185,6 +204,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         guard authorized == true, !started else { return }
         guard let end = buf.readableBytesView.firstRange(of: Array("\r\n\r\n".utf8)) else {
             if buf.readableBytes > Self.maxHeader { reply(context, .error(400, "Bad request")) }
+            else if inputClosed { context.close(promise: nil) }
             return
         }
         let headLen = end.upperBound - buf.readerIndex
@@ -197,7 +217,10 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
             }
         }
         guard length <= Self.maxBody else { reply(context, .error(400, "Bad request")); return }
-        guard buf.readableBytes >= headLen + length else { return }
+        guard buf.readableBytes >= headLen + length else {
+            if inputClosed { context.close(promise: nil) }
+            return
+        }
         started = true
         let line = head.split(separator: "\r\n").first?.split(separator: " ") ?? []
         guard line.count >= 2 else { reply(context, .error(400, "Bad request")); return }
