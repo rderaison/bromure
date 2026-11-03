@@ -100,11 +100,27 @@ public enum GuestOutbox {
                 "hasStats": .bool(total > 0)]
     }
 
-    /// A small text file the guest wrote, nil if missing or over 256 KiB.
+    /// The most of a guest-written file read (tabs.txt, vmstat.txt).
+    public static let readLimit = 64 << 10
+
+    /// A small text file the guest wrote, nil if missing or over `readLimit`.
+    /// The guest writes it (untrusted): no more than the limit is ever read,
+    /// whatever its size says or becomes, and a FIFO or other non-regular
+    /// file is refused rather than waited on.
     // @port-skip linux-only: UbuntuSandboxVM.boundedText for a path
-    public static func read(_ path: String) -> String? {
-        guard let a = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = a[.size] as? Int, size <= 256 << 10 else { return nil }
-        return try? String(contentsOfFile: path, encoding: .utf8)
+    public static func read(_ path: String, limit: Int = readLimit) -> String? {
+        let fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+        var data = [UInt8](repeating: 0, count: limit + 1)
+        var got = 0
+        while got <= limit {
+            let n = data.withUnsafeMutableBytes { Glibc.read(fd, $0.baseAddress! + got, limit + 1 - got) }
+            if n > 0 { got += n } else if n < 0 && errno == EINTR { continue } else { break }
+        }
+        guard got <= limit else { return nil }
+        return String(validating: data[0..<got], as: UTF8.self)
     }
 }

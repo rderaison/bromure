@@ -117,6 +117,8 @@ public actor FirecrackerMachine {
                 let tmp = config.overlay + ".tmp"
                 try? fm.removeItem(atPath: tmp)
                 try await ChildProcess.run("/usr/bin/cp", ["--sparse=always", "--reflink=auto", config.baseImage, tmp])
+                // Its own machine-id from the first boot on (the copy has the bake's).
+                try await GuestDisk.setMachineID(image: tmp, id: GuestDisk.newMachineID())
                 guard rename(tmp, config.overlay) == 0 else { throw MachineError.io("rename \(tmp)", errno) }
             }
             try await startDaemons()

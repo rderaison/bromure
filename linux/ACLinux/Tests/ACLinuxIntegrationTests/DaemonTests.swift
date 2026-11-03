@@ -274,4 +274,41 @@ struct DaemonTests {
         #expect(try w.cli("vm", "kill", "--force", "h2").0 == 0)
         #expect(try w.cli("vm", "rm", "h2").0 == 0)
     }
+
+    @Test("each VM has its own machine-id, not the base image's, and keeps it across kill/start")
+    func machineID() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+
+        func machineID(_ vm: String) throws -> String {
+            try w.cli("vm", "exec", vm, "--", "cat", "/etc/machine-id").1.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let debugfs = Process(), pipe = Pipe()
+        debugfs.executableURL = URL(fileURLWithPath: "/usr/sbin/debugfs")
+        debugfs.arguments = ["-R", "cat /etc/machine-id",
+                             Env.image + "/base.img?offset=\(try GuestDisk.rootPartitionOffset(Env.image + "/base.img"))"]
+        debugfs.standardOutput = pipe
+        debugfs.standardError = FileHandle.nullDevice
+        try debugfs.run()
+        let baseID = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        debugfs.waitUntilExit()
+        #expect(baseID.count == 32, "the base image's machine-id: \(baseID)")
+        #expect(try w.cli("vm", "run", "--name", "m1").0 == 0)
+        #expect(try w.cli("vm", "run", "--name", "m2").0 == 0)
+        let a = try machineID("m1"), b = try machineID("m2")
+        #expect(a.count == 32 && a.allSatisfy(\.isHexDigit), "m1's machine-id: \(a)")
+        #expect(a != b, "two VMs, two machine-ids")
+        #expect(a != baseID && b != baseID, "not the base image's (\(baseID))")
+        #expect(try w.cli("vm", "exec", "m1", "--", "cat", "/var/lib/dbus/machine-id").1
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == a, "D-Bus's copy agrees")
+        #expect(try w.cli("vm", "kill", "m1").0 == 0)
+        #expect(try w.cli("vm", "start", "m1").0 == 0)
+        var again = ""
+        for _ in 0..<60 { again = (try? machineID("m1")) ?? ""; if !again.isEmpty { break }; try await Task.sleep(for: .milliseconds(500)) }
+        #expect(again == a, "kept across kill/start")
+        for v in ["m1", "m2"] { _ = try w.cli("vm", "kill", "--force", v) }
+    }
 }

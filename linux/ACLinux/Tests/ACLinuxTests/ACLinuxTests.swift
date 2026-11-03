@@ -1156,3 +1156,67 @@ struct GuestOutboxTests {
         #expect(GuestOutbox.vitalsJSON("")["hasStats"] == .bool(false))
     }
 }
+
+@Suite("Guest outbox reads")
+struct GuestOutboxReadTests {
+    @Test("a guest-written file is read up to the limit, never past it; links, FIFOs and bad UTF-8 are refused")
+    func bounded() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        try "0\t1\tbash\n".write(toFile: d + "/tabs.txt", atomically: false, encoding: .utf8)
+        #expect(GuestOutbox.read(d + "/tabs.txt") == "0\t1\tbash\n")
+        try String(repeating: "x", count: GuestOutbox.readLimit).write(toFile: d + "/full", atomically: false, encoding: .utf8)
+        #expect(GuestOutbox.read(d + "/full")?.count == GuestOutbox.readLimit, "exactly the limit is fine")
+        try String(repeating: "x", count: GuestOutbox.readLimit + 1).write(toFile: d + "/over", atomically: false, encoding: .utf8)
+        #expect(GuestOutbox.read(d + "/over") == nil, "one byte over is refused")
+        // The guest can make a symlink in its outbox: it must not lead the
+        // daemon to read a host file.
+        try FileManager.default.createSymbolicLink(atPath: d + "/link", withDestinationPath: d + "/tabs.txt")
+        #expect(GuestOutbox.read(d + "/link") == nil, "a symlink isn't followed")
+        #expect(mkfifo(d + "/fifo", 0o600) == 0)
+        #expect(GuestOutbox.read(d + "/fifo") == nil, "a FIFO is refused, not waited on")
+        try Data([0x66, 0xFF, 0xFE]).write(to: URL(fileURLWithPath: d + "/bad"))
+        #expect(GuestOutbox.read(d + "/bad") == nil, "invalid UTF-8")
+        #expect(GuestOutbox.read(d + "/missing") == nil)
+    }
+}
+
+@Suite("Guest disk")
+struct GuestDiskTests {
+    @Test("machine-ids are 32 hex digits and differ")
+    func machineIDs() {
+        let a = GuestDisk.newMachineID(), b = GuestDisk.newMachineID()
+        #expect(a.count == 32 && a.allSatisfy { "0123456789abcdef".contains($0) })
+        #expect(a != b)
+    }
+
+    @Test("the root partition of a GPT image: by name, else the first Linux filesystem")
+    func rootOffset() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        func image(_ parts: [(type: [UInt8], start: UInt64, name: String)]) throws -> String {
+            var img = Data(count: 34 * 512)
+            var hdr = Data("EFI PART".utf8) + Data(count: 84)
+            func put(_ d: inout Data, _ o: Int, _ v: UInt64, _ n: Int) { for i in 0..<n { d[o + i] = UInt8((v >> (8 * UInt64(i))) & 0xFF) } }
+            put(&hdr, 72, 2, 8); put(&hdr, 80, 128, 4); put(&hdr, 84, 128, 4)
+            img.replaceSubrange(512..<604, with: hdr)
+            for (i, p) in parts.enumerated() {
+                var e = Data(count: 128)
+                e.replaceSubrange(0..<16, with: p.type)
+                put(&e, 32, p.start, 8)
+                for (j, u) in p.name.utf16.enumerated() { put(&e, 56 + 2 * j, UInt64(u), 2) }
+                img.replaceSubrange(1024 + 128 * i ..< 1024 + 128 * (i + 1), with: e)
+            }
+            let path = d + "/img-\(UUID().uuidString.prefix(6))"
+            try img.write(to: URL(fileURLWithPath: path))
+            return path
+        }
+        let efi = [UInt8](repeating: 0x11, count: 16), linux = GuestDisk.linuxFilesystemType
+        #expect(try GuestDisk.rootPartitionOffset(image([(efi, 2048, "EFI"), (linux, 4096, "data"), (linux, 1_050_624, "root")]))
+                == 1_050_624 * 512)
+        #expect(try GuestDisk.rootPartitionOffset(image([(efi, 2048, "EFI"), (linux, 4096, "data")])) == 4096 * 512)
+        #expect(throws: MachineError.self) { try GuestDisk.rootPartitionOffset(image([(efi, 2048, "EFI")])) }
+        try Data(count: 4096).write(to: URL(fileURLWithPath: d + "/nogpt"))
+        #expect(throws: MachineError.self) { try GuestDisk.rootPartitionOffset(d + "/nogpt") }
+    }
+}
