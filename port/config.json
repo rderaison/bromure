@@ -10,6 +10,7 @@
     "Sources/AgentCoding/FatClientTypes.swift",
     "Sources/AgentCoding/RemoteAccessServer.swift",
     "Sources/AgentCoding/RemoteSSHHandlers.swift",
+    "Sources/SandboxEngine/CloudTraceUploader.swift",
     "Sources/SandboxEngine/DNSSnoop.swift",
     "Sources/SandboxEngine/EgressPolicy.swift",
     "Sources/SandboxEngine/HostNetworkInfo.swift",
