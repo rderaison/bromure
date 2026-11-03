@@ -66,6 +66,9 @@ final class BrowserMCPBridge {
         FatClientLog.log("browser-mcp: agent waiting for a fat client (\(waiting.count) waiting)")
     }
 
+    /// Tests: agents on the client's channel now.
+    var relayedAgentCount: Int { relay?.agentCount ?? 0 }
+
     /// A fat client's `browser-mcp` channel (`fd`, now the bridge's): every
     /// agent, waiting or new, goes over it. A previous client's is closed.
     // @port-skip linux-only: BrowserMCPVsockBridge.attachRemote without a local browser to take agents from

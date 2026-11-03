@@ -1276,4 +1276,25 @@ struct BrowserMCPBridgeTests {
         let note = try await Task.detached { Self.line(agent) }.value
         #expect(note?.contains("list_changed") == true)
     }
+
+    @Test("an agent that sends a line and closes at once is dropped (its EOF came with the data)")
+    @MainActor func shortLivedAgent() async throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let bridge = try BrowserMCPBridge(udsPath: d + "/v.sock", fdStoreName: "bmcp-test2")
+        defer { bridge.stop() }
+        var sp: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &sp) == 0)
+        defer { close(sp[1]) }
+        bridge.attachRemote(fd: sp[0])
+        for i in 0..<5 {
+            let agent = try Self.connect(d + "/v.sock_5830")
+            Self.send(agent, #"{"jsonrpc":"2.0","method":"notifications/initialized","n":\#(i)}"#)
+            close(agent)
+        }
+        let client = sp[1]
+        for _ in 0..<5 { #expect(try await Task.detached { Self.line(client) }.value?.contains("initialized") == true) }
+        for _ in 0..<40 where bridge.relayedAgentCount > 0 { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(bridge.relayedAgentCount == 0, "every closed agent left the relay")
+    }
 }
