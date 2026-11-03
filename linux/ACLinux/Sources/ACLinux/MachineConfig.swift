@@ -159,10 +159,14 @@ public struct MachineConfig: Sendable {
                  "--sandbox", "namespace", "--migration-mode", "find-paths"]
         if s.readOnly { a.append("--readonly") }
         if let o = s.guestOwner {
-            // In the namespace sandbox the host user is uid/gid 0. Every guest
-            // id writes as it; it reads back as the guest owner.
-            a += ["--translate-uid", "squash-guest:0:0:4294967295", "--translate-uid", "host:0:\(o.uid):1",
-                  "--translate-gid", "squash-guest:0:0:4294967295", "--translate-gid", "host:0:\(o.gid):1"]
+            // Every guest id writes as the user running virtiofsd; that user's
+            // files read back as the guest owner. In the host's ids: run
+            // unprivileged, virtiofsd's namespace sandbox maps no ids (it logs
+            // "Couldn't set the process uid as root"), so it sees the files'
+            // real owners. Mapping from 0 only worked where the user was 1000.
+            let uid = getuid(), gid = getgid()
+            a += ["--translate-uid", "squash-guest:0:\(uid):4294967295", "--translate-uid", "host:\(uid):\(o.uid):1",
+                  "--translate-gid", "squash-guest:0:\(gid):4294967295", "--translate-gid", "host:\(gid):\(o.gid):1"]
         }
         return a
     }
