@@ -60,7 +60,8 @@ SHARED = [
     "FatClientController.swift",
     "GuestURLGate.swift",  # the guest-URL host gate (FatClientController opens a published sign-in URL)
     "FatClientConnect.swift",
-    "AgentSessions.swift",      # session model/store + shared row/section views (sessions home)
+    "AgentSessions.swift",      # session model/store (sessions home)
+    "AgentSessionViews.swift",  # shared row/section views (sessions home)
     "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)
     "AgentDelegation.swift",    # delegation records + store + notice text (the engine/MCP stay macOS-only)
     "SquelchViews.swift",       # Squelch header popover (numbers from the host)

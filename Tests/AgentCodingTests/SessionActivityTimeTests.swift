@@ -60,7 +60,7 @@ struct SessionActivityTimeTests {
         func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
         let a = try src("Sources/AgentCoding/AgentSessions.swift")
         #expect(a.contains("bucket(for: s, in: model) == .working ? now : lastActivity(s)"))
-        #expect(a.contains("when: SessionHome.rowWhen(s, in: model),"))
+        #expect(try src("Sources/AgentCoding/AgentSessionViews.swift").contains("when: SessionHome.rowWhen(s, in: model),"))
         for p in ["Sources/AgentCoding/SessionStageViews.swift", "ios/BromureRemote/Sources/BromureRemote/SessionScreens.swift"] {
             let v = try src(p)
             #expect(v.contains("case .idle:    detail = SessionHome.elapsed(since: SessionHome.lastActivity(s))"), "\(p)")
