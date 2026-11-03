@@ -1092,36 +1092,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // trace store records these as `LeakEntry` values so the user
         // sees exactly which secrets escaped the swap pipeline.
         var leaks = swapper.detectLeaks(in: request, profileID: profileID)
-        // Drop false-positive "leaks" for our own bogus subscription tokens:
-        // they're host-minted placeholders the transforms below rewrite to the
-        // real credential — never a real secret escaping the VM.
-        if let hdr = Self.rawHeaderSection(of: request) {
-            // Claude: bogus x-api-key on anthropic hosts.
-            if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
-               let provider = Self.claudeSubscriptionProvider, let (store, _) = provider(),
-               let apiKey = Self.headerValue("x-api-key", inHeaderSection: hdr),
-               store.profileForBogusKey(apiKey) != nil {
-                leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
-            }
-            // Claude with account features: its OAuth stand-in as Bearer.
-            if Self.isClaudeHost(host), let bearer = Self.bearerToken(inHeaderSection: hdr),
-               Self.isClaudeStandIn(bearer, profileID: profileID) {
-                leaks = leaks.filter { $0.header.lowercased() != "authorization" }
-            }
-            // Codex / Grok / Kimi: bogus Bearer on their backends.
-            let codexHost = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com"
-            let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
-                || host == "x.ai" || host.hasSuffix(".x.ai")
-            let kimiHost = KimiRegion.isSubscriptionHost(host)
-            if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
-                let codexBogus = Self.isCodexStandIn(bearer, profileID: profileID)
-                let grokBogus = grokHost && Self.isGrokStandIn(bearer, profileID: profileID)
-                let kimiBogus = kimiHost && Self.isKimiStandIn(bearer, profileID: profileID)
-                if codexBogus || grokBogus || kimiBogus {
-                    leaks = leaks.filter { $0.header.lowercased() != "authorization" }
-                }
-            }
-        }
+        // Drop false-positive "leaks" for our own bogus subscription tokens
+        // (SubscriptionAuthRewrite.filterStandInLeaks).
+        leaks = SubscriptionAuthRewrite.filterStandInLeaks(leaks, request: request, host: host,
+                                                           profileID: profileID)
 
         // Aho-Corasick scan over headers + body for any fake token
         // bound for a host outside the scope the fake was minted for.

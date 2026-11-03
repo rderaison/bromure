@@ -291,6 +291,42 @@ enum SubscriptionAuthRewrite {
         return .forward(req, injected)
     }
 
+    /// A request's leak scan without the false positives of the agents' own
+    /// stand-in subscription tokens: host-minted placeholders the swaps
+    /// rewrite to the real credential, never a real secret escaping the VM.
+    static func filterStandInLeaks(_ found: [LeakEntry], request: Data, host: String,
+                                   profileID: UUID) -> [LeakEntry] {
+        var leaks = found
+        if let hdr = Self.rawHeaderSection(of: request) {
+            // Claude: bogus x-api-key on anthropic hosts.
+            if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
+               let provider = SubscriptionProviders.claude, let (store, _) = provider(),
+               let apiKey = Self.headerValue("x-api-key", inHeaderSection: hdr),
+               store.profileForBogusKey(apiKey) != nil {
+                leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
+            }
+            // Claude with account features: its OAuth stand-in as Bearer.
+            if Self.isClaudeHost(host), let bearer = Self.bearerToken(inHeaderSection: hdr),
+               Self.isClaudeStandIn(bearer, profileID: profileID) {
+                leaks = leaks.filter { $0.header.lowercased() != "authorization" }
+            }
+            // Codex / Grok / Kimi: bogus Bearer on their backends.
+            let codexHost = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com"
+            let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
+                || host == "x.ai" || host.hasSuffix(".x.ai")
+            let kimiHost = KimiRegion.isSubscriptionHost(host)
+            if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
+                let codexBogus = Self.isCodexStandIn(bearer, profileID: profileID)
+                let grokBogus = grokHost && Self.isGrokStandIn(bearer, profileID: profileID)
+                let kimiBogus = kimiHost && Self.isKimiStandIn(bearer, profileID: profileID)
+                if codexBogus || grokBogus || kimiBogus {
+                    leaks = leaks.filter { $0.header.lowercased() != "authorization" }
+                }
+            }
+        }
+        return leaks
+    }
+
     /// A live token the provider turned down (a 401 on the reply): refresh
     /// it in the background so the next request uses a fresh one (the agent
     /// retries the failed call on its own). De-duped in each refresher.
