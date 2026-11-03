@@ -32,14 +32,32 @@ final class LinuxSessionHost: AgentSessionHost {
     func updateRoster(_ id: UUID, _ roster: [GuestTab]?) {
         guard let roster else { tabs[id] = nil; return }
         let model = tabs[id] ?? TabsModel()
+        // A tab keeps its id while its index lives (macOS's sessionEntries):
+        // reconcile tells tabs apart by it.
+        let ids = Dictionary(model.tabs.map { ($0.index, $0.id) }, uniquingKeysWith: { a, _ in a })
         model.tabs = roster.map {
             TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID, cwd: $0.cwd,
                           worktreeBranch: $0.worktreeBranch, parentBranch: $0.parentBranch,
-                          rootRepo: $0.rootRepo, display: $0.display, repoRoot: $0.repoRoot)
+                          rootRepo: $0.rootRepo, display: $0.display, repoRoot: $0.repoRoot,
+                          id: ids[$0.index] ?? UUID())
         }
         model.activeIndex = roster.firstIndex(where: \.active) ?? 0
         model.rosterLive = true
         tabs[id] = model
+    }
+
+    /// Bind launching sessions to their tabs, end those whose tab went away,
+    /// adopt unregistered agent tabs (AgentSessionStore.reconcile), from the
+    /// running workspaces' rosters; macOS does it from its session list.
+    // @port ACAppDelegate.sessionEntries(for: SessionListModel) h=f7d00b98aad3ae2a @9936e30c
+    func reconcileSessions() {
+        let profiles = Dictionary(ProfileStore().loadAll().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let entries: [SessionListModel.VMEntry] = Self.running.withLockedValue { $0 }.sorted { $0.uuidString < $1.uuidString }
+            .compactMap { id in
+                guard let p = profiles[id], let model = tabsModel(for: id), !model.tabs.isEmpty else { return nil }
+                return SessionListModel.VMEntry(id: id, name: p.name, accentHex: p.color.hexInUI, model: model)
+            }
+        SessionStores.shared?.sessions.reconcile(entries: entries)
     }
 
     // MARK: The guest

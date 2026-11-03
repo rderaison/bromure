@@ -14,6 +14,14 @@ extension Daemon {
             let host = LinuxSessionHost(daemon: me, stateDir: state)
             LinuxSessionHost.shared = host
             stores.engine = AgentSessionEngine(store: stores.sessions, delegate: host)
+            // The rosters and the sessions bound to them, kept current (macOS:
+            // its session list's refresh), with or without a client watching.
+            Task { @MainActor in
+                while true {
+                    try? await Task.sleep(for: .seconds(2))
+                    LinuxSessionHost.shared?.reconcileSessions()
+                }
+            }
         }
     }
 
