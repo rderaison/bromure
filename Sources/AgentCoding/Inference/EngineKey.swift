@@ -32,10 +32,20 @@ enum EngineKey {
         do {
             try FileManager.default.createDirectory(
                 at: masterURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            // .atomic only — NOT .completeFileProtection (an iOS data-protection
-            // flag; on macOS it can make the write fail / the file unreadable,
-            // which silently defeated persistence and broke per-VM key auth).
-            try fresh.write(to: masterURL, options: [.atomic])
+            // No .completeFileProtection (an iOS data-protection flag; on
+            // macOS it can make the write fail / the file unreadable, which
+            // silently defeated persistence and broke per-VM key auth).
+            // The owner's alone from its first byte (anyone who reads it can
+            // mint any VM's key): made 0600 beside it, then moved into place.
+            let tmp = masterURL.path + ".tmp-\(getpid())"
+            let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            guard fd >= 0 else { throw CocoaError(.fileWriteNoPermission) }
+            let written = fresh.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+            close(fd)
+            guard written == fresh.count, rename(tmp, masterURL.path) == 0 else {
+                unlink(tmp)
+                throw CocoaError(.fileWriteUnknown)
+            }
         } catch {
             FileHandle.standardError.write(Data("[enginekey] master persist failed: \(error)\n".utf8))
         }
@@ -45,9 +55,13 @@ enum EngineKey {
     /// The master as hex — handed to the engine child via `BROMURE_ENGINE_MASTER`.
     static var masterHex: String { master.hexString }
 
-    private static var masterURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BromureAC", isDirectory: true)
+    /// Where the master lives instead of Application Support (the Linux
+    /// daemon: its own state directory). Set before the first key is made.
+    nonisolated(unsafe) static var directoryOverride: URL?
+
+    static var masterURL: URL {
+        (directoryOverride ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("BromureAC", isDirectory: true))
             .appendingPathComponent("engine-master.key")
     }
 
