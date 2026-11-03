@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Which release of each floci emulator a cluster gets: the newest one on
 /// Docker Hub when the cluster is set up, so bromure pins nothing itself.
