@@ -90,22 +90,84 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// engine). nil → cloud pass-through. Set by `MitmEngine.register`;
     /// same static-provider rationale as the Fusion providers above.
     nonisolated(unsafe) static var routingProvider: (@Sendable (UUID) -> LLMRoutingContext?)?
-    /// Reaches the host-owned Claude subscription store + refresher. nil →
-    /// subscription auth off. Set once by `MitmEngine.register`; static, same
-    /// rationale as the providers above.
-    /// The engine's `CredentialMinter`: rewrites the responses of calls
-    /// that issue a credential (`CredentialMint`). Set by MitmEngine.
-    nonisolated(unsafe) static var credentialMinterProvider: (@Sendable () -> CredentialMinter?)?
-    nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
-    /// A sign-in the host is capturing for this workspace (SignInCapture.swift):
-    /// the token exchange is answered by the host, not the provider.
-    nonisolated(unsafe) static var signInCaptureProvider: (@Sendable (UUID) -> SignInCapture?)?
-    /// Codex / ChatGPT counterpart of `claudeSubscriptionProvider`.
-    nonisolated(unsafe) static var codexSubscriptionProvider: (@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?)?
-    /// Grok (xAI) counterpart of `claudeSubscriptionProvider`.
-    nonisolated(unsafe) static var grokSubscriptionProvider: (@Sendable () -> (GrokSubscriptionStore, GrokSubscriptionRefresher)?)?
-    /// Kimi (Moonshot) counterpart of `claudeSubscriptionProvider`.
-    nonisolated(unsafe) static var kimiSubscriptionProvider: (@Sendable () -> (KimiSubscriptionStore, KimiSubscriptionRefresher)?)?
+    /// The sign-in providers, by their old names (SubscriptionProviders.swift
+    /// holds them, for every proxy that swaps stand-in credentials).
+    static var credentialMinterProvider: (@Sendable () -> CredentialMinter?)? {
+        get { SubscriptionProviders.credentialMinter }
+        set { SubscriptionProviders.credentialMinter = newValue }
+    }
+    static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)? {
+        get { SubscriptionProviders.claude }
+        set { SubscriptionProviders.claude = newValue }
+    }
+    static var signInCaptureProvider: (@Sendable (UUID) -> SignInCapture?)? {
+        get { SubscriptionProviders.signInCapture }
+        set { SubscriptionProviders.signInCapture = newValue }
+    }
+    static var codexSubscriptionProvider: (@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?)? {
+        get { SubscriptionProviders.codex }
+        set { SubscriptionProviders.codex = newValue }
+    }
+    static var grokSubscriptionProvider: (@Sendable () -> (GrokSubscriptionStore, GrokSubscriptionRefresher)?)? {
+        get { SubscriptionProviders.grok }
+        set { SubscriptionProviders.grok = newValue }
+    }
+    static var kimiSubscriptionProvider: (@Sendable () -> (KimiSubscriptionStore, KimiSubscriptionRefresher)?)? {
+        get { SubscriptionProviders.kimi }
+        set { SubscriptionProviders.kimi = newValue }
+    }
+    // The subscription sign-in helpers (SubscriptionAuthRewrite.swift), by
+    // their old names.
+    static func shouldLogTokenInjection(_ key: String, now: Date = Date(), interval: TimeInterval = 60) -> Bool {
+        SubscriptionAuthRewrite.shouldLogTokenInjection(key, now: now, interval: interval)
+    }
+    static func logTokenInjection(_ what: String, host: String, profileID: UUID) {
+        SubscriptionAuthRewrite.logTokenInjection(what, host: host, profileID: profileID)
+    }
+    static func headerValue(_ name: String, inHeaderSection text: String) -> String? {
+        SubscriptionAuthRewrite.headerValue(name, inHeaderSection: text)
+    }
+    static func rawHeaderSection(of raw: Data) -> String? { SubscriptionAuthRewrite.rawHeaderSection(of: raw) }
+    static func spliceHeaderSection(of raw: Data, newHeader: String) -> Data {
+        SubscriptionAuthRewrite.spliceHeaderSection(of: raw, newHeader: newHeader)
+    }
+    static func injectClaudeSubscriptionAuth(rawRequest raw: Data, access: String) -> Data {
+        SubscriptionAuthRewrite.injectClaudeSubscriptionAuth(rawRequest: raw, access: access)
+    }
+    static func bearerToken(inHeaderSection text: String) -> String? {
+        SubscriptionAuthRewrite.bearerToken(inHeaderSection: text)
+    }
+    static func replaceAuthorizationBearer(rawRequest raw: Data, token: String) -> Data {
+        SubscriptionAuthRewrite.replaceAuthorizationBearer(rawRequest: raw, token: token)
+    }
+    static func isClaudeHost(_ host: String) -> Bool { SubscriptionAuthRewrite.isClaudeHost(host) }
+    static func isClaudeStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        SubscriptionAuthRewrite.isClaudeStandIn(bearer, profileID: profileID)
+    }
+    static func isCodexStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        SubscriptionAuthRewrite.isCodexStandIn(bearer, profileID: profileID)
+    }
+    static func isGrokStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        SubscriptionAuthRewrite.isGrokStandIn(bearer, profileID: profileID)
+    }
+    static func isKimiStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        SubscriptionAuthRewrite.isKimiStandIn(bearer, profileID: profileID)
+    }
+    static func standInRefreshToken(in rawRequest: Data, matching: (String) -> Bool) -> String? {
+        SubscriptionAuthRewrite.standInRefreshToken(in: rawRequest, matching: matching)
+    }
+    static func subscriptionUnavailableReply(provider: String, rejected: Bool) -> Data {
+        SubscriptionAuthRewrite.subscriptionUnavailableReply(provider: provider, rejected: rejected)
+    }
+    static func answerStandInRefresh(host: String, method: String, path: String,
+                                     rawRequest: Data, profileID: UUID) async -> Data? {
+        await SubscriptionAuthRewrite.answerStandInRefresh(host: host, method: method, path: path,
+                                                           rawRequest: rawRequest, profileID: profileID)
+    }
+    static func urlQueryParam(_ name: String, inPath path: String) -> String? {
+        SubscriptionAuthRewrite.urlQueryParam(name, inPath: path)
+    }
+
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
@@ -1233,278 +1295,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
 
-        // 5c. Claude subscription auth. In subscription mode the guest runs in
-        //     API-key mode with a *bogus* ANTHROPIC_API_KEY (so it never does
-        //     OAuth and never stores a real credential). Here we turn that into
-        //     a real subscription request: drop x-api-key, add Authorization:
-        //     Bearer <live access token> + the OAuth beta header. The token is
-        //     held only on the host, in a store shared by every session, and
-        //     the host owns its refresh — so one refresh serves all VMs.
-        //     `claudeSubStaleAccess` carries the injected token to the post-
-        //     relay 401 self-heal below.
-        var claudeSubStaleAccess: String? = nil
-        // 5c'. …and with account features on, the machine holds an OAuth
-        //     stand-in (ClaudeStandIn) and sends it as Bearer to Anthropic's
-        //     and Claude's hosts: a value swap for the live token.
-        if !insecure, Self.isClaudeHost(host),
-           let provider = Self.claudeSubscriptionProvider, let (_, refresher) = provider(),
-           let headerSection = Self.rawHeaderSection(of: swap.modified),
-           let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           Self.isClaudeStandIn(bearer, profileID: profileID) {
-            do {
-                let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
-                claudeSubStaleAccess = access
-                FileHandle.standardError.write(Data(
-                    "[mitm] swapped Claude OAuth stand-in for \(host)\(reqPath)\n".utf8))
-            } catch {
-                let rejected = (error as? ClaudeSubscriptionError)?.isRejection ?? false
-                let reply = rejected
-                    ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
-                        "type": "error",
-                        "error": ["type": "authentication_error",
-                                  "message": "Your Claude sign-in expired. Sign in again from Bromure (the workspace's sign-in card or Preferences → Models) — not with /login inside the VM."],
-                    ])
-                    : SignInCapture.response(status: 529, reason: "Overloaded", json: [
-                        "type": "error",
-                        "error": ["type": "overloaded_error",
-                                  "message": "Bromure couldn't renew the Claude sign-in just now; retrying."],
-                    ])
+        // 5c–5e′. Subscription auth: the agents' stand-ins swapped for the
+        //     host's live tokens, or answered here (SubscriptionAuthRewrite).
+        var subInjected = SubscriptionAuthRewrite.Injected()
+        if !insecure {
+            switch await SubscriptionAuthRewrite.apply(rawRequest: swap.modified, host: host, method: reqMethod,
+                                                       path: reqPath, profileID: profileID,
+                                                       spooledBody: bodyFile != nil) {
+            case .forward(let req, let injected):
+                swap.modified = req
+                subInjected = injected
+            case .answer(let reply):
                 if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
-                try tls.write(reply)
-                return
-            }
-        }
-        if !insecure,
-           host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
-           let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
-           let headerSection = Self.rawHeaderSection(of: swap.modified),
-           let apiKey = Self.headerValue("x-api-key", inHeaderSection: headerSection),
-           store.profileForBogusKey(apiKey) != nil {
-            do {
-                let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.injectClaudeSubscriptionAuth(rawRequest: swap.modified, access: access)
-                claudeSubStaleAccess = access
-                Self.logTokenInjection("Claude subscription token", host: host, profileID: profileID)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Claude subscription token unavailable for \(host): \(error)\n".utf8))
-                // Never forward the bogus key: Anthropic would answer "invalid
-                // x-api-key" and Claude Code would tell the user to /login —
-                // which, in the guest, would mint a separate grant inside the
-                // VM. Answer here instead: a transient failure (network, 5xx,
-                // 429) as a retryable 529 that Claude Code backs off and
-                // retries; a rejected grant as a 401 that says where to fix it.
-                let rejected = (error as? ClaudeSubscriptionError)?.isRejection ?? false
-                let reply = rejected
-                    ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
-                        "type": "error",
-                        "error": ["type": "authentication_error",
-                                  "message": "Your Claude sign-in expired. Sign in again from Bromure (the workspace's sign-in card or Preferences → Models) — not with /login inside the VM."],
-                    ])
-                    : SignInCapture.response(status: 529, reason: "Overloaded", json: [
-                        "type": "error",
-                        "error": ["type": "overloaded_error",
-                                  "message": "Bromure couldn't renew the Claude sign-in just now; retrying."],
-                    ])
-                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
-                try tls.write(reply)
-                return
-            }
-        }
-
-        // 5d. Codex / ChatGPT subscription auth. The guest's ~/.codex/auth.json
-        //     holds a *bogus* far-future-exp JWT (so it never refreshes); on the
-        //     ChatGPT backend it sends that as `Authorization: Bearer`. Swap it
-        //     for the live real access token from the host store, which the host
-        //     refreshes. Distinct from the Claude path (x-api-key → Bearer):
-        //     here the guest already sends a Bearer, so it's a value swap.
-        var codexSubStaleAccess: String? = nil
-        if !insecure,
-           host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
-           let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider(),
-           let headerSection = Self.rawHeaderSection(of: swap.modified),
-           let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           Self.isCodexStandIn(bearer, profileID: profileID) {
-            do {
-                let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
-                codexSubStaleAccess = access
-                Self.logTokenInjection("Codex subscription token", host: host, profileID: profileID)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Codex subscription token unavailable for \(host): \(error)\n".utf8))
-                // Never forward the stand-in (or a dead token): answer here.
-                // A rejected / flagged login → a 401 that says where to sign
-                // in (Codex then prints its "sign in again" banner, which the
-                // session turns into a sign-in card); a transient failure → a
-                // retryable 503.
-                let rejected = (error as? CodexSubscriptionError)?.isRejection ?? false
-                let reply = rejected
-                    ? SignInCapture.response(status: 401, reason: "Unauthorized",
-                                             json: CodexSignInExpired.apiErrorJSON)
-                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
-                        "error": ["message": "Bromure couldn't renew the ChatGPT sign-in just now; retrying.",
-                                  "type": "server_error"] as [String: Any],
-                    ])
-                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
-                try tls.write(reply)
-                return
-            }
-        }
-
-        // 5e. Grok (xAI) subscription auth. The guest's ~/.grok/auth.json holds
-        //     a bogus OIDC token with a far-future expiry (so it never
-        //     refreshes); on the chat proxy it sends that as Bearer. Swap it for
-        //     the live real access token from the host store, which the host
-        //     refreshes against auth.x.ai.
-        var grokSubStaleAccess: String? = nil
-        if !insecure,
-           host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
-            || host == "x.ai" || host.hasSuffix(".x.ai"),
-           let provider = Self.grokSubscriptionProvider, let (_, refresher) = provider(),
-           let headerSection = Self.rawHeaderSection(of: swap.modified),
-           let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           Self.isGrokStandIn(bearer, profileID: profileID) {
-            do {
-                let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
-                grokSubStaleAccess = access
-                Self.logTokenInjection("Grok subscription token", host: host, profileID: profileID)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Grok subscription token unavailable for \(host): \(error)\n".utf8))
-                // Never forward the stand-in (or a dead token): a rejected /
-                // flagged login → a 401 that says where to sign in; a
-                // transient failure → a retryable 503.
-                let rejected = (error as? GrokSubscriptionError)?.isRejection ?? false
-                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
-                try tls.write(Self.subscriptionUnavailableReply(provider: "Grok", rejected: rejected))
-                return
-            }
-        }
-
-        // 5f. Kimi (Moonshot) subscription auth. The guest's
-        //     ~/.kimi-code/credentials/<name>.json holds a bogus OAuth token
-        //     with a far-future expiry (so the CLI never refreshes); it sends
-        //     that as Bearer to api.kimi.ai/coding/v1. Swap it for the live
-        //     real access token from the host store, which the host refreshes
-        //     against auth.kimi.ai (the international region; see KimiRegion).
-        var kimiSubStaleAccess: String? = nil
-        if !insecure,
-           KimiRegion.isSubscriptionHost(host),
-           let provider = Self.kimiSubscriptionProvider, let (_, refresher) = provider(),
-           let headerSection = Self.rawHeaderSection(of: swap.modified),
-           let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           Self.isKimiStandIn(bearer, profileID: profileID) {
-            do {
-                let access = try await refresher.accessToken(for: profileID)
-                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
-                kimiSubStaleAccess = access
-                Self.logTokenInjection("Kimi subscription token", host: host, profileID: profileID)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Kimi subscription token unavailable for \(host): \(error)\n".utf8))
-                let rejected = (error as? KimiSubscriptionError)?.isRejection ?? false
-                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
-                try tls.write(Self.subscriptionUnavailableReply(provider: "Kimi", rejected: rejected))
-                return
-            }
-        }
-
-        // 5f′. Kimi stand-in refresh. The guest's credential file holds a
-        //     bogus refresh token it is never meant to use — but kimi 2.0.x
-        //     FORCES a refresh (`ensureFresh({force:true})`) the moment its
-        //     managed-models provisioning call gets a 401, and a refresh that
-        //     auth.kimi.ai rejects is persisted as a revoked tombstone (empty
-        //     access token): the CLI reports "requires login" from then on,
-        //     until the next re-seed. So when the guest POSTs
-        //     `grant_type=refresh_token` with ANY of our stand-ins (an older
-        //     one too: a machine resumed across an app restart or a host-side
-        //     rotation still holds it), answer it here: refresh the REAL
-        //     credential host-side (forced, rate-limited) and hand back fresh
-        //     stand-ins minted from the current real record. The real refresh
-        //     token never enters the VM; a genuine (non-stand-in) refresh —
-        //     e.g. the registration VM's own login — passes through untouched.
-        //
-        // 5e″. Grok stand-in refresh, the same way: Grok refreshes when xAI
-        //     turns a request down (a 401 — which an unrecognised stand-in
-        //     used to cause after an app restart), and its stand-in refresh
-        //     token sent on to auth.x.ai was rejected: Grok logged out.
-        if !insecure, bodyFile == nil,
-           let reply = await Self.answerStandInRefresh(host: host, method: reqMethod, path: reqPath,
-                                                       rawRequest: swap.modified, profileID: profileID) {
-            try tls.write(reply)
-            return
-        }
-
-        // 5c''. Claude stand-in refresh: answered here with the stand-in
-        //     again (the host keeps the real login fresh), never sent on.
-        if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
-           Self.isClaudeHost(host), reqPath.hasPrefix("/v1/oauth/token"),
-           let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
-           store.record(for: profileID) != nil,
-           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
-            let body = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
-            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-            let form = "?" + String(decoding: body, as: UTF8.self)
-            let grant = (json?["grant_type"] as? String) ?? Self.urlQueryParam("grant_type", inPath: form)
-            let sent = (json?["refresh_token"] as? String) ?? Self.urlQueryParam("refresh_token", inPath: form)
-            if grant == "refresh_token", let sent, ClaudeStandIn.isRefresh(sent) {
-                let reply: Data
-                do {
-                    _ = try await refresher.accessToken(for: profileID)
-                    reply = SignInCapture.response(status: 200, reason: "OK",
-                                                   json: ClaudeStandIn.refreshAnswer(ClaudeStandIn.mint(profileID: profileID)))
-                    FileHandle.standardError.write(Data(
-                        "[mitm] answered Claude stand-in refresh for \(profileID.uuidString.prefix(8))\n".utf8))
-                } catch {
-                    reply = SignInCapture.response(status: 400, reason: "Bad Request", json: [
-                        "error": "invalid_grant",
-                        "error_description": "Bromure could not refresh the Claude subscription on the host: \(error)",
-                    ])
-                }
-                try tls.write(reply)
-                return
-            }
-        }
-
-        // 5e'. Codex stand-in refresh. Codex refreshes when OpenAI turns its
-        //     token down (a 401) — which a stand-in the proxy didn't swap
-        //     used to cause — and a stand-in refresh token sent on to OpenAI
-        //     came back "Your access token could not be refreshed. Please
-        //     log out and sign in again." Answered here instead, like Kimi's:
-        //     the host refreshes the real login and Codex gets fresh stand-ins.
-        if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
-           host == "auth.openai.com", reqPath.hasPrefix("/oauth/token"),
-           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
-           store.record(for: profileID) != nil,
-           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
-            let body = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
-            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-            let form = "?" + String(decoding: body, as: UTF8.self)
-            let grant = (json?["grant_type"] as? String) ?? Self.urlQueryParam("grant_type", inPath: form)
-            let sent = (json?["refresh_token"] as? String) ?? Self.urlQueryParam("refresh_token", inPath: form)
-            if grant == "refresh_token", let sent, SubscriptionFakeMint.isCodexRefreshFake(sent) {
-                let reply: Data
-                do {
-                    // Codex only refreshes after OpenAI turned it down: refresh
-                    // the REAL login for real (not just "it isn't expired yet"),
-                    // and fail honestly when the login is dead.
-                    let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
-                    guard let fresh = store.record(for: profileID),
-                          let standIn = CodexStandIn.mint(fresh, profileID: profileID)
-                    else { throw CodexSubscriptionError.noCredential }
-                    store.registerBogusKey(standIn.access, for: profileID)
-                    reply = SignInCapture.response(status: 200, reason: "OK", json: CodexStandIn.refreshAnswer(standIn))
-                    FileHandle.standardError.write(Data(
-                        "[mitm] answered Codex stand-in refresh for \(profileID.uuidString.prefix(8)) (\(refreshedNow ? "host refreshed the real credential" : "real credential refreshed moments ago; reused"))\n".utf8))
-                } catch {
-                    reply = SignInCapture.response(status: 401, reason: "Unauthorized",
-                                                   json: CodexSignInExpired.refreshRejectedJSON(error))
-                    FileHandle.standardError.write(Data(
-                        "[mitm] Codex stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
-                }
                 try tls.write(reply)
                 return
             }
@@ -1698,11 +1500,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 })
             // Codex's Responses WebSocket turned the injected token down:
             // same self-heal / dead-login detection as the HTTP path below.
-            if let stale = codexSubStaleAccess, result.statusCode == 401,
-               let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider() {
-                let pid = profileID
-                let invalidated = CodexSignInExpired.isInvalidation(result.handshakeResponse)
-                Task { await refresher.noteUnauthorized(stale: stale, for: pid, invalidated: invalidated) }
+            if result.statusCode == 401 {
+                SubscriptionAuthRewrite.noteUnauthorized(.init(codex: subInjected.codex),
+                                                         response: result.handshakeResponse, profileID: profileID)
             }
             let elapsed = Date().timeIntervalSince(t0) * 1000
             let streamedAny = realtimeTap?.streamedAnyEvents ?? false
@@ -2701,35 +2501,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             })
         }
 
-        // Claude subscription 401 self-heal. The streaming relay has already
+        // Subscription 401 self-heal. The streaming relay has already
         // committed the response to the guest, so we can't retry transparently
         // — instead refresh the shared token in the background so the *next*
-        // request uses a fresh one (and Claude Code retries the failed call on
-        // its own). De-duped in the refresher against concurrent 401s.
-        if let stale = claudeSubStaleAccess,
-           Self.parseStatusCode(relay.buffer) == 401,
-           let provider = Self.claudeSubscriptionProvider, let (_, refresher) = provider() {
-            let pid = profileID
-            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
-        }
-        if let stale = codexSubStaleAccess,
-           Self.parseStatusCode(relay.buffer) == 401,
-           let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider() {
-            let pid = profileID
-            let invalidated = CodexSignInExpired.isInvalidation(relay.buffer)
-            Task { await refresher.noteUnauthorized(stale: stale, for: pid, invalidated: invalidated) }
-        }
-        if let stale = grokSubStaleAccess,
-           Self.parseStatusCode(relay.buffer) == 401,
-           let provider = Self.grokSubscriptionProvider, let (_, refresher) = provider() {
-            let pid = profileID
-            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
-        }
-        if let stale = kimiSubStaleAccess,
-           Self.parseStatusCode(relay.buffer) == 401,
-           let provider = Self.kimiSubscriptionProvider, let (_, refresher) = provider() {
-            let pid = profileID
-            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+        // request uses a fresh one (and the agent retries the failed call on
+        // its own).
+        if Self.parseStatusCode(relay.buffer) == 401 {
+            SubscriptionAuthRewrite.noteUnauthorized(subInjected, response: relay.buffer, profileID: profileID)
         }
 
         // 7. Trace. Build a TraceRecord from what we observed and
@@ -3459,25 +3237,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
                      "store.record hop->main done host=\(host) took=\(BACDebug.ms(storeT0))")
     }
 
-    /// "injected … token" lines, at most once a minute per (what, host,
-    /// workspace): every request — every Codex WebSocket turn — gets one, and
-    /// dozens a turn drowned the log.
-    private static let injectionLogLock = NSLock()
-    nonisolated(unsafe) private static var injectionLogLast: [String: Date] = [:]
-    static func shouldLogTokenInjection(_ key: String, now: Date = Date(),
-                                        interval: TimeInterval = 60) -> Bool {
-        injectionLogLock.lock(); defer { injectionLogLock.unlock() }
-        if let last = injectionLogLast[key], now.timeIntervalSince(last) < interval { return false }
-        injectionLogLast[key] = now
-        return true
-    }
-
-    static func logTokenInjection(_ what: String, host: String, profileID: UUID) {
-        guard shouldLogTokenInjection("\(what)|\(host)|\(profileID.uuidString)") else { return }
-        FileHandle.standardError.write(Data(
-            "[mitm] injected \(what) for \(host) (logged once a minute)\n".utf8))
-    }
-
     /// Pull the untrusted `tool_result` spans that were freshly added
     /// this turn. The request re-sends the whole history every turn, so
     /// we scan only the last message that carries tool_results (the
@@ -3957,20 +3716,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return (String(parts[0]), String(parts[1]))
     }
 
-    /// Case-insensitive lookup of a header value in a CRLF-delimited header
-    /// section (request line included; we skip it). nil if absent.
-    static func headerValue(_ name: String, inHeaderSection text: String) -> String? {
-        let wanted = name.lowercased()
-        for line in text.components(separatedBy: "\r\n").dropFirst() {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let key = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-            if key == wanted {
-                return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-            }
-        }
-        return nil
-    }
-
     /// Downgrade an npm packument request's `Accept` to plain JSON.
     ///
     /// `npm install` asks for the abbreviated "corgi" packument
@@ -3997,94 +3742,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return out
     }
 
-    /// The header block of a raw HTTP request (request line + headers, up to
-    /// but excluding the blank line), decoded body-agnostically, or nil if
-    /// there's no blank line.
-    ///
-    /// HTTP header bytes are ASCII and Latin-1 maps every byte 1:1 (it never
-    /// returns nil), so this yields the headers even when the *body* is binary
-    /// — a gzip artifact upload, protobuf, etc. The swap + leak paths used to
-    /// decode the whole request as UTF-8, which returned nil on a single
-    /// non-UTF-8 body byte; that silently skipped subscription-token swaps
-    /// (bogus token left on the wire → HTTP 401) and credential-leak
-    /// suppression (false-positive `LEAK authorization=…` warnings) for e.g.
-    /// Grok's `*.tar.gz` session-state and OTLP `/v1/traces` uploads.
-    /// Suitable to pass to `headerValue(_:inHeaderSection:)`.
-    static func rawHeaderSection(of raw: Data) -> String? {
-        guard let end = raw.range(of: Data("\r\n\r\n".utf8))?.lowerBound else { return nil }
-        return String(data: raw.subdata(in: raw.startIndex..<end), encoding: .isoLatin1)
-    }
-
-    /// Replace a raw request's header block with `newHeader`, keeping the
-    /// original — possibly binary — body byte-for-byte (Content-Length stays
-    /// valid because the body is untouched). `newHeader` is the transformed
-    /// header block *without* the trailing blank line.
-    static func spliceHeaderSection(of raw: Data, newHeader: String) -> Data {
-        guard let sep = raw.range(of: Data("\r\n\r\n".utf8)) else {
-            return newHeader.data(using: .isoLatin1) ?? raw
-        }
-        var out = newHeader.data(using: .isoLatin1) ?? Data()
-        out.append(raw.subdata(in: sep.lowerBound..<raw.endIndex))   // "\r\n\r\n" + body
-        return out
-    }
-
-    /// Turn a guest API-key request into a Claude subscription request: drop
-    /// `x-api-key` and any existing `Authorization`, set `Authorization: Bearer
-    /// <access>`, and ensure `anthropic-beta` carries the OAuth flag (merged,
-    /// not clobbered). Body is untouched, so Content-Length stays valid.
-    static func injectClaudeSubscriptionAuth(rawRequest raw: Data, access: String) -> Data {
-        guard let headerBlock = Self.rawHeaderSection(of: raw) else { return raw }
-        let oauthBeta = "oauth-2025-04-20"
-        var outLines: [String] = []
-        var sawBeta = false
-        for line in headerBlock.components(separatedBy: "\r\n") {
-            let lower = line.lowercased()
-            if lower.hasPrefix("x-api-key:") { continue }       // drop the bogus key
-            if lower.hasPrefix("authorization:") { continue }   // we set our own
-            if lower.hasPrefix("anthropic-beta:"), let colon = line.firstIndex(of: ":") {
-                sawBeta = true
-                let existing = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-                let parts = existing.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                let merged = parts.contains(oauthBeta) ? existing
-                    : (existing.isEmpty ? oauthBeta : existing + "," + oauthBeta)
-                outLines.append("anthropic-beta: \(merged)")
-            } else {
-                outLines.append(line)
-            }
-        }
-        outLines.append("Authorization: Bearer \(access)")
-        if !sawBeta { outLines.append("anthropic-beta: \(oauthBeta)") }
-        return Self.spliceHeaderSection(of: raw, newHeader: outLines.joined(separator: "\r\n"))
-    }
-
-    /// The token from an `Authorization: Bearer <token>` header (or nil).
-    static func bearerToken(inHeaderSection text: String) -> String? {
-        guard let v = headerValue("authorization", inHeaderSection: text) else { return nil }
-        let prefix = "Bearer "
-        guard v.count > prefix.count,
-              v.lowercased().hasPrefix(prefix.lowercased()) else { return nil }
-        return String(v.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
-    }
-
-    /// Rewrite the request's `Authorization` header to `Bearer <token>`,
-    /// preserving everything else (and the body / Content-Length). Operates on
-    /// raw bytes so a binary body survives untouched.
-    static func replaceAuthorizationBearer(rawRequest raw: Data, token: String) -> Data {
-        guard let headerBlock = Self.rawHeaderSection(of: raw) else { return raw }
-        var outLines: [String] = []
-        var replaced = false
-        for line in headerBlock.components(separatedBy: "\r\n") {
-            if line.lowercased().hasPrefix("authorization:") {
-                outLines.append("Authorization: Bearer \(token)")
-                replaced = true
-            } else {
-                outLines.append(line)
-            }
-        }
-        if !replaced { outLines.append("Authorization: Bearer \(token)") }
-        return Self.spliceHeaderSection(of: raw, newHeader: outLines.joined(separator: "\r\n"))
-    }
-
     /// Extract the `Action` value from a form-urlencoded AWS query-protocol
     /// body (e.g. `Action=TerminateInstances&Version=…`). `Action` need not
     /// be the first field.
@@ -4094,164 +3751,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
             if kv.count == 2, kv[0] == "Action" {
                 return kv[1].removingPercentEncoding ?? String(kv[1])
             }
-        }
-        return nil
-    }
-
-    /// Extract a query-string parameter from a request path
-    /// (`/?query=SELECT+1&database=x` → "SELECT 1"). Percent- and
-    /// `+`-decoded. nil if the path has no query string or no such key.
-    /// Anthropic's API and Claude's own hosts (claude.ai, platform.claude.com).
-    static func isClaudeHost(_ host: String) -> Bool {
-        let h = host.lowercased()
-        return h == "api.anthropic.com" || h.hasSuffix(".anthropic.com")
-            || h == "claude.ai" || h.hasSuffix(".claude.ai") || h.hasSuffix(".claude.com") || h == "claude.com"
-    }
-
-    /// Claude's OAuth stand-in, from a workspace that has a Claude login.
-    static func isClaudeStandIn(_ bearer: String, profileID: UUID) -> Bool {
-        guard ClaudeStandIn.isAccess(bearer),
-              let (store, _) = claudeSubscriptionProvider?() else { return false }
-        return store.record(for: profileID) != nil
-    }
-
-    /// A Codex stand-in for this workspace: one the host registered, or one
-    /// it minted any time (its Bromure-marked signature) for a workspace that
-    /// has a Codex login — the registry is in memory, and a machine that
-    /// outlives an app restart (or a host-side refresh) still holds an older
-    /// stand-in. Only ever resolved to THIS connection's workspace's login.
-    static func isCodexStandIn(_ bearer: String, profileID: UUID) -> Bool {
-        guard let (store, _) = codexSubscriptionProvider?() else { return false }
-        if store.profileForBogusKey(bearer) != nil { return true }
-        return SubscriptionFakeMint.isJWTFake(bearer) && store.record(for: profileID) != nil
-    }
-
-    /// A Grok stand-in for this workspace: one the host registered, or one
-    /// it minted any time (Bromure's mark) for a workspace that has a Grok
-    /// login — the registry is in memory, and a machine resumed across an
-    /// app restart (or a host-side refresh) still holds an older stand-in.
-    /// Only ever resolved to THIS connection's workspace's login.
-    static func isGrokStandIn(_ bearer: String, profileID: UUID) -> Bool {
-        guard let (store, _) = grokSubscriptionProvider?() else { return false }
-        if store.profileForBogusKey(bearer) != nil { return true }
-        return GrokStandIn.isAccess(bearer) && store.record(for: profileID) != nil
-    }
-
-    /// Kimi's twin of ``isGrokStandIn(_:profileID:)``.
-    static func isKimiStandIn(_ bearer: String, profileID: UUID) -> Bool {
-        guard let (store, _) = kimiSubscriptionProvider?() else { return false }
-        if store.profileForBogusKey(bearer) != nil { return true }
-        return KimiStandIn.isAccess(bearer) && store.record(for: profileID) != nil
-    }
-
-    /// The refresh token of a `grant_type=refresh_token` request (form or
-    /// JSON body), when `matching` says it is one of our stand-ins.
-    static func standInRefreshToken(in rawRequest: Data, matching: (String) -> Bool) -> String? {
-        guard let bodyStart = rawRequest.range(of: Data("\r\n\r\n".utf8)) else { return nil }
-        let body = rawRequest.subdata(in: bodyStart.upperBound..<rawRequest.count)
-        let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-        let form = "?" + String(decoding: body, as: UTF8.self)
-        let grant = (json?["grant_type"] as? String) ?? urlQueryParam("grant_type", inPath: form)
-        let sent = (json?["refresh_token"] as? String) ?? urlQueryParam("refresh_token", inPath: form)
-        guard grant == "refresh_token", let sent, matching(sent) else { return nil }
-        return sent
-    }
-
-    /// What a Grok / Kimi request carrying a stand-in hears when the host has
-    /// no usable login: never the stand-in forwarded upstream.
-    static func subscriptionUnavailableReply(provider: String, rejected: Bool) -> Data {
-        rejected
-            ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
-                "error": ["message": "Your \(provider) sign-in expired or was rejected. Sign in again from Bromure (the session's sign-in card or Preferences → Models).",
-                          "type": "authentication_error", "code": "sign_in_required"] as [String: Any],
-            ])
-            : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
-                "error": ["message": "Bromure couldn't renew the \(provider) sign-in just now; retrying.",
-                          "type": "server_error"] as [String: Any],
-            ])
-    }
-
-    /// The proxy's answer to a Grok / Kimi refresh the guest sent with one
-    /// of Bromure's stand-in refresh tokens (5e″ / 5f′), or nil when the
-    /// request isn't one (it then goes on untouched). Never forwards it: the
-    /// host refreshes the real login (forced, rate-limited per slot) and the
-    /// guest gets fresh stand-ins — or the truth: a rejected login as a
-    /// permanent error, a transient failure as a retryable 503.
-    static func answerStandInRefresh(host: String, method: String, path: String,
-                                     rawRequest: Data, profileID: UUID) async -> Data? {
-        guard method.uppercased() == "POST" else { return nil }
-        let pid8 = profileID.uuidString.prefix(8)
-        func outcome(_ refreshedNow: Bool) -> String {
-            refreshedNow ? "host refreshed the real credential" : "reused the host's recently refreshed credential"
-        }
-        if (host == "auth.kimi.ai" || host == "auth.kimi.com"), path.hasPrefix("/api/oauth/token"),
-           let (store, refresher) = kimiSubscriptionProvider?(),
-           store.record(for: profileID) != nil,
-           standInRefreshToken(in: rawRequest, matching: KimiStandIn.isRefresh) != nil {
-            do {
-                let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
-                // Mint from the CURRENT real record (the refresher persisted it).
-                guard let fresh = store.record(for: profileID) else { throw KimiSubscriptionError.noCredential }
-                let answer = KimiRefreshAnswer.build(record: fresh, profileID: profileID)
-                store.registerBogusKey(answer.bogusAccess, for: profileID)
-                FileHandle.standardError.write(Data(
-                    "[mitm] answered Kimi stand-in refresh for \(pid8) (\(outcome(refreshedNow)))\n".utf8))
-                return SignInCapture.response(status: 200, reason: "OK", json: answer.json)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Kimi stand-in refresh for \(pid8) failed host-side: \(error)\n".utf8))
-                // A transient failure must never read as a 401: the CLI would
-                // persist it as a revoked login.
-                let rejected = (error as? KimiSubscriptionError)?.isRejection ?? false
-                return rejected
-                    ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
-                        "error": "invalid_grant",
-                        "error_description": "Bromure could not refresh the Kimi subscription on the host: \(error). Sign in again from Bromure.",
-                    ])
-                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
-                        "error": "temporarily_unavailable",
-                        "error_description": "Bromure couldn't renew the Kimi sign-in just now; retrying: \(error)",
-                    ])
-            }
-        }
-        if host == "auth.x.ai", path.hasPrefix("/oauth2/token"),
-           let (store, refresher) = grokSubscriptionProvider?(),
-           store.record(for: profileID) != nil,
-           standInRefreshToken(in: rawRequest, matching: GrokStandIn.isRefresh) != nil {
-            do {
-                let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
-                guard let fresh = store.record(for: profileID) else { throw GrokSubscriptionError.noCredential }
-                let standIn = GrokStandIn.mint(fresh, profileID: profileID)
-                store.registerBogusKey(standIn.access, for: profileID)
-                FileHandle.standardError.write(Data(
-                    "[mitm] answered Grok stand-in refresh for \(pid8) (\(outcome(refreshedNow)))\n".utf8))
-                return SignInCapture.response(status: 200, reason: "OK", json: GrokStandIn.refreshAnswer(standIn))
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "[mitm] Grok stand-in refresh for \(pid8) failed host-side: \(error)\n".utf8))
-                let rejected = (error as? GrokSubscriptionError)?.isRejection ?? false
-                return rejected
-                    ? SignInCapture.response(status: 400, reason: "Bad Request", json: [
-                        "error": "invalid_grant",
-                        "error_description": "Bromure could not refresh the Grok subscription on the host: \(error). Sign in again from Bromure.",
-                    ])
-                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
-                        "error": "temporarily_unavailable",
-                        "error_description": "Bromure couldn't renew the Grok sign-in just now; retrying: \(error)",
-                    ])
-            }
-        }
-        return nil
-    }
-
-    static func urlQueryParam(_ name: String, inPath path: String) -> String? {
-        guard let q = path.firstIndex(of: "?") else { return nil }
-        let query = path[path.index(after: q)...]
-        for pair in query.split(separator: "&") {
-            let kv = pair.split(separator: "=", maxSplits: 1)
-            guard kv.count == 2, kv[0] == name else { continue }
-            let plusDecoded = kv[1].replacingOccurrences(of: "+", with: " ")
-            return plusDecoded.removingPercentEncoding ?? plusDecoded
         }
         return nil
     }

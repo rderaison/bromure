@@ -23,21 +23,22 @@ public final class BromureCA: @unchecked Sendable {
     /// for the in-VM `update-ca-certificates` install step.
     public let certificatePEM: String
 
+    #if canImport(Security)
     /// SecCertificate / SecKey wrappers for use with Apple's security
     /// stack (SecureTransport accepts a SecIdentity built from these).
     public let secCertificate: SecCertificate
     public let secPrivateKey: SecKey
+    #endif
 
     private init(certificate: Certificate,
                  privateKey: P256.Signing.PrivateKey,
-                 certificatePEM: String,
-                 secCertificate: SecCertificate,
-                 secPrivateKey: SecKey) {
+                 certificatePEM: String) throws {
         self.certificate = certificate
         self.privateKey = privateKey
         self.certificatePEM = certificatePEM
-        self.secCertificate = secCertificate
-        self.secPrivateKey = secPrivateKey
+        #if canImport(Security)
+        (secCertificate, secPrivateKey) = try Self.makeSecPair(cert: certificate, key: privateKey)
+        #endif
     }
 
     /// Load from disk if present; otherwise mint a fresh one and persist.
@@ -67,12 +68,7 @@ public final class BromureCA: @unchecked Sendable {
         let cert = try Certificate(pemEncoded: certPEM)
         let key  = try P256.Signing.PrivateKey(pemRepresentation: keyPEM)
 
-        let (sec, secKey) = try makeSecPair(cert: cert, key: key)
-        return BromureCA(certificate: cert,
-                         privateKey: key,
-                         certificatePEM: certPEM,
-                         secCertificate: sec,
-                         secPrivateKey: secKey)
+        return try BromureCA(certificate: cert, privateKey: key, certificatePEM: certPEM)
     }
 
     private static func mint(certURL: URL, keyURL: URL) throws -> BromureCA {
@@ -121,14 +117,10 @@ public final class BromureCA: @unchecked Sendable {
             [.posixPermissions: NSNumber(value: 0o600)],
             ofItemAtPath: keyURL.path)
 
-        let (sec, secKey) = try makeSecPair(cert: cert, key: key)
-        return BromureCA(certificate: cert,
-                         privateKey: key,
-                         certificatePEM: certPEM,
-                         secCertificate: sec,
-                         secPrivateKey: secKey)
+        return try BromureCA(certificate: cert, privateKey: key, certificatePEM: certPEM)
     }
 
+    #if canImport(Security)
     /// Convert the swift-certificates `Certificate` + crypto `PrivateKey`
     /// into Apple-`Sec*` references. SecureTransport / SecIdentity want
     /// these specific types for the server-side TLS handshake.
@@ -158,6 +150,7 @@ public final class BromureCA: @unchecked Sendable {
         }
         return (secCert, secKey)
     }
+    #endif
 }
 
 // MARK: - Random helper

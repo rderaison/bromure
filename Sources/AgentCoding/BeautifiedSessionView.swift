@@ -4109,21 +4109,6 @@ struct InlineTerminalView: NSViewRepresentable {
 /// The failure card shown in place of the cue — red-accented so a dead session
 /// is unmistakable, carrying the terminal's own error line and a nudge back to
 /// the terminal, where the fix (re-login, top up) actually happens.
-/// What a host-run sign-in reports to the card that started it.
-enum HostSignInEvent: Equatable {
-    case status(String)
-    /// A headless sign-in on an attached machine: the page to open here and
-    /// the one-time code to enter there (or, for Claude, a code to paste back).
-    case device(HostSignInDevice)
-    case finished(success: Bool, message: String?)
-}
-
-struct HostSignInDevice: Equatable {
-    var url: URL
-    var code: String?
-    var paste: Bool
-}
-
 /// A session's sign-in on a Bromure Sidecar machine: the agent's own
 /// device-code login runs there (AgentLogin), this side shows its link and
 /// code and waits for it to land. `call` POSTs one of the session's actions

@@ -346,3 +346,18 @@ enum ComposerDrafts {
         }
     }
 }
+
+/// What a host-run sign-in reports to the card that started it.
+enum HostSignInEvent: Equatable {
+    case status(String)
+    /// A headless sign-in on an attached machine: the page to open here and
+    /// the one-time code to enter there (or, for Claude, a code to paste back).
+    case device(HostSignInDevice)
+    case finished(success: Bool, message: String?)
+}
+
+struct HostSignInDevice: Equatable {
+    var url: URL
+    var code: String?
+    var paste: Bool
+}

@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 
 // MARK: - Sign-in for a session, captured at the proxy
@@ -45,7 +44,54 @@ enum SignInSimulator {
     static var completed = 0
 }
 
-extension ACAppDelegate {
+/// What the proxy sign-in needs from its host: the proxy's stores and
+/// capture registry, the sign-ins in flight, and a shell in the guest. The
+/// macOS app delegate is one (SessionSignIn+App.swift); the Linux server
+/// another.
+@MainActor
+protocol ProxySignInHost: AnyObject {
+    /// The proxy's side; nil while the proxy isn't running.
+    var proxySignInBackend: ProxySignInBackend? { get }
+    /// One sign-in in flight per workspace.
+    var proxySignIns: [UUID: ProxySignIn] { get set }
+    func guestExec(profileID: Profile.ID, command: String, timeout: Int) async throws -> String
+}
+
+/// The proxy's stores and the registry its capture hooks are armed in.
+struct ProxySignInBackend {
+    let captures: SignInCaptureRegistry
+    let claude: ClaudeSubscriptionStore
+    let codex: CodexSubscriptionStore
+    let grok: GrokSubscriptionStore
+    let kimi: KimiSubscriptionStore
+}
+
+/// Where a capture hook finds its sign-in's host. The hook holds values only
+/// (see `beginProxySignIn`), so the host is looked up when it fires; set by
+/// every sign-in that arms one.
+@MainActor
+enum ProxySignInHub {
+    static weak var host: (any ProxySignInHost)?
+
+    /// The capture hook's way in: the sign-in still live for `profileID`
+    /// under `token`, and the exchange's reply carrying an access token.
+    static func proxySignInExchanged(profileID: UUID, token: UUID, body: Data) -> Data? {
+        guard let app = host,
+              let s = app.proxySignIns[profileID], s.token == token, !s.finished,
+              let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let access = json["access_token"] as? String, !access.isEmpty else { return nil }
+        if s.simulated {
+            app.endProxySignIn(s, success: true, message: nil)
+            SignInSimulator.completed += 1
+            return SignInCapture.response(status: 200, reason: "OK", json: [
+                "bromure_sim": "kept-on-host", "token": token.uuidString,
+            ])
+        }
+        return app.proxySignInCaptured(s, json: json, access: access)
+    }
+}
+
+extension ProxySignInHost {
     /// Leave the agent (Ctrl-C twice, C-u for a stray keystroke) in ONE
     /// window — resolved once to its tmux id, so the keys can't follow the
     /// index to another tab — then type the login line only once a shell
@@ -113,7 +159,7 @@ extension ACAppDelegate {
     @MainActor
     func beginProxySignIn(provider: SubscriptionProvider, profileID: UUID, windowIndex: Int,
                           events: @escaping (HostSignInEvent) -> Void) {
-        guard let engine = mitmEngine else {
+        guard let engine = proxySignInBackend else {
             events(.finished(success: false, message: NSLocalizedString(
                 "The Bromure proxy isn't running, so the sign-in can't be captured.", comment: "sign-in")))
             return
@@ -135,11 +181,12 @@ extension ACAppDelegate {
         // crash the instant the browser's "Authorize" came back). The main
         // actor finds the live sign-in by workspace + token.
         let token = signIn.token
-        engine.signInCaptures.arm(SignInCapture(
+        ProxySignInHub.host = self
+        engine.captures.arm(SignInCapture(
             profileID: profileID, hosts: endpoint.hosts, pathPrefix: endpoint.path,
             handle: { status, body in
                 guard status == 200 else { return nil }
-                return await ACAppDelegate.proxySignInExchanged(profileID: profileID, token: token, body: body)
+                return await ProxySignInHub.proxySignInExchanged(profileID: profileID, token: token, body: body)
             }))
 
         // Leave whatever the agent shows (Ctrl-C twice exits every supported
@@ -163,24 +210,6 @@ extension ACAppDelegate {
         }
     }
 
-    /// The capture hook's way in: the sign-in still live for `profileID`
-    /// under `token`, and the exchange's reply carrying an access token.
-    @MainActor
-    static func proxySignInExchanged(profileID: UUID, token: UUID, body: Data) -> Data? {
-        guard let app = NSApp.delegate as? ACAppDelegate,
-              let s = app.proxySignIns[profileID], s.token == token, !s.finished,
-              let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
-              let access = json["access_token"] as? String, !access.isEmpty else { return nil }
-        if s.simulated {
-            app.endProxySignIn(s, success: true, message: nil)
-            SignInSimulator.completed += 1
-            return SignInCapture.response(status: 200, reason: "OK", json: [
-                "bromure_sim": "kept-on-host", "token": token.uuidString,
-            ])
-        }
-        return app.proxySignInCaptured(s, json: json, access: access)
-    }
-
     /// The sign-in simulator (debug `sign-in-sim`, e2e): arm a capture for
     /// `profileID` exactly as `beginProxySignIn` does — the same values-only
     /// hook, the same registry — on `SignInSimulator.host`, whose provider
@@ -190,12 +219,13 @@ extension ACAppDelegate {
     /// sign-in's token, or nil when another sign-in is in flight there.
     @MainActor
     func beginSimulatedSignIn(profileID: UUID) -> UUID? {
-        guard let engine = mitmEngine else { return nil }
+        guard let engine = proxySignInBackend else { return nil }
         if let existing = proxySignIns[profileID], !existing.finished { return nil }
         let signIn = ProxySignIn(provider: .claude, profileID: profileID, windowIndex: -1)
         signIn.simulated = true
         proxySignIns[profileID] = signIn
         let token = signIn.token
+        ProxySignInHub.host = self
         let canned = SignInCapture.response(status: 200, reason: "OK", json: [
             "access_token": "sim-access-\(token.uuidString)", "refresh_token": "sim-refresh",
             "token_type": "Bearer", "expires_in": 3600,
@@ -204,10 +234,10 @@ extension ACAppDelegate {
             profileID: profileID, hosts: [SignInSimulator.host], pathPrefix: SignInSimulator.path,
             handle: { status, body in
                 guard status == 200 else { return nil }
-                return await ACAppDelegate.proxySignInExchanged(profileID: profileID, token: token, body: body)
+                return await ProxySignInHub.proxySignInExchanged(profileID: profileID, token: token, body: body)
             })
         capture.simulatedReply = canned
-        engine.signInCaptures.arm(capture)
+        engine.captures.arm(capture)
         signIn.timeout = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
             guard let self, let live = self.proxySignIns[profileID], live === signIn, !live.finished else { return }
@@ -219,8 +249,8 @@ extension ACAppDelegate {
     /// The exchange came back with tokens: keep them on the host and decide
     /// what the CLI hears.
     @MainActor
-    private func proxySignInCaptured(_ s: ProxySignIn, json: [String: Any], access: String) -> Data? {
-        guard !s.finished, let engine = mitmEngine else { return nil }
+    func proxySignInCaptured(_ s: ProxySignIn, json: [String: Any], access: String) -> Data? {
+        guard !s.finished, let engine = proxySignInBackend else { return nil }
         let refresh = (json["refresh_token"] as? String) ?? ""
         let expiresAt = (json["expires_in"] as? Double).map { Date().addingTimeInterval($0) } ?? .distantPast
         let pid = s.profileID
@@ -235,10 +265,10 @@ extension ACAppDelegate {
             case .claude:
                 let rec = ClaudeSubscriptionRecord(
                     accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date())
-                if engine.claudeSubscriptionStore.hasProfileRecord(pid) {
-                    try engine.claudeSubscriptionStore.setOverride(rec, for: pid)
+                if engine.claude.hasProfileRecord(pid) {
+                    try engine.claude.setOverride(rec, for: pid)
                 } else {
-                    try engine.claudeSubscriptionStore.setShared(rec)
+                    try engine.claude.setShared(rec)
                 }
                 endProxySignIn(s, success: true, message: nil)
                 return Self.keptOnHostReply()
@@ -247,10 +277,10 @@ extension ACAppDelegate {
                     accessToken: access, refreshToken: refresh,
                     idToken: (json["id_token"] as? String) ?? "",
                     expiresAt: expiresAt, savedAt: Date())
-                if engine.codexSubscriptionStore.hasProfileRecord(pid) {
-                    try engine.codexSubscriptionStore.setOverride(rec, for: pid)
+                if engine.codex.hasProfileRecord(pid) {
+                    try engine.codex.setOverride(rec, for: pid)
                 } else {
-                    try engine.codexSubscriptionStore.setShared(rec)
+                    try engine.codex.setShared(rec)
                 }
                 endProxySignIn(s, success: true, message: nil)
                 return Self.keptOnHostReply()
@@ -267,8 +297,8 @@ extension ACAppDelegate {
                 }
                 // The swap works from the first request; the record with the
                 // file's template follows once the CLI has written it.
-                if s.provider == .grok { engine.grokSubscriptionStore.registerBogusKey(standIn.access, for: pid) }
-                else { engine.kimiSubscriptionStore.registerBogusKey(standIn.access, for: pid) }
+                if s.provider == .grok { engine.grok.registerBogusKey(standIn.access, for: pid) }
+                else { engine.kimi.registerBogusKey(standIn.access, for: pid) }
                 Task { @MainActor in
                     await self.finishFileBackedSignIn(s, access: access, refresh: refresh,
                                                       expiresAt: expiresAt, standInAccess: standIn.access)
@@ -288,7 +318,7 @@ extension ACAppDelegate {
     @MainActor
     private func finishFileBackedSignIn(_ s: ProxySignIn, access: String, refresh: String,
                                         expiresAt: Date, standInAccess: String) async {
-        guard let engine = mitmEngine else { return }
+        guard let engine = proxySignInBackend else { return }
         let pid = s.profileID
         var grokFile: [String: Any]?
         var kimiFiles: [(name: String, obj: [String: Any])] = []
@@ -323,7 +353,7 @@ extension ACAppDelegate {
                         }
                     }
                     if !kimiFiles.isEmpty,
-                       let t = kimiTOML, ACAppDelegate.kimiConfigIsProvisioned(t) { break }
+                       let t = kimiTOML, KimiProvisioner.isProvisioned(t) { break }
                 }
             }
         }
@@ -346,10 +376,10 @@ extension ACAppDelegate {
                 let rec = GrokSubscriptionRecord(
                     accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date(),
                     scopeKey: scopeKey, templateJSON: template)
-                if engine.grokSubscriptionStore.hasProfileRecord(pid) {
-                    try engine.grokSubscriptionStore.setOverride(rec, for: pid)
+                if engine.grok.hasProfileRecord(pid) {
+                    try engine.grok.setOverride(rec, for: pid)
                 } else {
-                    try engine.grokSubscriptionStore.setShared(rec)
+                    try engine.grok.setShared(rec)
                 }
             } else {
                 var name = kimiManagedCredentialName
@@ -367,14 +397,14 @@ extension ACAppDelegate {
                 // up before `kimi login` provisioned) is worth nothing to a
                 // seed: store none, and the host provisions one from /models
                 // itself (KimiProvisioner) before the next boot.
-                let provisioned = kimiTOML.flatMap { ACAppDelegate.kimiConfigIsProvisioned($0) ? $0 : nil }
+                let provisioned = kimiTOML.flatMap { KimiProvisioner.isProvisioned($0) ? $0 : nil }
                 let rec = KimiSubscriptionRecord(
                     accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date(),
                     credentialName: name, templateJSON: template, configTOML: provisioned)
-                if engine.kimiSubscriptionStore.hasProfileRecord(pid) {
-                    try engine.kimiSubscriptionStore.setOverride(rec, for: pid)
+                if engine.kimi.hasProfileRecord(pid) {
+                    try engine.kimi.setOverride(rec, for: pid)
                 } else {
-                    try engine.kimiSubscriptionStore.setShared(rec)
+                    try engine.kimi.setShared(rec)
                 }
             }
             endProxySignIn(s, success: true, message: nil)
@@ -390,7 +420,7 @@ extension ACAppDelegate {
         guard !s.finished else { return }
         s.finished = true
         s.timeout?.cancel()
-        mitmEngine?.signInCaptures.disarm(profileID: s.profileID)
+        proxySignInBackend?.captures.disarm(profileID: s.profileID)
         if proxySignIns[s.profileID] === s { proxySignIns[s.profileID] = nil }
         if success {
             NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)

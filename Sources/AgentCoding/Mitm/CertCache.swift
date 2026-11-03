@@ -8,13 +8,16 @@ import SwiftASN1
 /// host → fresh cert with that host as the CN + SAN.
 public final class CertCache: @unchecked Sendable {
     private let ca: BromureCA
+    #if canImport(Security)
     private var cache: [String: SecIdentity] = [:]
     private let lock = NSLock()
+    #endif
 
     public init(ca: BromureCA) {
         self.ca = ca
     }
 
+    #if canImport(Security)
     /// SecIdentity = cert + private key, ready for SecureTransport's
     /// SSLSetCertificate. Generated lazily, cached for the process
     /// lifetime.
@@ -32,8 +35,12 @@ public final class CertCache: @unchecked Sendable {
         lock.unlock()
         return id
     }
+    #endif
 
-    private func mint(for host: String) throws -> SecIdentity {
+    /// A leaf for `host` signed by `ca`: the certificate and its key. The
+    /// SecureTransport path wraps them in a SecIdentity; a NIOSSL server
+    /// uses them as they are.
+    static func mintLeaf(for host: String, ca: BromureCA) throws -> (Certificate, P256.Signing.PrivateKey) {
         // Per-host EC key. Sharing a single key across leaves would let
         // a leaked leaf re-impersonate every host; per-host keys keep
         // blast radius scoped to the leaked host.
@@ -75,7 +82,12 @@ public final class CertCache: @unchecked Sendable {
             extensions: extensions,
             issuerPrivateKey: Certificate.PrivateKey(ca.privateKey)
         )
+        return (cert, leafKey)
+    }
 
+    #if canImport(Security)
+    private func mint(for host: String) throws -> SecIdentity {
+        let (cert, leafKey) = try Self.mintLeaf(for: host, ca: ca)
         var serializer = DER.Serializer()
         try serializer.serialize(cert)
         let derBytes = Data(serializer.serializedBytes)
@@ -107,6 +119,7 @@ public final class CertCache: @unchecked Sendable {
         }
         return identity.takeRetainedValue()
     }
+    #endif
 
     private static func isIPAddress(_ s: String) -> Bool {
         var v4 = in_addr()
@@ -129,6 +142,7 @@ public final class CertCache: @unchecked Sendable {
     }
 }
 
+#if canImport(Security)
 // MARK: - SecIdentityCreate SPI bridge
 
 // Declared with @_silgen_name so the linker resolves it against the
@@ -144,3 +158,4 @@ private func bromure_SecIdentityCreate(
     _ certificate: SecCertificate,
     _ privateKey: SecKey
 ) -> Unmanaged<SecIdentity>?
+#endif

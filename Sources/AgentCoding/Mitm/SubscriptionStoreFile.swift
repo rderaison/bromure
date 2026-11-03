@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
 
 /// Why a subscription store refused to read or write. Every case is a HARD
 /// error: a store that can't be read is never overwritten (that would wipe
