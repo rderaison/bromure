@@ -94,7 +94,7 @@ struct LoopbackForwarderReuseTests {
         #expect(!branch.contains("signIn.onEvent?(.finished"))
         let ss = try Self.src("Sources/AgentCoding/SessionSignIn.swift")
         let end = try #require(ss.range(of: "func endProxySignIn(_ s: ProxySignIn, success: Bool, message: String?) {"))
-        let body = ss[end.upperBound...].prefix(600)
+        let body = ss[end.upperBound...].prefix(1100)
         for step in ["s.finished = true", "s.timeout?.cancel()", "captures.disarm(profileID: s.profileID)",
                      "proxySignIns[s.profileID] = nil"] {
             #expect(body.contains(step), "endProxySignIn no longer does \(step)")

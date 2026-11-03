@@ -34,8 +34,21 @@ struct SignInCapture: Sendable {
     var spent = false
     var expiresAt: Date? = nil
 
-    /// How long an ended sign-in still turns its exchange away.
-    static let spentFor: TimeInterval = 15 * 60
+    /// How long an ended sign-in still turns its exchange away: past the
+    /// sign-in's own 5 minutes plus a device code's usual lifetime.
+    static let spentFor: TimeInterval = 30 * 60
+
+    /// Other ended sign-ins of this workspace still turned away (another
+    /// agent's, or this one's before a retry): kept apart from the live
+    /// capture so arming one never lifts them (SignInCaptureRegistry).
+    var spentEndpoints: [SpentEndpoint] = []
+
+    /// A token exchange no host keeps: an ended sign-in's (this capture
+    /// spent, or any of `spentEndpoints`). Answered with `notKeptReply`.
+    func refusesExchange(host: String, method: String, path: String, body: Data) -> Bool {
+        (spent && matches(host: host, method: method, path: path, body: body))
+            || spentEndpoints.contains { $0.capture.matches(host: host, method: method, path: path, body: body) }
+    }
 
     /// What the guest hears for a token exchange the host doesn't keep.
     static var notKeptReply: Data {
@@ -78,28 +91,57 @@ struct SignInCapture: Sendable {
     }
 }
 
+/// An ended sign-in's token endpoint, turned away until it expires.
+struct SpentEndpoint: Sendable {
+    let capture: SignInCapture
+    var expiresAt: Date { capture.expiresAt ?? .distantPast }
+}
+
 /// The captures in flight, one per workspace, consulted by every proxied
-/// request (from the connection tasks, hence the lock).
+/// request (from the connection tasks, hence the lock) -- and the ended
+/// ones each workspace still turns away, kept apart so arming a new
+/// sign-in (another agent's) never lifts them.
 final class SignInCaptureRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var captures: [UUID: SignInCapture] = [:]
+    private var spent: [UUID: [SpentEndpoint]] = [:]
 
+    /// A live capture replaces the workspace's live one and lifts only the
+    /// spent markers on its own endpoint (a retry); a spent marker joins
+    /// the list, replacing one on the same endpoint.
     func arm(_ capture: SignInCapture) {
         lock.lock(); defer { lock.unlock() }
-        captures[capture.profileID] = capture
+        func sameEndpoint(_ e: SpentEndpoint) -> Bool {
+            e.capture.hosts == capture.hosts && e.capture.pathPrefix == capture.pathPrefix
+        }
+        if capture.spent {
+            spent[capture.profileID, default: []].removeAll(where: sameEndpoint)
+            spent[capture.profileID, default: []].append(SpentEndpoint(capture: capture))
+        } else {
+            spent[capture.profileID]?.removeAll(where: sameEndpoint)
+            captures[capture.profileID] = capture
+        }
     }
 
+    /// The live capture goes; spent markers stay until they expire.
     func disarm(profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         captures[profileID] = nil
     }
 
+    /// The workspace's live capture, carrying its spent markers -- or, with
+    /// none live, a spent capture of the first marker carrying the rest.
     func capture(for profileID: UUID, now: Date = Date()) -> SignInCapture? {
         lock.lock(); defer { lock.unlock() }
-        if let c = captures[profileID], let until = c.expiresAt, now >= until {
-            captures[profileID] = nil
-            return nil
+        spent[profileID]?.removeAll { now >= $0.expiresAt }
+        if spent[profileID]?.isEmpty == true { spent[profileID] = nil }
+        let markers = spent[profileID] ?? []
+        if var live = captures[profileID] {
+            live.spentEndpoints = markers
+            return live
         }
-        return captures[profileID]
+        guard var first = markers.first?.capture else { return nil }
+        first.spentEndpoints = Array(markers.dropFirst())
+        return first
     }
 }
