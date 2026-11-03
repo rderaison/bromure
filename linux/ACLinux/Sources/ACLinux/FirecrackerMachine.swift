@@ -275,13 +275,16 @@ extension QEMUMachineConfig {
             ].merging(initrd.map { ["initrd_path": .string($0)] } ?? [:]) { a, _ in a }),
             "machine-config": ["vcpu_count": .number(Double(cpus)), "mem_size_mib": .number(Double(memoryMiB))],
         ]
+        // Writeback: the guest's flushes reach the host file (fdatasync).
+        // Firecracker's default, Unsafe, drops them: a host crash could lose
+        // what the guest had synced.
         var drives: [JSONValue] = [[
             "drive_id": "root", "path_on_host": .string(writeBaseInPlace ? baseImage : overlay),
-            "is_root_device": false, "is_read_only": false,
+            "is_root_device": false, "is_read_only": false, "cache_type": "Writeback",
         ]]
         for (i, d) in extraDisks.enumerated() {
             drives.append(["drive_id": .string("disk\(i + 1)"), "path_on_host": .string(d.path),
-                           "is_root_device": false, "is_read_only": false])
+                           "is_root_device": false, "is_read_only": false, "cache_type": "Writeback"])
         }
         o["drives"] = .array(drives)
         if !shares.isEmpty {

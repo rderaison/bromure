@@ -1299,8 +1299,10 @@ struct FirecrackerBackendTests {
         let j = c.firecrackerConfig(netFD: 3)
         #expect(j["boot-source"]?["boot_args"]?.stringValue == "console=ttyS0 reboot=k panic=1")
         #expect(j["boot-source"]?["initrd_path"]?.stringValue == "/i")
-        #expect(j["drives"] == [["drive_id": "root", "path_on_host": "/vm/disk.raw", "is_root_device": false, "is_read_only": false],
-                                ["drive_id": "disk1", "path_on_host": "/vm/home.img", "is_root_device": false, "is_read_only": false]])
+        #expect(j["drives"] == [["drive_id": "root", "path_on_host": "/vm/disk.raw", "is_root_device": false, "is_read_only": false,
+                                 "cache_type": "Writeback"],
+                                ["drive_id": "disk1", "path_on_host": "/vm/home.img", "is_root_device": false, "is_read_only": false,
+                                 "cache_type": "Writeback"]])
         #expect(j["fs"] == [["fs_id": "fs0", "tag": "bromure-meta", "socket": "/r/fs0.sock"],
                             ["fs_id": "fs1", "tag": "bromure-outbox", "socket": "/r/fs1.sock"]])
         #expect(j["network-interfaces"] == [["iface_id": "eth0", "host_dev_name": "fd:3", "guest_mac": "52:54:00:00:00:07"]])
@@ -1365,5 +1367,32 @@ struct FirecrackerBackendTests {
         // ls's own directory fd is the extra one.
         let fds = try String(contentsOfFile: log, encoding: .utf8).split(separator: " ").compactMap { Int($0) }
         #expect(fds.filter { $0 > 2 }.count == 3, "\(fds)")
+    }
+}
+
+@Suite("Firecracker adoption")
+struct FirecrackerAdoptionTests {
+    @Test("a VM process that can't be re-adopted is killed, and only if it is still the one recorded")
+    func orphanKill() async throws {
+        // `; :` keeps sh from exec'ing sleep, so the --id args stay in its cmdline.
+        let p = try ChildProcess(name: "fake-fc", executable: "/bin/sh",
+                                 arguments: ["-c", "sleep 30; :", "--id", "bromure-0a1b2c3d"], logPath: nil)
+        try p.start()
+        defer { if p.isRunning { p.signal(SIGKILL) } }
+        var rec = VMRecord(id: "0a1b2c3d-0000-0000-0000-000000000000", name: "o", machine: "firecracker", cid: 3,
+                           mac: "52:54:00:00:00:03", state: .running, ip: nil, cpus: 1, memoryMiB: 128,
+                           createdAt: Date(), bootedAt: nil, statePath: nil)
+        rec.pid = p.pid
+        rec.pidStart = Daemon.processStartTime(p.pid)
+        var stale = rec
+        stale.pidStart = rec.pidStart.map { $0 + 1 }            // the pid was recycled
+        #expect(!Daemon.killIfOurs(stale))
+        var other = rec
+        other.id = "ffffffff-0000-0000-0000-000000000000"        // another VM's process
+        #expect(!Daemon.killIfOurs(other))
+        #expect(p.isRunning)
+        #expect(Daemon.killIfOurs(rec))
+        #expect(await p.waitForExit(timeout: .seconds(5)) == 128 + SIGKILL)
+        #expect(!Daemon.killIfOurs(rec))                          // gone: nothing to kill
     }
 }

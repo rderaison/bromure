@@ -1,4 +1,5 @@
 import Foundation
+import CACLinuxShims
 import NIOCore
 
 /// Where the daemon keeps things.
@@ -612,6 +613,14 @@ public actor Daemon {
                 live[id] = l
                 r.state = .running
             } catch {
+                // QEMU follows its daemon out (-run-with exit-with-parent is
+                // off for re-adoption, but its VM is unusable without its
+                // net.sock peer anyway); a Firecracker left here would keep
+                // running and hold disk.raw and home.img. End it, if it's
+                // still the process we recorded.
+                if rec.machine == QEMUMachineConfig.MachineType.firecracker.rawValue, Self.killIfOurs(rec) {
+                    FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': not re-adopted (\(error)); killed its Firecracker (pid \(rec.pid ?? 0))\n".utf8))
+                }
                 CIDAllocator.shared.release(rec.cid)
                 r.state = .stopped
                 r.pid = nil
@@ -619,6 +628,22 @@ public actor Daemon {
             }
             try? registry.upsert(r)
         }
+    }
+
+    /// SIGKILLs `rec`'s recorded VM process if it is still ours (isOurQEMU:
+    /// same start time, `-name`/`--id bromure-<short>`), through a pidfd so
+    /// a pid recycled after the check can't be hit. Returns whether it did.
+    // @port-skip linux-only: Linux process identity
+    @discardableResult
+    static func killIfOurs(_ rec: VMRecord) -> Bool {
+        guard let pid = rec.pid else { return false }
+        let fd = acl_pidfd_open(pid)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        // Checked after the pidfd is open: it pins this process, so a match
+        // now is the process the signal goes to.
+        guard isOurQEMU(rec) else { return false }
+        return acl_pidfd_send_signal(fd, SIGKILL) == 0
     }
 
     /// /proc/<pid>/stat's starttime (field 22), nil if there's no such process.
