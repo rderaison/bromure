@@ -79,6 +79,15 @@ public final class GatewayRouter: RemoteAccountRouter {
         }
     }
 
+    // @port-skip linux-only: multi-user gateway
+    func browserMCP(user: String, vm: String, completion: @escaping @Sendable (Int32) -> Void) {
+        guard let sock = socket(for: user) else { completion(-1); return }
+        let payload = (try? JSONEncoder().encode(JSONValue.object(["vm": .string(vm)]))) ?? Data()
+        DispatchQueue.global(qos: .userInitiated).async {
+            completion(Self.openStream(sock, "POST", "/fatclient/browser-mcp", payload))
+        }
+    }
+
     /// Sends one request and, on a 200, returns the connection with its
     /// response header consumed (what follows is the stream); -1 otherwise.
     // @port-skip linux-only: multi-user gateway

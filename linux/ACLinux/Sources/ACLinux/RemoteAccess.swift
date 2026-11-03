@@ -157,6 +157,18 @@ extension Daemon {
         ControlResponse(200, ["ok": .bool(EnrollmentCodes.consume(body["code"]?.stringValue ?? ""))])
     }
 
+    /// `POST /fatclient/browser-mcp {"vm"}`: the gateway's `browser-mcp`,
+    /// through this daemon. The connection becomes the VM's browser-MCP
+    /// stream (its agents relayed to the client); 404 when no VM of this
+    /// user with that id is running.
+    // @port-skip linux-only: multi-user gateway support (macOS resolves browser-mcp in-process)
+    func fatclientBrowserMCP(_ body: JSONValue) async -> ControlResponse {
+        guard let vm = body["vm"]?.stringValue else { return .error(400, "Missing 'vm'") }
+        let fd = await browserMCPFD(vm: vm)
+        guard fd >= 0 else { return .error(404, "No running VM \(vm)") }
+        return .streaming { client in await Self.pump(client, fd) }
+    }
+
     /// `POST /fatclient/forward {"ip", "port" | "udp": true}`: the gateway's
     /// `forward` / `forward-udp`, through this daemon. The connection becomes
     /// the stream to the guest's loopback relay; 404 when no running VM of

@@ -77,6 +77,40 @@ R=$(req GET /i | timeout 20 ssh "${SSHO[@]}" -i $W/$A -o IdentitiesOnly=yes "$A@
 [ "$R" = from-$A ] && ok "$A's forward to $IP reaches A's own guest, not B's" || no "$A's forward: '$R'"
 R=$(req GET /i | timeout 20 ssh "${SSHO[@]}" -i $W/$B -o IdentitiesOnly=yes "$B@$HOST" "bromure-fatclient/1 forward $IP 8080" 2>/dev/null | tail -1)
 [ "$R" = from-$B ] && ok "$B's forward reaches B's guest" || no "$B's forward: '$R'"
+# Browser MCP through the gateway: A's channel carries A's agent (a stand-in
+# in A's guest on vsock 5830); B can't open A's VM's.
+FA=$(echo "$SA" | python3 -c "import json,sys; print(json.load(sys.stdin)['vms'][0]['id'])")
+R=$(python3 - "$HOST" "$PORT" "$W/$A" "$A" "$FA" "$W/known_hosts" <<'PY'
+import json, select, subprocess, sys, threading, time
+host, port, key, user, vm, kh = sys.argv[1:]
+ssh = ["ssh", "-p", port, "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + kh,
+       "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10", "-i", key, "-o", "IdentitiesOnly=yes", user + "@" + host]
+relay = subprocess.Popen(ssh + ["bromure-fatclient/1 browser-mcp " + vm.upper()],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+time.sleep(2)
+agent = ("import socket; s=socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM); s.settimeout(15); s.connect((2, 5830)); "
+         "s.sendall(b'{\"jsonrpc\":\"2.0\",\"id\":\"g-7\",\"method\":\"initialize\"}\\n'); print(s.makefile().readline().strip())")
+body = json.dumps({"command": "python3 -c " + json.dumps(agent), "timeout": 30})
+req = "POST /vms/same/exec HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(body), body)
+out = {}
+def run_agent():
+    out["r"] = subprocess.run(ssh + ["bromure-fatclient/1 control"], input=req.encode(), capture_output=True, timeout=60).stdout.decode()
+t = threading.Thread(target=run_agent); t.start()
+ready, _, _ = select.select([relay.stdout], [], [], 20)
+line = relay.stdout.readline().decode() if ready else ""
+try:
+    mid = json.loads(line)["id"]
+except Exception:
+    print("no request on the channel: %r" % line); sys.exit()
+relay.stdin.write((json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"from": "client-" + user}}) + "\n").encode()); relay.stdin.flush()
+t.join(60); relay.kill()
+r = out.get("r", "")
+print("OK" if ('\\"g-7\\"' in r or '"g-7"' in r) and "client-" + user in r and mid != "g-7" else "agent got: " + r[-300:])
+PY
+)
+[ "$R" = OK ] && ok "$A's browser-mcp channel relays $A's agent (ids rewritten and restored)" || no "$A's browser-mcp: $R"
+T0=$(date +%s); timeout 20 ssh "${SSHO[@]}" -i $W/$B -o IdentitiesOnly=yes "$B@$HOST" "bromure-fatclient/1 browser-mcp $FA" </dev/null >/dev/null 2>&1; RC=$?
+[ $RC != 0 ] && [ $RC != 124 ] && ok "$B can't open $A's VM's browser-mcp (refused in $(( $(date +%s) - T0 ))s)" || no "$B's browser-mcp for $A's VM: rc=$RC"
 # A crash of A's daemon: A's VM re-adopted, B untouched.
 PB=$(systemctl show bromure-ac@$B -p MainPID --value); PA=$(systemctl show bromure-ac@$A -p MainPID --value)
 sudo -n kill -9 $PA; sleep 5

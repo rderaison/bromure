@@ -180,6 +180,7 @@ public actor Daemon {
         case ("GET", "/remote/authorized-keys"): return await remoteAuthorizedKeys()
         case ("POST", "/remote/code/check"): return remoteCodeCheck(req.body)
         case ("POST", "/fatclient/forward"): return await fatclientForward(req.body)
+        case ("POST", "/fatclient/browser-mcp"): return await fatclientBrowserMCP(req.body)
         case ("DELETE", let p) where p.hasPrefix("/remote/keys/"):
             let raw = String(p.dropFirst("/remote/keys/".count))
             return await remoteRemoveKey(raw.removingPercentEncoding ?? raw)
