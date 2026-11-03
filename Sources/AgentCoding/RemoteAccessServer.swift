@@ -5,11 +5,18 @@ import NIOPosix
 import NIOSSH
 // The agent host (Sources/AgentHost) compiles this file too, with small
 // stand-ins for SandboxEngine / ProfileStore / SupplyChainLog.
-#if !AGENT_HOST
+#if !AGENT_HOST && !BROMURE_LINUX
 import SandboxEngine
 #endif
 
 // MARK: - Remote access (optional embedded SSH server)
+
+/// The TCP keepalive idle-time option: TCP_KEEPALIVE on Darwin, TCP_KEEPIDLE on Linux.
+#if os(Linux)
+private let tcpKeepIdle = TCP_KEEPIDLE
+#else
+private let tcpKeepIdle = TCP_KEEPALIVE
+#endif
 
 /// Optional remote access to bromure-ac over SSH.
 ///
@@ -167,7 +174,7 @@ final class RemoteAccessServer {
             // connection → channelInactive → SSHPTYSessionHandler tears the
             // whole session down. Live-but-idle clients just ACK the probes.
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
-            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPALIVE), value: 60)
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), tcpKeepIdle), value: 60)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPINTVL), value: 30)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPCNT), value: 4)
             .childChannelInitializer { channel in
