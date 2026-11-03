@@ -17,7 +17,7 @@ enum ConditionEvaluator {
         "CVmnet", "MLX", "MLXLLM", "MLXLMCommon", "MLXHuggingFace", "AVKit", "AVFoundation",
         "CoreGraphics", "CoreImage", "QuartzCore", "Metal", "MetalKit", "UserNotifications",
         "LocalAuthentication", "SystemConfiguration", "CoreServices", "Carbon", "Sparkle",
-        "OnnxRuntimeBindings", "Observation", "PhotosUI", "QuickLook", "StoreKit",
+        "OnnxRuntimeBindings", "PhotosUI", "QuickLook", "StoreKit",
     ]
     /// Modules that exist on Linux only.
     static let linuxOnlyModules: Set<String> = ["Glibc", "Musl", "FoundationNetworking"]

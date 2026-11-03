@@ -180,4 +180,30 @@ struct PortMapCoreTests {
         #expect(s["macOnly()"] == .todo)
         #expect(r.unclaimedLinux.isEmpty)
     }
+
+    @Test("a shared function declared once per platform (#if canImport(Security) … #else … #endif) is shared, not unclaimed Linux code")
+    func perPlatformDeclarationIsShared() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("portmap-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("mac"), withIntermediateDirectories: true)
+        try """
+            enum Store {
+            #if canImport(Security)
+                static func save(account: String) { keychain(account) }
+            #else
+                static func save(account: String) { file(account) }
+            #endif
+            #if os(Linux)
+                static func linuxOnly() {}
+            #endif
+            }
+            """.write(to: root.appendingPathComponent("mac/Store.swift"), atomically: true, encoding: .utf8)
+        let config = PortConfig(macosRoots: ["mac"], linuxBuild: ["mac/Store.swift"], linuxRoots: [], skip: [])
+        let r = try Ledger.build(config: config, root: root)
+        let s = Dictionary(r.entries.map { ($0.mac.id, $0.status) }, uniquingKeysWith: { a, _ in a })
+        #expect(s["Store.static save(account: String)"] == .shared)
+        // A Linux-only declaration with no macOS twin is still Linux code to claim.
+        #expect(r.unclaimedLinux.map(\.id) == ["Store.static linuxOnly()"])
+    }
 }

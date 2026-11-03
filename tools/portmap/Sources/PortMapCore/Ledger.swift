@@ -125,9 +125,18 @@ public enum Ledger {
             }
         }
         let macSide = all.filter { $0.inMacOS }
+        // A function a shared file declares once per platform (`#if
+        // canImport(Security) … #else … #endif`) is one function: both
+        // branches build, each in its own build. Shared, and neither branch
+        // is Linux code to claim. A Linux branch that names its macOS twin
+        // with `// @port` stays a port (ported or stale by its hash).
+        let key = { (r: FunctionRecord) in r.file + "\u{0}" + r.id }
+        let linuxBranches = all.filter { $0.inLinux && !$0.inMacOS }
+        let macBranchKeys = Set(macSide.filter { !$0.inLinux }.map(key))
+        let pairedKeys = Set(linuxBranches.filter { $0.ports.isEmpty }.map(key)).intersection(macBranchKeys)
         // Linux implementations: Linux-only files plus `#if os(Linux)`
-        // branches of shared files.
-        let linuxImpls = linuxOnly + all.filter { $0.inLinux && !$0.inMacOS }
+        // branches of shared files that aren't such a pair.
+        let linuxImpls = linuxOnly + linuxBranches.filter { !pairedKeys.contains(key($0)) }
         var claims: [String: [Entry.LinuxClaim]] = [:]
         for r in linuxImpls {
             for p in r.ports {
@@ -146,7 +155,7 @@ public enum Ledger {
             let mine = claims[r.id] ?? []
             let status: Status
             var reason: String?
-            if r.inLinux {
+            if r.inLinux || pairedKeys.contains(key(r)) {
                 status = .shared
             } else if !mine.isEmpty {
                 status = mine.allSatisfy { $0.portedHash == r.hash } ? .ported : .stale
