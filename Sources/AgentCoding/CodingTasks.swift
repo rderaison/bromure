@@ -1993,7 +1993,7 @@ final class PendingWork {
 /// (→ Testing), sending review feedback back (→ In Progress), and merging
 /// (→ Done). UI-only moves (backlog edits, dismiss) go straight through
 /// the store.
-#if os(macOS)
+#if os(macOS) || BROMURE_LINUX
 @MainActor
 final class CodingTaskEngine {
     weak var delegate: (any CodingTaskHost)?

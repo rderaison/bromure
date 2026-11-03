@@ -128,7 +128,7 @@ enum LandingReportOutcome: Equatable, Sendable {
     }
 }
 
-#if os(macOS)
+#if os(macOS) || BROMURE_LINUX
 extension CodingTaskEngine {
 
     // MARK: Guest commands and prompts (pure)

@@ -1523,7 +1523,7 @@ enum LinearPoller {
 /// Fires due automations. Owns a 30-second wall-clock tick — a Timer doesn't
 /// fire during sleep, so a very late tick is exactly how missed fires are
 /// detected and routed through the missed-run policy.
-#if os(macOS)
+#if os(macOS) || BROMURE_LINUX
 @MainActor
 final class ScheduledAutomationEngine {
     private weak var delegate: (any AutomationHost)?
