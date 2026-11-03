@@ -154,10 +154,14 @@ enum GuestURLGate {
         return AgentScreen.isSignInURL(url.absoluteString, agent: nil) ? .open : .ask
     }
 
-    /// Whether `url` may be handed to the user's real browser: it must have a
-    /// PUBLIC host. Empty / local / private / link-local / ULA / `.local`
-    /// hosts are refused. Necessary, not sufficient: see `disposition(for:)`.
+    /// Whether `url` may be handed to the user's real browser: it must be a
+    /// web page (http or https: another scheme opens whatever app claims it,
+    /// or mounts a network share, past the "in your browser" the ask says)
+    /// with a PUBLIC host. Empty / local / private / link-local / ULA /
+    /// `.local` hosts are refused. Necessary, not sufficient: see
+    /// `disposition(for:)`.
     static func opensInRealBrowser(_ url: URL) -> Bool {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return false }
         guard let host = url.host, !host.isEmpty else { return false }
         return !hostIsLocalOrPrivate(host)
     }

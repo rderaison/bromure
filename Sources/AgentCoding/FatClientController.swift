@@ -624,7 +624,10 @@ final class RemoteHostController {
                 dismissGuestPage(id, "opened")
             default:
 #if os(macOS)
-                guard !guestPageAsking else { continue }
+                // A sheet, never a modal (this runs on the /state stream's
+                // delivery): no window to hang it on yet, the page waits for
+                // the next snapshot.
+                guard !guestPageAsking, let window = promptWindow() else { continue }
                 handledGuestPages[id] = now
                 guestPageAsking = true
                 let alert = NSAlert()
@@ -634,7 +637,7 @@ final class RemoteHostController {
                 // Cancel is the default: Return doesn't open it.
                 alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
                 alert.addButton(withTitle: NSLocalizedString("Open in Browser", comment: "guest URL open prompt"))
-                presentSheet(alert) { [weak self] resp in
+                alert.beginSheetModal(for: window) { [weak self] resp in
                     self?.guestPageAsking = false
                     let open = resp == .alertSecondButtonReturn
                     if open { NSWorkspace.shared.open(url) }

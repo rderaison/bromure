@@ -57,6 +57,15 @@ struct GuestURLDispositionTests {
         }
     }
 
+    @Test("a page that isn't a web page never opens, even on a public host")
+    func otherSchemesRefused() {
+        for s in ["smb://public.example/share", "ftp://public.example/f", "slack://public.example/open",
+                  "vnc://8.8.8.8", "ssh://github.com", "afp://public.example/vol"] {
+            #expect(Self.d(s) == .refuse, "\(s)")
+        }
+        #expect(Self.d("HTTPS://github.com/") == .ask)
+    }
+
     @Test("every guest-URL hand-off goes through the disposition")
     func handOffsUseIt() throws {
         let ac = try Self.src("Sources/AgentCoding/BromureAC.swift")
