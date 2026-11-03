@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, StopPost.self])
+        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Gateway.self, Admin.self, StopPost.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -23,8 +23,12 @@ struct Daemon: AsyncParsableCommand {
         // Before anything spawns threads that inherit the mask.
         _ = acl_unblock_term_signals()
         let config = DaemonConfig.fromEnvironment()
+        // Multi-user: systemd's socket unit made the control socket (owner,
+        // group and mode its own) and passes it as "control".
+        let inherited = FDStore.take()["control"]?.first
         let daemon = try await ACLinux.Daemon.start(config)
-        let server = try await ControlServer.start(path: config.controlSocketPath) { req in await daemon.handle(req) }
+        let server = try await ControlServer.start(path: config.controlSocketPath, inherited: inherited,
+                                                   peers: config.controlPeers) { req in await daemon.handle(req) }
         FileHandle.standardError.write(Data("bromure-ac daemon: \(config.controlSocketPath)\n".utf8))
         _ = acl_sd_notify("READY=1\nSTATUS=serving \(config.controlSocketPath)")
         // SIGTERM (systemctl stop) / SIGINT: stop the VMs and passt, then exit.
@@ -507,6 +511,88 @@ struct Remote: AsyncParsableCommand {
             let r = try client().request("DELETE", "/remote/keys/\(ControlClient.encodeSegment(key))")
             try check(r, "rm-key")
             print("Revoked \(key).")
+        }
+    }
+}
+
+/// `bromure-ac gateway`: the multi-user server's SSH front door (systemd:
+/// bromure-gw.service, as the gateway account). Settings in
+/// $STATE_DIRECTORY/gateway.json (else ~/.local/state/bromure-gw), host key
+/// beside it in remote/.
+// @port-skip linux-only: multi-user Linux server
+struct Gateway: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Run the multi-user SSH gateway (bromure-gw.service).")
+
+    // @port-skip linux-only: gateway main
+    func run() async throws {
+        _ = acl_unblock_term_signals()
+        let env = ProcessInfo.processInfo.environment
+        let state = env["STATE_DIRECTORY"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? (env["XDG_STATE_HOME"] ?? NSHomeDirectory() + "/.local/state") + "/bromure-gw"
+        let line = try await MainActor.run { try GatewayMain.start(stateDir: state) }
+        FileHandle.standardError.write(Data("bromure-ac gateway: \(line)\n".utf8))
+        _ = acl_sd_notify("READY=1")
+        let stop = AsyncStream<Int32> { cont in
+            for sig in [SIGTERM, SIGINT] {
+                signal(sig, SIG_IGN)
+                let src = DispatchSource.makeSignalSource(signal: sig)
+                src.setEventHandler { cont.yield(sig) }
+                src.resume()
+                Signals.keep(src)
+            }
+        }
+        var it = stop.makeAsyncIterator()
+        _ = await it.next()
+        await MainActor.run { GatewayMain.stop() }
+    }
+}
+
+/// `bromure-ac admin` (root): the multi-user server's users.
+// @port-skip linux-only: multi-user Linux server administration
+struct Admin: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Multi-user server: add, remove and list Bromure users (root).",
+        subcommands: [Add.self, Remove.self, List.self, Code.self])
+
+    struct Add: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Add a Bromure user (a system account unless --existing).")
+        @Argument(help: "Account name.") var name: String
+        @Flag(help: "Use this existing login account instead of creating a system account.") var existing = false
+        // @port-skip linux-only: admin CLI
+        func run() async throws { print(try await MultiUserAdmin.add(name, existing: existing)) }
+    }
+
+    struct Remove: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Stop and disable a user's daemon (and its VMs).")
+        @Argument(help: "Account name.") var name: String
+        @Flag(help: "Also delete the user's state (VMs, disks, keys).") var purge = false
+        @Flag(help: "Also delete the Unix account.") var deleteAccount = false
+        // @port-skip linux-only: admin CLI
+        func run() async throws { print(try await MultiUserAdmin.remove(name, purge: purge, deleteAccount: deleteAccount)) }
+    }
+
+    struct List: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "The Bromure users, their daemons and VMs.")
+        // @port-skip linux-only: admin CLI
+        func run() async throws {
+            for u in MultiUserAdmin.users() {
+                let vms: String
+                if case .array(let a)? = (try? MultiUserAdmin.request(u, "GET", "/vms"))?.flatMap({ $0["vms"] }) {
+                    vms = "\(a.count) VM(s), \(a.filter { $0["state"]?.stringValue == "running" }.count) running"
+                } else { vms = "daemon not answering" }
+                print(u.padding(toLength: 20, withPad: " ", startingAt: 0) + vms)
+            }
+        }
+    }
+
+    struct Code: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "A one-time enrollment code for a user's first login from an app.")
+        @Argument(help: "Account name.") var name: String
+        @Option(help: "Minutes it stays valid (1-60).") var minutes = 30
+        // @port-skip linux-only: admin CLI
+        func run() async throws {
+            let r = try MultiUserAdmin.request(name, "POST", "/remote/code", ["minutes": .number(Double(minutes))])
+            print("Enrollment code for \(name) (one use, \(minutes) min): \(r?["code"]?.stringValue ?? "?")")
         }
     }
 }

@@ -46,41 +46,53 @@ public struct ControlResponse: Sendable {
 public final class ControlServer: Sendable {
     public let path: String
     private let channel: Channel
+    /// We made the socket file (unlinked at close); false for an inherited one.
+    private let owned: Bool
 
     /// Binds, chmods 0600, and serves `handler` for each request.
     // @port ACAutomationServer.startUnix(path: String) h=3a0a1caa7b640a41 @7dd92fdf
-    public static func start(path: String, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+    public static func start(path: String, inherited: Int32? = nil, peers: Set<uid_t> = [getuid()],
+                             group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
                              handler: @escaping @Sendable (ControlRequest) async -> ControlResponse) async throws -> ControlServer {
         if path.utf8.count > 107 { throw MachineError.socketPathTooLong(path) }
-        let dir = (path as NSString).deletingLastPathComponent
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        unlink(path)
-        let me = getuid()
-        let ch = try await ServerBootstrap(group: group)
+        if inherited == nil {
+            let dir = (path as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            unlink(path)
+        }
+        let me = peers
+        let bootstrap = ServerBootstrap(group: group)
             // A client may send its request and half-close (the SSH control
             // bridge forwards the fat client's EOF): it still gets the reply.
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelInitializer { ch in
                 ch.eventLoop.makeCompletedFuture {
-                    try ch.pipeline.syncOperations.addHandler(ControlConnection(owner: me, handler: handler))
+                    try ch.pipeline.syncOperations.addHandler(ControlConnection(peers: me, handler: handler))
                 }
             }
-            .bind(unixDomainSocketPath: path).get()
+        // A socket systemd made (multi-user: its owner, group and mode are the
+        // socket unit's) is used as is and left in place at the end.
+        if let inherited {
+            let ch = try await bootstrap.withBoundSocket(inherited).get()
+            return ControlServer(path: path, channel: ch, owned: false)
+        }
+        let ch = try await bootstrap.bind(unixDomainSocketPath: path).get()
         chmod(path, 0o600)
-        return ControlServer(path: path, channel: ch)
+        return ControlServer(path: path, channel: ch, owned: true)
     }
 
     // @port-skip linux-only: control server
-    private init(path: String, channel: Channel) {
+    private init(path: String, channel: Channel, owned: Bool) {
         self.path = path
         self.channel = channel
+        self.owned = owned
     }
 
     // @port-skip linux-only: control server
     public func close() async {
         try? await channel.close()
-        unlink(path)
+        if owned { unlink(path) }
     }
 
     /// `HTTP/1.1 <status> <text>`, JSON (pretty-printed, sorted keys),
@@ -134,7 +146,8 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
     static let maxHeader = 1 << 20, maxBody = 16 << 20
-    let owner: uid_t
+    /// The uids served (the owner; root; the multi-user gateway).
+    let peers: Set<uid_t>
     let handler: @Sendable (ControlRequest) async -> ControlResponse
     private var buf = ByteBuffer()
     private var started = false
@@ -146,21 +159,21 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     private var inputClosed = false
 
     // @port-skip linux-only: NIO request framing
-    init(owner: uid_t, handler: @escaping @Sendable (ControlRequest) async -> ControlResponse) {
-        self.owner = owner
+    init(peers: Set<uid_t>, handler: @escaping @Sendable (ControlRequest) async -> ControlResponse) {
+        self.peers = peers
         self.handler = handler
     }
 
-    /// SO_PEERCRED: only our own uid gets an answer.
+    /// SO_PEERCRED: only the allowed uids get an answer.
     // @port-skip linux-only: peer credential check (macOS has none)
     func channelActive(context: ChannelHandlerContext) {
         guard let provider = context.channel as? SocketOptionProvider else { context.close(promise: nil); return }
-        let owner = self.owner
+        let peers = self.peers
         let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
         let peer: EventLoopFuture<acl_ucred> = provider.unsafeGetSocketOption(level: .socket, name: .init(rawValue: SO_PEERCRED))
         peer.whenComplete { r in
             let (handler, context) = bound.value
-            if case .success(let cred) = r, cred.uid == owner {
+            if case .success(let cred) = r, peers.contains(cred.uid) {
                 handler.authorized = true
                 handler.process(context)
             } else {

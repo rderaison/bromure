@@ -19,6 +19,9 @@ public final class InterimSwitch: Sendable {
     public let dhcp: InterimDHCP
     public let uplink: any Uplink
     private let ports = NIOLockedValueBox<[(mac: MAC, port: any FramePort, task: Task<Void, Never>)]>([])
+    /// IPv4 destinations a guest may not send to (multi-user: the host's
+    /// own addresses); their frames are dropped before the uplink.
+    public let blockedDestination = NIOLockedValueBox<(@Sendable (UInt32) -> Bool)?>(nil)
 
     // @port-skip linux-only: interim switch
     public init(uplink: any Uplink, gateway: String = "192.168.64.1", dns: String = "192.168.64.1",
@@ -64,9 +67,11 @@ public final class InterimSwitch: Sendable {
     // @port-skip linux-only: interim switch
     public func attach(_ port: any FramePort, mac: String) {
         let m = MAC(Self.mac(mac))
-        let t = Task { [dhcp, uplink] in
+        let t = Task { [dhcp, uplink, blockedDestination] in
             for await f in port.inbound {
-                if let r = dhcp.handle(f) { port.send(r) } else { await uplink.sendWaiting(f) }
+                if let r = dhcp.handle(f) { port.send(r); continue }
+                if let blocked = blockedDestination.withLockedValue({ $0 }), let dst = Self.ipv4Destination(f), blocked(dst) { continue }
+                await uplink.sendWaiting(f)
             }
         }
         ports.withLockedValue { $0.append((m, port, t)) }
@@ -93,6 +98,15 @@ public final class InterimSwitch: Sendable {
     public func stop() {
         uplink.setReceiver(nil, batchEnd: nil)
         ports.withLockedValue { ps in for p in ps { p.task.cancel() } }
+    }
+
+    /// An IPv4 frame's destination address (big-endian u32).
+    // @port-skip linux-only: interim switch
+    static func ipv4Destination(_ f: Data) -> UInt32? {
+        f.withUnsafeBytes { b in
+            guard b.count >= 34, b[12] == 0x08, b[13] == 0x00 else { return nil }
+            return UInt32(b[30]) << 24 | UInt32(b[31]) << 16 | UInt32(b[32]) << 8 | UInt32(b[33])
+        }
     }
 
     // @port-skip linux-only: interim switch

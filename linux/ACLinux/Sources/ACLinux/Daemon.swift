@@ -16,6 +16,16 @@ public struct DaemonConfig: Sendable {
     /// A new VM's home image, GiB (sparse: costs nothing up front). macOS:
     /// SessionDisk.defaultHomeImageGB. Env: BROMURE_AC_HOME_GB.
     public var homeImageGB = 16
+    /// One of several users' daemons behind the multi-user gateway
+    /// (BROMURE_AC_MULTIUSER=1): Firecracker VMs only (vhost-vsock's CIDs and
+    /// ports are host-wide), and guests can't reach the host's own addresses.
+    public var multiUser = false
+    /// The gateway's account (BROMURE_AC_GATEWAY_USER), which may use the
+    /// control socket besides its owner (and root).
+    public var gatewayUser: String?
+    /// The control socket, when not `runtimeDir/control.sock`
+    /// (BROMURE_AC_CONTROL_SOCKET; multi-user: systemd's socket unit).
+    public var controlSocketOverride: String?
 
     // @port-skip linux-only: Linux daemon configuration
     public init(stateDir: String, runtimeDir: String, imageDir: String, agentdPath: String) {
@@ -36,7 +46,12 @@ public struct DaemonConfig: Sendable {
             runtimeDir: xdg("XDG_RUNTIME_DIR", "/tmp/bromure-ac-\(getuid())") + "/bromure-ac",
             imageDir: env["BROMURE_AC_IMAGE"] ?? data + "/bromure-ac/image-amd64",
             agentdPath: env["BROMURE_AGENTD"] ?? data + "/bromure-ac/vm-setup/bromure-agentd.py")
-            .with { c in if let gb = env["BROMURE_AC_HOME_GB"].flatMap(Int.init) { c.homeImageGB = min(1024, max(8, gb)) } }
+            .with { c in
+                if let gb = env["BROMURE_AC_HOME_GB"].flatMap(Int.init) { c.homeImageGB = min(1024, max(8, gb)) }
+                c.multiUser = env["BROMURE_AC_MULTIUSER"] == "1"
+                c.gatewayUser = env["BROMURE_AC_GATEWAY_USER"].flatMap { $0.isEmpty ? nil : $0 }
+                c.controlSocketOverride = env["BROMURE_AC_CONTROL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
+            }
     }
 
     // @port-skip linux-only: Linux daemon configuration
@@ -47,7 +62,15 @@ public struct DaemonConfig: Sendable {
     }
 
     // @port-skip linux-only: Linux daemon configuration
-    public var controlSocketPath: String { runtimeDir + "/control.sock" }
+    public var controlSocketPath: String { controlSocketOverride ?? runtimeDir + "/control.sock" }
+
+    /// Who may use the control socket: its owner, root, and the gateway.
+    // @port-skip linux-only: control socket peer policy
+    public var controlPeers: Set<uid_t> {
+        var s: Set<uid_t> = [getuid(), 0]
+        if let g = gatewayUser, let pw = getpwnam(g) { s.insert(pw.pointee.pw_uid) }
+        return s
+    }
 }
 
 /// The headless daemon: one passt for the host, the interim switch, the
@@ -97,7 +120,8 @@ public actor Daemon {
         let passt = try await PasstUplink.start(pc, adopting: PasstUplink.Adopted.fromStore(stored))
         let storedListener = stored["vsock-5800"]?.count == 1 ? stored["vsock-5800"]?.first : nil
         // net-<short id>: Firecracker VMs' network ends, for adoptRunning.
-        for (name, fds) in stored where !["passt", "passt-pid"].contains(name) && fds.first != storedListener
+        // control: systemd's socket unit (multi-user), the daemon command's.
+        for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && fds.first != storedListener
             && !((name.hasPrefix("net-") || (name.hasPrefix("vsock-") && name != "vsock-5800")) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -120,6 +144,9 @@ public actor Daemon {
         self.passt = passt
         self.listener = listener
         self.sw = InterimSwitch(uplink: passt)
+        if config.multiUser {
+            sw.blockedDestination.withLockedValue { $0 = { HostAddresses.shared.contains($0) } }
+        }
         let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurQEMU)
         self.registry = registry
         // Suspended VMs keep their CID across daemon restarts.
@@ -154,6 +181,9 @@ public actor Daemon {
         case ("POST", "/remote"): return await remoteApply(req.body)
         case ("POST", "/remote/keys"): return await remoteAddKey(req.body)
         case ("POST", "/remote/code"): return remoteCode(req.body)
+        case ("GET", "/remote/authorized-keys"): return await remoteAuthorizedKeys()
+        case ("POST", "/remote/code/check"): return remoteCodeCheck(req.body)
+        case ("POST", "/fatclient/forward"): return await fatclientForward(req.body)
         case ("DELETE", let p) where p.hasPrefix("/remote/keys/"):
             let raw = String(p.dropFirst("/remote/keys/".count))
             return await remoteRemoveKey(raw.removingPercentEncoding ?? raw)
@@ -273,6 +303,9 @@ public actor Daemon {
         let machine = body["machine"]?.stringValue ?? "microvm"
         guard let type = QEMUMachineConfig.MachineType(rawValue: machine) else {
             return .error(400, "Unknown machine '\(machine)' (q35, microvm or firecracker)")
+        }
+        if config.multiUser, type != .firecracker {
+            return .error(400, "This is a multi-user server: VMs are Firecracker only (machine 'firecracker'); QEMU's vsock is shared by every user on the host")
         }
         if type == .firecracker, !FileManager.default.isExecutableFile(atPath: QEMUMachineConfig.defaultFirecrackerBinary) {
             return .error(400, "No Firecracker at \(QEMUMachineConfig.defaultFirecrackerBinary) (linux/firecracker/build.sh)")

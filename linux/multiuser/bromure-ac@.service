@@ -1,0 +1,61 @@
+# One Bromure user's daemon on a multi-user server: Firecracker VMs only,
+# its own passt and switch, state in /var/lib/bromure-ac/%i. Started by its
+# socket; survives its own crashes with its VMs (fd store, stop-post).
+[Unit]
+Description=Bromure AC daemon for %i
+Requires=bromure-ac@%i.socket
+After=bromure-ac@%i.socket network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=%i
+SupplementaryGroups=kvm
+ExecStart=/usr/local/lib/bromure-ac/bin/bromure-ac daemon
+ExecStopPost=/usr/local/lib/bromure-ac/bin/bromure-ac stop-post
+KillMode=process
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=2
+FileDescriptorStoreMax=64
+StateDirectory=bromure-ac/%i
+StateDirectoryMode=0700
+RuntimeDirectory=bromure-ac/%i
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+Environment=HOME=/var/lib/bromure-ac/%i
+Environment=XDG_STATE_HOME=/var/lib/bromure-ac/%i
+Environment=XDG_RUNTIME_DIR=/run/bromure-ac/%i
+Environment=BROMURE_AC_MULTIUSER=1
+Environment=BROMURE_AC_GATEWAY_USER=bromure
+Environment=BROMURE_AC_CONTROL_SOCKET=/run/bromure-ac/sock/%i.sock
+Environment=BROMURE_AC_IMAGE=/var/lib/bromure-ac-image
+Environment=BROMURE_AGENTD=/usr/local/lib/bromure-ac/vm-setup/bromure-agentd.py
+Environment=BROMURE_FIRECRACKER=/usr/local/lib/bromure-ac/bin/firecracker
+Environment=LD_LIBRARY_PATH=/usr/local/lib/bromure-ac/lib
+
+# Sandbox (in place of Firecracker's jailer, which needs root): every child
+# (firecracker, virtiofsd, passt) inherits it. A VMM escape lands as %i, on a
+# read-only system with only %i's state and runtime dirs writable.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+# passt: user mnt pid ipc uts; virtiofsd --sandbox namespace: user mnt pid net.
+RestrictNamespaces=user mnt pid net ipc uts
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

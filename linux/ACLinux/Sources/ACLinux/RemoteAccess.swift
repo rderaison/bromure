@@ -1,5 +1,7 @@
 import CACLinuxShims
 import Foundation
+import NIOCore
+import NIOPosix
 
 /// The shared SSH server's settings (macOS keeps them in UserDefaults under
 /// `remoteAccess.*`): `<stateDir>/remote.json`.
@@ -114,6 +116,74 @@ extension Daemon {
             let code = try EnrollmentCodes.create(lifetime: .seconds(minutes * 60))
             return ControlResponse(200, ["code": .string(code), "minutes": .number(Double(minutes)), "user": .string(NSUserName())])
         } catch { return .error(500, "\(error)") }
+    }
+
+    // MARK: the multi-user gateway's routes (it does auth and bytes; this
+    // daemon, its user's, does the policy)
+
+    /// `GET /remote/authorized-keys`: the account's key lines, for the
+    /// gateway's public-key check.
+    // @port-skip linux-only: multi-user gateway support
+    func remoteAuthorizedKeys() async -> ControlResponse {
+        let path = await MainActor.run { RemoteAccessServer.Paths.default.authKeys.path }
+        let lines = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        return ControlResponse(200, ["keys": .array(lines.map(JSONValue.string))])
+    }
+
+    /// `POST /remote/code/check {"code"}`: consumes a live enrollment code.
+    /// Same answer shape for any code; whether the account exists is the
+    /// gateway's to hide.
+    // @port-skip linux-only: multi-user gateway support
+    func remoteCodeCheck(_ body: JSONValue) -> ControlResponse {
+        ControlResponse(200, ["ok": .bool(EnrollmentCodes.consume(body["code"]?.stringValue ?? ""))])
+    }
+
+    /// `POST /fatclient/forward {"ip", "port" | "udp": true}`: the gateway's
+    /// `forward` / `forward-udp`, through this daemon. The connection becomes
+    /// the stream to the guest's loopback relay; 404 when no running VM of
+    /// this user has that address.
+    // @port-skip linux-only: multi-user gateway support (macOS resolves forwards in-process)
+    func fatclientForward(_ body: JSONValue) async -> ControlResponse {
+        guard let ip = body["ip"]?.stringValue else { return .error(400, "Missing 'ip'") }
+        let header: String
+        if body["udp"] == .bool(true) { header = "UDP\n" }
+        else if let p = body["port"]?.numberValue, p > 0, p < 65536 { header = "\(Int(p))\n" }
+        else { return .error(400, "Missing 'port' (or 'udp': true)") }
+        let fd = await relayFD(ip: ip, header: header)
+        guard fd >= 0 else { return .error(404, "No running VM at \(ip)") }
+        return .streaming { client in await Self.pump(client, fd) }
+    }
+
+    /// Bytes both ways between a control stream and `fd` until both sides
+    /// are done; each side's end half-closes the other.
+    // @port-skip linux-only: multi-user gateway support
+    static func pump(_ client: ControlStream, _ fd: Int32) async {
+        let conn: NIOAsyncChannel<ByteBuffer, ByteBuffer>
+        do {
+            conn = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+                .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+                .withConnectedSocket(fd) { ch in
+                    ch.eventLoop.makeCompletedFuture {
+                        try NIOAsyncChannel<ByteBuffer, ByteBuffer>(wrappingChannelSynchronously: ch,
+                            configuration: .init(isOutboundHalfClosureEnabled: true))
+                    }
+                }
+        } catch {
+            close(fd)
+            return
+        }
+        try? await conn.executeThenClose { inbound, outbound in
+            await withTaskGroup(of: Void.self) { g in
+                g.addTask {
+                    for await b in client.inbound { try? await outbound.write(b) }
+                    outbound.finish()
+                }
+                g.addTask {
+                    do { for try await b in inbound { try await client.write(b) } } catch {}
+                }
+            }
+        }
     }
 
     /// `GET /remote`: what macOS's remoteAccessStatus returns.

@@ -1,0 +1,17 @@
+# One Bromure user's control socket on a multi-user server (bromure-ac admin
+# add <user> enables it). Owner the user, group bromure (the SSH gateway),
+# 0660: nobody else can connect, and the daemon checks the peer's uid too.
+[Unit]
+Description=Bromure AC control socket for %i
+
+[Socket]
+ListenStream=/run/bromure-ac/sock/%i.sock
+SocketUser=%i
+SocketGroup=bromure
+SocketMode=0660
+DirectoryMode=0755
+FileDescriptorName=control
+Service=bromure-ac@%i.service
+
+[Install]
+WantedBy=sockets.target

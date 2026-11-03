@@ -1,0 +1,45 @@
+# The multi-user server's SSH front door (port 2222 by default): one host
+# key; the SSH user name picks the Bromure user. It authenticates and moves
+# bytes to that user's control socket, nothing else: each user's daemon
+# keeps that user's keys and codes and decides everything else.
+[Unit]
+Description=Bromure AC multi-user SSH gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=bromure
+Group=bromure
+ExecStart=/usr/local/lib/bromure-ac/bin/bromure-ac gateway
+Restart=on-failure
+RestartSec=2
+StateDirectory=bromure-gw
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/bromure-gw
+Environment=LD_LIBRARY_PATH=/usr/local/lib/bromure-ac/lib
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

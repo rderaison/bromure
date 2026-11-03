@@ -1,0 +1,145 @@
+import Foundation
+import NIOConcurrencyHelpers
+import NIOSSH
+
+/// The multi-user server's front door: one SSH listener for every Bromure
+/// user on the host, the shared RemoteAccessServer with this router behind it.
+///
+/// Trust boundary: the gateway's account may use every user's control
+/// socket, so it does authentication and moves bytes, nothing else. Each
+/// user's own daemon holds that user's keys and enrollment codes and decides
+/// everything else (which VMs exist, where a forward may go). The SSH user
+/// name picks the account: `/run/bromure-ac/sock/<name>.sock`, made by
+/// `bromure-ac@<name>.socket` (owner the user, group the gateway's, 0660).
+// @port-skip linux-only: multi-user Linux server (macOS serves one user)
+public final class GatewayRouter: RemoteAccountRouter {
+    let socketDir: String
+    /// Every password check takes at least this long, an unknown account's
+    /// included: the timing tells nothing about which names exist.
+    static let passwordFloor: Duration = .milliseconds(150)
+    private let keyCache = NIOLockedValueBox<[String: (keys: Set<NIOSSHPublicKey>, at: ContinuousClock.Instant)]>([:])
+
+    // @port-skip linux-only: multi-user gateway
+    public init(socketDir: String) { self.socketDir = socketDir }
+
+    /// A plausible account name with a socket: nil otherwise.
+    // @port-skip linux-only: multi-user gateway
+    func socket(for user: String) -> String? {
+        let ok = !user.isEmpty && user.count <= 32
+            && user.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_-").contains($0) }
+            && !user.hasPrefix("-")
+        guard ok else { return nil }
+        let path = socketDir + "/" + user + ".sock"
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    // @port-skip linux-only: multi-user gateway
+    func authorizedKeys(user: String) -> Set<NIOSSHPublicKey>? {
+        guard let sock = socket(for: user) else { return nil }
+        if let c = keyCache.withLockedValue({ $0[user] }), ContinuousClock.now - c.at < .seconds(3) { return c.keys }
+        guard let r = try? FirecrackerAPI.exchange(sock, "GET", "/remote/authorized-keys", nil, timeoutMs: 5000), r.ok,
+              case .array(let lines)? = r.body?["keys"] else { return nil }
+        let keys = Set(lines.compactMap { $0.stringValue.flatMap { try? NIOSSHPublicKey(openSSHPublicKey: Self.keyField($0)) } })
+        keyCache.withLockedValue { $0[user] = (keys, .now) }
+        return keys
+    }
+
+    /// `type base64` of an authorized_keys line (no options, no comment).
+    // @port-skip linux-only: multi-user gateway
+    static func keyField(_ line: String) -> String {
+        let f = line.split(separator: " ")
+        guard let i = f.firstIndex(where: { $0.hasPrefix("ssh-") || $0.hasPrefix("ecdsa-") }), f.count > i + 1 else { return line }
+        return "\(f[i]) \(f[i + 1])"
+    }
+
+    // @port-skip linux-only: multi-user gateway
+    func verifyPassword(user: String, password: String) -> Bool {
+        let start = ContinuousClock.now
+        var ok = false
+        if let sock = socket(for: user),
+           let r = try? FirecrackerAPI.exchange(sock, "POST", "/remote/code/check", ["code": .string(password)], timeoutMs: 5000) {
+            ok = r.ok && r.body?["ok"] == .bool(true)
+        }
+        let left = Self.passwordFloor - (ContinuousClock.now - start)
+        if left > .zero { Thread.sleep(forTimeInterval: Double(left.components.attoseconds) / 1e18 + Double(left.components.seconds)) }
+        return ok
+    }
+
+    // @port-skip linux-only: multi-user gateway
+    func controlSocketPath(user: String) -> String { socket(for: user) ?? "/nonexistent" }
+
+    // @port-skip linux-only: multi-user gateway
+    func forward(user: String, ip: String, port: Int?, completion: @escaping @Sendable (Int32) -> Void) {
+        guard let sock = socket(for: user) else { completion(-1); return }
+        var body: [String: JSONValue] = ["ip": .string(ip)]
+        if let port { body["port"] = .number(Double(port)) } else { body["udp"] = true }
+        let payload = (try? JSONEncoder().encode(JSONValue.object(body))) ?? Data()
+        DispatchQueue.global(qos: .userInitiated).async {
+            completion(Self.openStream(sock, "POST", "/fatclient/forward", payload))
+        }
+    }
+
+    /// Sends one request and, on a 200, returns the connection with its
+    /// response header consumed (what follows is the stream); -1 otherwise.
+    // @port-skip linux-only: multi-user gateway
+    static func openStream(_ path: String, _ method: String, _ target: String, _ body: Data) -> Int32 {
+        let fd = Glibc.socket(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0)
+        guard fd >= 0 else { return -1 }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { close(fd); return -1 }
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in p.copyBytes(from: bytes); p[bytes.count] = 0 }
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        let head = "\(method) \(target) HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\n\r\n"
+        let req = Data(head.utf8) + body
+        let sent = req.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+        guard rc == 0, sent == req.count else { close(fd); return -1 }
+        // Header byte by byte: nothing of the stream after it is consumed.
+        var header = [UInt8](), c: UInt8 = 0
+        while header.count < 8192, !header.suffix(4).elementsEqual([13, 10, 13, 10]) {
+            guard recv(fd, &c, 1, 0) == 1 else { close(fd); return -1 }
+            header.append(c)
+        }
+        guard String(decoding: header.prefix(12), as: UTF8.self).hasPrefix("HTTP/1.1 200") else { close(fd); return -1 }
+        return fd
+    }
+}
+
+/// `bromure-ac gateway`'s settings: `<state>/gateway.json`.
+// @port-skip linux-only: multi-user gateway
+public struct GatewaySettings: Codable, Sendable {
+    public var port = 2222
+    public var bindAddress = "0.0.0.0"
+    /// Enrollment codes (`bromure-ac admin code <user>`) as SSH passwords.
+    public var codeLogin = true
+    public var socketDir = "/run/bromure-ac/sock"
+    // @port-skip linux-only: multi-user gateway
+    public init() {}
+}
+
+/// Starts the gateway's SSH server from `<state>/gateway.json` (host key in
+/// `<state>/remote`). Returns a line for the log.
+// @port-skip linux-only: multi-user gateway
+public enum GatewayMain {
+    @MainActor private static var server: RemoteAccessServer?
+
+    // @port-skip linux-only: multi-user gateway
+    @MainActor public static func start(stateDir state: String) throws -> String {
+        try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let settings = (try? JSONDecoder().decode(GatewaySettings.self,
+            from: Data(contentsOf: URL(fileURLWithPath: state + "/gateway.json")))) ?? GatewaySettings()
+        let s = RemoteAccessServer(paths: .init(dir: URL(fileURLWithPath: state + "/remote", isDirectory: true)))
+        s.accountRouter = GatewayRouter(socketDir: settings.socketDir)
+        try s.start(.init(port: settings.port, bindAddress: settings.bindAddress,
+                          passwordAuth: settings.codeLogin, pubkeyAuth: true))
+        server = s
+        return "\(settings.bindAddress):\(settings.port), accounts in \(settings.socketDir), host key \(s.hostKeyFingerprint() ?? "?")"
+    }
+
+    // @port-skip linux-only: multi-user gateway
+    @MainActor public static func stop() { server?.stop(); server = nil }
+}
