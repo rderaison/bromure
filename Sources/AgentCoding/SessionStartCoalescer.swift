@@ -1,4 +1,4 @@
-#if os(macOS)
+#if os(macOS) || BROMURE_LINUX   // a session server
 import Foundation
 
 /// A new session asked for again — the same workspace, agent, folder,

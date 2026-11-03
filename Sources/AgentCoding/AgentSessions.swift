@@ -970,7 +970,7 @@ final class AgentSessionStore {
         }
     }
 
-    #if os(macOS)
+    #if os(macOS) || BROMURE_LINUX   // the session engine's server side
     /// The Codex conversations (rollout uuids) the sessions on `profileID`
     /// other than `besides` own — never another session's to resume.
     func codexConversationsClaimed(profileID: UUID, besides: UUID?) -> [String] {
