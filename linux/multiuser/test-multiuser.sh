@@ -14,7 +14,7 @@ no() { echo "FAIL $*"; fail=$((fail + 1)); }
 cleanup() { for u in $A $B; do sudo -n bromure-ac admin remove $u --purge --delete-account >/dev/null 2>&1; done; rm -rf "$W"; }
 trap cleanup EXIT
 SSHO=(-p $PORT -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$W/known_hosts -o LogLevel=ERROR -o ConnectTimeout=10)
-req() { printf '%s %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$1" "$2" ${#3} "$3"; }
+req() { local b=${3:-}; printf '%s %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$1" "$2" ${#b} "$b"; }
 # as USER KEY METHOD PATH [BODY]: one request through the gateway; the JSON body.
 as() { req "$3" "$4" "${5:-}" | timeout 60 ssh "${SSHO[@]}" -i "$2" -o IdentitiesOnly=yes -o PreferredAuthentications=publickey \
        "$1@$HOST" 'bromure-fatclient/1 control' 2>/dev/null | sed -n '/^{/,$p'; }

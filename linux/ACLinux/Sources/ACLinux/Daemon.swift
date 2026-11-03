@@ -96,8 +96,19 @@ public actor Daemon {
     /// VMs whose stop is being recorded (vmStopped).
     private var stopping: [String: Task<Void, Never>] = [:]
 
+    /// The soft open-file limit up to the hard one: systemd starts services at
+    /// 1024, and every VM, SSH session and forward holds several.
+    // @port-skip linux-only: Linux daemon core
+    static func raiseFDLimit() {
+        var l = rlimit()
+        guard getrlimit(Int32(RLIMIT_NOFILE.rawValue), &l) == 0, l.rlim_cur < l.rlim_max else { return }
+        l.rlim_cur = l.rlim_max
+        _ = setrlimit(Int32(RLIMIT_NOFILE.rawValue), &l)
+    }
+
     // @port-skip linux-only: Linux daemon core
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
+        raiseFDLimit()
         try FileManager.default.createDirectory(atPath: config.stateDir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(atPath: config.runtimeDir, withIntermediateDirectories: true,

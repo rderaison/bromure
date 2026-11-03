@@ -85,6 +85,19 @@ def function_at(path, line):
 
 # ---- per-file scan --------------------------------------------------------------------------
 files = {}
+def linux_branch(cond):
+    """Whether an `#if` condition holds on Linux, as far as imports go: False
+    for canImport of an Apple-only module and for os() tests that leave Linux
+    out; True for anything else (compiler flags, unknowns)."""
+    c = cond.split("//")[0].strip()
+    m = re.fullmatch(r"(!\s*)?canImport\((\w+)\)", c)
+    if m: return (m.group(2) in LINUX_OK or m.group(2) in IN_REPO) != bool(m.group(1))
+    if re.fullmatch(r"!\s*os\(Linux\)", c): return False
+    oses = re.findall(r"os\((\w+)\)", c)
+    if oses and re.fullmatch(r"[\sos()\w|]*", c): return "Linux" in oses
+    return True
+
+
 for module, src, _ in MODULES:
     for dirpath, _, names in os.walk(os.path.join(ROOT, src)):
         for n in sorted(names):
@@ -97,11 +110,27 @@ for module, src, _ in MODULES:
             text = open(full, encoding="utf-8", errors="replace").read()
             lines = text.split("\n")
             imports = []
+            branches = []   # per open #if: [this branch compiles on Linux, an earlier one did]
             for l in lines:
                 # Only the file's header: an `import` inside a multi-line string
                 # (Python heredocs in guest scripts) isn't one.
                 if re.match(r"\s*(?:(?:public|internal|private|fileprivate|open|final)\s+)*(?:class|struct|enum|protocol|actor|extension|func|let|var)\b", l):
                     break
+                d = re.match(r"\s*#(if|elseif|else|endif)\b\s*(.*)", l)
+                if d:
+                    kind, cond = d.groups()
+                    if kind == "if":
+                        branches.append([linux_branch(cond), False])
+                    elif branches and kind in ("elseif", "else"):
+                        taken = branches[-1][0] or branches[-1][1]
+                        branches[-1] = [not taken and (kind == "else" or linux_branch(cond)), taken]
+                    elif branches:
+                        branches.pop()
+                    continue
+                # An import only another platform compiles (#if canImport(AppKit),
+                # #if os(macOS)) isn't one here.
+                if not all(b[0] for b in branches):
+                    continue
                 m = re.match(r"\s*(?:@\w+(?:\([^)]*\))?\s+)*import\s+(?:class\s+|struct\s+|enum\s+|protocol\s+|func\s+|var\s+|typealias\s+)?([\w]+)", l)
                 if m and m.group(1) not in imports: imports.append(m.group(1))
             apple = [i for i in imports if i not in LINUX_OK and i not in IN_REPO]

@@ -41,12 +41,14 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectKernelLogs=yes
+# No ProtectKernelTunables=, ProtectKernelLogs= or ProtectHostname=: they
+# mount over parts of /proc, and the kernel then refuses virtiofsd's own /proc
+# in its namespace sandbox (EPERM, "not fully visible"). /proc/sys and
+# /proc/kmsg are root-only to write or read, and setting the hostname takes
+# CAP_SYS_ADMIN, which %i doesn't have.
 ProtectControlGroups=yes
 ProtectClock=yes
-ProtectHostname=yes
 DevicePolicy=closed
 DeviceAllow=/dev/kvm rw
 LockPersonality=yes

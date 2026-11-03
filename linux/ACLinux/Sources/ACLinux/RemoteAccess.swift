@@ -60,7 +60,7 @@ extension Daemon {
     /// forward resolvers) and starts it if enabled.
     // @port-skip linux-only: the daemon's half of ACAppDelegate.startRemoteAccessIfNeeded
     func setUpRemoteAccess() async {
-        ProfileStore.controlSocket.withLockedValue { $0 = URL(fileURLWithPath: config.controlSocketPath) }
+        ProfileStore.controlSocket.withLockedValue { $0 = URL(fileURLWithPath: Self.linkControlSocket(config)) }
         // The shared server keeps its host key and authorized_keys in
         // `remote/` beside the control socket: persistent on macOS (Application
         // Support), a tmpfs here ($XDG_RUNTIME_DIR). The real directory is
@@ -88,6 +88,21 @@ extension Daemon {
         } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: remote access not started: \(error)\n".utf8))
         }
+    }
+
+    /// The control socket as the shared server should see it: always
+    /// `<runtime>/control.sock`, since it keeps `remote/` beside it. A socket
+    /// elsewhere (multi-user: /run/bromure-ac/sock/<user>.sock, in a folder
+    /// the user can't write) gets a symlink there.
+    // @port-skip linux-only: Linux daemon layout
+    static func linkControlSocket(_ config: DaemonConfig) -> String {
+        let local = config.runtimeDir + "/control.sock"
+        guard config.controlSocketPath != local else { return local }
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: local)) != config.controlSocketPath {
+            unlink(local)
+            try? FileManager.default.createSymbolicLink(atPath: local, withDestinationPath: config.controlSocketPath)
+        }
+        return local
     }
 
     // @port-skip linux-only: see setUpRemoteAccess
