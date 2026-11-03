@@ -55,51 +55,48 @@ extension Daemon {
         return ControlResponse(200, ["profiles": .array(rows)])
     }
 
-    /// POST /profiles {document}: a new workspace from the preferences
-    /// template with the document overlaid (ProfileDocument), its VM
-    /// registered (stopped) with the same id. 201 with its id; 400 for a bad
-    /// document or an OpenShell policy that wouldn't validate.
-    // partial: no `generateSSH`, no folder shares
-    // @port ACAppDelegate.automationUpsertProfile(idOrName: String?, doc: [String:Any]) h=391511fcb8407fd9 @7dd92fdf
+    /// `POST /profiles`: a workspace from the template, overlaid with the
+    /// document (the shared save: ProfileEditHost.automationUpsertProfile),
+    /// and its VM registered (stopped) with the same id. 201 with its id.
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/profiles"): h=ea29b136cb0d8add @7dd92fdf
     func createProfile(_ body: JSONValue) async -> ControlResponse {
-        guard case .object = body, var doc = body.foundationObject as? [String: Any] else {
+        guard case .object = body, let doc = body.foundationObject as? [String: Any] else {
             return .error(400, "Expected a JSON object")
         }
-        for k in ["_secretsRedacted", "generateSSH", "_commentsIfStill"] { doc.removeValue(forKey: k) }
         let name = (doc["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !name.isEmpty else { return .error(400, "A workspace name is required.") }
         if registry.records.contains(where: { $0.name == name }) {
             return .error(409, "A workspace is already named '\(name)'")
         }
-        let store = profileStore
-        let minted = store.newProfileFromTemplate(name: name)
-        var created: Profile
-        switch ProfileDocument.merge(doc, over: minted) {
-        case .success(let p): created = p
-        case .failure(let e): return .error(400, e.message)
+        let r: [String: Any] = await MainActor.run {
+            LinuxSessionHost.shared?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "no host"]
         }
-        created.id = minted.id
-        created.createdAt = minted.createdAt
-        created.lastUsedAt = nil
-        if created.usesOpenShellPolicy {
-            do { _ = try OpenShellPolicy.parse(created.networkPolicy) } catch {
-                return .error(400, "Invalid OpenShell policy: \(error)")
-            }
-            if let r = OpenShellGovernance.shared.check(policyYAML: created.networkPolicy,
-                                                        providerRules: created.openShellProviderRules),
-               !r.passed {
-                return .error(400, "OpenShell policy is outside the organization boundary: \(r.summary)")
-            }
+        guard r["ok"] as? Bool == true, let id = r["id"] as? String else {
+            return ControlResponse(400, JSONValue(foundation: r) ?? .object([:]))
         }
-        do { created = try store.save(created) } catch { return .error(500, "Couldn't save the workspace: \(error)") }
-        let vm = await createVM(.object(["name": .string(name)]), id: created.id.uuidString, boot: false)
+        let vm = await createVM(.object(["name": .string(name)]), id: id, boot: false)
         guard vm.status == 201 else {
-            try? FileManager.default.removeItem(at: store.profileDirectory(for: created))
+            if let p = Daemon.workspace(id) { try? FileManager.default.removeItem(at: profileStore.profileDirectory(for: p)) }
             return vm
         }
-        return ControlResponse(201, ["ok": true, "id": .string(created.id.uuidString), "name": .string(name),
-                                     "shortId": .string(String(created.id.uuidString.lowercased().prefix(8)))])
+        var out = r
+        out["name"] = name
+        out["shortId"] = String(id.lowercased().prefix(8))
+        return ControlResponse(201, JSONValue(foundation: out) ?? .object([:]))
+    }
+
+    /// `PUT|PATCH /profiles/<id>`: the shared save (a full document replaces,
+    /// a partial one overlays; blank secrets keep the stored ones). 404 for
+    /// a missing workspace, 400 for a bad document.
+    // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleProfileRoute's PUT (the body is shared)
+    func updateProfile(_ key: String, _ body: JSONValue) async -> ControlResponse {
+        guard let doc = body.foundationObject as? [String: Any] else { return .error(400, "Expected a JSON object") }
+        let r: [String: Any] = await MainActor.run {
+            LinuxSessionHost.shared?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "no host"]
+        }
+        let ok = r["ok"] as? Bool == true
+        let status = ok ? 200 : ((r["error"] as? String)?.contains("not found") == true ? 404 : 400)
+        return ControlResponse(status, JSONValue(foundation: r) ?? .object([:]))
     }
 
     /// POST /sessions/<workspace>/tab {"action": new|select|close, "index"}:

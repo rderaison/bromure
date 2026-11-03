@@ -7,7 +7,6 @@ extension Daemon {
     /// `GET /profiles/<id>` (`?full=1`: the whole Profile, secrets blanked;
     /// `?storage=1`: its disk sizes; else the compact describe), and `POST
     /// /agent-sessions/folders`; nil for any other path.
-    // partial: no PUT/PATCH /profiles/<id> (the workspace editor's save) yet
     // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=0153ac41445571d4 @7dd92fdf
     func workspaceRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let parts = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
@@ -28,8 +27,9 @@ extension Daemon {
                 ? Self.profileExport(prof) : describe(prof)
             guard let d, let v = JSONValue(foundation: d) else { return .error(404, "Profile not found") }
             return ControlResponse(200, v)
-        case ("PUT", let p), ("PATCH", let p) where p.hasPrefix("/profiles/"):
-            return .error(501, "Editing a workspace's settings from a client isn't available on this server yet.")
+        case ("PUT", let p) where p.hasPrefix("/profiles/"), ("PATCH", let p) where p.hasPrefix("/profiles/"):
+            let raw = String(p.dropFirst("/profiles/".count))
+            return await updateProfile(raw.removingPercentEncoding ?? raw, body)
         default:
             return nil
         }
