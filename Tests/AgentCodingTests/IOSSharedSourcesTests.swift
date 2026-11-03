@@ -23,14 +23,15 @@ struct IOSSharedSourcesTests {
         }
     }
 
-    /// The text outside `#if os(macOS)` / `#if canImport(AppKit)` blocks
-    /// (their `#else` branch kept): what the iOS compiler reads.
+    /// The text outside `#if os(macOS)` / `#if os(macOS) || os(Linux)` /
+    /// `#if canImport(AppKit)` blocks (their `#else` branch kept): what the
+    /// iOS compiler reads.
     static func withoutMacOnlyBlocks(_ text: String) -> String {
         var out: [Substring] = [], stack: [Bool] = []   // true: a mac-only branch is skipping
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("#if") {
-                stack.append(t == "#if os(macOS)" || t == "#if canImport(AppKit)")
+                stack.append(t == "#if os(macOS)" || t == "#if os(macOS) || os(Linux)" || t == "#if canImport(AppKit)")
                 continue
             }
             if t.hasPrefix("#else") || t.hasPrefix("#elseif") { if !stack.isEmpty { stack[stack.count - 1] = false }; continue }

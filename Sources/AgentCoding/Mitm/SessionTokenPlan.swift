@@ -129,8 +129,9 @@ public struct SessionTokenPlan: Sendable {
     /// Build the proxy's swap map. Each entry becomes one fake→real
     /// replacement, scoped to the host the real token belongs to (so a
     /// stray fake leaking to a third-party host is left alone, not
-    /// quietly rewritten with the wrong value).
-#if os(macOS)
+    /// quietly rewritten with the wrong value). Not on iOS: Bromure Remote
+    /// shares this file without the proxy's TokenSwap.
+#if os(macOS) || os(Linux)
     public func tokenMap() -> TokenMap {
         let mapped = entries.map { e in
             TokenMap.Entry(

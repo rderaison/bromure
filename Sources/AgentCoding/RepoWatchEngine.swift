@@ -250,12 +250,7 @@ final class RepoWatchEngine {
         return Binding(run: run, watch: watch)
     }
 
-    struct ReportOutcome {
-        var created: [RepoFinding] = []
-        var updated: [RepoFinding] = []
-        var reopened: [RepoFinding] = []
-        var rejected: [String] = []
-    }
+    typealias ReportOutcome = FindingReportOutcome
 
     /// Fold reports into the store. `repo` is required when the session
     /// isn't a watch scan; it must then be a repo this workspace watches or
@@ -291,9 +286,7 @@ final class RepoWatchEngine {
         return .success(out)
     }
 
-    enum ReportError: Error {
-        case noRepo
-    }
+    typealias ReportError = FindingReportError
 
     /// The prompt-injection screen over a finding's text. The finding came
     /// out of an agent reading repository content — the text will be put in
@@ -528,4 +521,7 @@ final class RepoWatchNotifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 }
+/// The automations MCP's findings tools run on the watches' engine.
+extension RepoWatchEngine: FindingsBackend {}
+
 #endif

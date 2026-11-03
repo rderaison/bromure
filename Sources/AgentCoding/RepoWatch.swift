@@ -1308,3 +1308,26 @@ extension Array where Element == RepoFinding {
         }
     }
 }
+
+/// What a findings_report folded into the store.
+struct FindingReportOutcome {
+    var created: [RepoFinding] = []
+    var updated: [RepoFinding] = []
+    var reopened: [RepoFinding] = []
+    var rejected: [String] = []
+}
+
+enum FindingReportError: Error {
+    case noRepo
+}
+
+/// The findings tools' side of the repository watches (RepoWatchEngine on
+/// macOS), for the automations MCP on any host.
+@MainActor
+protocol FindingsBackend: AnyObject {
+    var store: FindingStore { get }
+    func report(_ reports: [FindingReport], profileID: UUID, branch: String?,
+                repo: String?, commit: String?) async -> Result<FindingReportOutcome, FindingReportError>
+    func resolve(_ id: UUID, profileID: UUID, reason: String) -> Bool
+    func scanDone(profileID: UUID, branch: String?, commit: String?, summary: String) -> Bool
+}

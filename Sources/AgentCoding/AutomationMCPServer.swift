@@ -22,7 +22,7 @@ final class AutomationMCPServer: MCPLineHandler {
     private let remove: (UUID) -> Void
     private let runNow: (UUID) -> Void
     /// The repository watches' engine — the findings tools.
-    private let watches: () -> RepoWatchEngine?
+    private let watches: () -> (any FindingsBackend)?
     /// The agents the workspace can run (its Models settings and sign-ins
     /// included), as the editor offers them.
     private let readyTools: (Profile) -> [Profile.Tool]
@@ -33,7 +33,7 @@ final class AutomationMCPServer: MCPLineHandler {
          save: @escaping (ScheduledAutomation) -> Void,
          remove: @escaping (UUID) -> Void,
          runNow: @escaping (UUID) -> Void,
-         watches: @escaping () -> RepoWatchEngine? = { nil },
+         watches: @escaping () -> (any FindingsBackend)? = { nil },
          readyTools: @escaping (Profile) -> [Profile.Tool] = { $0.allToolSpecs.map(\.tool) }) {
         self.profileID = profileID
         self.store = store

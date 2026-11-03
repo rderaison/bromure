@@ -1,4 +1,4 @@
-#if os(macOS)
+#if os(macOS) || BROMURE_LINUX
 import Foundation
 
 // MARK: - Handing a board task to a session or a room
@@ -17,14 +17,14 @@ import Foundation
 
 @MainActor
 final class TaskDispatcher {
-    private weak var delegate: ACAppDelegate?
+    private weak var delegate: (any TaskDispatchHost)?
     private var timer: Timer?
     /// Asks an answer is being delivered to (`answer`).
     private var answering: Set<UUID> = []
     static let alreadyOnItsWay = NSLocalizedString("Your answer is already on its way.",
                                                    comment: "coding task: a second send of the same answer")
 
-    init(delegate: ACAppDelegate?) {
+    init(delegate: (any TaskDispatchHost)?) {
         self.delegate = delegate
     }
 
@@ -43,7 +43,7 @@ final class TaskDispatcher {
     /// Sessions and rooms the board can hand a task to.
     func choices() -> TaskAssigneeChoices {
         guard let delegate else { return TaskAssigneeChoices() }
-        let model = delegate.unifiedWindow?.listModel
+        let model = delegate.sessionListModel
         // This host's sessions and its native machines' (Bromure Sidecar).
         let sessions = delegate.allSessionRecords
             .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
@@ -53,7 +53,7 @@ final class TaskDispatcher {
                 let bucket = model.map { SessionHome.bucket(for: s, in: $0) }
                 return .init(id: s.id, label: delegate.delegationEngine.label(s),
                              workspace: delegate.profile(for: s.profileID)?.name
-                                ?? delegate.attachedMachines[s.profileID]?.name ?? "",
+                                ?? delegate.attachedMachineName(s.profileID) ?? "",
                              busy: bucket == .working || bucket == .needsYou,
                              profileID: s.profileID)
             }
@@ -134,7 +134,7 @@ final class TaskDispatcher {
     /// counts as busy.
     private func sessionIsFree(_ id: UUID) -> Bool {
         guard let delegate, let s = delegate.sessionRecord(id), !s.isDeleted else { return false }
-        if let model = delegate.unifiedWindow?.listModel {
+        if let model = delegate.sessionListModel {
             let b = SessionHome.bucket(for: s, in: model)
             return b != .working && b != .needsYou
         }
@@ -188,14 +188,14 @@ final class TaskDispatcher {
                 }
                 target = s.id
             case .switchboard:
-                guard let sid = delegate.switchboardEngine.ensureSwitchboard() else {
+                guard let sid = delegate.ensureSwitchboard(room: nil) else {
                     revert(NSLocalizedString("There's no workspace to run the Switchboard in.", comment: "task assign"))
                     return
                 }
                 target = sid
             case .room:
                 guard let room = delegate.agentRoomStore.room(assignment.id),
-                      let sid = delegate.switchboardEngine.ensureSwitchboard(room: room) else {
+                      let sid = delegate.ensureSwitchboard(room: room) else {
                     revert(NSLocalizedString("The room has no Switchboard to take the task.", comment: "task assign"))
                     return
                 }

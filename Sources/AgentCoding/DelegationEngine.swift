@@ -147,7 +147,7 @@ final class DelegationEngine {
     /// The connected Bromure Agent Hosts (see AgentHostLink).
     var agentHostLinks: @MainActor () -> [AgentHostLink] = { [] }
     var sessions: DelegationSessions { DelegationSessions(local: localSessions, hosts: agentHostLinks()) }
-    private weak var delegate: ACAppDelegate?
+    private weak var delegate: (any AgentSessionHost)?
 
     /// Scans a text crossing between agents; a non-nil return is the snippet
     /// that tripped the detector and the message is withheld. Injected so
@@ -231,7 +231,7 @@ final class DelegationEngine {
     private var ticker: Task<Void, Never>?
 
     init(store: DelegationStore, sessions: AgentSessionStore,
-         sessionEngine: AgentSessionEngine, delegate: ACAppDelegate?) {
+         sessionEngine: AgentSessionEngine, delegate: (any AgentSessionHost)?) {
         self.store = store
         self.localSessions = sessions
         self.sessionEngine = sessionEngine
@@ -1648,7 +1648,7 @@ final class DelegationEngine {
         guard let w = s.windowIndex else { return nil }
         if let h = sessions.host(for: s.profileID) { return h.hostTabStatus(window: w) }
         guard let delegate else { return nil }
-        return delegate.pane(for: s.profileID)?.model.tabs.first { $0.index == w }?.agentStatus
+        return delegate.tabsModel(for: s.profileID)?.tabs.first { $0.index == w }?.agentStatus
     }
 
     /// Sessions the host still owes a notice — a first one, or a repeat
