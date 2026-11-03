@@ -93,6 +93,7 @@
     "Sources/AgentCoding/TaskReviewData.swift",
     "Sources/AgentCoding/TaskTranscriptArchive.swift",
     "Sources/AgentCoding/TerminalAppDefaults.swift",
+    "Sources/AgentCoding/TerminalScreens.swift",
     "Sources/SandboxEngine/CloudTraceUploader.swift",
     "Sources/SandboxEngine/DNSSnoop.swift",
     "Sources/SandboxEngine/EgressPolicy.swift",

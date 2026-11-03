@@ -58,6 +58,49 @@ final class LinuxSessionHost: AgentSessionHost {
                 return SessionListModel.VMEntry(id: id, name: p.name, accentHex: p.color.hexInUI, model: model)
             }
         SessionStores.shared?.sessions.reconcile(entries: entries)
+        scanLiveSessions()
+    }
+
+    /// When each session's tab was last read (capped, a few seconds apart).
+    private var lastScan: [UUID: Date] = [:]
+    private var scanning: Set<UUID> = []
+
+    /// What the beautified view tells the store on macOS, from the tab's
+    /// screen (TerminalScan): an agent waiting on its sign-in screen
+    /// (needsSignIn), or on a dialog (awaiting an answer). On a server no
+    /// pane is attached, so the host reads the tab itself.
+    // @port-skip linux-only: the server-side half of the beautified view's loginPromptChanged / dialogPromptChanged
+    private func scanLiveSessions(now: Date = Date()) {
+        guard let store = SessionStores.shared?.sessions else { return }
+        let up = Self.running.withLockedValue { $0 }
+        for s in store.sessions where up.contains(s.profileID) && !s.hasEnded && !s.isArchived && !s.isDeleted {
+            guard let w = s.windowIndex, !scanning.contains(s.id),
+                  now.timeIntervalSince(lastScan[s.id] ?? .distantPast) >= 4 else { continue }
+            lastScan[s.id] = now
+            scanning.insert(s.id)
+            let id = s.id, tool = s.tool.rawValue
+            Task { [weak self] in
+                let screen = try? await self?.guestExec(profileID: s.profileID,
+                                                        command: "tmux capture-pane -p -J -t bromure:\(w) | tail -n 45", timeout: 10)
+                guard let self else { return }
+                self.scanning.remove(id)
+                guard let screen else { return }
+                var prompt: TerminalPrompt?
+                if case .prompt(let p)? = TerminalScan.classify(screen, agent: tool) { prompt = p }
+                store.setNeedsSignIn(id, prompt?.kind == .login)
+                _ = store.setAwaitingAnswer(id, Self.isDialog(prompt))
+            }
+        }
+        lastScan = lastScan.filter { k, _ in store.session(k) != nil }
+    }
+
+    /// The prompts that wait on an answer (BeautifiedSessionView.isDialog).
+    // @port-skip linux-only: BeautifiedSessionView.isDialog, which is in a SwiftUI file
+    static func isDialog(_ p: TerminalPrompt?) -> Bool {
+        switch p?.kind {
+        case .picker?, .checklist?, .trust?: return true
+        default: return false
+        }
     }
 
     // MARK: The guest
