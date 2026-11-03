@@ -32,6 +32,8 @@ final class TokenAgentChannel {
     func accept(fd: Int32, owner: AnyObject?) {
         readSource?.cancel()
         readSource = nil
+        // Requests written to the old connection never get their replies.
+        failPending()
         self.fd = fd
         self.owner = owner
         isConnected = true
