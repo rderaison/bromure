@@ -1695,10 +1695,164 @@ BRIDGE_LOG_PATH = "/tmp/bromure-vm-bridge.log"
 
 def _bridge_log(msg):
     try:
+        now = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now))
         with open(BRIDGE_LOG_PATH, "a") as f:
-            f.write(msg + "\n")
+            f.write("%s.%03dZ %s\n" % (stamp, int(now * 1000) % 1000, msg))
     except Exception:
         pass
+
+
+# How long a bridged client waits for the host to accept its vsock connection.
+# The kernel's default connect timeout is 2 s, and the host accepts vsock
+# connections one after another: a burst of parallel clients (docker push, API
+# discovery) queued past 2 s, and each one that did was reset. A slow accept is
+# not a dead host, so the bridge waits it out: a timed-out connect is retried
+# until the deadline. A refused or reset one (nothing listening on that port, or
+# a host restarting its listener) is retried only briefly, so a client of a
+# service the host doesn't run hears so at once.
+BRIDGE_CONNECT_DEADLINE = 30.0
+BRIDGE_CONNECT_ATTEMPT = 15.0
+BRIDGE_REFUSED_RETRY_FOR = 2.0
+BRIDGE_TIMEOUT_ERRNOS = (errno.ETIMEDOUT, errno.EINTR)
+BRIDGE_REFUSED_ERRNOS = (errno.ECONNREFUSED, errno.ECONNRESET)
+# A connect slower than this is logged, so host-side accept lag shows up in the
+# bridge log before it costs anyone a failure.
+BRIDGE_SLOW_CONNECT = 1.0
+
+
+def _vsock_connect(vsock_port, label, deadline=None, attempt=None,
+                   make_socket=None, sleep=time.sleep, clock=time.monotonic):
+    """A vsock connection to the host's `vsock_port`, retried until `deadline`
+    seconds have passed. Raises the last OSError when it runs out."""
+    deadline = BRIDGE_CONNECT_DEADLINE if deadline is None else deadline
+    attempt = BRIDGE_CONNECT_ATTEMPT if attempt is None else attempt
+    if make_socket is None:
+        def make_socket():
+            return socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    started = clock()
+    tries = 0
+    backoff = 0.05
+    while True:
+        tries += 1
+        left = deadline - (clock() - started)
+        host = make_socket()
+        try:
+            if (not _vsock_set_connect_timeout(host, max(0.1, min(attempt, left)))
+                    and not _CONNECT_TIMEOUT_WARNED and hasattr(socket, "AF_VSOCK")
+                    and getattr(host, "family", None) == socket.AF_VSOCK):
+                _CONNECT_TIMEOUT_WARNED.append(True)
+                _bridge_log("[%s] could not set the vsock connect timeout; "
+                            "the kernel's 2 s default applies" % label)
+            host.connect((HOST_CID, vsock_port))
+        except OSError as e:
+            host.close()
+            elapsed = clock() - started
+            if e.errno in BRIDGE_TIMEOUT_ERRNOS:
+                left = deadline - elapsed
+            elif e.errno in BRIDGE_REFUSED_ERRNOS:
+                left = min(deadline, BRIDGE_REFUSED_RETRY_FOR) - elapsed
+            else:
+                raise
+            if left <= backoff:
+                raise
+            _bridge_log("[%s] vsock connect to host:%d attempt %d failed: %s"
+                        "; retrying" % (label, vsock_port, tries, e))
+            sleep(backoff)
+            backoff = min(backoff * 2, 1.0)
+            continue
+        took = clock() - started
+        if took >= BRIDGE_SLOW_CONNECT or tries > 1:
+            _bridge_log("[%s] vsock connect to host:%d took %.2fs (%d attempt%s)"
+                        % (label, vsock_port, took, tries,
+                           "" if tries == 1 else "s"))
+        return host
+
+
+# SO_VM_SOCKETS_CONNECT_TIMEOUT from <linux/vm_sockets.h>: 6 (the _OLD name,
+# which is the only one on 64-bit), taking a native struct timeval. CPython
+# neither names it nor can pass it: socket.setsockopt on an AF_VSOCK socket
+# takes an int and hands the kernel a u64, which it refuses (EINVAL). So the
+# option goes through libc.
+_VSOCK_CONNECT_TIMEOUT_OPT = 6
+_LIBC = []
+_CONNECT_TIMEOUT_WARNED = []
+
+
+def _vsock_set_connect_timeout(sock, seconds):
+    """Set the socket's vsock connect timeout to `seconds`. Best effort: where
+    it can't be set the kernel's 2 s default applies, and the retry loop in
+    _vsock_connect still waits out a slow host."""
+    level = getattr(socket, "AF_VSOCK", None)
+    if level is None or getattr(sock, "family", None) != level:
+        return False
+    try:
+        if not _LIBC:
+            import ctypes
+            _LIBC.append(ctypes.CDLL(None, use_errno=True))
+        import ctypes
+        sec = int(seconds)
+        tv = struct.pack("@ll", sec, int((seconds - sec) * 1000000))
+        rc = _LIBC[0].setsockopt(ctypes.c_int(sock.fileno()), ctypes.c_int(level),
+                                 ctypes.c_int(_VSOCK_CONNECT_TIMEOUT_OPT),
+                                 ctypes.c_char_p(tv), ctypes.c_uint(len(tv)))
+        return rc == 0
+    except Exception:
+        return False
+
+
+# What a client of an HTTP bridge (the proxy, the local LLM engine) reads when
+# the host could not be reached: a proxy error it can show and retry, not a
+# reset. curl prints "CONNECT tunnel failed, response 503"; docker and most HTTP
+# clients retry a 503 with Retry-After.
+BRIDGE_HTTP_LABELS = ("http", "llm")
+
+
+def _bridge_unavailable_reply(reason):
+    body = ("Bromure: the host proxy did not answer (%s). Retry.\n"
+            % reason).encode("utf-8", "replace")
+    return (b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"Retry-After: 1\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body)
+
+
+def _bridge_refuse(client, label, reason, drain_for=1.0):
+    """End a client the bridge couldn't serve without resetting it.
+
+    Closing a socket with unread bytes in its receive queue sends an RST, and
+    the client's request (the CONNECT line, an agent query) is exactly such
+    bytes. So: answer HTTP clients with a 503, send FIN, read what the client
+    sent until it closes or `drain_for` passes, then close."""
+    try:
+        if label in BRIDGE_HTTP_LABELS:
+            try:
+                client.settimeout(drain_for)
+                client.sendall(_bridge_unavailable_reply(reason))
+            except OSError:
+                pass
+        try:
+            client.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        end = time.monotonic() + drain_for
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                client.settimeout(left)
+                if not client.recv(64 * 1024):
+                    break
+            except OSError:
+                break
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
 
 
 class _BridgeConn(object):
@@ -1808,12 +1962,13 @@ def _client_preamble(addr):
 def _bridge(client, vsock_port, label, preamble=None):
     """Open a vsock connection to the host, then pump both directions."""
     try:
-        host = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-        host.connect((HOST_CID, vsock_port))
-    except OSError as e:
+        host = _vsock_connect(vsock_port, label)
+    except Exception as e:
+        # Any failure, not only OSError: an unrefused client would be closed
+        # with its request unread, which is the reset this replaces.
         _bridge_log("[%s] vsock connect to host:%d failed: %s"
                     % (label, vsock_port, e))
-        client.close()
+        _bridge_refuse(client, label, "connect failed")
         return
 
     if preamble:
@@ -1826,8 +1981,8 @@ def _bridge(client, vsock_port, label, preamble=None):
             # half-written line is the one state nobody can parse.
             _bridge_log("[%s] could not write the client preamble: %s"
                         % (label, e))
-            client.close()
             host.close()
+            _bridge_refuse(client, label, "preamble not sent")
             return
 
     conn = _BridgeConn(client, host)
