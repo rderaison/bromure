@@ -567,134 +567,6 @@ final class RemoteHostController {
 #endif
     }
 
-    // MARK: Guest pages
-
-    /// Pages a workspace's guest asked to open, published by a server with
-    /// no screen of its own (Linux: /state `guestPages`), by id → when this
-    /// client took it. Kept past the page's own 10 min: a snapshot that
-    /// still lists a page whose dismiss is on its way mustn't open it twice.
-    private var handledGuestPages: [String: Date] = [:]
-#if os(macOS)
-    private var guestPageAsking = false
-    /// The mirror window's way to open a guest page in the workspace's own
-    /// browser VM (true: it's on its way there). Unset, or false (the
-    /// browser's tunnel isn't up yet), the user is asked instead.
-    var onGuestPage: ((_ profileID: Profile.ID, _ url: URL, _ workspace: String?) -> Bool)?
-#else
-    struct GuestPageAsk: Identifiable, Equatable {
-        let id: String
-        let url: URL
-        let workspace: String?
-    }
-    /// The page waiting on the user's word (HostMirrorScreen asks).
-    private(set) var guestPageAsk: GuestPageAsk?
-#endif
-
-    private static var appIsActive: Bool {
-#if os(macOS)
-        NSApp.isActive
-#else
-        UIApplication.shared.applicationState == .active
-#endif
-    }
-
-    /// Open or ask about each new page — only while this app is in front, so
-    /// one browser opens rather than one per connected device (a page no
-    /// client takes expires on the server). The server's gate decided; this
-    /// side decides again, as for a sign-in URL.
-    private func applyGuestPages(_ pages: [[String: Any]], now: Date = Date()) {
-        handledGuestPages = handledGuestPages.filter { now.timeIntervalSince($0.value) < 30 * 60 }
-        guard !pages.isEmpty, Self.appIsActive else { return }
-        for p in pages {
-            guard let id = p["id"] as? String, handledGuestPages[id] == nil else { continue }
-            guard let s = p["url"] as? String, let url = URL(string: s) else {
-                handledGuestPages[id] = now
-                dismissGuestPage(id, "declined")
-                continue
-            }
-            let workspace = (p["workspace"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            switch GuestURLGate.disposition(for: url) {
-            case .refuse:
-                handledGuestPages[id] = now
-                FatClientLog.log("guest page: refused one with a local/private host")
-                dismissGuestPage(id, "declined")
-            case .open where (p["disposition"] as? String) != "ask":
-                handledGuestPages[id] = now
-#if os(macOS)
-                NSWorkspace.shared.open(url)
-#else
-                UIApplication.shared.open(url)
-#endif
-                dismissGuestPage(id, "opened")
-            default:
-#if os(macOS)
-                // Not a sign-in page: the workspace's own browser VM, which
-                // reaches the workspace's network, not this Mac's.
-                if let pid = (p["profile"] as? String).flatMap(UUID.init(uuidString:)),
-                   onGuestPage?(pid, url, workspace) == true {
-                    handledGuestPages[id] = now
-                    dismissGuestPage(id, "opened")
-                    continue
-                }
-                // A sheet, never a modal (this runs on the /state stream's
-                // delivery): no window to hang it on yet, the page waits for
-                // the next snapshot.
-                guard !guestPageAsking, let window = promptWindow() else { continue }
-                handledGuestPages[id] = now
-                guestPageAsking = true
-                let alert = NSAlert()
-                alert.alertStyle = .warning
-                alert.messageText = Self.guestPageTitle
-                alert.informativeText = Self.guestPageMessage(url, workspace: workspace)
-                // Cancel is the default: Return doesn't open it.
-                alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-                alert.addButton(withTitle: NSLocalizedString("Open in Browser", comment: "guest URL open prompt"))
-                alert.beginSheetModal(for: window) { [weak self] resp in
-                    self?.guestPageAsking = false
-                    let open = resp == .alertSecondButtonReturn
-                    if open { NSWorkspace.shared.open(url) }
-                    self?.dismissGuestPage(id, open ? "opened" : "declined")
-                }
-#else
-                guard guestPageAsk == nil else { continue }
-                handledGuestPages[id] = now
-                guestPageAsk = GuestPageAsk(id: id, url: url, workspace: workspace)
-#endif
-            }
-        }
-    }
-
-#if !os(macOS)
-    /// The user's word on `guestPageAsk`.
-    func answerGuestPage(open: Bool) {
-        guard let ask = guestPageAsk else { return }
-        guestPageAsk = nil
-        if open { UIApplication.shared.open(ask.url) }
-        dismissGuestPage(ask.id, open ? "opened" : "declined")
-    }
-#endif
-
-    private func dismissGuestPage(_ id: String, _ action: String) {
-        send("POST", "/guest-pages/\(ControlClient.encodeSegment(id))/dismiss",
-             body: ["action": action], then: false)
-    }
-
-    /// The ask's words, the macOS app's own (ACAppDelegate.openGuestRelayedURL).
-    static var guestPageTitle: String {
-        NSLocalizedString("Open a Page from the Workspace?", comment: "guest URL open prompt")
-    }
-
-    static func guestPageMessage(_ url: URL, workspace: String?) -> String {
-        let shown = url.absoluteString.count > 400 ? String(url.absoluteString.prefix(400)) + "…" : url.absoluteString
-        return workspace.map {
-            String(format: NSLocalizedString(
-                "Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
-                comment: "guest URL open prompt: workspace name, URL"), $0, shown)
-        } ?? String(format: NSLocalizedString(
-            "Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
-            comment: "guest URL open prompt: URL"), shown)
-    }
-
     /// Shared-folder paths per running VM (feeds the remote file browser's
     /// location list — browsed via the guest, since the host dirs live on A).
     private(set) var mounts: [Profile.ID: [String]] = [:]
@@ -1175,7 +1047,6 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
-        applyGuestPages((snapshot["guestPages"] as? [[String: Any]]) ?? [])
         applyRegistrationSnapshot(pending: snapshot["pendingRegistration"] as? [String: Any],
                                   ended: snapshot["registrationEnded"] as? [String: Any],
                                   endedList: snapshot["registrationsEnded"] as? [[String: Any]])
@@ -3768,9 +3639,6 @@ final class RemoteHostWindow: NSWindow {
         observeSending()
         showGrid()
         controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }
-        controller.onGuestPage = { [weak self] id, url, workspace in
-            self?.openGuestPage(url, in: id, workspace: workspace) ?? false
-        }
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
             self.syncSessionsHome()
@@ -6668,12 +6536,6 @@ final class RemoteHostWindow: NSWindow {
             selectWorkspaceName(id)
             return ["ok": true, "selectedID": controller.listModel.selectedID?.uuidString ?? "",
                     "dashboardShown": shownDashboard?.id == id]
-        case "activate":
-            // Bring this app and the mirror window to the front (what a
-            // client in front does on its own: guest pages, prompts).
-            NSApp.activate(ignoringOtherApps: true)
-            makeKeyAndOrderFront(nil)
-            return ["ok": true]
         case "shot":
             // Just render the window as it is to "shot" (a PNG path).
             guard let shot = p["shot"] as? String else { return ["error": "shot path required"] }
@@ -7155,19 +7017,7 @@ final class RemoteHostWindow: NSWindow {
         else { setBrowserOpen(id, true) }
     }
 
-    /// A guest page in the workspace's browser VM: shown when the workspace
-    /// is on stage, else opened in the background. False while the browser's
-    /// tunnel isn't up (no subnet / SOCKS port yet).
-    private func openGuestPage(_ url: URL, in id: Profile.ID, workspace: String?) -> Bool {
-        guard let ctl = browserController(for: id) else { return false }
-        let onStage = (liveSessionOnStage?.profileID ?? controller.listModel.selectedID) == id
-        if onStage { setBrowserOpen(id, true, offerVPN: false) }
-        FatClientLog.log("guest page: opening in \(workspace ?? id.uuidString.prefix(8).description)'s browser (onStage=\(onStage))")
-        ctl.openWhenReady(url.absoluteString)
-        return true
-    }
-
-    private func setBrowserOpen(_ id: Profile.ID, _ open: Bool, offerVPN: Bool = true) {
+    private func setBrowserOpen(_ id: Profile.ID, _ open: Bool) {
         if open {
             if shownBrowser == id, browserWidthConstraint.constant > 0 { return }   // already shown
             guard let ctl = browserController(for: id) else {
@@ -7204,8 +7054,7 @@ final class RemoteHostWindow: NSWindow {
             ensureBrowserRelay(id)
             // First browser opened this session: offer the VPN to the remote
             // host so its VMs are reachable system-wide, not just from the pane.
-            // Not for a page the workspace opened: the user didn't ask for it.
-            if offerVPN { offerBrowserVPNIfNeeded() }
+            offerBrowserVPNIfNeeded()
         } else {
             browserOpen.remove(id)
             browserOpenSessions = browserOpenSessions.filter { $0.value != id }

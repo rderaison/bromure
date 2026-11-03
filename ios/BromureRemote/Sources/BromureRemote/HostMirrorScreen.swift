@@ -510,30 +510,6 @@ struct HostMirrorScreen: View {
 
 // MARK: - Decision prompts (mirror of the macOS NSAlert path)
 
-/// A page a workspace asked to open, held for the user's word (the server
-/// marked it "ask"). Cancel is the default, as on the Mac.
-struct GuestPageAlert: ViewModifier {
-    let controller: RemoteHostController
-
-    private var shown: Binding<Bool> {
-        Binding(get: { controller.guestPageAsk != nil }, set: { _ in })
-    }
-
-    func body(content: Content) -> some View {
-        content.alert(RemoteHostController.guestPageTitle, isPresented: shown,
-                      presenting: controller.guestPageAsk) { _ in
-            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {
-                controller.answerGuestPage(open: false)
-            }
-            Button(NSLocalizedString("Open in Browser", comment: "guest URL open prompt")) {
-                controller.answerGuestPage(open: true)
-            }
-        } message: { ask in
-            Text(RemoteHostController.guestPageMessage(ask.url, workspace: ask.workspace))
-        }
-    }
-}
-
 /// The server's pending prompt as a native alert with EVERY button it sent,
 /// in order — the base-image upgrade offer has three ("Yes, upgrade" / "No"
 /// / "Remind me later"), and collapsing to two used to lose the last one.
@@ -573,7 +549,6 @@ struct DecisionPromptAlert: ViewModifier {
 extension View {
     func decisionPrompts(_ controller: RemoteHostController) -> some View {
         modifier(DecisionPromptAlert(controller: controller))
-            .modifier(GuestPageAlert(controller: controller))
     }
 }
 

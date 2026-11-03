@@ -69,13 +69,10 @@ struct GuestURLDispositionTests {
     @Test("every guest-URL hand-off goes through the disposition")
     func handOffsUseIt() throws {
         let ac = try Self.src("Sources/AgentCoding/BromureAC.swift")
-        let fn = try #require(ac.range(of: "static func openGuestRelayedURL(_ url: URL, workspace: String? = nil, profileID: Profile.ID? = nil) {"))
-        let body = ac[fn.upperBound...].prefix(900)
+        let fn = try #require(ac.range(of: "static func openGuestRelayedURL(_ url: URL, workspace: String? = nil) {"))
+        let body = ac[fn.upperBound...].prefix(700)
         #expect(body.contains("switch GuestURLGate.disposition(for: url) {"))
-        // A page that isn't a sign-in opens in the workspace's own browser,
-        // or, with no window for it, only once the user says so.
-        #expect(body.contains("window.openGuestPage(url, in: profileID, workspace: workspace)"))
-        #expect(body.contains("askBeforeOpeningGuestURL(url, workspace: workspace)"))
+        #expect(body.contains("case .ask:\n            askBeforeOpeningGuestURL(url, workspace: workspace)"))
         // The fat client (Mac and iOS) opens a published sign-in URL only when
         // it is one: no ask there, the VM terminal still shows the URL.
         let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")

@@ -736,18 +736,6 @@ final class WorkspaceBrowserController {
     }
 
     func newTab(_ raw: String) { tabBridge?.newTab(url: raw.isEmpty ? "" : BrowserPaneModel.normalize(raw)) }
-    /// Open `raw` in a new tab once the browser is up, booting it if it isn't
-    /// (a page the workspace's guest asked to open).
-    func openWhenReady(_ raw: String) {
-        ensureRunning()
-        Task { @MainActor [weak self] in
-            for _ in 0..<900 {   // ~90 s: a cold boot, an image install
-                guard let self else { return }
-                if self.tabBridge != nil { self.newTab(raw); return }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-        }
-    }
     func activateTab(_ id: String) { model.tabBar.markActiveLocally(id); tabBridge?.activate(id: id) }
     /// Close a tab. Closing the LAST tab would quit Chromium and power off the
     /// browser VM, so open a fresh tab first to keep the browser alive.

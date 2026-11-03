@@ -1139,21 +1139,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         controller.ensureRunning()
     }
 
-    /// A page the workspace's guest asked to open, in that workspace's own
-    /// browser: shown when the workspace is on stage, else opened in its
-    /// browser in the background, with a notice.
-    func openGuestPage(_ url: URL, in id: Profile.ID, workspace: String?) {
-        let controller = browserController(for: id)
-        if (liveSessionOnStage?.profileID ?? selectedID) == id, !browserPaneOpen {
-            setBrowserPaneOpen(true, animated: true)
-        } else if (liveSessionOnStage?.profileID ?? selectedID) != id {
-            showNotice(String(format: NSLocalizedString(
-                "Opened a page in “%@”’s browser.", comment: "guest page opened in a background workspace's browser"),
-                workspace ?? ""))
-        }
-        controller.openWhenReady(url.absoluteString)
-    }
-
     /// Point the pane at `id`'s browser and mark it visible; hide the
     /// previously-shown one so its collapse timers arm.
     private func showBrowser(for id: Profile.ID) {
