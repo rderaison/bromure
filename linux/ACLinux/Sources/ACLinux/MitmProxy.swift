@@ -456,6 +456,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         if tls, let c = SubscriptionProviders.signInCapture?(profileID),
            let bodyStart = req.range(of: Data("\r\n\r\n".utf8)),
            c.matches(host: host, method: method, path: path, body: req.subdata(in: bodyStart.upperBound..<req.count)) {
+            // An ended sign-in's late exchange: refused, never redeemed with
+            // the provider (the code would be spent on a login nobody keeps).
+            if c.spent { return .answer(SignInCapture.notKeptReply) }
             if let sim = c.simulatedReply {
                 // The sign-in simulator (e2e): the provider's reply is canned.
                 let (status, body) = HTTPRequestFraming.responseStatusAndBody(sim)
@@ -608,10 +611,7 @@ final class ResponseRelay: ChannelInboundHandler {
                 if let kept {
                     reply = kept
                 } else if status == 200 {
-                    reply = SignInCapture.response(status: 400, reason: "Bad Request", json: [
-                        "error": "bromure_not_kept",
-                        "error_description": "Bromure couldn't keep this sign-in on the host, so it wasn't saved and nothing was passed to the workspace. Sign in again from the session's card.",
-                    ])
+                    reply = SignInCapture.notKeptReply
                 } else {
                     reply = raw
                 }
