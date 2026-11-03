@@ -197,25 +197,8 @@ extension CodingTaskEngine {
     nonisolated static func safeRemote(_ remote: String?) -> String? { BranchMergeCommands.safeRemote(remote) }
     nonisolated static func pickRemoteShell(repo: String) -> String { BranchMergeCommands.pickRemoteShell(repo: repo) }
 
-    /// A branch name safe to hand git — Bromure's commands and an agent's
-    /// brief alike: what `git check-ref-format --branch` accepts, and never
-    /// an option. Quoting stops the shell, not git: a parent branch named
-    /// `--upload-pack=./pwn.sh` (HEAD can point at one, and the worktree's
-    /// parent is read from HEAD) ran that program from `git pull --rebase`.
-    nonisolated static func isSafeBranchName(_ s: String) -> Bool {
-        BranchMergeCommands.isSafeBranchName(s)
-    }
 
-    /// The first of these names that isn't a plain branch name, if any.
-    nonisolated static func unsafeBranch(_ names: String?...) -> String? {
-        names.compactMap { $0 }.first { !isSafeBranchName($0) }
-    }
 
-    nonisolated static func unsafeBranchWhy(_ name: String) -> String {
-        String(format: NSLocalizedString(
-            "“%@” isn't a plain branch name — git would read it as an option. Rename the branch, then retry.",
-            comment: "task landing: an option-shaped branch name"), name)
-    }
 
     /// `git remote`'s listing → the remote a landing pushes to.
     nonisolated static func pickRemote(_ listing: String) -> String? {

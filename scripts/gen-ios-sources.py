@@ -37,6 +37,7 @@ SHARED = [
     "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store
     "Profile.swift",
     "CodingTasks.swift",
+    "CodingTaskCommands.swift", # the guest commands both engines build (relaunch, transcript chunk, clone, branch names)
     "AgentScreen.swift",        # agent-screen shapes + per-agent wording (CodingTasks uses its menu regex)
     "ScheduledAutomations.swift",
     # Policy / token / routing types Profile.swift and the mirror reference.
