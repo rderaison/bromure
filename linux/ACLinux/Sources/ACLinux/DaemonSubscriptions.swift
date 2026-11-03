@@ -1,0 +1,100 @@
+import Foundation
+
+/// The server's subscription sign-ins for a fat client's Preferences →
+/// Models (macOS: the automation server's /subscriptions routes and
+/// /state's `subscriptions`), over the proxy's stores.
+extension Daemon {
+    /// `POST /subscriptions/register|forget`; nil for any other path.
+    // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
+    func subscriptionsRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
+        let provider = body["provider"]?.stringValue ?? ""
+        let pid = body["profileId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        switch (method, path) {
+        case ("POST", "/subscriptions/register"):
+            // macOS signs in on a throwaway machine from Preferences; here a
+            // sign-in runs in a session's own tab (its card).
+            // partial: no Preferences sign-in on Linux (the session card's sign-in is the path)
+            return ControlResponse(409, ["ok": false, "error": .string(
+                "Sign in from a session on this server: its card's \"Sign in\" runs the login in that session's tab.")])
+        case ("POST", "/subscriptions/forget"):
+            guard let p = SubscriptionProvider(rawValue: provider) else { return .error(400, "Missing 'provider'") }
+            let ok = await MainActor.run { () -> Bool in
+                guard let mitm = self.mitm else { return false }
+                Self.forgetSubscription(p, profileID: pid, mitm: mitm)
+                return true
+            }
+            return ControlResponse(ok ? 200 : 400, ["ok": .bool(ok)])
+        default:
+            return nil
+        }
+    }
+
+    /// Log a subscription out: with a workspace, the scope in effect for it
+    /// (its own sign-in if it has one, else the shared one); without, the
+    /// shared one.
+    // @port ACAppDelegate.forgetSubscription(_: SubscriptionProvider, profileID: UUID?) h=2b6d62a75938ccc3 @b10aa434
+    @MainActor
+    static func forgetSubscription(_ provider: SubscriptionProvider, profileID: UUID?, mitm: MitmProxy) {
+        switch provider {
+        case .claude:
+            let s = mitm.claudeStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .codex:
+            let s = mitm.codexStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .grok:
+            let s = mitm.grokStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .kimi:
+            let s = mitm.kimiStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        }
+        FileHandle.standardError.write(Data(
+            "[subscription] logged out \(provider.rawValue) (\(profileID.map { "workspace \($0.uuidString.prefix(8))" } ?? "shared"))\n".utf8))
+        NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+    }
+
+    /// `/state`'s `subscriptions`: per agent, when its sign-in was stored,
+    /// the re-auth flag and the login's health (never token data), and the
+    /// workspaces whose own sign-in shadows the shared one.
+    // partial: no per-launch auth notes (launchAuth) on Linux
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSubscriptionStatus h=7804aacc121a331d @b10aa434
+    @MainActor
+    static func subscriptionStatus(mitm: MitmProxy?, profileID pid: UUID? = nil) -> [String: Any] {
+        guard let mitm else { return [:] }
+        let allProfiles = ProfileStore().loadAll()
+        func entry(_ savedAt: Date?, _ reauth: Date?, health: SubscriptionLoginHealth?,
+                   hasOwn: (UUID) -> Bool) -> [String: Any]? {
+            guard let savedAt else {
+                return health?.storeUnreadable == true ? ["storeUnreadable": true] : nil
+            }
+            var d: [String: Any] = ["registeredAt": savedAt.timeIntervalSince1970]
+            if let reauth { d["reauthRequiredAt"] = reauth.timeIntervalSince1970 }
+            if let health { d.merge(health.stateJSON) { cur, _ in cur } }
+            if let pid {
+                d["scope"] = hasOwn(pid) ? "workspace" : "shared"
+            } else {
+                let overrides = allProfiles.filter { hasOwn($0.id) }.map { $0.id.uuidString }
+                if !overrides.isEmpty { d["overrides"] = overrides }
+            }
+            return d
+        }
+        var out: [String: Any] = [:]
+        if let e = entry(mitm.claudeStore.record(for: pid)?.savedAt, mitm.claudeStore.reauthRequiredAt(for: pid),
+                         health: mitm.claudeStore.health(for: pid), hasOwn: mitm.claudeStore.hasProfileRecord) { out["claude"] = e }
+        if let e = entry(mitm.codexStore.record(for: pid)?.savedAt, mitm.codexStore.reauthRequiredAt(for: pid),
+                         health: mitm.codexStore.health(for: pid), hasOwn: mitm.codexStore.hasProfileRecord) { out["codex"] = e }
+        if let e = entry(mitm.grokStore.record(for: pid)?.savedAt, mitm.grokStore.reauthRequiredAt(for: pid),
+                         health: mitm.grokStore.health(for: pid), hasOwn: mitm.grokStore.hasProfileRecord) { out["grok"] = e }
+        if let e = entry(mitm.kimiStore.record(for: pid)?.savedAt, mitm.kimiStore.reauthRequiredAt(for: pid),
+                         health: mitm.kimiStore.health(for: pid), hasOwn: mitm.kimiStore.hasProfileRecord) { out["kimi"] = e }
+        return out
+    }
+
+    /// `/state`'s `securityTimeline`: the rows the timeline holds, as macOS
+    /// mirrors them to a client.
+    // partial: the Linux proxy doesn't yet record its egress/guardrail/PII events into the timeline
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSecurityTimeline h=b7ea08f0aaba6afa @b10aa434
+    @MainActor
+    static func securityTimelineRows() -> [Any] { SecurityTimeline.shared.mirrorRows() }
+}

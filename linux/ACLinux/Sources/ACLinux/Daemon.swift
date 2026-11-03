@@ -229,6 +229,7 @@ public actor Daemon {
         default:
             if let r = await boardRoute(req.method, path, req.body) { return r }
             if let r = await preferencesRoute(req.method, path, req.body) { return r }
+            if let r = await subscriptionsRoute(req.method, path, req.body) { return r }
             return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
@@ -319,9 +320,14 @@ public actor Daemon {
             guard rec.state == .running else { return (id, nil) }
             return (id, GuestOutbox.parseRoster(GuestOutbox.read(vmDir(rec.id) + "/outbox/tabs.txt") ?? ""))
         }
+        let mitmProxy = mitm
         let (prompts, sessionEntries, statuses) = await MainActor.run {
             for (id, roster) in rosters { LinuxSessionHost.shared?.updateRoster(id, roster) }
-            return (PendingPromptBroker.shared.pendingList(), (SessionStores.shared?.stateEntries() ?? [:]).merging(SessionStores.shared?.boardStateEntries() ?? [:]) { a, _ in a },
+            return (PendingPromptBroker.shared.pendingList(), (SessionStores.shared?.stateEntries() ?? [:]).merging(SessionStores.shared?.boardStateEntries() ?? [:]) { a, _ in a }
+                .merging([
+                    "subscriptions": JSONValue(foundation: Daemon.subscriptionStatus(mitm: mitmProxy)) ?? .object([:]),
+                    "securityTimeline": JSONValue(foundation: Daemon.securityTimelineRows()) ?? .array([]),
+                ]) { a, _ in a },
                     LinuxSessionHost.shared?.tabStatuses() ?? [:])
         }
         // As on macOS, `vms` is the running (and booting) VMs and `workspaces`

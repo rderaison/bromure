@@ -462,6 +462,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 return .answer(await c.handle(status, body) ?? sim)
             }
             capture = c
+            // The exchange's reply is read here, not relayed: ask for it
+            // uncompressed (nothing here decodes gzip or br).
+            req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
         }
         return .forward(upgrade ? req : closing(req), injected, capture: capture, upgrade: upgrade)
     }
@@ -595,10 +598,25 @@ final class ResponseRelay: ChannelInboundHandler {
             let (status, body) = HTTPRequestFraming.responseStatusAndBody(raw)
             noteStatus(raw)
             let guest = self.guest
+            let encoded = Self.isEncoded(raw)
             Task {
-                let reply = await capture.handle(status, body) ?? raw
+                let kept = encoded ? nil : await capture.handle(status, body)
+                // A successful exchange the host didn't keep never reaches
+                // the guest: its real tokens would. (A pending device-code
+                // poll or an error isn't a 200, and passes through.)
+                let reply: Data
+                if let kept {
+                    reply = kept
+                } else if status == 200 {
+                    reply = SignInCapture.response(status: 502, reason: "Bad Gateway", json: [
+                        "error": "bromure_not_kept",
+                        "error_description": "Bromure couldn't keep this sign-in on the host, so it wasn't saved and nothing was passed to the workspace. Sign in again from the session's card.",
+                    ])
+                } else {
+                    reply = raw
+                }
                 FileHandle.standardError.write(Data(
-                    "[mitm] sign-in exchange → \(status), \(reply == raw ? "passed through" : "kept on the host")\n".utf8))
+                    "[mitm] sign-in exchange → \(status), \(kept != nil ? "kept on the host" : status == 200 ? "NOT kept\(encoded ? " (encoded reply)" : ""): refused to the guest" : "passed through")\n".utf8))
                 guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
             }
             return
@@ -609,6 +627,15 @@ final class ResponseRelay: ChannelInboundHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func errorCaught(context: ChannelHandlerContext, error: Error) {
         context.close(promise: nil)
+    }
+
+    /// Whether a response's body is content-encoded (gzip, br, …).
+    // @port-skip linux-only: proxy response parsing
+    static func isEncoded(_ raw: Data) -> Bool {
+        guard let end = raw.range(of: Data("\r\n\r\n".utf8)) else { return false }
+        let head = String(decoding: raw[raw.startIndex..<end.lowerBound], as: UTF8.self)
+        let ce = HTTPRequestFraming.headers(head)["content-encoding"]?.lowercased() ?? "identity"
+        return !ce.isEmpty && ce != "identity"
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy

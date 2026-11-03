@@ -1525,3 +1525,19 @@ struct VMRegistryTests {
         #expect(reg.find(lost.id)?.state == .stopped)
     }
 }
+
+@Suite("Sign-in capture")
+struct SignInCaptureProxyTests {
+    @Test("a captured exchange's reply is asked for uncompressed, and an encoded one is recognised")
+    func encoding() {
+        #expect(ResponseRelay.isEncoded(Data("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\nxx".utf8)))
+        #expect(ResponseRelay.isEncoded(Data("HTTP/1.1 200 OK\r\ncontent-encoding: br\r\n\r\nxx".utf8)))
+        #expect(!ResponseRelay.isEncoded(Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}".utf8)))
+        #expect(!ResponseRelay.isEncoded(Data("HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\n\r\n{}".utf8)))
+        let req = HTTPRequestFraming.replacingHeaders(
+            Data("POST /v1/oauth/token HTTP/1.1\r\nHost: a\r\nAccept-Encoding: gzip, br\r\n\r\n{}".utf8),
+            drop: ["accept-encoding"], add: "Accept-Encoding: identity")
+        let text = String(decoding: req, as: UTF8.self)
+        #expect(text.contains("Accept-Encoding: identity") && !text.contains("gzip"))
+    }
+}
