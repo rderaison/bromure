@@ -1,23 +1,31 @@
 import CACLinuxShims
 import Crypto
 import Foundation
+import NIOConcurrencyHelpers
 
 /// The Linux side of the shared SSH server's password check
 /// (SystemPassword.verify in _shared/RemoteSSHHandlers.swift): a fat client
 /// that has no enrolled key yet logs in once with a password, then enrolls its
-/// key over the control API. Accepted:
+/// key over the control API. Only for the user running the daemon, and:
 /// - a one-time enrollment code (`bromure-ac remote code`): shown on the
 ///   server, single use, short-lived, kept only as a hash;
-/// - the account password of the user running the daemon, through PAM
-///   (service `bromure-ac`; without /etc/pam.d/bromure-ac PAM uses "other").
-///   An unprivileged process can check its own user's password: pam_unix
-///   asks the setuid unix_chkpwd helper.
+/// - with `--allow-account-password` only (off by default: the daemon's
+///   user is often a sudo-capable login, and the listener is on 0.0.0.0),
+///   that user's account password through PAM (service `bromure-ac`;
+///   without /etc/pam.d/bromure-ac PAM uses "other"). Unprivileged,
+///   pam_unix checks it through the setuid unix_chkpwd helper.
 // @port-skip linux-only: macOS verifies against OpenDirectory (SystemPassword)
 enum LinuxAccountPassword {
+    /// Whether the account password is accepted (RemoteSettings.allowAccountPassword).
+    static let allowPAM = NIOLockedValueBox(false)
+
     // @port-skip linux-only: password check
-    static func verify(user: String, password: String) -> Bool {
+    static func verify(user: String, password: String, owner: String = NSUserName()) -> Bool {
+        // Never another account's credentials: a session runs with the
+        // daemon's rights, whoever the name says.
+        guard user == owner else { return false }
         if EnrollmentCodes.consume(password) { return true }
-        return acl_pam_check("bromure-ac", user, password) == 0
+        return allowPAM.withLockedValue { $0 } && acl_pam_check("bromure-ac", user, password) == 0
     }
 }
 
@@ -28,9 +36,13 @@ enum EnrollmentCodes {
     /// No 0/O, 1/I/L: read off a screen and typed on a phone.
     static let alphabet = Array("ABCDEFGHJKMNPQRSTUVWXYZ23456789")
 
+    /// The one code file, set by the daemon (<state>/remote/enroll-codes):
+    /// `remote code` writes it and the SSH server's password check reads it.
+    static let file = NIOLockedValueBox<String?>(nil)
+
     // @port-skip linux-only: enrollment codes
     static var defaultPath: String {
-        RemoteAccessServer.Paths.default.dir.appendingPathComponent("enroll-codes").path
+        file.withLockedValue { $0 } ?? RemoteAccessServer.Paths.default.dir.appendingPathComponent("enroll-codes").path
     }
 
     /// A new code valid for `lifetime`, e.g. `K7QM-2HXP-9TRA-WD4N` (80 bits).

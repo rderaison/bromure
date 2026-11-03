@@ -10,6 +10,22 @@ public struct RemoteSettings: Codable, Equatable, Sendable {
     public var bindAddress = "0.0.0.0"
     public var passwordAuth = true
     public var pubkeyAuth = true
+    /// Password logins may use the account password (PAM), not only
+    /// one-time enrollment codes. Off unless asked for.
+    public var allowAccountPassword = false
+
+    enum CodingKeys: String, CodingKey { case enabled, port, bindAddress, passwordAuth, pubkeyAuth, allowAccountPassword }
+
+    // @port-skip linux-only: remote settings (files written before allowAccountPassword decode)
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 2222
+        bindAddress = try c.decodeIfPresent(String.self, forKey: .bindAddress) ?? "0.0.0.0"
+        passwordAuth = try c.decodeIfPresent(Bool.self, forKey: .passwordAuth) ?? true
+        pubkeyAuth = try c.decodeIfPresent(Bool.self, forKey: .pubkeyAuth) ?? true
+        allowAccountPassword = try c.decodeIfPresent(Bool.self, forKey: .allowAccountPassword) ?? false
+    }
 
     // @port-skip linux-only: remote settings
     public init() {}
@@ -49,6 +65,7 @@ extension Daemon {
         // the state dir's; the runtime one points at it, so the host key a
         // client pinned survives a reboot.
         Self.linkRemoteDirectory(state: config.stateDir + "/remote", runtime: config.runtimeDir + "/remote")
+        EnrollmentCodes.file.withLockedValue { $0 = config.stateDir + "/remote/enroll-codes" }
         let g = sw.dhcp.server.map(UInt32.init)
         let gw = g[0] << 24 | g[1] << 16 | g[2] << 8 | g[3]
         SandboxEngine.VMNetSwitch.shared.subnet = SandboxEngine.Subnet(network: gw & 0xFFFF_FF00, prefix: 24, gateway: gw)
@@ -62,6 +79,7 @@ extension Daemon {
             }
         }
         let s = RemoteSettings.load(remoteSettingsPath)
+        LinuxAccountPassword.allowPAM.withLockedValue { $0 = s.allowAccountPassword }
         guard s.enabled else { return }
         do {
             try await MainActor.run { try RemoteAccessServer.shared.start(s.serverConfig) }
@@ -93,8 +111,7 @@ extension Daemon {
     func remoteCode(_ body: JSONValue) -> ControlResponse {
         let minutes = min(60, max(1, Int(body["minutes"]?.numberValue ?? 10)))
         do {
-            let code = try EnrollmentCodes.create(lifetime: .seconds(minutes * 60),
-                                                  path: config.stateDir + "/remote/enroll-codes")
+            let code = try EnrollmentCodes.create(lifetime: .seconds(minutes * 60))
             return ControlResponse(200, ["code": .string(code), "minutes": .number(Double(minutes)), "user": .string(NSUserName())])
         } catch { return .error(500, "\(error)") }
     }
@@ -112,6 +129,7 @@ extension Daemon {
         return ControlResponse(200, [
             "enabled": .bool(s.enabled), "running": .bool(running), "port": .number(Double(s.port)),
             "bindAddress": .string(s.bindAddress), "passwordAuth": .bool(s.passwordAuth), "pubkeyAuth": .bool(s.pubkeyAuth),
+            "allowAccountPassword": .bool(s.allowAccountPassword),
             "fingerprint": .string(fp ?? "(not generated yet)"), "user": .string(user),
             "connect": .string("ssh -p \(s.port) \(user)@\(host)"),
             "authorizedKeys": .array(keys.map { ["type": .string($0.type), "comment": .string($0.comment),
@@ -132,11 +150,13 @@ extension Daemon {
         if let b = spec["bindAddress"]?.stringValue, !b.isEmpty { s.bindAddress = b }
         if case .bool(let v)? = spec["passwordAuth"] { s.passwordAuth = v }
         if case .bool(let v)? = spec["pubkeyAuth"] { s.pubkeyAuth = v }
+        if case .bool(let v)? = spec["allowAccountPassword"] { s.allowAccountPassword = v }
         if case .bool(let enabled)? = spec["enabled"] {
             guard s.passwordAuth || s.pubkeyAuth else { return .error(400, "Enable at least one of password / public-key auth.") }
             s.enabled = enabled
         }
         do { try s.save(remoteSettingsPath) } catch { return .error(500, "\(error)") }
+        LinuxAccountPassword.allowPAM.withLockedValue { $0 = s.allowAccountPassword }
         let cfg = s.serverConfig, enabled = s.enabled
         do {
             try await MainActor.run {

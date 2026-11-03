@@ -1396,3 +1396,35 @@ struct FirecrackerAdoptionTests {
         #expect(!Daemon.killIfOurs(rec))                          // gone: nothing to kill
     }
 }
+
+@Suite("Remote access passwords", .serialized)
+struct RemotePasswordTests {
+    @Test("an enrollment code: the daemon's user only, once, before it expires; the account password only when allowed")
+    func codes() throws {
+        let path = try shortTempDir() + "/enroll-codes"
+        EnrollmentCodes.file.withLockedValue { $0 = path }
+        defer { EnrollmentCodes.file.withLockedValue { $0 = nil } }
+        let code = try EnrollmentCodes.create(lifetime: .seconds(60))
+        #expect(code.count == 19 && code.split(separator: "-").count == 4)
+        // Another user name never gets in, and doesn't use the code up.
+        #expect(!LinuxAccountPassword.verify(user: "root", password: code, owner: "me"))
+        #expect(LinuxAccountPassword.verify(user: "me", password: code.lowercased().replacingOccurrences(of: "-", with: ""), owner: "me"))
+        #expect(!LinuxAccountPassword.verify(user: "me", password: code, owner: "me"))          // used up
+        let old = try EnrollmentCodes.create(lifetime: .seconds(60), now: Date(timeIntervalSinceNow: -120))
+        #expect(!LinuxAccountPassword.verify(user: "me", password: old, owner: "me"))           // expired
+        // Not a code, and PAM off (the default): refused without asking PAM.
+        LinuxAccountPassword.allowPAM.withLockedValue { $0 = false }
+        #expect(!LinuxAccountPassword.verify(user: "me", password: "hunter2", owner: "me"))
+        let left = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        #expect(left.isEmpty, "expired and used codes are dropped: \(left)")
+    }
+
+    @Test("settings written before allowAccountPassword existed decode with it off")
+    func settingsCompat() throws {
+        let path = try shortTempDir() + "/remote.json"
+        try #"{"enabled": true, "port": 2300, "bindAddress": "127.0.0.1", "passwordAuth": true, "pubkeyAuth": true}"#
+            .write(toFile: path, atomically: true, encoding: .utf8)
+        let s = RemoteSettings.load(path)
+        #expect(s.enabled && s.port == 2300 && !s.allowAccountPassword)
+    }
+}

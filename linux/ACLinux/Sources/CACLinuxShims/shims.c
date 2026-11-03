@@ -249,6 +249,7 @@ int acl_pidfd_send_signal(int pidfd, int sig) {
 #ifdef __linux__
 #include <linux/vm_sockets.h>
 #include <poll.h>
+#include <time.h>
 #include <stdio.h>
 #include <sys/time.h>
 int acl_vsock_listen(unsigned int port, int backlog) {
@@ -274,6 +275,12 @@ static int acl_connect_timeout(int fd, const struct sockaddr *sa, socklen_t len,
     int fl = fcntl(fd, F_GETFL);
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     int r = connect(fd, sa, len);
+    // AF_UNIX: EAGAIN when the listener's backlog is full; try again until the deadline.
+    for (int waited = 0; r < 0 && errno == EAGAIN && sa->sa_family == AF_UNIX && waited < timeout_ms; waited += 10) {
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+        r = connect(fd, sa, len);
+    }
     if (r < 0 && errno == EINPROGRESS) {
         struct pollfd p = { .fd = fd, .events = POLLOUT };
         r = poll(&p, 1, timeout_ms);

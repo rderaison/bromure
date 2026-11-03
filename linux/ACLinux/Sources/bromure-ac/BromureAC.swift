@@ -425,7 +425,7 @@ struct Remote: AsyncParsableCommand {
                           default: return j[k]?.stringValue ?? "-" }
         }
         print("enabled: \(s("enabled"))   running: \(s("running"))   port: \(s("port"))   bind: \(s("bindAddress"))")
-        print("password auth: \(s("passwordAuth"))   public-key auth: \(s("pubkeyAuth"))")
+        print("password auth: \(s("passwordAuth")) (account password: \(s("allowAccountPassword")), else one-time codes)   public-key auth: \(s("pubkeyAuth"))")
         print("host key: \(s("fingerprint"))")
         print("connect: \(s("connect"))")
         if case .array(let keys)? = j["authorizedKeys"], !keys.isEmpty {
@@ -451,9 +451,12 @@ struct Remote: AsyncParsableCommand {
         @Option(help: "Address to listen on (default 0.0.0.0).") var bind: String?
         @Flag(help: "Refuse password (and enrollment-code) logins.") var noPassword = false
         @Flag(help: "Refuse public-key logins.") var noPubkey = false
+        @Flag(help: "Also accept this account's password (PAM) for password logins; by default only one-time codes (`remote code`).")
+        var allowAccountPassword = false
         // @port-skip linux-only: CLI
         func run() async throws {
-            var body: [String: JSONValue] = ["enabled": true, "passwordAuth": .bool(!noPassword), "pubkeyAuth": .bool(!noPubkey)]
+            var body: [String: JSONValue] = ["enabled": true, "passwordAuth": .bool(!noPassword), "pubkeyAuth": .bool(!noPubkey),
+                                             "allowAccountPassword": .bool(allowAccountPassword)]
             if let port { body["port"] = .number(Double(port)) }
             if let bind { body["bindAddress"] = .string(bind) }
             let r = try client().request("POST", "/remote", body: .object(body))
