@@ -1520,3 +1520,28 @@ struct DelegationScreenTests {
         #expect(Daemon.heuristicScan(hidden) != nil, "Unicode tag characters are a high-severity hit")
     }
 }
+
+@Suite("VM registry")
+struct VMRegistryTests {
+    @Test("a suspended VM stays suspended across a daemon restart while its snapshot is there, and is stopped without it")
+    func suspendedSurvives() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let path = d + "/vms.json"
+        let keep = VMRecord(id: UUID().uuidString.lowercased(), name: "keep", machine: "firecracker", cid: 3,
+                            mac: "52:54:00:00:00:01", state: .suspended, ip: nil, cpus: 1, memoryMiB: 512,
+                            createdAt: Date(), bootedAt: nil, statePath: nil)
+        var lost = keep
+        lost.id = UUID().uuidString.lowercased(); lost.name = "lost"
+        var reg0 = VMRegistry(path: path)
+        for var r in [keep, lost] {
+            r.state = .suspended
+            try reg0.upsert(r)
+        }
+        try FileManager.default.createDirectory(atPath: d + "/vms/" + keep.id + "/snapshot", withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: d + "/vms/" + keep.id + "/snapshot/vm.snap", contents: Data([1]))
+        let reg = VMRegistry(path: path)
+        #expect(reg.find(keep.id)?.state == .suspended)
+        #expect(reg.find(lost.id)?.state == .stopped)
+    }
+}

@@ -77,8 +77,8 @@ public struct VMRegistry: Sendable {
 
     /// Loads the registry. VMs recorded as running or starting are marked
     /// stopped unless `isAlive` says their Firecracker is still there (the daemon
-    /// re-adopts those). Suspended ones stay suspended (their state file is
-    /// still valid).
+    /// re-adopts those). Suspended ones stay suspended while their snapshot
+    /// is there.
     // @port-skip linux-only: Linux daemon state persistence
     public init(path: String, isAlive: (VMRecord) -> Bool = { _ in false }) {
         self.path = path
@@ -95,8 +95,12 @@ public struct VMRegistry: Sendable {
             records[i].ip = nil
             changed = true
         }
+        // A suspended VM's snapshot is `<state>/vms/<id>/snapshot/vm.snap`
+        // (Daemon.snapshotDir); without it, there's nothing to resume.
+        let vmsDir = (path as NSString).deletingLastPathComponent + "/vms/"
         for i in records.indices where records[i].state == .suspended {
-            if records[i].statePath.map({ !FileManager.default.fileExists(atPath: $0) }) ?? true {
+            let snap = vmsDir + records[i].id + "/snapshot/vm.snap"
+            if !FileManager.default.fileExists(atPath: snap) {
                 records[i].state = .stopped
                 changed = true
             }

@@ -96,7 +96,7 @@ extension LinuxSessionHost: ProxySignInHost {
     /// A page the guest opened. A server has no browser: the one it acts on
     /// is a sign-in's, published for the client that asked for it, with the
     /// guest port its callback comes back to.
-    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=1e83b10fabd16924 @dd7ba30d
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=d249db054a08a5ca @5ba53c17
     func guestOpenedURL(_ url: URL, profileID pid: UUID) {
         guard let signIn = proxySignIns[pid], !signIn.finished else {
             // Any other page: offered to the fat client (GuestPageBroker).
