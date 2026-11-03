@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// A tiny loopback HTTP proxy that sits in front of the vllm-mlx engine and
 /// applies `ToolCallRepair` to `/v1/messages` responses. The vsock bridge
@@ -91,12 +94,12 @@ final class InferenceRepairProxy: @unchecked Sendable {
     func startIfNeeded(enginePort: Int = InferenceService.enginePort) {
         lock.lock(); defer { lock.unlock() }
         if running { return }
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        let fd = tcpSocket()
         guard fd >= 0 else { return }
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        setSockaddrLength(&addr)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = 0   // kernel-assigned: avoids clashing with whatever holds 11500
         _ = inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
@@ -144,7 +147,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // One pool per request: a raw Thread never drains its implicit pool,
         // so a keep-alive connection would hold every request's (multi-MB)
         // prompt JSON until it closed.
-        while autoreleasepool(invoking: { () -> Bool in
+        while threadAutoreleasepool({ () -> Bool in
             guard let req = Self.readRequest(fd: clientFD) else { return false }
             guard let resp = Self.respond(to: req, enginePort: enginePort,
                                           streamFD: clientFD) else {

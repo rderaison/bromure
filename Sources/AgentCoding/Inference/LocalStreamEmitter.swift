@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 // Live token streaming for local inference (external engines + built-in MLX).
 //
@@ -76,7 +79,7 @@ final class LocalStreamEmitter {
             guard var base = raw.baseAddress else { return false }
             var remaining = raw.count
             while remaining > 0 {
-                let n = Darwin.write(fd, base, remaining)
+                let n = LibC.write(fd, base, remaining)
                 if n > 0 { base += n; remaining -= n }
                 else if n < 0 && errno == EINTR { continue }
                 else { return false }

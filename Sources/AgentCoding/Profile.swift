@@ -3557,9 +3557,15 @@ public final class ProfileStore {
     private let rootDir: URL
     private let fm = FileManager.default
 
+    /// Where `ProfileStore()` keeps profiles when no root is given: unset,
+    /// Application Support (below); the Linux daemon sets its state dir.
+    nonisolated(unsafe) public static var defaultRootDir: URL?
+
     public init(rootDir: URL? = nil) {
         if let rootDir {
             self.rootDir = rootDir
+        } else if let root = Self.defaultRootDir {
+            self.rootDir = root
         } else {
             let appSupport = FileManager.default.urls(
                 for: .applicationSupportDirectory, in: .userDomainMask
@@ -4139,7 +4145,7 @@ public final class ProfileStore {
         let srcPath = src.path(percentEncoded: false)
         let dstPath = dst.path(percentEncoded: false)
 
-        let result = clonefile(srcPath, dstPath, 0)
+        let result = cloneFile(srcPath, dstPath)
         if result == 0 { return }
 
         let cloneErrno = errno
@@ -7056,4 +7062,11 @@ public enum KernelSentryMode: String, Codable, CaseIterable, Sendable {
         case .hard: return NSLocalizedString("Required", comment: "kernel sentry mode")
         }
     }
+}
+
+extension Notification.Name {
+    /// A workspace's storage may have changed under an open editor: it
+    /// started (a boot creates the home image) or stopped. `object` is the
+    /// profile id; its editor measures the storage again.
+    static let bromureWorkspaceStorageChanged = Notification.Name("io.bromure.workspaceStorageChanged")
 }

@@ -5,17 +5,6 @@ import Foundation
 // the VZ listener in BrowserMCPVsockBridge, so a server without
 // Virtualization (bromure-ac on Linux) relays its agents the same way.
 
-/// A raw Thread never drains its implicit autorelease pool on Apple
-/// platforms; elsewhere there is none.
-@inline(__always)
-func relayAutoreleasepool<T>(_ body: () throws -> T) rethrows -> T {
-#if canImport(ObjectiveC)
-    try autoreleasepool(invoking: body)
-#else
-    try body()
-#endif
-}
-
 // MARK: - Fat-client relay: one channel, many agents
 
 /// One `browser-mcp` channel to the fat client, shared by every agent in the
@@ -105,7 +94,7 @@ final class RelayMux {
                 let n = LibC.read(fd, &buf, buf.count)
                 if n <= 0 { break }
                 // Pool per batch: a raw Thread never drains its implicit pool.
-                relayAutoreleasepool {
+                threadAutoreleasepool {
                     pendingBytes.append(contentsOf: buf[0..<n])
                     while let nl = pendingBytes.firstIndex(of: 0x0A) {
                         let lineData = Data(pendingBytes[pendingBytes.startIndex..<nl])

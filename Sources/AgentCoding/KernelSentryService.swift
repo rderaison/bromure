@@ -1,7 +1,13 @@
 import Foundation
+#if canImport(Virtualization)
 @preconcurrency import Virtualization
+#endif
 import SandboxEngine
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 
 /// Host side of the guest's kernel sentry (vsock 5841).
 ///
@@ -52,6 +58,7 @@ public final class KernelSentryService: @unchecked Sendable {
 
     // MARK: Lifecycle
 
+    #if canImport(Virtualization)
     @MainActor
     public func attach(profile: Profile, socketDevice: VZVirtioSocketDevice, restoring: Bool) {
         let requirement = profile.effectiveKernelSentry
@@ -74,6 +81,7 @@ public final class KernelSentryService: @unchecked Sendable {
         lock.unlock()
         b?.stop(socketDevice: socketDevice)
     }
+    #endif
 
     /// The guest's root attestor independently reports whether the sentry
     /// runs and a digest of its secret; a live connection that doesn't match
@@ -169,7 +177,7 @@ public final class KernelSentryService: @unchecked Sendable {
 }
 
 /// One VM's sentry channel: u32 big-endian length + JSON frames.
-public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked Sendable {
+public final class SentryBridge: NSObject, @unchecked Sendable {
     public struct Snapshot: Sendable, Equatable {
         public var connected: Bool
         public var kernel: String?
@@ -185,7 +193,9 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
     let profileID: UUID
     let requirement: KernelSentryMode
     private let lock = NSLock()
+    #if canImport(Virtualization)
     private var listener: VZVirtioSocketListener?
+    #endif
     private var fd: Int32 = -1
     private var pinnedSecret: String?
     private var lastSeq: UInt64?
@@ -259,6 +269,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
         sha256Hex(secret + bootID + String(conn))
     }
 
+    #if canImport(Virtualization)
     @MainActor func listen(on device: VZVirtioSocketDevice) {
         let l = VZVirtioSocketListener()
         l.delegate = self
@@ -268,6 +279,12 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
 
     @MainActor func stop(socketDevice: VZVirtioSocketDevice?) {
         socketDevice?.removeSocketListener(forPort: KernelSentryService.vsockPort)
+        closeChannel()
+    }
+    #endif
+
+    /// Ends the guest's connection, if one is open.
+    func closeChannel() {
         lock.lock(); let f = fd; fd = -1; lock.unlock()
         if f >= 0 { close(f) }
     }
@@ -279,14 +296,11 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
                         dropped: dropped, alarms: alarms)
     }
 
-    public func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection,
-                         from socketDevice: VZVirtioSocketDevice) -> Bool {
-        let cfd = dup(connection.fileDescriptor)
-        guard cfd >= 0 else { return false }
+    /// Serves a guest connection (`fd`, the bridge's from now on) on its own thread.
+    func accept(_ cfd: Int32) {
         Thread.detachNewThread { [weak self] in
-            autoreleasepool { self?.serve(cfd) }
+            threadAutoreleasepool { self?.serve(cfd) }
         }
-        return true
     }
 
     // MARK: Framing
@@ -297,7 +311,7 @@ public final class SentryBridge: NSObject, VZVirtioSocketListenerDelegate, @unch
     /// on a raw Thread for the VM's lifetime, whose pool never drains, and
     /// every frame's JSON objects would stay alive until the VM stopped.
     static func serveFrames(_ fd: Int32, _ handle: ([String: Any]) -> Void) {
-        while autoreleasepool(invoking: { () -> Bool in
+        while threadAutoreleasepool({ () -> Bool in
             guard let frame = readFrame(fd) else { return false }
             handle(frame)
             return true
@@ -729,3 +743,15 @@ final class KernelSentryRunState: @unchecked Sendable {
     func set(_ s: Set<UUID>) { lock.lock(); running = s; lock.unlock() }
     func isRunning(_ id: UUID) -> Bool { lock.lock(); defer { lock.unlock() }; return running.contains(id) }
 }
+
+#if canImport(Virtualization)
+extension SentryBridge: VZVirtioSocketListenerDelegate {
+    public func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection,
+                         from socketDevice: VZVirtioSocketDevice) -> Bool {
+        let cfd = dup(connection.fileDescriptor)
+        guard cfd >= 0 else { return false }
+        accept(cfd)
+        return true
+    }
+}
+#endif

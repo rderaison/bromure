@@ -258,13 +258,6 @@ struct ProfileStorageContext {
     }
 }
 
-extension Notification.Name {
-    /// A workspace's storage may have changed under an open editor: it
-    /// started (a boot creates the home image) or stopped. `object` is the
-    /// profile id; its editor measures the storage again.
-    static let bromureWorkspaceStorageChanged = Notification.Name("io.bromure.workspaceStorageChanged")
-}
-
 /// What each storage layer costs on the Mac that holds it.
 struct StorageSizes: Sendable {
     var base: Int64 = 0

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The pluggable local inference engine. We standardize on `vllm-mlx`
 /// (MLX backend, Anthropic-native `/v1/messages` + OpenAI `/v1/*`,
@@ -552,20 +555,4 @@ public actor InferenceService {
         p.arguments = ["-f", "_mlx-engine --config"]
         try? p.run(); p.waitUntilExit()
     }
-}
-
-/// An IPv4 TCP socket: SOCK_STREAM is an Int32 in Darwin, an enum in Glibc.
-private func tcpSocket() -> Int32 {
-#if os(Linux)
-    socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
-#else
-    socket(AF_INET, SOCK_STREAM, 0)
-#endif
-}
-
-/// BSD's sockaddr_in starts with its length; Linux's has no such field.
-private func setSockaddrLength(_ addr: inout sockaddr_in) {
-#if !os(Linux)
-    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-#endif
 }
