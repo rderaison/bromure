@@ -701,6 +701,9 @@ public actor Daemon {
             // the token plan, Codex's file beside the seed's), as macOS seeds them.
             let plan = sessionTokenPlan(for: profile)
             try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan)
+            // The agents' MCP configs (the built-ins and the workspace's own
+            // servers, their tokens as stand-ins), as macOS writes them.
+            try SessionDisk.writeMCPConfigs(into: meta, profile: profile, tokenPlan: plan)
             seedCodexAuthFile(for: profile, homeRoot: seed.appendingPathComponent("files", isDirectory: true))
             try store.finalizeHomeSeed(for: profile, seedDir: seed)
         } else {
@@ -712,7 +715,8 @@ public actor Daemon {
         // The agents' MCP shims (board, automations, delegation, …) and the
         // built-in browser and display servers, as macOS stages them.
         try SessionDisk.writeGuestMCPShims(into: meta)
-        try SessionDisk.writeBuiltInMCPServers(into: meta)
+        // A VM with a Profile got the built-ins with its MCP configs.
+        if profile(for: rec) == nil { try SessionDisk.writeBuiltInMCPServers(into: meta) }
 
         var qc = try machineConfig(rec)
         qc.restoreFrom = restoreFrom

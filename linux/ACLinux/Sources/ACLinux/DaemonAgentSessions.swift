@@ -33,6 +33,7 @@ extension Daemon {
                                                sessionEngine: stores.engine!, delegate: host)
             delegations.profiles = { ProfileStore().loadAll() }
             delegations.hostLabel = { ProcessInfo.processInfo.hostName }
+            delegations.scan = { text in Daemon.heuristicScan(text) }
             stores.delegationEngine = delegations
             let dispatcher = TaskDispatcher(delegate: host)
             stores.taskDispatcher = dispatcher
@@ -251,5 +252,25 @@ extension Daemon {
         }()
         guard let data else { return .error(404, "No transcript") }
         return ControlResponse(200, ["transcript": .string(data.base64EncodedString())])
+    }
+
+    /// The Linux stand-in for the on-device prompt-injection classifier
+    /// (no ONNX runtime on the server): every message between agents is
+    /// screened by the instruction heuristics, and withheld only on a
+    /// high-severity hit (hidden Unicode, instruction content). The return
+    /// is the classifier's shape: the flagged section with some context,
+    /// at most 4000 characters, or nil.
+    // @port-skip linux-only: the Linux screen for DelegationEngine.scan (macOS: PromptInjectionClassifier)
+    static func heuristicScan(_ text: String) -> String? {
+        let findings = InstructionHeuristics.scanHiddenUnicode(text) + InstructionHeuristics.scanInstructionContent(text)
+        guard let hit = findings.first(where: { $0.severity == .high }) else { return nil }
+        var flagged = text
+        if let r = hit.range {
+            let lo = text.index(r.lowerBound, offsetBy: -200, limitedBy: text.startIndex) ?? text.startIndex
+            let hi = text.index(r.upperBound, offsetBy: 200, limitedBy: text.endIndex) ?? text.endIndex
+            flagged = String(text[lo..<hi])
+        }
+        BACDebug.log("delegation", "withheld (\(hit.signal)): \(hit.detail)")
+        return flagged.count > 4000 ? String(flagged.prefix(4000)) + "\n…(truncated)" : flagged
     }
 }
