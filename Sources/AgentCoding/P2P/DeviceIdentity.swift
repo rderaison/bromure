@@ -50,7 +50,7 @@ struct DeviceRecord: Codable, Equatable {
 /// NEVER be mistaken for "not enrolled" (that would silently orphan the
 /// device on the control plane and force a re-enroll after a screen lock).
 enum DeviceIdentityStore {
-#if AGENT_HOST || BROMURE_LINUX
+#if AGENT_HOST || !canImport(Security)
     // The agent host (Sources/AgentHost) is a separate device with no keychain
     // access group (ad-hoc signed), which the data-protection keychain refuses:
     // its record is an owner-only file in its support directory instead.

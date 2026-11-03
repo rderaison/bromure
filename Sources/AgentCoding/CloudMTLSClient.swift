@@ -25,7 +25,9 @@ extension BACMTLSClient {
         try await withCheckedThrowingContinuation { c in
             send(req) { data, resp, err in
                 if let err { c.resume(throwing: err); return }
-                c.resume(returning: (data ?? Data(), resp ?? URLResponse()))
+                // No response and no error: treat it as a bad reply.
+                guard let resp else { c.resume(throwing: URLError(.badServerResponse)); return }
+                c.resume(returning: (data ?? Data(), resp))
             }
         }
     }

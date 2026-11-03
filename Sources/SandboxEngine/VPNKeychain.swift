@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Security)
 import Security
+#endif
 
 /// Stores and retrieves VPN credentials in the macOS Keychain.
 ///
@@ -22,7 +24,11 @@ public enum VPNKeychain {
     /// Store a secret for a profile. Overwrites any existing value.
     public static func store(profileID: UUID, key: String, secret: String) {
         let account = "\(profileID.uuidString)-\(key)"
-
+        #if !canImport(Security)
+        // The Linux daemon's per-user secret store.
+        if secret.isEmpty { BACSecretStore.delete(service: service, account: account) }
+        else { try? BACSecretStore.store(service: service, account: account, data: Data(secret.utf8)) }
+        #else
         // Delete existing entry (ignore errors)
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -41,11 +47,15 @@ public enum VPNKeychain {
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
         SecItemAdd(addQuery as CFDictionary, nil)
+        #endif
     }
 
     /// Retrieve a secret for a profile. Returns nil if not found.
     public static func retrieve(profileID: UUID, key: String) -> String? {
         let account = "\(profileID.uuidString)-\(key)"
+        #if !canImport(Security)
+        return BACSecretStore.read(service: service, account: account).flatMap { String(data: $0, encoding: .utf8) }
+        #else
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -57,17 +67,22 @@ public enum VPNKeychain {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+        #endif
     }
 
     /// Delete a specific secret for a profile.
     public static func delete(profileID: UUID, key: String) {
         let account = "\(profileID.uuidString)-\(key)"
+        #if !canImport(Security)
+        BACSecretStore.delete(service: service, account: account)
+        #else
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)
+        #endif
     }
 
     /// Delete all VPN secrets for a profile.
