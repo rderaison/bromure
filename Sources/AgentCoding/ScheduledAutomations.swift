@@ -1,6 +1,11 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // URLSession for the GitHub / Linear pollers off Apple platforms
+#endif
 import Observation
+#if canImport(os)
 import os
+#endif
 
 // MARK: - Model
 

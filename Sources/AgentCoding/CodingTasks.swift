@@ -1,6 +1,10 @@
 import Foundation
 import Observation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same SHA256 API off Apple platforms
+#endif
 
 // MARK: - Model
 
