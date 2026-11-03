@@ -25,6 +25,9 @@ struct DaemonTests {
             var e = ProcessInfo.processInfo.environment
             e["XDG_RUNTIME_DIR"] = root + "/run"
             e["XDG_STATE_HOME"] = root + "/state"
+            // Its own data home: never the user's subscription logins,
+            // model settings, engine key or secrets vault.
+            e["XDG_DATA_HOME"] = root + "/data"
             e["BROMURE_AC_IMAGE"] = Env.image
             e["BROMURE_AGENTD"] = Env.agentd
             e.removeValue(forKey: "NOTIFY_SOCKET")

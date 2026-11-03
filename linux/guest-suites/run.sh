@@ -26,6 +26,10 @@ BIN=$ROOT/linux/ACLinux/.build/release/bromure-ac
 OUT=${OUT:-$(mktemp -d /tmp/acl-gs-out.XXXXXX)}; mkdir -p "$OUT"
 W=$(mktemp -d /tmp/acl-gs.XXXXXX)          # short: it holds the daemon's sockets
 export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state
+# A private data home too: no test daemon reads the user's subscription
+# logins, model settings, engine key or secrets vault (~/.local/share); the
+# image stays the user's (read only).
+export BROMURE_AC_IMAGE=${BROMURE_AC_IMAGE:-${XDG_DATA_HOME:-$HOME/.local/share}/bromure-ac/image-amd64} XDG_DATA_HOME=$W/data
 mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 T0=$(date +%s)
 log() { echo "[guest-suites $(date +%T)] $*"; }
