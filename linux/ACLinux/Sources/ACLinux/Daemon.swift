@@ -630,7 +630,11 @@ public actor Daemon {
         // profile-independent subset.
         if let profile = profile(for: rec) {
             let store = profileStore
-            try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback)
+            // The stand-ins the proxy turns into the real logins (Claude's in
+            // the token plan, Codex's file beside the seed's), as macOS seeds them.
+            let plan = sessionTokenPlan(for: profile)
+            try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan)
+            seedCodexAuthFile(for: profile, homeRoot: seed.appendingPathComponent("files", isDirectory: true))
             try store.finalizeHomeSeed(for: profile, seedDir: seed)
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)

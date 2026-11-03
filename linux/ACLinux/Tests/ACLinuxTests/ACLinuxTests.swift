@@ -1428,3 +1428,20 @@ struct ProxyFramingTests {
         #expect(env.contains("export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem\n"))
     }
 }
+
+@Suite("Codex stand-in")
+struct CodexStandInTests {
+    @Test("the ChatGPT account id comes out of an id-token's claims (namespaced or top-level), else nil")
+    func accountID() {
+        func jwt(_ claims: [String: Any]) -> String {
+            let body = (try? JSONSerialization.data(withJSONObject: claims)) ?? Data()
+            let b64 = body.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+            return "eyJhbGciOiJub25lIn0.\(b64).sig"
+        }
+        #expect(Daemon.codexAccountID(fromIDToken: jwt(["https://api.openai.com/auth": ["chatgpt_account_id": "acct-1"]])) == "acct-1")
+        #expect(Daemon.codexAccountID(fromIDToken: jwt(["chatgpt_account_id": "acct-2"])) == "acct-2")
+        #expect(Daemon.codexAccountID(fromIDToken: jwt(["sub": "x"])) == nil)
+        #expect(Daemon.codexAccountID(fromIDToken: "not.a-jwt") == nil)
+    }
+}

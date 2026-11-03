@@ -41,6 +41,9 @@ final class MitmProxy: @unchecked Sendable {
     let kimiStore: KimiSubscriptionStore
     let kimiRefresher: KimiSubscriptionRefresher
     let captures = SignInCaptureRegistry()
+    /// Per-install salt for the fake tokens (macOS: MitmEngine's
+    /// `fake-salt.bin` beside the CA); wiping it rotates every fake.
+    let fakeTokenSalt: Data
     let group: EventLoopGroup
     /// Leaves for the hosts the guests reach (macOS: CertCache's identities).
     private let leaves = NIOLockedValueBox<(map: [String: (NIOSSLContext, UInt64)], tick: UInt64)>(([:], 0))
@@ -57,6 +60,16 @@ final class MitmProxy: @unchecked Sendable {
          group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) throws {
         ca = try BromureCA.loadOrCreate(at: caDirectory)
         caNIO = try NIOSSLCertificate(bytes: Array(ca.certificatePEM.utf8), format: .pem)
+        let saltURL = caDirectory.appendingPathComponent("fake-salt.bin")
+        if let existing = try? Data(contentsOf: saltURL), existing.count == 32 {
+            fakeTokenSalt = existing
+        } else {
+            var g = SystemRandomNumberGenerator()
+            let fresh = Data((0..<32).map { _ in UInt8.random(in: 0...255, using: &g) })
+            try fresh.write(to: saltURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: saltURL.path)
+            fakeTokenSalt = fresh
+        }
         swapper = TokenSwapper(consent: ConsentBroker())
         claudeStore = ClaudeSubscriptionStore()
         claudeRefresher = ClaudeSubscriptionRefresher(store: claudeStore)

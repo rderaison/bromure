@@ -66,11 +66,92 @@ extension Daemon {
         return sw.dhcp.leasedIP(for: rec.mac)
     }
 
-    /// Codex's stand-in `~/.codex/auth.json` (macOS mints it from the
-    /// stored login and registers its bogus tokens with the proxy).
-    // partial: no Codex stand-in on Linux yet
-    // @port-skip linux-only: no Codex stand-in on Linux yet (ACAppDelegate.pushCodexAuth)
-    func pushCodexAuth(profileID: UUID) async -> Bool { false }
+    /// Codex's login, into a running machine: the stand-in
+    /// `~/.codex/auth.json` (its bogus tokens registered with the proxy).
+    // @port ACAppDelegate.pushCodexAuth(profileID: UUID) h=b989b5fc6a033b6a @dd7ba30d
+    func pushCodexAuth(profileID: UUID) async -> Bool {
+        guard let data = codexStandInAuth(for: profileID) else { return false }
+        let b64 = data.base64EncodedString()
+        let out = try? await guestExec(
+            profileID: profileID,
+            command: "mkdir -p ~/.codex && umask 077 && echo \(b64) | base64 -d > ~/.codex/auth.json.tmp "
+                + "&& mv -f ~/.codex/auth.json.tmp ~/.codex/auth.json && echo ok",
+            timeout: 15)
+        return out?.contains("ok") == true
+    }
+
+    /// The stand-in `~/.codex/auth.json` for a workspace's Codex login — the
+    /// bogus tokens registered with the proxy — or nil when there's no login.
+    // @port ACAppDelegate.codexStandInAuth(for: UUID) h=58363fc1bd492534 @dd7ba30d
+    func codexStandInAuth(for profileID: UUID) -> Data? {
+        guard let mitm, let real = mitm.codexStore.record(for: profileID) else { return nil }
+        guard let standIn = CodexStandIn.mint(real, profileID: profileID) else {
+            FileHandle.standardError.write(Data("[codex-sub] seed skipped — stored tokens aren't JWT-shaped\n".utf8))
+            return nil
+        }
+        let bogusAccess = standIn.access, bogusID = standIn.id, bogusRefresh = standIn.refresh
+        mitm.codexStore.registerBogusKey(bogusAccess, for: profileID)
+        var tokens: [String: Any] = [
+            "id_token": bogusID, "access_token": bogusAccess, "refresh_token": bogusRefresh,
+        ]
+        if let accountID = Self.codexAccountID(fromIDToken: real.idToken) {
+            tokens["account_id"] = accountID
+        }
+        let doc: [String: Any] = [
+            "OPENAI_API_KEY": NSNull(),
+            "tokens": tokens,
+            "last_refresh": ISO8601DateFormatter().string(from: Date()),
+        ]
+        return try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted])
+    }
+
+    /// A launch's token plan, with Claude's subscription mode when a login
+    /// is stored: its bogus key registered with the proxy, and with account
+    /// features the OAuth stand-in. nil without a proxy (the guest then
+    /// runs on whatever it has).
+    // partial: the plan's other fakes aren't exported or mapped yet (SessionTokenPlan.tokenMap is macOS-only)
+    // @port ACAppDelegate.sessionTokenPlan(for: Profile, salt: Data) h=71b1ca7b397c2cf6 @dd7ba30d
+    func sessionTokenPlan(for profile: Profile) -> SessionTokenPlan? {
+        guard let mitm else { return nil }
+        let available = mitm.claudeStore.hasCredential(for: profile.id)
+        var plan = profile.makeTokenPlan(salt: mitm.fakeTokenSalt, claudeSubscriptionAvailable: available)
+        if let bogus = plan.claudeSubscriptionBogusKey {
+            mitm.claudeStore.registerBogusKey(bogus, for: profile.id)
+            if ClaudeStandIn.isEnabled {
+                plan.claudeOAuthStandIn = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profile.id))
+            }
+        }
+        return plan
+    }
+
+    /// Codex subscription mode: the stand-in `~/.codex/auth.json` in the
+    /// home seed's `files/` (agentd copies it into the ext4 home). No-op
+    /// unless the workspace runs Codex on a subscription with a stored login.
+    // @port ACAppDelegate.seedCodexAuthFile(for: Profile, homeRoot: URL?) h=803c67f8b98a1ef5 @dd7ba30d
+    func seedCodexAuthFile(for profile: Profile, homeRoot: URL) {
+        guard profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .subscription }),
+              let data = codexStandInAuth(for: profile.id) else { return }
+        let dir = homeRoot.appendingPathComponent(".codex", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("auth.json")
+        try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+    }
+
+    /// Pull `chatgpt_account_id` out of a Codex id-token JWT (best effort).
+    // @port ACAppDelegate.static codexAccountID(fromIDToken: String) h=feb12e2521f81dfb @dd7ba30d
+    static func codexAccountID(fromIDToken jwt: String) -> String? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count == 3 else { return nil }
+        var s = String(parts[1]).replacingOccurrences(of: "-", with: "+")
+                                .replacingOccurrences(of: "_", with: "/")
+        while s.count % 4 != 0 { s += "=" }
+        guard let d = Data(base64Encoded: s),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
+        if let auth = obj["https://api.openai.com/auth"] as? [String: Any],
+           let acct = auth["chatgpt_account_id"] as? String { return acct }
+        return obj["chatgpt_account_id"] as? String
+    }
 
     /// Claude with account features, into a running machine: its OAuth
     /// stand-in (`~/.claude/.credentials.json`), which the proxy swaps for
