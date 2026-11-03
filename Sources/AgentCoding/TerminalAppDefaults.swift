@@ -89,6 +89,7 @@ public struct TerminalAppDefaults: Sendable {
 #endif
 }
 
+#if canImport(SwiftUI)
 import SwiftUI
 
 extension Color {
@@ -121,6 +122,7 @@ extension Color {
 #endif
     }
 }
+#endif
 
 #if os(macOS)
 extension TerminalAppDefaults {

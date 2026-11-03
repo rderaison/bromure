@@ -250,10 +250,6 @@
     {
       "path": "Sources/AgentCoding/Terminal/TerminalPaneHistory.swift",
       "reason": "ui"
-    },
-    {
-      "path": "Sources/AgentCoding/TerminalAppDefaults.swift",
-      "reason": "ui"
     }
   ],
   "skipInheriting": [
