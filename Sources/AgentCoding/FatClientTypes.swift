@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 // MARK: - Fat-client shared types (platform-independent)
 //
@@ -21,17 +23,9 @@ enum FatClientLog {
         || ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] != nil
     /// When set to a path, also append to that file (survives pty/stderr mixing).
     static let filePath = ProcessInfo.processInfo.environment["BROMURE_ATTACH_DEBUG"]
-    /// Unified-logging sink so the fat-client trace is visible on a PHYSICAL
-    /// device with NO env var — the stderr/file sinks above need an env var that
-    /// can't be set on a real phone. Read it over USB with:
-    ///   log stream --device --style compact \
-    ///     --predicate 'subsystem == "io.bromure.fatclient"'
-    /// (or the same predicate in Console.app). Emitted at `.notice` so it shows
-    /// without a `--level` flag and is persisted to the log store.
-    private static let logger = Logger(subsystem: "io.bromure.fatclient", category: "trace")
     static func log(_ msg: @autoclosure () -> String) {
         let text = msg()
-        logger.notice("\(text, privacy: .public)")
+        FatClientSystemLog.notice(text)
         guard enabled || filePath != nil else { return }
         let line = "[fatclient] \(text)\n"
         if enabled { FileHandle.standardError.write(Data(line.utf8)) }
@@ -44,6 +38,24 @@ enum FatClientLog {
             }
         }
     }
+}
+
+/// Unified-logging sink so the fat-client trace is visible on a PHYSICAL
+/// device with NO env var — the stderr/file sinks above need an env var that
+/// can't be set on a real phone. Read it over USB with:
+///   log stream --device --style compact \
+///     --predicate 'subsystem == "io.bromure.fatclient"'
+/// (or the same predicate in Console.app). Emitted at `.notice` so it shows
+/// without a `--level` flag and is persisted to the log store.
+/// (Apple platforms; a no-op elsewhere.)
+private enum FatClientSystemLog {
+    #if canImport(os)
+    private static let logger = Logger(subsystem: "io.bromure.fatclient", category: "trace")
+    static func notice(_ text: String) { logger.notice("\(text, privacy: .public)") }
+    #else
+    // @port-skip linux-only: no unified logging off Apple platforms
+    static func notice(_ text: String) {}
+    #endif
 }
 
 // MARK: - Fat-client remote transport types
@@ -128,6 +140,8 @@ struct HostKeyInfo: Equatable {
 /// SecretsVault choice). Both platforms hand it straight to the in-process
 /// NIOSSH dialer; macOS stores it as an OpenSSH PEM (decoded by
 /// `OpenSSHKeyFormat.ed25519Seed(fromPEM:)`), iOS as a raw base64 seed.
+/// (Apple platforms only: the Linux server keeps no client identity.)
+#if canImport(Security)
 enum FatClientKeyStore {
     private static let service = "io.bromure.agentic-coding.fatclient"
     private static let account = "client-key-ed25519"
@@ -204,8 +218,11 @@ enum FatClientKeyStore {
         return SecItemAdd(attrs as CFDictionary, nil) == errSecSuccess
     }
 }
+#endif
 
-#if !AGENT_HOST   // the Bromure Agent Host dials servers, but keeps no host list
+// The Bromure Agent Host dials servers but keeps no host list; the Linux
+// server dials none.
+#if !AGENT_HOST && !BROMURE_LINUX
 /// UI-facing, observable store of configured remote hosts. Delegates all path /
 /// transport work to `RemoteTransport`.
 @MainActor
