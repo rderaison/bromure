@@ -3280,9 +3280,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // handshake before they hit the trace store.
         let req = captureBody ? Self.redactSensitiveHeaders(preSwapRequest) : nil
         let res = captureBody ? Self.redactSensitiveHeaders(responseBlob) : nil
-        await MainActor.run {
-            store.record(record, requestBody: req, responseBody: res)
-        }
+        store.record(record, requestBody: req, responseBody: res)
     }
 
     /// Pull the numeric status code out of a raw response header
@@ -3449,14 +3447,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let res = canStoreResponseBody
             ? Self.bodyForTrace(upstreamResponse).map { Self.redactSensitiveHeaders($0) }
             : nil
-        let storeT0 = Date()
-        BACDebug.log("[mitm/trace]",
-                     "store.record hop->main start host=\(host) reqBodyBytes=\(req?.count ?? 0) resBodyBytes=\(res?.count ?? 0)")
-        await MainActor.run {
-            store.record(record, requestBody: req, responseBody: res)
-        }
-        BACDebug.log("[mitm/trace]",
-                     "store.record hop->main done host=\(host) took=\(BACDebug.ms(storeT0))")
+        // No wait on the main thread: the store batches its ring update.
+        store.record(record, requestBody: req, responseBody: res)
     }
 
     /// "injected … token" lines, at most once a minute per (what, host,
