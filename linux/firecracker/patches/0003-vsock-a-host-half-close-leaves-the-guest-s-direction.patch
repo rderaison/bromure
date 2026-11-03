@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Renaud Deraison <renaud@secl.io>
+Date: Mon, 2 Nov 2026 19:54:17 -0500
+Subject: [PATCH] vsock: a host half-close leaves the guest's direction open
+
+A 0-length read from the host stream ended both directions (SHUTDOWN
+with RCV and SEND), so a host that sent a request and shut down its
+sending side never got the reply: the guest's writes hit EPIPE. When the
+host only half-closed (a zero-length send to the stream still succeeds),
+the guest is now told SHUTDOWN(SEND) alone, its data keeps reaching the
+host, and the connection ends once the guest is done sending as well -
+vhost-vsock's behaviour. A host that closed its stream altogether, or one
+that isn't a socket, gets the full shutdown as before.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../devices/virtio/vsock/csm/connection.rs    | 51 +++++++++++++++++--
+ .../src/devices/virtio/vsock/unix/muxer.rs    | 33 ++++++++++++
+ 2 files changed, 80 insertions(+), 4 deletions(-)
+
+diff --git a/src/vmm/src/devices/virtio/vsock/csm/connection.rs b/src/vmm/src/devices/virtio/vsock/csm/connection.rs
+index 7cb2dac..38b9ed2 100644
+--- a/src/vmm/src/devices/virtio/vsock/csm/connection.rs
++++ b/src/vmm/src/devices/virtio/vsock/csm/connection.rs
+@@ -138,6 +138,10 @@ pub struct VsockConnection<S: VsockConnectionBackend> {
+     /// Instant when this connection should be scheduled for immediate termination, due to some
+     /// timeout condition having been fulfilled.
+     expiry: Option<Instant>,
++    /// The host stream reached EOF (the host half-closed): nothing more goes to the guest, but
++    /// the guest may still send, as with vhost-vsock. The connection ends once the guest is done
++    /// sending too.
++    host_eof: bool,
+ }
+ 
+ impl<S> VsockChannel for VsockConnection<S>
+@@ -220,7 +224,19 @@ where
+             // Read data from the stream straight to the RX buffer, for maximum throughput.
+             match pkt.read_at_offset_from(&mut self.stream, 0, max_len) {
+                 Ok(read_cnt) => {
+-                    if read_cnt == 0 {
++                    if read_cnt == 0
++                        && !matches!(self.state, ConnState::PeerClosed(_, true))
++                        && !self.host_stream_closed()
++                    {
++                        // A 0-length read while the guest may still send: the host half-closed
++                        // its stream. Tell the guest we'll send no more, and keep delivering
++                        // what it sends (vhost-vsock's semantics; a request/response over a
++                        // half-closed stream needs it).
++                        self.host_eof = true;
++                        pkt.hdr
++                            .set_op(uapi::VSOCK_OP_SHUTDOWN)
++                            .set_flag(uapi::VSOCK_FLAGS_SHUTDOWN_SEND);
++                    } else if read_cnt == 0 {
+                         // A 0-length read means the host stream was closed down. In that case,
+                         // we'll ask our peer to shut down the connection. We can neither send nor
+                         // receive any more data.
+@@ -346,7 +362,9 @@ where
+                 let recv_off = pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
+                 let send_off = pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
+                 self.state = ConnState::PeerClosed(recv_off, send_off);
+-                if recv_off && send_off {
++                // After a host EOF nothing more goes to the guest: the guest being done sending
++                // ends the connection, whether or not it also said it won't receive.
++                if (recv_off || self.host_eof) && send_off {
+                     if self.tx_buf.is_empty() {
+                         self.pending_rx.insert(PendingRx::Rst);
+                     } else {
+@@ -364,7 +382,7 @@ where
+             {
+                 *recv_off = *recv_off || (pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0);
+                 *send_off = *send_off || (pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0);
+-                if *recv_off && *send_off && self.tx_buf.is_empty() {
++                if (*recv_off || self.host_eof) && *send_off && self.tx_buf.is_empty() {
+                     self.pending_rx.insert(PendingRx::Rst);
+                 }
+             }
+@@ -434,6 +452,8 @@ where
+         // stream, unless we're in a state which doesn't allow moving data from host to guest.
+         match self.state {
+             ConnState::Killed | ConnState::LocalClosed | ConnState::PeerClosed(true, _) => (),
++            // The host stream is at EOF: nothing more to read from it.
++            _ if self.host_eof => (),
+             _ if self.need_credit_update_from_peer() => (),
+             // An `Rw` indication means the host stream is readable and its data is waiting to
+             // be delivered to the guest by `recv_pkt`, which needs a guest RX buffer. While
+@@ -487,7 +507,11 @@ where
+ 
+             // If this connection was shutting down, but is waiting to drain the TX buffer
+             // before forceful termination, the wait might be over.
+-            if self.state == ConnState::PeerClosed(true, true) && self.tx_buf.is_empty() {
++            let peer_done = match self.state {
++                ConnState::PeerClosed(recv_off, true) => recv_off || self.host_eof,
++                _ => false,
++            };
++            if peer_done && self.tx_buf.is_empty() {
+                 self.pending_rx.insert(PendingRx::Rst);
+             } else if self.peer_needs_credit_update() {
+                 // If we've freed up some more buffer space, we may need to let the peer know it
+@@ -526,6 +550,7 @@ where
+             last_fwd_cnt_to_peer: Wrapping(0),
+             pending_rx: PendingRxSet::from(PendingRx::Response),
+             expiry: None,
++            host_eof: false,
+         }
+     }
+ 
+@@ -552,9 +577,27 @@ where
+             last_fwd_cnt_to_peer: Wrapping(0),
+             pending_rx: PendingRxSet::from(PendingRx::Request),
+             expiry: None,
++            host_eof: false,
+         }
+     }
+ 
++    /// After a 0-length read: whether the host closed its stream altogether, rather than only
++    /// shut down its sending side. A zero-length send fails (EPIPE) only in the first case.
++    fn host_stream_closed(&self) -> bool {
++        let fd = self.stream.as_raw_fd();
++        // SAFETY: a zero-length send on a descriptor we own; nothing is read or written.
++        let r = unsafe {
++            libc::send(
++                fd,
++                std::ptr::null(),
++                0,
++                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
++            )
++        };
++        // Not a socket (ENOTSOCK): nothing to tell apart; keep the full close.
++        r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EAGAIN)
++    }
++
+     /// Check if there is an expiry (kill) timer set for this connection, sometime in the
+     /// future.
+     pub fn will_expire(&self) -> bool {
+diff --git a/src/vmm/src/devices/virtio/vsock/unix/muxer.rs b/src/vmm/src/devices/virtio/vsock/unix/muxer.rs
+index bac3b10..94dd70e 100644
+--- a/src/vmm/src/devices/virtio/vsock/unix/muxer.rs
++++ b/src/vmm/src/devices/virtio/vsock/unix/muxer.rs
+@@ -1343,6 +1343,39 @@ mod tests {
+         assert!(!ctx.muxer.local_port_set.contains(&local_port));
+     }
+ 
++    #[test]
++    fn test_local_half_close() {
++        // The host shuts down only its sending side: the guest is told it will get no more
++        // data (SHUTDOWN with SEND alone), but what the guest sends still reaches the host, and
++        // the connection ends when the guest is done sending too.
++        let peer_port = 1025;
++        let mut ctx = MuxerTestContext::new("local_half_close");
++        let (mut stream, local_port) = ctx.local_connect(peer_port);
++        stream.shutdown(std::net::Shutdown::Write).unwrap();
++        ctx.notify_muxer();
++        assert!(ctx.muxer.has_pending_rx());
++        ctx.recv();
++        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_SHUTDOWN);
++        assert_ne!(ctx.rx_pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND, 0);
++        assert_eq!(ctx.rx_pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV, 0);
++
++        let data = [9, 8, 7, 6];
++        ctx.init_data_tx_pkt(local_port, peer_port, &data);
++        ctx.send();
++        let mut buf = vec![0u8; data.len()];
++        stream.set_nonblocking(false).unwrap();
++        stream.read_exact(buf.as_mut_slice()).unwrap();
++        assert_eq!(buf.as_slice(), &data);
++
++        ctx.init_tx_pkt(local_port, peer_port, uapi::VSOCK_OP_SHUTDOWN)
++            .hdr
++            .set_flags(uapi::VSOCK_FLAGS_SHUTDOWN_SEND);
++        ctx.send();
++        assert!(ctx.muxer.has_pending_rx());
++        ctx.recv();
++        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RST);
++    }
++
+     #[test]
+     fn test_peer_close() {
+         let peer_port = 1025;
