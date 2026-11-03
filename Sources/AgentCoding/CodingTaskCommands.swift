@@ -229,4 +229,7 @@ extension CodingTaskEngine {
     nonisolated static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
+
+    /// The verify command's word for a checkout whose status can't be read.
+    nonisolated static let treeUnknownWord = "TREEUNKNOWN"
 }

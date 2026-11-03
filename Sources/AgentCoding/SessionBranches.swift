@@ -54,7 +54,7 @@ extension AgentSessionEngine {
         // "ahead behind changed|root|parent".
         var script = ""
         for s in sessions {
-            let dir = Self.q(ScheduledAutomationEngine.guestPath(s.cwd))
+            let dir = Self.q(SessionHome.guestPath(s.cwd))
             let parent = s.branchParent.map(Self.q) ?? "''"
             script += "( printf '%s\\t' \(s.id.uuidString); cd \(dir) 2>/dev/null || { echo gone; exit; }; \(RepoGitPrograms.off("."))"
                 + "r=$(git worktree list --porcelain 2>/dev/null | head -1 | cut -c10-); "
@@ -93,7 +93,7 @@ extension AgentSessionEngine {
     private func branchFacts(_ s: AgentSession) async -> (root: String, parent: String)? {
         if let r = s.branchRoot, let p = s.branchParent { return (r, p) }
         guard let delegate else { return nil }
-        let dir = Self.q(ScheduledAutomationEngine.guestPath(s.cwd))
+        let dir = Self.q(SessionHome.guestPath(s.cwd))
         let out = (try? await delegate.guestExec(
             profileID: s.profileID,
             command: "cd \(dir) 2>/dev/null && r=$(git worktree list --porcelain | head -1 | cut -c10-) "
@@ -138,7 +138,7 @@ extension AgentSessionEngine {
             // was and the session's agent is asked to finish it.
             let script = BranchMergeCommands.mergeScript(
                 root: facts.root, branch: branch, into: into,
-                sourceDir: ScheduledAutomationEngine.guestPath(s.cwd), squash: squash)
+                sourceDir: SessionHome.guestPath(s.cwd), squash: squash)
             let out = ((try? await delegate.guestExec(profileID: s.profileID, command: script, timeout: 60)) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if out.hasSuffix("merged") {
@@ -287,7 +287,7 @@ extension AgentSessionEngine {
     /// without a commit yet, or none. nil: the machine can't be asked.
     func gitState(profileID: UUID, cwd: String) async -> GitFolderState? {
         guard let delegate else { return nil }
-        let dir = Self.q(ScheduledAutomationEngine.guestPath(cwd))
+        let dir = Self.q(SessionHome.guestPath(cwd))
         let script = "cd \(dir) 2>/dev/null || exit; "
             + "if git rev-parse --show-toplevel >/dev/null 2>&1; then "
             + "if git rev-parse --verify -q HEAD >/dev/null; then echo \"repo $(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"; else echo empty; fi; "
@@ -302,7 +302,7 @@ extension AgentSessionEngine {
     /// `git init` a folder and commit what's in it, so it can be branched.
     func initGitRepository(profileID: UUID, cwd: String) async -> Bool {
         guard let delegate else { return false }
-        let dir = Self.q(ScheduledAutomationEngine.guestPath(cwd))
+        let dir = Self.q(SessionHome.guestPath(cwd))
         let out = (try? await delegate.guestExec(
             profileID: profileID,
             command: "cd \(dir) && git init -q && git add -A && "
@@ -328,7 +328,7 @@ extension AgentSessionEngine {
         // An attached Mac's session too: its record is in the machine's
         // mirror, its checkout on that Mac.
         guard let delegate, let s = store.session(id) ?? delegate.sessionRecord(id) else { return nil }
-        let cmd = TaskReviewData.sessionCommand(dir: ScheduledAutomationEngine.guestPath(s.cwd), base: base,
+        let cmd = TaskReviewData.sessionCommand(dir: SessionHome.guestPath(s.cwd), base: base,
                                                 focusFiles: focusFiles)
         let run: () async throws -> String = {
             if let out = try await delegate.attachedMachineExec(sessionID: id, command: cmd, timeout: 30) { return out }

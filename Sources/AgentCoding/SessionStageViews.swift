@@ -496,14 +496,6 @@ private struct WorkspaceSquare: View {
     }
 }
 
-/// The folder as the user thinks of it: "~/clock", never /home/ubuntu/clock.
-func prettyGuestPath(_ path: String) -> String {
-    let home = "/home/ubuntu"
-    if path == home || path == "~" || path.isEmpty { return "~" }
-    if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
-    return path
-}
-
 // MARK: - Header
 
 struct SessionHeaderView: View {

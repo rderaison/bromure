@@ -997,8 +997,6 @@ extension CodingTaskEngine {
         return (!now.keepBranch, now.phase == observed.phase && now.phase != .needsYou)
     }
 
-    /// The verify command's word for a checkout whose status can't be read.
-    nonisolated static let treeUnknownWord = "TREEUNKNOWN"
 
     nonisolated static let statusFailedText = NSLocalizedString(
         "Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done.",

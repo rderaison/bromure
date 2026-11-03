@@ -324,8 +324,8 @@ final class AgentSessionEngine {
                     if s.isSwitchboard {
                         _ = try? await delegate.guestExec(
                             profileID: s.profileID,
-                            command: SwitchboardEngine.briefCommand(
-                                guestFolder: ScheduledAutomationEngine.guestPath(s.cwd),
+                            command: SwitchboardLaunch.briefCommand(
+                                guestFolder: SessionHome.guestPath(s.cwd),
                                 roomName: delegate.agentRoomStore.room(s.roomID)?.name),
                             timeout: 15)
                     }
@@ -675,7 +675,7 @@ final class AgentSessionEngine {
             // already does).
             let typeOnceUp = Self.typesOpeningMessage(s.tool) && !prompt.isEmpty ? prompt : nil
             if typeOnceUp != nil { prompt = "" }
-            let guestPath = ScheduledAutomationEngine.guestPath(s.cwd)
+            let guestPath = SessionHome.guestPath(s.cwd)
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
             if let worktreeSlug {
                 // The folder must be a git checkout; say so now rather than
@@ -761,7 +761,7 @@ final class AgentSessionEngine {
                 // it works on sessions, not on files.
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,
-                    command: SwitchboardEngine.briefCommand(
+                    command: SwitchboardLaunch.briefCommand(
                         guestFolder: guestPath, roomName: delegate.agentRoomStore.room(s.roomID)?.name),
                     timeout: 15)
             } else {
@@ -1004,7 +1004,7 @@ final class AgentSessionEngine {
                 }
             }
             guard let cmd = CodingTaskEngine.transcriptChunkCommand(
-                    guestCwd: ScheduledAutomationEngine.guestPath(s.cwd), since: since,
+                    guestCwd: SessionHome.guestPath(s.cwd), since: since,
                     agent: s.tool.rawValue, pinnedWindow: s.windowIndex, pin: pin,
                     knownPath: known?.path, knownOffset: known?.end ?? -1,
                     bytes: Self.snapshotFirstBytes, earlier: false),
@@ -1057,7 +1057,7 @@ final class AgentSessionEngine {
             self.snapshotCursor[s.id] = (f.path, f.end)
             if s.tool == .kimi { self.noteJournal(s.id, f.chunk, continues: continues && !newConversation) }
             guard !f.chunk.isEmpty else { return }
-            if let m = TranscriptSearchIndex.liveModel(in: f.chunk) { self.store.setLastModel(s.id, m) }
+            if let m = TranscriptModelSniff.liveModel(in: f.chunk) { self.store.setLastModel(s.id, m) }
             if continues {
                 self.transcripts.append(s.id, f.chunk)
             } else {
@@ -1481,7 +1481,7 @@ final class AgentSessionEngine {
 
     /// `kimi`: the workspace's Kimi approval mode (`Profile.kimiApprovals`).
     static func roleFlags(for s: AgentSession, kimi: KimiApprovals = .neverAsk) -> String {
-        [s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : "", autonomyFlags(for: s.tool, kimi: kimi)]
+        [s.isSwitchboard ? SwitchboardLaunch.launchFlags(for: s.tool) : "", autonomyFlags(for: s.tool, kimi: kimi)]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
 

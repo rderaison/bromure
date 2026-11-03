@@ -116,6 +116,7 @@
 		F508C137A218C5B85B9A5B09 /* SquelchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8B3ECA30D79673393D2C03A /* SquelchViews.swift */; };
 		5A7824EB8C68A0DBDE6D8629 /* SubscriptionNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */; };
 		A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */; };
+		BDF59927FC8BD8E72B801424 /* TaskReviewData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 059A5141791AC286B7CD1AA4 /* TaskReviewData.swift */; };
 		4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */; };
 		87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */; };
 		273ACE71B4D5E451211255EF /* TaskTranscriptWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */; };
@@ -276,6 +277,7 @@
 		A8B3ECA30D79673393D2C03A /* SquelchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SquelchViews.swift"; path = "Sources/BromureRemote/_shared/SquelchViews.swift"; sourceTree = "<group>"; };
 		1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionNotifications.swift"; path = "Sources/BromureRemote/_shared/SubscriptionNotifications.swift"; sourceTree = "<group>"; };
 		39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionTokenSwapState.swift"; path = "Sources/BromureRemote/_shared/SubscriptionTokenSwapState.swift"; sourceTree = "<group>"; };
+		059A5141791AC286B7CD1AA4 /* TaskReviewData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewData.swift"; path = "Sources/BromureRemote/_shared/TaskReviewData.swift"; sourceTree = "<group>"; };
 		11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewWindow.swift"; path = "Sources/BromureRemote/_shared/TaskReviewWindow.swift"; sourceTree = "<group>"; };
 		A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptArchive.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptArchive.swift"; sourceTree = "<group>"; };
 		397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptWindow.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptWindow.swift"; sourceTree = "<group>"; };
@@ -460,6 +462,7 @@
 				A8B3ECA30D79673393D2C03A /* SquelchViews.swift */,
 				1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */,
 				39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */,
+				059A5141791AC286B7CD1AA4 /* TaskReviewData.swift */,
 				11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */,
 				A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */,
 				397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */,
@@ -698,6 +701,7 @@
 				F508C137A218C5B85B9A5B09 /* SquelchViews.swift in Sources */,
 				5A7824EB8C68A0DBDE6D8629 /* SubscriptionNotifications.swift in Sources */,
 				A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */,
+				BDF59927FC8BD8E72B801424 /* TaskReviewData.swift in Sources */,
 				4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */,
 				87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */,
 				273ACE71B4D5E451211255EF /* TaskTranscriptWindow.swift in Sources */,

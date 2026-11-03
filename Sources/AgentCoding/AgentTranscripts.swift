@@ -2204,3 +2204,95 @@ enum KimiTranscriptParser {
         return GrokTranscriptParser.trimmedTextItems(items)
     }
 }
+
+enum TodoStatus: Equatable { case pending, active, done, blocked
+    static func parse(_ s: String?) -> TodoStatus {
+        switch (s ?? "").lowercased() {
+        case "completed", "complete", "done", "x": return .done
+        case "in_progress", "inprogress", "active", "doing", "running": return .active
+        case "blocked": return .blocked
+        default: return .pending
+        }
+    }
+    /// Canonical string for the fat-client wire codec (round-trips via `parse`).
+    var wire: String {
+        switch self {
+        case .pending: return "pending"
+        case .active:  return "in_progress"
+        case .done:    return "completed"
+        case .blocked: return "blocked"
+        }
+    }
+}
+
+struct TodoRowModel: Identifiable, Equatable {
+    let text: String
+    let status: TodoStatus
+    let phase: String?
+    /// Stable across polls (content-derived), so an in-place todo update only
+    /// redraws changed rows and TranscriptItem equality works.
+    var id: String { (phase ?? "") + "\u{1}" + text }
+}
+
+/// Normalizes a todo/plan tool call's arguments into checklist rows. Kept
+/// separate from the view so it's unit-testable. Handles the three shapes seen
+/// in practice (Claude `todos`, omp `list`, Codex `plan`); a delta op with no
+/// item list yields no rows (the card shows a one-line status instead).
+enum TodoParse {
+    static func rows(from input: [String: Any]) -> [TodoRowModel] {
+        if let todos = input["todos"] as? [[String: Any]] {          // Claude
+            return todos.compactMap { t in
+                let text = (t["content"] as? String) ?? (t["activeForm"] as? String) ?? ""
+                return text.isEmpty ? nil
+                    : TodoRowModel(text: text, status: .parse(t["status"] as? String), phase: nil)
+            }
+        }
+        if let list = input["list"] as? [[String: Any]] {            // omp init
+            var out: [TodoRowModel] = []
+            for p in list {
+                let phase = p["phase"] as? String
+                for it in (p["items"] as? [String] ?? []) {
+                    out.append(TodoRowModel(text: it, status: .pending, phase: phase))
+                }
+            }
+            return out
+        }
+        if let plan = input["plan"] as? [[String: Any]] {            // Codex
+            return plan.compactMap { p in
+                guard let s = p["step"] as? String, !s.isEmpty else { return nil }
+                return TodoRowModel(text: s, status: .parse(p["status"] as? String), phase: nil)
+            }
+        }
+        return []
+    }
+
+    /// Per-item status read from omp's todo-tool RESULT text — its authoritative
+    /// rendering (the call args don't carry live status, and its delta ops don't
+    /// reliably mutate state). The text lists remaining items with a `[status]`
+    /// tag, or all items as `- [X]`/`- [ ]`. An item ABSENT from the text is
+    /// done: the "remaining items" form omits completed ones.
+    static func statusFromResult(itemText: String, resultText: String) -> TodoStatus {
+        for line in resultText.split(whereSeparator: \.isNewline) {
+            guard line.contains(itemText) else { continue }
+            let l = line.lowercased()
+            if l.contains("[x]") { return .done }
+            if l.contains("[in_progress]") || l.contains("[in progress]") { return .active }
+            if l.contains("[blocked]") { return .blocked }
+            if l.contains("[ ]") || l.contains("[pending]") { return .pending }
+            return .pending                       // listed but untagged
+        }
+        return .done                              // absent → completed
+    }
+
+    /// The live checklist: the plan's full item list (from the `init` call) with
+    /// each item's status taken from the latest result text. Without a result yet
+    /// the plan shows as-is (all pending).
+    static func merge(initRows: [TodoRowModel], resultText: String?) -> [TodoRowModel] {
+        guard let resultText, !resultText.isEmpty else { return initRows }
+        return initRows.map {
+            TodoRowModel(text: $0.text,
+                         status: statusFromResult(itemText: $0.text, resultText: resultText),
+                         phase: $0.phase)
+        }
+    }
+}

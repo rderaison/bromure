@@ -104,6 +104,7 @@ SHARED = [
     "VMDashboard.swift",
     "DockerDashboard.swift",
     "KubeDashboard.swift",      # cluster dashboard + creation sheet (AppKit-only styles #if'd)
+    "TaskReviewData.swift",     # review data, summary and build litter (the window is TaskReviewWindow)
     "TaskReviewWindow.swift",
     "RepoGitPrograms.swift",    # the git TaskLitter runs switches the repository's programs off
     "BranchMergeCommands.swift",  # isSafeBranchName: a task's landing target (CodingTasks)
