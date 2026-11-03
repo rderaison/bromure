@@ -1343,7 +1343,10 @@ struct BoardRouteTests {
         #expect(stores.codingTasks.task(task.id)?.comments.first?.line == 3)
         #expect(stores.taskCommand(task.id, "bogus", [:])["error"] as? String == "unknown action")
         #expect(stores.taskCommand(UUID(), "start", [:])["error"] as? String == "unknown task")
-        #expect(stores.taskCommand(task.id, "assign", ["kind": "none"])["ok"] as? Bool == false, "no dispatcher here")
+        #expect(stores.taskCommand(task.id, "assign", ["kind": "none"])["error"] as? String == "no dispatcher",
+                "without a dispatcher, assign says so")
+        stores.taskDispatcher = TaskDispatcher(delegate: nil)
+        #expect(stores.taskCommand(task.id, "assign", ["kind": "bogus"])["error"] as? String == "kind required")
         #expect(stores.taskCommand(task.id, "plan-events", [:])["live"] as? Bool == false)
         #expect(stores.taskCommand(task.id, "delete", [:])["stage"] as? String == "deleted")
         // Kept in the state dir, next to the sessions.
@@ -1485,5 +1488,25 @@ struct MCPLineListenerTests {
         }.value
         close(fd)
         #expect(got.contains("wt/fix-it|{\"id\":1}\n") && got.contains("wt/fix-it|{\"id\":2}\n"), "\(got)")
+    }
+}
+
+@Suite("Guest pages")
+@MainActor
+struct GuestPageTests {
+    @Test("a public page is offered, a private one never; the first dismiss wins; pages expire and are capped")
+    func broker() throws {
+        let b = GuestPageBroker()
+        let t0 = Date()
+        let p = try #require(b.publish(URL(string: "https://example.com/docs")!, profileID: UUID(), workspace: "w", now: t0))
+        #expect(b.publish(URL(string: "http://192.168.1.10/admin")!, profileID: UUID(), workspace: "w", now: t0) == nil)
+        #expect(b.publish(URL(string: "http://127.0.0.1:8080/")!, profileID: UUID(), workspace: "w", now: t0) == nil)
+        let list = b.stateList(now: t0)
+        #expect(list.count == 1 && list[0]["url"]?.stringValue == "https://example.com/docs")
+        #expect(["open", "ask"].contains(list[0]["disposition"]?.stringValue ?? ""))
+        #expect(b.dismiss(p.id) && !b.dismiss(p.id))
+        for i in 0..<12 { b.publish(URL(string: "https://example.com/\(i)")!, profileID: UUID(), workspace: "w", now: t0) }
+        #expect(b.stateList(now: t0).count == GuestPageBroker.keptMax)
+        #expect(b.stateList(now: t0.addingTimeInterval(GuestPageBroker.keptFor + 1)).isEmpty)
     }
 }

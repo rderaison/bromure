@@ -98,7 +98,6 @@ final class LinuxSessionHost: AgentSessionHost {
     /// new turn means no dialog waits any more. `turnEnded` false: a done
     /// that is only the agent idle at its prompt (an interrupt, a session
     /// end, an idle notification): the tab shows it, no run or task finishes.
-    // partial: no delegation engine (promptFreed) on Linux yet
     // @port ACAppDelegate.setTabAgentStatus(_: Profile.ID, index: Int, _: AgentStatus, turnEnded: Bool) h=122def8726c0a46e @5f46a841
     func setTabAgentStatus(_ id: UUID, index: Int, _ status: AgentStatus, turnEnded: Bool = true) {
         guard let store = SessionStores.shared?.sessions else { return }
@@ -111,9 +110,13 @@ final class LinuxSessionHost: AgentSessionHost {
         tab.agentStatus = status
         // A finished tab may be an automation run (its transcript is saved,
         // its tab closed) or a coding task, which moves to Testing.
-        if status == .done, turnEnded, let stores = SessionStores.shared {
-            stores.automationEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
-            stores.codingTaskEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
+        if status == .done, let stores = SessionStores.shared {
+            if turnEnded {
+                stores.automationEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
+                stores.codingTaskEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
+            }
+            // A request or a reply held while this agent worked goes now.
+            stores.delegationEngine?.promptFreed(profileID: id, window: index)
         }
     }
 

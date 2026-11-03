@@ -109,7 +109,7 @@ extension Daemon {
     /// is stored: its bogus key registered with the proxy, and with account
     /// features the OAuth stand-in. nil without a proxy (the guest then
     /// runs on whatever it has).
-    // partial: the plan's other fakes aren't exported or mapped yet (SessionTokenPlan.tokenMap is macOS-only)
+    // partial: the plan's fakes are mapped, not yet exported to the guest (api_key.env / proxy.env's token lines)
     // @port ACAppDelegate.sessionTokenPlan(for: Profile, salt: Data) h=71b1ca7b397c2cf6 @dd7ba30d
     func sessionTokenPlan(for profile: Profile) -> SessionTokenPlan? {
         guard let mitm else { return nil }
@@ -121,6 +121,8 @@ extension Daemon {
                 plan.claudeOAuthStandIn = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profile.id))
             }
         }
+        // The plan's fakes, swapped for their real values on the wire.
+        mitm.swapper.setMap(plan.tokenMap(), for: profile.id)
         return plan
     }
 

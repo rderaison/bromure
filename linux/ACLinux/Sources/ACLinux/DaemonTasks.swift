@@ -20,6 +20,7 @@ extension Daemon {
             let parts = p.dropFirst("/tasks/".count).split(separator: "/", maxSplits: 1).map(String.init)
             guard let id = parts.first.map(Self.segment).flatMap(UUID.init(uuidString:)) else { return .error(400, "Bad task id") }
             let action = m == "DELETE" ? "delete" : (parts.count > 1 ? parts[1] : "")
+            if action == "answer" { return await taskAnswer(id, doc) }
             let r = await MainActor.run { SessionStores.shared?.taskCommand(id, action, doc) ?? ["error": "no task engine"] }
             return ControlResponse(r["error"] == nil ? 200 : 400, JSONValue(foundation: r) ?? .object([:]))
         case ("GET", "/automations"): return await reply { $0.automationList() }
@@ -64,6 +65,23 @@ extension Daemon {
         default:
             return nil
         }
+    }
+
+    /// `POST /tasks/<id>/answer`: answered once the board actually took the
+    /// answer (or refused it, with why).
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskAnswer h=b83ac739078242b6 @dd7ba30d
+    private func taskAnswer(_ id: UUID, _ body: [String: Any]) async -> ControlResponse {
+        let r: [String: Any] = await { @MainActor in
+            guard let stores = SessionStores.shared, let dispatcher = stores.taskDispatcher else {
+                return ["ok": false, "error": "no dispatcher"]
+            }
+            guard let text = body["text"] as? String, !text.isEmpty else { return ["ok": false, "error": "text required"] }
+            let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
+            if await dispatcher.answer(id, askID: ask, text: text) { return ["ok": true] }
+            return ["ok": false, "error": stores.codingTasks.task(id)?.lastError
+                        ?? NSLocalizedString("The answer couldn't be sent.", comment: "coding task: answer refused")]
+        }()
+        return ControlResponse(200, JSONValue(foundation: r) ?? .object([:]))
     }
 
     /// `GET /tasks/<id>/transcript`: base64, from the archive or the guest.
@@ -115,7 +133,7 @@ extension SessionStores {
     /// One coding-board verb on one task (`POST /tasks/<id>/<action>`,
     /// `DELETE /tasks/<id>`): macOS's, less what needs its task dispatcher
     /// (assign, answer, recall, locate) or its plan-stream bridge.
-    // partial: no task dispatcher (assign, answer, recall, locate) and no plan stream (plan-events, plan-cmd) on Linux
+    // partial: no plan stream (plan-events, plan-cmd) on Linux
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=09891b7729777755 @9936e30c
     func taskCommand(_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any] {
         guard let engine = codingTaskEngine else { return ["error": "no task engine"] }
@@ -123,8 +141,28 @@ extension SessionStores {
         switch action {
         case "start":
             engine.start(id)
-        case "assign", "answer", "recall", "locate":
-            return ["ok": false, "error": "This server can't hand board tasks to sessions or rooms yet."]
+        case "assign":
+            // Queue it for a session, a room, or new agents ({kind, id,
+            // label}); kind "none" takes it off its queue.
+            guard let dispatcher = taskDispatcher else { return ["error": "no dispatcher"] }
+            if body["kind"] as? String == "none" {
+                dispatcher.assign(id, to: nil)
+            } else if let kind = (body["kind"] as? String).flatMap(TaskAssignment.Kind.init(rawValue:)) {
+                let a = kind == .worktree ? TaskAssignment.newAgent : kind == .switchboard ? TaskAssignment.switchboard : TaskAssignment(
+                    kind: kind, id: (body["id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID(),
+                    label: body["label"] as? String ?? "")
+                dispatcher.assign(id, to: a)
+            } else {
+                return ["error": "kind required"]
+            }
+        case "answer":
+            guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+            let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
+            Task { @MainActor [weak self] in _ = await self?.taskDispatcher?.answer(id, askID: ask, text: text) }
+        case "recall":
+            taskDispatcher?.recall(id)
+        case "locate":
+            Task { @MainActor [weak self] in _ = await self?.taskDispatcher?.relocateDelivery(id) }
         case "plan", "plan-start":   // plan-start: legacy alias
             engine.plan(id)
         case "send-back":
@@ -284,11 +322,11 @@ extension SessionStores {
 extension Daemon {
     /// The workspace's MCP sockets for its agents (macOS: the board's and the
     /// automations' TaskMCPVsockBridge per VM): the coding board on 5831,
-    /// the workspace's own automations on 5833 once its server builds here
-    /// (it takes macOS's RepoWatchEngine). `stored`: a restarted
+    /// the workspace's own automations on 5833 (no repository watches here),
+    /// delegations between agents on 5835. `stored`: a restarted
     /// daemon's listeners, by fd-store prefix. One that can't listen is
     /// left out (its tools then fail in the guest), logged.
-    // partial: no automations MCP (5833) yet: AutomationMCPServer takes RepoWatchEngine (AppKit)
+    // partial: no infrastructure (5834) or Switchboard (5836) MCP on Linux yet
     // @port-skip linux-only: the per-VM MCP listeners (macOS: in ACAppDelegate's VM start, on the VZ socket device)
     func serveMCP(_ rec: VMRecord, udsPath: String, stored: [String: Int32]) async -> [MCPLineListener] {
         let pid = UUID(uuidString: rec.id) ?? UUID()
@@ -298,7 +336,20 @@ extension Daemon {
             let board = TaskBoardMCPServer(profileID: pid,
                                            store: { SessionStores.shared?.codingTasks },
                                            engine: { SessionStores.shared?.codingTaskEngine })
-            for (prefix, port, server) in [("tbmcp-", GuestPorts.taskBoardMCPVsockPort, board as any MCPLineHandler)] {
+            let automations = AutomationMCPServer(
+                profileID: pid,
+                store: { SessionStores.shared?.automations },
+                profile: { ProfileStore().loadAll().first { $0.id == pid } },
+                save: { a in SessionStores.shared?.saveAutomation(a) },
+                remove: { id in SessionStores.shared?.automations.remove(id) },
+                runNow: { id in _ = SessionStores.shared?.runAutomationNow(id) },
+                watches: { nil })
+            let delegation = DelegationMCPServer(profileID: pid,
+                                                 sessions: { SessionStores.shared?.sessions },
+                                                 engine: { SessionStores.shared?.delegationEngine })
+            for (prefix, port, server) in [("tbmcp-", GuestPorts.taskBoardMCPVsockPort, board as any MCPLineHandler),
+                                           ("amcp-", GuestPorts.automationMCPVsockPort, automations as any MCPLineHandler),
+                                           ("dmcp-", GuestPorts.delegationMCPVsockPort, delegation as any MCPLineHandler)] {
                 do {
                     out.append(try MCPLineListener(udsPath: udsPath, port: port, server: server,
                                                    fdStoreName: prefix + short, stored: stored[prefix]))

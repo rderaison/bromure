@@ -136,7 +136,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "dmcp-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -208,6 +208,8 @@ public actor Daemon {
             }
             return await agentSessionCommand(id, parts[1], req.body)
         case ("POST", "/debug/sign-in-sim"): return await signInSimulator(req.body)
+        case ("POST", let p) where p.hasPrefix("/guest-pages/") && p.hasSuffix("/dismiss"):
+            return await dismissGuestPage(String(p.dropFirst("/guest-pages/".count).dropLast("/dismiss".count)), req.body)
         case ("GET", "/profiles"): return listProfiles()
         case ("POST", "/profiles"): return await createProfile(req.body)
         case ("GET", "/vms"): return listVMs()
@@ -707,6 +709,10 @@ public actor Daemon {
         }
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
         try writeProxyMeta(meta)
+        // The agents' MCP shims (board, automations, delegation, …) and the
+        // built-in browser and display servers, as macOS stages them.
+        try SessionDisk.writeGuestMCPShims(into: meta)
+        try SessionDisk.writeBuiltInMCPServers(into: meta)
 
         var qc = try machineConfig(rec)
         qc.restoreFrom = restoreFrom
@@ -846,7 +852,7 @@ public actor Daemon {
                 l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath,
                                     stored: storedNet.removeValue(forKey: "mitm-" + rec.shortId))
                 var storedMCP: [String: Int32] = [:]
-                for name in ["tbmcp-", "amcp-"] {
+                for name in ["tbmcp-", "amcp-", "dmcp-"] {
                     if let fd = storedNet.removeValue(forKey: name + rec.shortId) { storedMCP[name] = fd }
                 }
                 l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP)
@@ -1020,7 +1026,7 @@ public actor Daemon {
         await MainActor.run { [browser = l.browser] in browser.stop() }
         l.mitm?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
-        for name in ["mitm-", "tbmcp-", "amcp-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
+        for name in ["mitm-", "tbmcp-", "amcp-", "dmcp-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))

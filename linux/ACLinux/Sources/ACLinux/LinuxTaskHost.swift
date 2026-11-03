@@ -181,22 +181,43 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     // @port-skip linux-only: the daemon's session store
     var agentSessionStore: AgentSessionStore { SessionStores.shared!.sessions }
 
-    /// No task dispatcher here (board tasks handed to a session or a room):
-    /// nothing is the dispatcher's, so nothing goes back through it.
-    // partial: no task dispatcher on Linux
-    // @port-skip linux-only: no task dispatcher on Linux (ACAppDelegate.dispatcherSendBack)
-    func dispatcherSendBack(_ taskID: UUID, feedback: String) async -> Bool { false }
+    // @port-skip linux-only: the daemon's task dispatcher (ACAppDelegate.dispatcherSendBack)
+    func dispatcherSendBack(_ taskID: UUID, feedback: String) async -> Bool {
+        await SessionStores.shared?.taskDispatcher?.sendBack(taskID, feedback: feedback) ?? false
+    }
 
-    // partial: no task dispatcher on Linux
-    // @port-skip linux-only: no task dispatcher on Linux (ACAppDelegate.dispatcherSteerLanding)
-    func dispatcherSteerLanding(_ taskID: UUID, text: String) async -> Bool { false }
+    // @port-skip linux-only: the daemon's task dispatcher (ACAppDelegate.dispatcherSteerLanding)
+    func dispatcherSteerLanding(_ taskID: UUID, text: String) async -> Bool {
+        await SessionStores.shared?.taskDispatcher?.steerLanding(taskID, text: text) ?? false
+    }
 
-    // partial: no task dispatcher on Linux
-    // @port-skip linux-only: no task dispatcher on Linux (ACAppDelegate.dispatcherRecall)
-    func dispatcherRecall(_ taskID: UUID) {}
+    // @port-skip linux-only: the daemon's task dispatcher (ACAppDelegate.dispatcherRecall)
+    func dispatcherRecall(_ taskID: UUID) { SessionStores.shared?.taskDispatcher?.recall(taskID) }
 
     // @port ACAppDelegate.settleCodingTaskRefusals(now: Date, liveBranches: (UUID)->[String]) h=6c290afbe8141d2e @0c31f70f
     func settleCodingTaskRefusals(now: Date, liveBranches: (UUID) -> [String]) {
         SessionStores.shared?.codingTaskEngine?.settlePendingRefusals(now: now, liveBranches: liveBranches)
     }
+}
+
+/// The daemon as the board dispatcher's host (macOS: TaskDispatchHost+App.swift).
+extension LinuxSessionHost: TaskDispatchHost {
+    // @port-skip linux-only: the daemon's stores (set at start, before the dispatcher runs)
+    var codingTaskStore: CodingTaskStore { SessionStores.shared!.codingTasks }
+    // @port-skip linux-only: the daemon's engines (set at start, before the dispatcher runs)
+    var codingTaskEngine: CodingTaskEngine { SessionStores.shared!.codingTaskEngine! }
+    // @port-skip linux-only: the daemon's engines (set at start, before the dispatcher runs)
+    var delegationEngine: DelegationEngine { SessionStores.shared!.delegationEngine! }
+    /// No attached machines here: the daemon's own sessions.
+    // @port-skip linux-only: no attached machines on Linux
+    var allSessionRecords: [AgentSession] { agentSessionStore.sessions }
+    /// No window: every live session is free unless its agent is mid-turn.
+    // @port-skip linux-only: no session list window on a server
+    var sessionListModel: SessionListModel? { nil }
+    // @port-skip linux-only: no attached machines on Linux
+    func attachedMachineName(_ id: Profile.ID) -> String? { nil }
+    /// No Switchboard on Linux yet: a room's task has nowhere to go.
+    // partial: no Switchboard on Linux yet
+    // @port-skip linux-only: no Switchboard on Linux yet
+    func ensureSwitchboard(room: AgentRoom?) -> UUID? { nil }
 }

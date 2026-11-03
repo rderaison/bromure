@@ -27,6 +27,17 @@ extension Daemon {
             automations.start()
             tasks.resumePlanningWatchdogs()
             tasks.startHousekeeping()
+            // Delegations between agents, and the board's dispatcher (tasks
+            // handed to a session or a room come back through them).
+            let delegations = DelegationEngine(store: stores.delegations, sessions: stores.sessions,
+                                               sessionEngine: stores.engine!, delegate: host)
+            delegations.profiles = { ProfileStore().loadAll() }
+            delegations.hostLabel = { ProcessInfo.processInfo.hostName }
+            stores.delegationEngine = delegations
+            let dispatcher = TaskDispatcher(delegate: host)
+            stores.taskDispatcher = dispatcher
+            delegations.onBoardMessage = { d, m in SessionStores.shared?.taskDispatcher?.handle(d, m) }
+            delegations.boardWantsRevival = { d in SessionStores.shared?.taskDispatcher?.wantsRevival(d) ?? true }
             // Their timers are on RunLoop.main, which an async daemon never
             // runs: the same ticks, from here (30 s and 5 min, as macOS's).
             Task { @MainActor in
@@ -36,6 +47,13 @@ extension Daemon {
                     SessionStores.shared?.automationEngine?.tick()
                     n += 1
                     if n % 10 == 0 { SessionStores.shared?.codingTaskEngine?.sweepIdleReview() }
+                }
+            }
+            // The dispatcher's 10 s sync (its Timer is on RunLoop.main too).
+            Task { @MainActor in
+                while true {
+                    try? await Task.sleep(for: .seconds(10))
+                    SessionStores.shared?.taskDispatcher?.sync()
                 }
             }
             // The rosters and the sessions bound to them, kept current (macOS:
