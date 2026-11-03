@@ -17,6 +17,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         // The shared SSH server (Sources/AgentCoding/RemoteAccessServer.swift), as the app builds it.
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
+        // Enrollment's X.509 handling, as the app builds it.
+        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         // SandboxEngine's policy parser, as the app builds it.
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     ],
@@ -26,7 +28,10 @@ let package = Package(
         // Sources/SandboxEngine) and the Linux stand-ins under Linux/.
         .target(
             name: "SandboxEngine",
-            dependencies: [.product(name: "Yams", package: "Yams")],
+            dependencies: [
+                .product(name: "Yams", package: "Yams"),
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
             // Swift 5 mode, as the app builds it.
             swiftSettings: [.define("BROMURE_LINUX"), .swiftLanguageMode(.v5)]),
         .target(
@@ -38,11 +43,14 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "_CryptoExtras", package: "swift-crypto"),
+                .product(name: "X509", package: "swift-certificates"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ],
             // Shared macOS sources (Sources/ACLinux/_shared) build with their
-            // Linux stand-ins under this flag.
-            swiftSettings: [.define("BROMURE_LINUX")]),
+            // Linux stand-ins under this flag, in Swift 5 mode as the app
+            // builds them (they share one module with the daemon's code).
+            swiftSettings: [.define("BROMURE_LINUX"), .swiftLanguageMode(.v5)]),
         // The headless Linux daemon and its CLI.
         .executableTarget(
             name: "bromure-ac",

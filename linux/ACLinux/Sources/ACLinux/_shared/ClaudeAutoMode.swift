@@ -1,0 +1,1 @@
+../../../../../Sources/AgentCoding/ClaudeAutoMode.swift

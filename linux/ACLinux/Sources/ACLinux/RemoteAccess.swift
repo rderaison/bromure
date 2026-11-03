@@ -61,12 +61,13 @@ extension Daemon {
     /// forward resolvers) and starts it if enabled.
     // @port-skip linux-only: the daemon's half of ACAppDelegate.startRemoteAccessIfNeeded
     func setUpRemoteAccess() async {
-        ProfileStore.controlSocket.withLockedValue { $0 = URL(fileURLWithPath: Self.linkControlSocket(config)) }
-        // The shared server keeps its host key and authorized_keys in
-        // `remote/` beside the control socket: persistent on macOS (Application
-        // Support), a tmpfs here ($XDG_RUNTIME_DIR). The real directory is
-        // the state dir's; the runtime one points at it, so the host key a
-        // client pinned survives a reboot.
+        // The shared code's ProfileStore() lives in the state dir, and the
+        // shared server keeps `remote/` (host key, authorized_keys) beside its
+        // control socket: <state>/control.sock links to the real socket, so
+        // remote/ is the state dir's own and a pinned host key survives a
+        // reboot. The runtime dir's remote/ (older daemons') points at it.
+        ProfileStore.defaultRootDir = URL(fileURLWithPath: config.stateDir + "/profiles", isDirectory: true)
+        Self.linkControlSocket(config)
         Self.linkRemoteDirectory(state: config.stateDir + "/remote", runtime: config.runtimeDir + "/remote")
         EnrollmentCodes.file.withLockedValue { $0 = config.stateDir + "/remote/enroll-codes" }
         let g = sw.dhcp.server.map(UInt32.init)
@@ -94,19 +95,17 @@ extension Daemon {
         }
     }
 
-    /// The control socket as the shared server should see it: always
-    /// `<runtime>/control.sock`, since it keeps `remote/` beside it. A socket
-    /// elsewhere (multi-user: /run/bromure-ac/sock/<user>.sock, in a folder
-    /// the user can't write) gets a symlink there.
+    /// The control socket where the shared code looks for it,
+    /// ProfileStore().controlSocketURL: `<state>/control.sock`, a symlink to
+    /// the real one (`<runtime>/control.sock`, or multi-user's
+    /// /run/bromure-ac/sock/<user>.sock).
     // @port-skip linux-only: Linux daemon layout
-    static func linkControlSocket(_ config: DaemonConfig) -> String {
-        let local = config.runtimeDir + "/control.sock"
-        guard config.controlSocketPath != local else { return local }
+    static func linkControlSocket(_ config: DaemonConfig) {
+        let local = config.stateDir + "/control.sock"
         if (try? FileManager.default.destinationOfSymbolicLink(atPath: local)) != config.controlSocketPath {
             unlink(local)
             try? FileManager.default.createSymbolicLink(atPath: local, withDestinationPath: config.controlSocketPath)
         }
-        return local
     }
 
     // @port-skip linux-only: see setUpRemoteAccess

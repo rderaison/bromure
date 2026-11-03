@@ -10,7 +10,7 @@ import Foundation
 // @port-skip linux-only: macOS listens on the VZ socket device and can serve agents from its own browser
 @MainActor
 final class BrowserMCPBridge {
-    static let port: UInt32 = 5830
+    static let port = GuestPorts.browserMCPVsockPort
     /// Agents kept waiting for a client at most; past it the oldest goes.
     static let maxWaiting = 32
 
