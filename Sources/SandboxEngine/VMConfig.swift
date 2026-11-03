@@ -1,6 +1,10 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import Foundation
+#if canImport(Virtualization)
 import Virtualization
+#endif
 
 /// The guest operating system type.
 public enum GuestOS: String, Codable, CaseIterable {
@@ -940,8 +944,7 @@ public struct VMConfig {
         let globalDelay = d.object(forKey: "vm.keyRepeatDelayMs") as? Int
         let globalRate  = d.object(forKey: "vm.keyRepeatRateHz") as? Int
 
-        let baseDelaySeconds = NSEvent.keyRepeatDelay
-        let baseIntervalSeconds = NSEvent.keyRepeatInterval
+        let (baseDelaySeconds, baseIntervalSeconds) = hostKeyRepeat
 
         // Off sentinel: NSEvent reports a huge delay when the slider
         // is at "Off". Honour profile/global overrides first; only
@@ -1006,12 +1009,24 @@ public struct VMConfig {
         return (val as? Bool) ?? true
     }
 
+    /// The host's key repeat delay and interval, in seconds (the system's
+    /// HID-level values; a common default where there is no AppKit).
+    private static var hostKeyRepeat: (delay: Double, interval: Double) {
+        #if canImport(AppKit)
+        (NSEvent.keyRepeatDelay, NSEvent.keyRepeatInterval)
+        #else
+        (0.5, 1.0 / 30)
+        #endif
+    }
+
     /// Detect the display scale factor (1 for non-Retina, 2 for Retina).
     public static func detectDisplayScale() -> Int {
+        #if canImport(AppKit)
         // NSScreen.main requires main thread; safe to call from settings/init
         if let screen = NSScreen.main {
             return Int(screen.backingScaleFactor)
         }
+        #endif
         return 2 // Default to Retina on Apple Silicon
     }
 
@@ -1131,9 +1146,13 @@ public struct VMConfig {
 
     /// List available network interfaces for bridged networking.
     public static func bridgedInterfaces() -> [BridgedInterface] {
+        #if canImport(Virtualization)
         VZBridgedNetworkInterface.networkInterfaces.map {
             BridgedInterface(id: $0.identifier, localizedName: $0.localizedDisplayName)
         }
+        #else
+        []   // no Virtualization.framework bridging off macOS
+        #endif
     }
 
     /// Path to the saved VM state (for instant restore).
