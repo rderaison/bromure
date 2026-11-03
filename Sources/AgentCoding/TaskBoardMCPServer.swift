@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Virtualization)
 @preconcurrency import Virtualization
+#endif
 
 // The coding-board MCP exposed to in-VM task agents: read the task card,
 // record the agreed plan on it, split follow-up work into subtask cards, and
@@ -429,6 +431,7 @@ final class TaskBoardMCPServer: MCPLineHandler {
     }
 }
 
+#if canImport(Virtualization)   // the Linux daemon bridges its own (hybrid vsock)
 // MARK: - Vsock bridge
 
 /// Host-side vsock listener for a line-oriented MCP — the task board on
@@ -571,3 +574,4 @@ private final class TaskMCPListenerDelegate: NSObject, VZVirtioSocketListenerDel
         return true
     }
 }
+#endif

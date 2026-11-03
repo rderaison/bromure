@@ -293,7 +293,7 @@ public final class ManagedProfileSync {
     /// Other enrollments are untouched.
     public func unenroll(installId: String) {
         for p in ManagedProfileStore.shared.loadAll() where p.installId == installId {
-            AnalyticsMTLSIdentity.purge(profileId: p.id)
+            CloudTraceMTLS.purgeIdentity(profileId: p.id)
             deleteMTLSPrivateKey(for: p.id)
             ManagedProfileStore.shared.remove(id: p.id)
         }
@@ -305,7 +305,7 @@ public final class ManagedProfileSync {
     /// plus the shared X25519 key).
     public func destroyLocalState() {
         for p in ManagedProfileStore.shared.loadAll() {
-            AnalyticsMTLSIdentity.purge(profileId: p.id)
+            CloudTraceMTLS.purgeIdentity(profileId: p.id)
             deleteMTLSPrivateKey(for: p.id)
         }
         ManagedProfileStore.shared.removeAll()

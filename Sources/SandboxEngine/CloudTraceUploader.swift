@@ -1,5 +1,10 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(Security)
 import Security
+#endif
 
 /// Per-session uploader that ships HTTP trace events to an organization's
 /// analytics endpoint via mTLS.
@@ -36,8 +41,7 @@ public final class CloudTraceUploader: @unchecked Sendable {
 
     private let ctx: SessionContext
     private let policy: CloudTracePolicy
-    private let session: URLSession
-    private let delegate: MTLSDelegate
+    private let session: CloudTraceMTLSClient
 
     // Buffer / batching configuration.
     private let maxBatchEvents = 200
@@ -59,11 +63,7 @@ public final class CloudTraceUploader: @unchecked Sendable {
         guard policy.enabled, policy.endpoint != nil else { return nil }
         self.ctx = ctx
         self.policy = policy
-        self.delegate = MTLSDelegate(profileId: ctx.profileId)
-        let config = URLSessionConfiguration.ephemeral
-        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        config.timeoutIntervalForRequest = 15
-        self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        self.session = CloudTraceMTLS.makeClient(profileId: ctx.profileId, timeout: 15)
         startFlushTimer()
     }
 
@@ -101,7 +101,7 @@ public final class CloudTraceUploader: @unchecked Sendable {
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + timeout)
-        session.finishTasksAndInvalidate()
+        session.shutdown()
     }
 
     // MARK: - Flush / upload
@@ -143,7 +143,7 @@ public final class CloudTraceUploader: @unchecked Sendable {
         req.setValue(ctx.orgSlug, forHTTPHeaderField: "X-Bromure-Org")
         req.httpBody = body
 
-        let task = session.dataTask(with: req) { [weak self] _, resp, err in
+        session.send(req) { [weak self] _, resp, err in
             guard let self else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             let ok = err == nil && (200...299).contains(code)
@@ -177,7 +177,6 @@ public final class CloudTraceUploader: @unchecked Sendable {
                 }
             }
         }
-        task.resume()
     }
 
     private func envelope(for batch: [TraceEvent]) -> Data {
@@ -407,6 +406,49 @@ public final class CloudTraceUploader: @unchecked Sendable {
     }
 }
 
+// MARK: - mTLS client
+
+/// A managed profile's mTLS HTTPS client: the trace ingest authenticates
+/// the install by the profile's org-CA leaf. On Apple platforms a URLSession
+/// whose delegate presents it (below); the Linux daemon, whose URLSession
+/// can't present a client certificate, supplies `CloudTraceMTLS` itself.
+public protocol CloudTraceMTLSClient: AnyObject, Sendable {
+    /// Sends `req`; `completion` runs once, on a background queue.
+    func send(_ req: URLRequest, completion: @escaping @Sendable (Data?, URLResponse?, Error?) -> Void)
+    /// Lets in-flight requests finish, then stops.
+    func shutdown()
+}
+
+#if canImport(Security)
+public enum CloudTraceMTLS {
+    public static func makeClient(profileId: UUID, timeout: TimeInterval) -> CloudTraceMTLSClient {
+        URLSessionCloudTraceClient(profileId: profileId, timeout: timeout)
+    }
+
+    /// Forgets the profile's cached identity (leaf rotation, local-state wipe).
+    public static func purgeIdentity(profileId: UUID) {
+        AnalyticsMTLSIdentity.purge(profileId: profileId)
+    }
+}
+
+private final class URLSessionCloudTraceClient: CloudTraceMTLSClient, @unchecked Sendable {
+    private let session: URLSession
+
+    init(profileId: UUID, timeout: TimeInterval) {
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.timeoutIntervalForRequest = timeout
+        // URLSession holds its delegate strongly until invalidated.
+        session = URLSession(configuration: config, delegate: MTLSDelegate(profileId: profileId), delegateQueue: nil)
+    }
+
+    func send(_ req: URLRequest, completion: @escaping @Sendable (Data?, URLResponse?, Error?) -> Void) {
+        session.dataTask(with: req, completionHandler: completion).resume()
+    }
+
+    func shutdown() { session.finishTasksAndInvalidate() }
+}
+
 // MARK: - mTLS challenge handler
 
 /// URLSession delegate that answers TLS client-cert challenges with the
@@ -544,3 +586,4 @@ public enum AnalyticsMTLSIdentity {
         return Data(base64Encoded: String(b64))
     }
 }
+#endif

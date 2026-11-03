@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 
 // MARK: - Remote decision prompts (fat client)
 

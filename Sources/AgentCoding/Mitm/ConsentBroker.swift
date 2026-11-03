@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 
 /// Per-credential consent gate.
 ///
@@ -281,7 +280,7 @@ public actor ConsentBroker {
         if let token = promptTokens.removeValue(forKey: key) {
             superseded.insert(token)
             RemoteConsent.withdraw(token: token)   // a terminal prompt
-            Task { @MainActor in ConsentPanelPresenter.shared.withdraw(token: token) }
+            ConsentPrompt.withdrawLocal(token: token)
         }
         for w in waiters { w.resume(returning: allow) }
     }

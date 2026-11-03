@@ -1,6 +1,15 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
+/// Interface flags as Int32: plain constants on Darwin, enum cases in Glibc.
+#if canImport(Darwin)
+private let ifUp = IFF_UP, ifLoopback = IFF_LOOPBACK
+#else
+private let ifUp = Int32(IFF_UP.rawValue), ifLoopback = Int32(IFF_LOOPBACK.rawValue)
 #endif
 
 // MARK: - ICE-style connection candidate
@@ -104,7 +113,7 @@ enum P2PCandidateGatherer {
         while let p = ptr {
             defer { ptr = p.pointee.ifa_next }
             let flags = Int32(p.pointee.ifa_flags)
-            guard (flags & IFF_UP) == IFF_UP, (flags & IFF_LOOPBACK) == 0,
+            guard (flags & ifUp) == ifUp, (flags & ifLoopback) == 0,
                   let sa = p.pointee.ifa_addr else { continue }
             // Interfaces no remote peer can ever dial: Apple's peer-to-peer
             // radios (awdl/llw), the internal NIC-management links (anpi/ap),
@@ -118,7 +127,8 @@ enum P2PCandidateGatherer {
             guard sa.pointee.sa_family == sa_family_t(AF_INET) else { continue }   // IPv4 only
 
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len),
+            // An IPv4 address (checked above): sa_len, which Linux lacks, is always this.
+            guard getnameinfo(sa, socklen_t(MemoryLayout<sockaddr_in>.size),
                               &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0
             else { continue }
             let ip = String(cString: host)

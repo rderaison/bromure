@@ -82,6 +82,12 @@ enum ConsentPrompt {
 }
 
 extension ConsentPrompt {
+    /// Takes back the local panel asked under `token` (its asker gets nil).
+    /// The Linux daemon's ConsentPrompt has no local panel: a no-op there.
+    static func withdrawLocal(token: UUID) {
+        Task { @MainActor in ConsentPanelPresenter.shared.withdraw(token: token) }
+    }
+
     /// The first answer of two surfaces. `remote` gives nil when nobody
     /// answered there (no client, the client left, its timeout) — that
     /// never ends the race: the local panel still stands. `local` always
