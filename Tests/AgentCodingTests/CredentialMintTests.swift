@@ -348,13 +348,14 @@ struct CredentialMintTests {
         let app = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
         let script = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/ScriptCommands.swift"), encoding: .utf8)
         // The editor: the app's current list, before saveEdited writes the secrets blob.
-        let persist = try #require(app.range(of: "func persistEditedProfile("))
-        let body = app[persist.upperBound...]
+        let edits = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/ProfileEdits.swift"), encoding: .utf8)
+        let persist = try #require(edits.range(of: "func persistEditedProfile("))
+        let body = edits[persist.upperBound...]
         let carry = try #require(body.range(of: "profile.mintedCredentials = current.mintedCredentials"))
         let save = try #require(body.range(of: "try store.saveEdited(&profile)"))
         #expect(carry.lowerBound < save.lowerBound)
         // The document round-trips: the stored list, never the document's.
-        #expect(app.components(separatedBy: "incoming.mintedCredentials = existing.mintedCredentials").count == 2)
+        #expect(edits.components(separatedBy: "incoming.mintedCredentials = existing.mintedCredentials").count == 2)
         #expect(script.contains("incoming.mintedCredentials = existing.mintedCredentials"))
     }
 

@@ -1,4 +1,8 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 import Foundation
 
 /// Every saved version of a workspace's OpenShell policy, like OpenShell's

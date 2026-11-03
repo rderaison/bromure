@@ -77,7 +77,10 @@ struct DeletedEphemeralRecreateTests {
         let touch = try #require(body.range(of: "let written = try store.touch(profile)"))
         #expect(body[touch.upperBound...].prefix(600).contains("} catch is ProfileStore.ProfileGone {"))
         #expect(!src.contains("try? store.touch(profile)"))
-        let persist = try #require(src.range(of: "func persistEditedProfile("))
-        #expect(src[persist.upperBound...].prefix(1200).contains("if editing != nil, !store.exists(profile) {"))
+        let edits = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/ProfileEdits.swift"), encoding: .utf8)
+        let persist = try #require(edits.range(of: "func persistEditedProfile("))
+        #expect(edits[persist.upperBound...].prefix(1200).contains("if editing != nil, !store.exists(profile) {"))
     }
 }

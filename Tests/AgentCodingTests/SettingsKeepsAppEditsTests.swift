@@ -40,7 +40,7 @@ struct SettingsKeepsAppEditsTests {
     @Test("the save path applies the rule before writing")
     func localSaveWired() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/ProfileEdits.swift"), encoding: .utf8)
         let fn = try #require(ac.range(of: "func persistEditedProfile(_ profile: inout Profile, editing: Profile?,"))
         let save = try #require(ac[fn.upperBound...].range(of: "try store.saveEdited(&profile)"))
         #expect(ac[fn.upperBound..<save.lowerBound].contains("if let opened = editing { profile.adoptAppEdits(from: current, opened: opened) }"))
@@ -124,11 +124,12 @@ struct SettingsKeepsAppEditsTests {
         let set = try #require(ac.range(of: "func setNotes(_ id: Profile.ID, _ text: String, ifStill base: String? = nil)"))
         let write = try #require(ac[set.upperBound...].range(of: "try store.update(p)"))
         #expect(ac[set.upperBound..<write.lowerBound].contains("if let base, !Self.notesStill(p.comments, base) { return .superseded(p.comments) }"))
-        let upsert = try #require(ac.range(of: "func automationUpsertProfile(idOrName: String?, doc rawDoc: [String: Any])"))
-        let merge = try #require(ac[upsert.upperBound...].range(of: "switch ProfileDocument.merge(doc, over: existing)"))
-        #expect(ac[upsert.upperBound..<merge.lowerBound].contains(
-            "commentsSuperseded = Self.dropSupersededComments(&doc, stored: existing.comments, ifStill: commentsIfStill)"))
-        #expect(ac.contains("if commentsSuperseded { result[\"commentsSuperseded\"] = true }"))
+        let edits = try src("Sources/AgentCoding/ProfileEdits.swift")
+        let upsert = try #require(edits.range(of: "func automationUpsertProfile(idOrName: String?, doc rawDoc: [String: Any])"))
+        let merge = try #require(edits[upsert.upperBound...].range(of: "switch ProfileDocument.merge(doc, over: existing)"))
+        #expect(edits[upsert.upperBound..<merge.lowerBound].contains(
+            "commentsSuperseded = ProfileNotes.dropSupersededComments(&doc, stored: existing.comments, ifStill: commentsIfStill)"))
+        #expect(edits.contains("if commentsSuperseded { result[\"commentsSuperseded\"] = true }"))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains("if let base { doc[\"_commentsIfStill\"] = base }"))
         let v = try src("Sources/AgentCoding/VMDashboard.swift")
@@ -165,8 +166,9 @@ struct SettingsKeepsAppEditsTests {
         let ac = try src("Sources/AgentCoding/BromureAC.swift")
         let setter = try #require(ac.range(of: "    var profiles: [Profile] = [] {"))
         #expect(ac[setter.upperBound...].prefix(1600).contains("unifiedWindow?.refreshVMDashboard()"))
-        let upsert = try #require(ac.range(of: "try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH, policySource: \"api\")"))
-        #expect(ac[upsert.upperBound...].prefix(600).contains(
+        let edits = try src("Sources/AgentCoding/ProfileEdits.swift")
+        let upsert = try #require(edits.range(of: "try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH, policySource: \"api\")"))
+        #expect(edits[upsert.upperBound...].prefix(600).contains(
             "if commentsSuperseded, let editing { r[\"commentsSuperseded\"] = true; r[\"comments\"] = editing.comments }"))
     }
 }
