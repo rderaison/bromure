@@ -146,6 +146,7 @@ public actor Daemon {
         switch (req.method, path) {
         case ("GET", "/health"): return health()
         case ("GET", "/state"): return state()
+        case ("GET", "/state/subscribe"): return stateSubscribe()
         case ("GET", "/vms"): return listVMs()
         case ("POST", "/vms"): return await createVM(req.body)
         case (let m, let p) where p.hasPrefix("/vms/"): return await vmRoute(m, p, req.body)
@@ -169,16 +170,53 @@ public actor Daemon {
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
     // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, localModels, kubeClusters, generation/epoch, or agent sessions yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
-    func state() -> ControlResponse {
+    func state() -> ControlResponse { ControlResponse(200, stateBody()) }
+
+    /// `GET /state/subscribe`: the octet-stream header, then a `/state`
+    /// frame `[u32be len][u8 flag][json]` (len counts flag + json; flag 0,
+    /// never compressed) whenever it changes, checked every 0.5 s, and at
+    /// least every 15 s (a client resubscribes after 45 s of silence). Ends
+    /// when a write fails; the client half-closing (the SSH bridge forwards
+    /// its EOF) doesn't end it.
+    // partial: no gzip frames (flag 1)
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state/subscribe"): h=97279e9d002810bf @7dd92fdf
+    // @port ACAutomationServer.handleStateSubscribe(fd: Int32) h=7745b9b5fc280681 @7dd92fdf
+    func stateSubscribe() -> ControlResponse {
+        let me = WeakDaemon(self)
+        return .streaming { client in
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.sortedKeys]
+            var last = Data()
+            var lastSent = ContinuousClock.now - .seconds(60)
+            while !Task.isCancelled {
+                guard let d = me.daemon, let json = try? enc.encode(await d.stateBody()) else { return }
+                if json != last || ContinuousClock.now - lastSent >= .seconds(15) {
+                    var frame = ByteBuffer()
+                    frame.writeInteger(UInt32(json.count + 1))
+                    frame.writeInteger(UInt8(0))
+                    frame.writeBytes(json)
+                    do { try await client.write(frame) } catch { return }
+                    last = json
+                    lastSent = .now
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    /// The `/state` snapshot.
+    // @port-skip linux-only: the body of state(), shared with stateSubscribe()
+    func stateBody() -> JSONValue {
         // As on macOS, `vms` is the running (and booting) VMs and `workspaces`
         // every workspace; with no profiles here each VM is its own workspace,
         // same id, which is what a fat client opens a terminal on.
         let all = records
         let vms = all.filter { $0.state == .running || $0.state == .starting }.map(\.json)
-        return ControlResponse(200, [
+        return .object([
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
             "vms": .array(vms), "workspaces": .array(all.map(\.workspaceJSON)), "workspacesListed": true,
+            "supportsPush": true,
             "vmnetSubnet": "192.168.64.0/24", "vmnetGateway": "192.168.64.1",
             "uplink": ["kind": "passt", "mtu": .number(Double(passt.mtu))],
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
