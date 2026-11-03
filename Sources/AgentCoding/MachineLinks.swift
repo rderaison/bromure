@@ -793,10 +793,10 @@ extension AttachedMachine: AgentHostLink {
     func hostExec(_ command: String, timeout: Int) async throws -> String {
         guard let r = await call("POST", "/vms/\(id.uuidString)/exec",
                                  ["command": command, "timeout": timeout], timeout: TimeInterval(timeout + 15)),
-              r.status == 200 else { throw ACAppDelegate.GuestExecError.connectionFailed }
+              r.status == 200 else { throw GuestExecError.connectionFailed }
         let code = r.json["exitCode"] as? Int ?? 1
         guard code == 0 else {
-            throw ACAppDelegate.GuestExecError.commandFailed(exitCode: code, stderr: r.json["stderr"] as? String ?? "")
+            throw GuestExecError.commandFailed(exitCode: code, stderr: r.json["stderr"] as? String ?? "")
         }
         return r.json["stdout"] as? String ?? ""
     }
@@ -804,9 +804,9 @@ extension AttachedMachine: AgentHostLink {
     func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any] {
         guard let r = await call("POST", "/vms/\(id.uuidString)/file", ["op": op, "timeout": timeout],
                                  timeout: TimeInterval(timeout + 5)) else {
-            throw ACAppDelegate.GuestExecError.connectionFailed
+            throw GuestExecError.connectionFailed
         }
-        if let err = r.json["error"] as? String { throw ACAppDelegate.GuestExecError.commandFailed(exitCode: 1, stderr: err) }
+        if let err = r.json["error"] as? String { throw GuestExecError.commandFailed(exitCode: 1, stderr: err) }
         return r.json
     }
 

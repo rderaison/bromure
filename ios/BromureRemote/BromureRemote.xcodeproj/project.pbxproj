@@ -29,6 +29,7 @@
 		B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */; };
 		64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */; };
 		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
+		381D8B6E6FE7C2CC044C2CBC /* ActivitySummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56ABC6263B5FFDF8E91B8CBD /* ActivitySummary.swift */; };
 		1795F4EECEDD9CEFC5CDEAEA /* AgentDelegation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4581313AD4A13B6B9066CFDD /* AgentDelegation.swift */; };
 		3C7834582D27B4D1E4A912D9 /* AgentLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F352074D999D1ED408738D2 /* AgentLabels.swift */; };
 		70960E73B396816D6F41D36F /* AgentScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCC9420550508D892E331419 /* AgentScreen.swift */; };
@@ -49,6 +50,7 @@
 		F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */; };
 		B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC7578E83999395F752CAF /* ConversationView.swift */; };
 		43636D2E8824B12B1EA42A4A /* DisplayCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = A306DC4F346D7C5344F297CD /* DisplayCards.swift */; };
+		80A7DD4B862AF33797677E08 /* DisplayRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23839A2A7E1C4775C3108F39 /* DisplayRequest.swift */; };
 		483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */; };
 		04F22AD5C1F56A6E6B665FA8 /* EnvFileImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */; };
 		3D95969D8811463BD706F10D /* FDGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */; };
@@ -64,6 +66,7 @@
 		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
+		CD40F8FC35AF8A8FE2940D95 /* GuestExecError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65807D6CF50DB4D2F45F4BA5 /* GuestExecError.swift */; };
 		867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
 		FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */; };
@@ -190,6 +193,7 @@
 		5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WebBrowserPane.swift"; path = "Sources/BromureRemote/WebBrowserPane.swift"; sourceTree = "<group>"; };
 		C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceEditor.swift"; path = "Sources/BromureRemote/WorkspaceEditor.swift"; sourceTree = "<group>"; };
 		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
+		56ABC6263B5FFDF8E91B8CBD /* ActivitySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ActivitySummary.swift"; path = "Sources/BromureRemote/_shared/ActivitySummary.swift"; sourceTree = "<group>"; };
 		4581313AD4A13B6B9066CFDD /* AgentDelegation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AgentDelegation.swift"; path = "Sources/BromureRemote/_shared/AgentDelegation.swift"; sourceTree = "<group>"; };
 		9F352074D999D1ED408738D2 /* AgentLabels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AgentLabels.swift"; path = "Sources/BromureRemote/_shared/AgentLabels.swift"; sourceTree = "<group>"; };
 		CCC9420550508D892E331419 /* AgentScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AgentScreen.swift"; path = "Sources/BromureRemote/_shared/AgentScreen.swift"; sourceTree = "<group>"; };
@@ -210,6 +214,7 @@
 		A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ControlClient.swift"; path = "Sources/BromureRemote/_shared/ControlClient.swift"; sourceTree = "<group>"; };
 		EDCC7578E83999395F752CAF /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConversationView.swift"; path = "Sources/BromureRemote/_shared/ConversationView.swift"; sourceTree = "<group>"; };
 		A306DC4F346D7C5344F297CD /* DisplayCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DisplayCards.swift"; path = "Sources/BromureRemote/_shared/DisplayCards.swift"; sourceTree = "<group>"; };
+		23839A2A7E1C4775C3108F39 /* DisplayRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DisplayRequest.swift"; path = "Sources/BromureRemote/_shared/DisplayRequest.swift"; sourceTree = "<group>"; };
 		7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DockerDashboard.swift"; path = "Sources/BromureRemote/_shared/DockerDashboard.swift"; sourceTree = "<group>"; };
 		FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "EnvFileImport.swift"; path = "Sources/BromureRemote/_shared/EnvFileImport.swift"; sourceTree = "<group>"; };
 		719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FDGuard.swift"; path = "Sources/BromureRemote/_shared/FDGuard.swift"; sourceTree = "<group>"; };
@@ -225,6 +230,7 @@
 		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
+		65807D6CF50DB4D2F45F4BA5 /* GuestExecError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "GuestExecError.swift"; path = "Sources/BromureRemote/_shared/GuestExecError.swift"; sourceTree = "<group>"; };
 		3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "GuestURLGate.swift"; path = "Sources/BromureRemote/_shared/GuestURLGate.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
 		C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelCatalog.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelCatalog.swift"; sourceTree = "<group>"; };
@@ -375,6 +381,7 @@
 				5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */,
 				C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */,
 				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
+				56ABC6263B5FFDF8E91B8CBD /* ActivitySummary.swift */,
 				4581313AD4A13B6B9066CFDD /* AgentDelegation.swift */,
 				9F352074D999D1ED408738D2 /* AgentLabels.swift */,
 				CCC9420550508D892E331419 /* AgentScreen.swift */,
@@ -395,6 +402,7 @@
 				A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */,
 				EDCC7578E83999395F752CAF /* ConversationView.swift */,
 				A306DC4F346D7C5344F297CD /* DisplayCards.swift */,
+				23839A2A7E1C4775C3108F39 /* DisplayRequest.swift */,
 				7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */,
 				FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */,
 				719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */,
@@ -410,6 +418,7 @@
 				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
+				65807D6CF50DB4D2F45F4BA5 /* GuestExecError.swift */,
 				3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
 				C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */,
@@ -614,6 +623,7 @@
 				B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */,
 				64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */,
 				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
+				381D8B6E6FE7C2CC044C2CBC /* ActivitySummary.swift in Sources */,
 				1795F4EECEDD9CEFC5CDEAEA /* AgentDelegation.swift in Sources */,
 				3C7834582D27B4D1E4A912D9 /* AgentLabels.swift in Sources */,
 				70960E73B396816D6F41D36F /* AgentScreen.swift in Sources */,
@@ -634,6 +644,7 @@
 				F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */,
 				B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */,
 				43636D2E8824B12B1EA42A4A /* DisplayCards.swift in Sources */,
+				80A7DD4B862AF33797677E08 /* DisplayRequest.swift in Sources */,
 				483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */,
 				04F22AD5C1F56A6E6B665FA8 /* EnvFileImport.swift in Sources */,
 				3D95969D8811463BD706F10D /* FDGuard.swift in Sources */,
@@ -649,6 +660,7 @@
 				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
+				CD40F8FC35AF8A8FE2940D95 /* GuestExecError.swift in Sources */,
 				867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
 				FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */,

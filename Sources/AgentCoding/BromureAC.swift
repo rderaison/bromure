@@ -3674,27 +3674,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// Errors from `guestExec`.
-    enum GuestExecError: LocalizedError {
-        case vmNotRunning
-        /// The workspace is powered off — nothing to talk to until it boots.
-        case vmOff
-        /// The workspace is suspended (RAM saved to disk) — resume it first.
-        case vmSuspended
-        case connectionFailed
-        case commandFailed(exitCode: Int, stderr: String)
-        var errorDescription: String? {
-            switch self {
-            case .vmNotRunning: "The VM isn't running"
-            case .vmOff: "The VM is off"
-            case .vmSuspended: "The VM is suspended"
-            case .connectionFailed: "Couldn't reach the VM's shell agent"
-            case .commandFailed(let code, let stderr):
-                stderr.isEmpty ? "Command failed (exit \(code))"
-                               : stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-    }
+    /// Errors from `guestExec` (GuestExecError.swift).
+    typealias GuestExecError = bromure_ac.GuestExecError
 
     /// The error for a guest with no shell bridge: names the VM's actual
     /// state (off / suspended) so the file explorer and the fat client can say

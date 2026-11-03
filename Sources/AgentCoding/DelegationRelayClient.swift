@@ -205,12 +205,12 @@ extension RemoteHostController: AgentHostLink {
     var hostHome: String? { nil }
 
     func hostExec(_ command: String, timeout: Int) async throws -> String {
-        guard let id = agentHostID else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        guard let id = agentHostID else { throw GuestExecError.connectionFailed }
         return try await guestExec(id, command: command, timeout: timeout)
     }
 
     func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any] {
-        guard let id = agentHostID else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        guard let id = agentHostID else { throw GuestExecError.connectionFailed }
         return try await guestFileOp(id, op: op, timeout: timeout)
     }
 

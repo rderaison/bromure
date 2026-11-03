@@ -938,7 +938,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // shell vsock — never the virtio share (remote-access friendly).
         fileExplorerModel.execProvider = { [weak self] id, command, timeout in
             guard let delegate = self?.acDelegate else {
-                throw ACAppDelegate.GuestExecError.vmNotRunning
+                throw GuestExecError.vmNotRunning
             }
             return try await delegate.guestExec(profileID: id, command: command,
                                                 timeout: timeout)
@@ -946,7 +946,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // Drag-out / drop-in go over the guest file service.
         fileExplorerModel.fileOpProvider = { [weak self] id, op in
             guard let delegate = self?.acDelegate else {
-                throw ACAppDelegate.GuestExecError.vmNotRunning
+                throw GuestExecError.vmNotRunning
             }
             return try await delegate.guestFileOp(profileID: id, op: op)
         }

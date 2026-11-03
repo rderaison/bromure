@@ -3713,43 +3713,13 @@ final class CodingTaskEngine {
         return PaneTypeGuard.typeCommand(target: t, text: text)
     }
 
-    /// The guest command that tails a plan session's live agent transcript.
-    /// The agent runs IN the task's configured directory, so the session
-    /// store entry is derived from that path the way each tool encodes it;
-    /// `since` (epoch seconds) skips transcripts of earlier sessions in the
-    /// same directory. Output is capped so a long session stays cheap to
-    /// poll. `agent` is a canonical `BromureIcons` agent kind — nil (or a
-    /// tool without a known store) searches every store and takes the
-    /// newest match, so a tab whose label hasn't resolved yet still reads.
-    /// Nil return when the path has characters we won't quote.
+    /// The guest command that tails a plan session's live agent transcript,
+    /// with no conversation pinned (CodingTaskCommands has the pinned form).
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
                                                   agent: String? = nil,
-                                                  pinnedWindow: Int? = nil,
-                                                  pin: TranscriptPin = TranscriptPin()) -> String? {
-        guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
-        else { return nil }
-        var cmd = transcriptLocatePrefix(path: path, since: since, agent: agent,
-                                         pinnedWindow: pinnedWindow, pin: pin)
-        // iconv -c drops the orphan bytes a byte-cap cut can leave mid
-        // UTF-8 sequence — a strict decode downstream used to collapse the
-        // whole response.
-        cmd += "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
-        if agent == nil || agent == "claude" {
-            // The pq file is a PreToolUse hook's dump of a PENDING
-            // AskUserQuestion (see the guest agent's _seed_question_hooks):
-            // Claude Code doesn't write the assistant turn to the transcript
-            // until the question is answered, so this is the only way the
-            // window can show the question while it's actually being asked.
-            // tr strips newlines so a pretty-printed dump still parses as one
-            // transcript line. The pq name stays LOGICAL-path-encoded — the
-            // hook derives it from $(pwd), which keeps the symlink.
-            let enc2 = path.replacingOccurrences(of: ".", with: "-")
-                .replacingOccurrences(of: "/", with: "-")
-            let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
-            cmd += "if [ -n \"$(find \(pq) -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null)\" ]; "
-                + "then echo; tr -d '\\n' < \(pq); echo; fi"
-        }
-        return cmd
+                                                  pinnedWindow: Int? = nil) -> String? {
+        planTranscriptCommand(guestCwd: guestCwd, since: since, agent: agent,
+                              pinnedWindow: pinnedWindow, pin: TranscriptPin())
     }
 
 

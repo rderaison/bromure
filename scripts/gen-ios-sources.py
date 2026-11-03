@@ -97,6 +97,9 @@ SHARED = [
     "AgentTranscripts.swift",   # transcript models + parsers (the views are in ClaudeTranscriptView)
     "ClaudeTranscriptView.swift",
     "TranscriptActivity.swift",
+    "ActivitySummary.swift",    # what a run of activity amounts to (TranscriptActivity's model)
+    "DisplayRequest.swift",     # a display-MCP call, parsed (DisplayCards' model)
+    "GuestExecError.swift",     # guestExec's errors (ACAppDelegate keeps a typealias)
     "MermaidFence.swift",
     "DisplayCards.swift",  # display-MCP cards (show_media / show_chart); vega bundled via gen-ios-project.py  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback
     "PushCrypto.swift",  # HPKE seal/open — shared by the Mac sender + iOS NSE

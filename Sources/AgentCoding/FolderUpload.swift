@@ -7,6 +7,14 @@ import Foundation
 /// skipped): a file-op round trip per file was minutes for a node_modules
 /// over a remote link. A guest too old to unpack gets it file by file.
 enum FolderUpload {
+    /// Leave out extended attributes and macOS metadata (AppleDouble files):
+    /// bsdtar on macOS takes --no-mac-metadata, GNU tar (Linux) only --no-xattrs.
+    #if os(macOS)
+    static let tarNoMetadataFlags = ["--no-mac-metadata", "--no-xattrs"]
+    #else
+    static let tarNoMetadataFlags = ["--no-xattrs"]
+    #endif
+
     typealias FileOp = ([String: Any]) async throws -> [String: Any]
 
     /// Raw bytes per write — the base64 stays under the guest's request cap.
@@ -62,7 +70,7 @@ enum FolderUpload {
         return try await Task.detached(priority: .userInitiated) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            p.arguments = ["-czf", out.path, "--no-mac-metadata", "--no-xattrs", "-C", src.path, "."]
+            p.arguments = ["-czf", out.path] + Self.tarNoMetadataFlags + ["-C", src.path, "."]
             var env = ProcessInfo.processInfo.environment
             env["COPYFILE_DISABLE"] = "1"
             p.environment = env
@@ -74,7 +82,7 @@ enum FolderUpload {
             p.waitUntilExit()
             guard p.terminationStatus == 0 else {
                 try? FileManager.default.removeItem(at: out)
-                throw ACAppDelegate.GuestExecError.commandFailed(
+                throw GuestExecError.commandFailed(
                     exitCode: Int(p.terminationStatus), stderr: String(decoding: err, as: UTF8.self))
             }
             return out

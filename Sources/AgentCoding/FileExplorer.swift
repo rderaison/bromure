@@ -363,7 +363,7 @@ final class FileExplorerModel {
 
     private func exec(_ command: String, timeout: Int = 30) async throws -> String {
         guard let profileID, let execProvider else {
-            throw ACAppDelegate.GuestExecError.vmNotRunning
+            throw GuestExecError.vmNotRunning
         }
         return try await execProvider(profileID, command, timeout)
     }
@@ -601,7 +601,7 @@ final class FileExplorerModel {
     // MARK: Transfers (the guest file service)
 
     private func fileOp(_ op: [String: Any]) async throws -> [String: Any] {
-        guard let profileID, let fileOpProvider else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+        guard let profileID, let fileOpProvider else { throw GuestExecError.vmNotRunning }
         return try await fileOpProvider(profileID, op)
     }
 

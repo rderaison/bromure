@@ -2235,7 +2235,7 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("GET", path)
         }.value
         guard resp.status == 200 else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "profile fetch failed")
         }
         return resp.json
@@ -2358,7 +2358,7 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("PUT", path, body: doc)
         }.value
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
         }
         DispatchQueue.main.async { [weak self] in self?.pollOnce() }
@@ -2373,7 +2373,7 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("GET", "/preferences")
         }.value
         guard resp.status == 200 else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "preferences fetch failed")
         }
         return resp.json
@@ -2388,7 +2388,7 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("PUT", "/preferences", body: doc)
         }.value
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
         }
         return resp.json
@@ -2402,7 +2402,7 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("GET", "/models/settings")
         }.value
         guard resp.status == 200 else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "model settings fetch failed")
         }
         let data = try JSONSerialization.data(withJSONObject: resp.json)
@@ -2419,7 +2419,7 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("PUT", "/models/settings", body: doc)
         }.value
         guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
         }
         DispatchQueue.main.async { [weak self] in self?.pollOnce() }
@@ -2456,7 +2456,7 @@ final class RemoteHostController {
             try RemoteTransport.client(for: host).request("POST", "/profiles", body: doc)
         }.value
         guard resp.status == 201, (resp.json["ok"] as? Bool) == true else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "create failed (HTTP \(resp.status))")
         }
         DispatchQueue.main.async { [weak self] in self?.pollOnce() }
@@ -2561,8 +2561,8 @@ final class RemoteHostController {
     /// roster not mirrored yet) fall through and let the host decide.
     private func checkGuestReachable(_ id: Profile.ID) throws {
         switch listModel.profileRows.first(where: { $0.id == id })?.state {
-        case .off:       throw ACAppDelegate.GuestExecError.vmOff
-        case .suspended: throw ACAppDelegate.GuestExecError.vmSuspended
+        case .off:       throw GuestExecError.vmOff
+        case .suspended: throw GuestExecError.vmSuspended
         case .booting, .running, nil: break
         }
     }
@@ -2609,12 +2609,12 @@ final class RemoteHostController {
                          recvTimeoutSeconds: timeout + 15)
         }.value
         guard resp.status == 200 else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "exec failed")
         }
         let exitCode = resp.json["exitCode"] as? Int ?? 1
         guard exitCode == 0 else {
-            throw ACAppDelegate.GuestExecError.commandFailed(
+            throw GuestExecError.commandFailed(
                 exitCode: exitCode, stderr: resp.json["stderr"] as? String ?? "")
         }
         return resp.json["stdout"] as? String ?? ""
@@ -2632,10 +2632,10 @@ final class RemoteHostController {
                          recvTimeoutSeconds: timeout + 5)
         }.value
         if let err = resp.json["error"] as? String {
-            throw ACAppDelegate.GuestExecError.commandFailed(exitCode: 1, stderr: err)
+            throw GuestExecError.commandFailed(exitCode: 1, stderr: err)
         }
         guard resp.status == 200 else {
-            throw ACAppDelegate.GuestExecError.connectionFailed
+            throw GuestExecError.connectionFailed
         }
         return resp.json
     }
@@ -3944,13 +3944,13 @@ final class RemoteHostWindow: NSWindow {
         // File-explorer pane sits between the stage and the browser pane;
         // width toggles 0 ↔ N (⌃⌘E / the toolbar's sidebar.right button).
         fileExplorerModel.execProvider = { [weak self] id, command, timeout in
-            guard let self else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+            guard let self else { throw GuestExecError.vmNotRunning }
             return try await self.controller.guestExec(id, command: command, timeout: timeout)
         }
         // Drag-out / drop-in over the tunnel's file channel, like the
         // remote file browser window.
         fileExplorerModel.fileOpProvider = { [weak self] id, op in
-            guard let self else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+            guard let self else { throw GuestExecError.vmNotRunning }
             // Unpacking a dropped folder can take a while on a big one.
             let timeout = (op["op"] as? String) == "untar" ? 600 : 30
             return try await self.controller.guestFileOp(id, op: op, timeout: timeout)
@@ -6796,7 +6796,7 @@ final class RemoteHostWindow: NSWindow {
         let a = NSAlert()
         a.alertStyle = .warning
         a.messageText = title
-        if case ACAppDelegate.GuestExecError.commandFailed(_, let stderr) = error {
+        if case GuestExecError.commandFailed(_, let stderr) = error {
             a.informativeText = stderr
         } else {
             a.informativeText = error.localizedDescription

@@ -272,13 +272,13 @@ final class DelegationEngine {
 
     func guestExec(profileID: UUID, command: String, timeout: Int = 30) async throws -> String {
         if let h = sessions.host(for: profileID) { return try await h.hostExec(command, timeout: timeout) }
-        guard let delegate else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        guard let delegate else { throw GuestExecError.connectionFailed }
         return try await delegate.guestExec(profileID: profileID, command: command, timeout: timeout)
     }
 
     func guestFileOp(profileID: UUID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
         if let h = sessions.host(for: profileID) { return try await h.hostFileOp(op, timeout: timeout) }
-        guard let delegate else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        guard let delegate else { throw GuestExecError.connectionFailed }
         return try await delegate.guestFileOp(profileID: profileID, op: op, timeout: timeout)
     }
 
