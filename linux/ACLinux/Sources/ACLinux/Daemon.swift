@@ -228,6 +228,7 @@ public actor Daemon {
             return await remoteRemoveKey(raw.removingPercentEncoding ?? raw)
         default:
             if let r = await boardRoute(req.method, path, req.body) { return r }
+            if let r = await preferencesRoute(req.method, path, req.body) { return r }
             return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
