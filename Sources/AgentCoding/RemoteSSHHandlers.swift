@@ -398,6 +398,30 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         if !channel.isWritable { pauseReadPump(channel) }
     }
 
+    /// A pumped fd's read-source event: read until it would block, the pump
+    /// pauses or the fd ends (every pumped fd is non-blocking). Reading on
+    /// past the first chunk matters on Linux, where libdispatch doesn't fire
+    /// again for an EOF that came in with the data (a control reply written
+    /// and closed at once): the channel then never closed.
+    private func pumpReadable(_ fd: Int32, channel: Channel, pid: pid_t) {
+        var buf = [UInt8](repeating: 0, count: 1 << 15)
+        while !pumpPaused, !draining {
+            let n = LibC.read(fd, &buf, buf.count)
+            if n > 0 {
+                var bb = channel.allocator.buffer(capacity: n)
+                bb.writeBytes(buf[0..<n])
+                pumpWrite(channel, bb)
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else if n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK) {
+                finishAfterDrain(channel: channel, pid: pid, master: fd)
+                return
+            } else {
+                return
+            }
+        }
+    }
+
     /// The pumped fd hit EOF and the drain-then-finish is under way
     /// (ioQueue only).
     private var draining = false
@@ -678,18 +702,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         let flags = fcntl(masterFD, F_GETFL)
         _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
         let src = DispatchSource.makeReadSource(fileDescriptor: masterFD, queue: ioQueue)
-        src.setEventHandler { [weak self] in
-            guard let self else { return }
-            var buf = [UInt8](repeating: 0, count: 1 << 15)
-            let n = LibC.read(masterFD, &buf, buf.count)
-            if n > 0 {
-                var bb = channel.allocator.buffer(capacity: n)
-                bb.writeBytes(buf[0..<n])
-                self.pumpWrite(channel, bb)
-            } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
-                self.finishAfterDrain(channel: channel, pid: pid, master: masterFD)
-            }
-        }
+        src.setEventHandler { [weak self] in self?.pumpReadable(masterFD, channel: channel, pid: pid) }
         readSource = src
         src.resume()
     }
@@ -758,18 +771,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         // Read pump that forwards the fd's output to the client, identical in
         // shape to the PTY pump.
         let src = DispatchSource.makeReadSource(fileDescriptor: sockFD, queue: ioQueue)
-        src.setEventHandler { [weak self] in
-            guard let self else { return }
-            var buf = [UInt8](repeating: 0, count: 1 << 15)
-            let n = LibC.read(sockFD, &buf, buf.count)
-            if n > 0 {
-                var bb = channel.allocator.buffer(capacity: n)
-                bb.writeBytes(buf[0..<n])
-                self.pumpWrite(channel, bb)
-            } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
-                self.finishAfterDrain(channel: channel, pid: -1, master: sockFD)
-            }
-        }
+        src.setEventHandler { [weak self] in self?.pumpReadable(sockFD, channel: channel, pid: -1) }
         readSource = src
         src.resume()
     }
@@ -907,18 +909,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
         ioQueue.async { [weak self] in self?.flushPending() }
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: self.ioQueue)
-        src.setEventHandler { [weak self] in
-            guard let self else { return }
-            var buf = [UInt8](repeating: 0, count: 1 << 15)
-            let n = LibC.read(fd, &buf, buf.count)
-            if n > 0 {
-                var bb = channel.allocator.buffer(capacity: n)
-                bb.writeBytes(buf[0..<n])
-                self.pumpWrite(channel, bb)
-            } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
-                self.finishAfterDrain(channel: channel, pid: -1, master: fd)
-            }
-        }
+        src.setEventHandler { [weak self] in self?.pumpReadable(fd, channel: channel, pid: -1) }
         self.readSource = src
         src.resume()
     }
