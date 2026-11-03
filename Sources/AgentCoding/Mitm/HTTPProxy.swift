@@ -1591,55 +1591,55 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     store and the guest hears what the host decides (an error, or a
         //     reply carrying stand-in tokens). Buffered — a small JSON
         //     document; a pending device-code poll passes through untouched.
-        // An ended sign-in's late exchange (this agent's or another's in the
-        // same workspace): refused here, the provider never sees the code.
+        // One snapshot of the workspace's captures decides: a sign-in that
+        // ends between two reads must not leave an exchange neither refused
+        // nor captured.
         if !insecure, bodyFile == nil,
            let capture = Self.signInCaptureProvider?(profileID),
-           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
-           capture.refusesExchange(host: host, method: reqMethod, path: reqPath,
-                                   body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
-            try tls.write(SignInCapture.notKeptReply)
-            FileHandle.standardError.write(Data(
-                "[mitm] sign-in exchange \(host)\(reqPath) after its sign-in ended: refused, not sent on\n".utf8))
-            return
-        }
-        if !insecure, bodyFile == nil,
-           let capture = Self.signInCaptureProvider?(profileID), !capture.spent,
-           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
-           capture.matches(host: host, method: reqMethod, path: reqPath,
-                           body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
-            let upstream: Data
-            if let sim = capture.simulatedReply {
-                // The sign-in simulator (e2e): the provider's reply is canned,
-                // everything else — the hook, its hop, its release here — is
-                // the real path.
-                upstream = sim
-            } else {
-                let captureSession = upstreamSession(for: host, port: port, insecure: insecure)
-                noteUpstreamSession(captureSession)
-                defer { captureSession.finishTasksAndInvalidate() }
-                upstream = try await relayUpstreamCollecting(
-                    rawRequest: swap.modified, host: host, port: port,
-                    session: captureSession, scheme: upstreamScheme)
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
+            let exchangeBody = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
+            // An ended sign-in's late exchange (this agent's or another's in the
+            // same workspace): refused here, the provider never sees the code.
+            if capture.refusesExchange(host: host, method: reqMethod, path: reqPath, body: exchangeBody) {
+                try tls.write(SignInCapture.notKeptReply)
+                FileHandle.standardError.write(Data(
+                    "[mitm] sign-in exchange \(host)\(reqPath) after its sign-in ended: refused, not sent on\n".utf8))
+                return
             }
-            let status = Self.parseStatusCode(upstream)
-            let body = upstream.range(of: Data("\r\n\r\n".utf8))
-                .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
-            var reply = await capture.handle(status, body)
-            var refused = false
-            // A token reply the host didn't keep -- the sign-in ended as it
-            // landed, its store refused the write, a reply it couldn't read --
-            // is never the guest's to have: it carries the real credential.
-            // Only a reply that isn't one (a pending device-code poll, the
-            // provider's error) goes on.
-            if reply == nil, status == 200 {
-                refused = true
-                reply = SignInCapture.notKeptReply
+            if !capture.spent, capture.matches(host: host, method: reqMethod, path: reqPath, body: exchangeBody) {
+                let upstream: Data
+                if let sim = capture.simulatedReply {
+                    // The sign-in simulator (e2e): the provider's reply is canned,
+                    // everything else — the hook, its hop, its release here — is
+                    // the real path.
+                    upstream = sim
+                } else {
+                    let captureSession = upstreamSession(for: host, port: port, insecure: insecure)
+                    noteUpstreamSession(captureSession)
+                    defer { captureSession.finishTasksAndInvalidate() }
+                    upstream = try await relayUpstreamCollecting(
+                        rawRequest: swap.modified, host: host, port: port,
+                        session: captureSession, scheme: upstreamScheme)
+                }
+                let status = Self.parseStatusCode(upstream)
+                let body = upstream.range(of: Data("\r\n\r\n".utf8))
+                    .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
+                var reply = await capture.handle(status, body)
+                var refused = false
+                // A token reply the host didn't keep -- the sign-in ended as it
+                // landed, its store refused the write, a reply it couldn't read --
+                // is never the guest's to have: it carries the real credential.
+                // Only a reply that isn't one (a pending device-code poll, the
+                // provider's error) goes on.
+                if reply == nil, status == 200 {
+                    refused = true
+                    reply = SignInCapture.notKeptReply
+                }
+                try tls.write(reply ?? upstream)
+                FileHandle.standardError.write(Data(
+                    "[mitm] sign-in exchange \(host)\(reqPath) → \(status), \(refused ? "not kept, refused to the guest" : reply == nil ? "passed through" : "kept on the host")\n".utf8))
+                return
             }
-            try tls.write(reply ?? upstream)
-            FileHandle.standardError.write(Data(
-                "[mitm] sign-in exchange \(host)\(reqPath) → \(status), \(refused ? "not kept, refused to the guest" : reply == nil ? "passed through" : "kept on the host")\n".utf8))
-            return
         }
 
         // 6a. WebSocket upgrade — bypass URLSession (which can't

@@ -40,10 +40,16 @@ struct SignInCaptureFailClosedTests {
         let spent = try #require(p.range(of: "capture.refusesExchange(host: host, method: reqMethod, path: reqPath,"))
         let relay = try #require(p.range(of: "upstream = try await relayUpstreamCollecting("))
         #expect(spent.lowerBound < relay.lowerBound)
-        // And every end leaves one.
+        // One read of the captures decides, so a sign-in ending between two
+        // reads can't leave an exchange neither refused nor captured.
+        #expect(p.components(separatedBy: "Self.signInCaptureProvider?(profileID)").count == 2)
+        // And every end leaves one, marked before the live capture goes.
         let ss = try Self.src("Sources/AgentCoding/SessionSignIn.swift")
         let end = try #require(ss.range(of: "func endProxySignIn(_ s: ProxySignIn, success: Bool, message: String?) {"))
-        #expect(ss[end.upperBound...].prefix(1400).contains("signInCaptures.arm(.spentMarker("))
+        let tail = ss[end.upperBound...].prefix(1400)
+        let arm = try #require(tail.range(of: "signInCaptures.arm(.spentMarker("))
+        let disarm = try #require(tail.range(of: "signInCaptures.disarm(profileID: s.profileID)"))
+        #expect(arm.lowerBound < disarm.lowerBound)
     }
 
     @Test("another agent's sign-in doesn't lift a spent marker; a retry of the same one does")
