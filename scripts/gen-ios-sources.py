@@ -93,6 +93,7 @@ SHARED = [
     "ScheduledAutomationViews.swift",
     "AutomationRunWindow.swift",
     "AutomationRunArchive.swift",
+    "AgentTranscripts.swift",   # transcript models + parsers (the views are in ClaudeTranscriptView)
     "ClaudeTranscriptView.swift",
     "TranscriptActivity.swift",
     "MermaidFence.swift",

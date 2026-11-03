@@ -195,49 +195,9 @@ final class TranscriptSearchIndex {
         ownEntry(s).map(\.tokens).flatMap { $0.total > 0 ? $0 : nil }
     }
 
-    /// The last model the agent logged: Claude's per-message `"model"`,
-    /// Codex's turn context, Kimi's `modelAlias`. Placeholders an agent
-    /// logs in the model slot (Claude's `<synthetic>`, Kimi's internal
-    /// "agent-loop") are skipped.
-    nonisolated static func model(in data: Data) -> String? {
-        if let m = model(inText: String(decoding: data.suffix(2_000_000), as: UTF8.self)) { return m }
-        // A long journal whose model is only named at its start (Kimi's
-        // `profile.bind`): its head.
-        guard data.count > 2_000_000 else { return nil }
-        return model(inText: String(decoding: data.prefix(512_000), as: UTF8.self))
-    }
-
-    nonisolated private static func model(inText raw: String) -> String? {
-        func last(_ pattern: String) -> String? {
-            guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
-            let all = re.matches(in: raw, range: NSRange(raw.startIndex..., in: raw))
-            for m in all.reversed() {
-                guard let r = Range(m.range(at: 1), in: raw) else { continue }
-                let v = String(raw[r])
-                if !placeholderModels.contains(v.lowercased()) { return v }
-            }
-            return nil
-        }
-        // An assistant message's own model first: a bare "model" key can
-        // just as well sit in a tool's input or a file the agent read.
-        return last(#""message"\s*:\s*\{\s*"model"\s*:\s*"([^"<]{2,80})""#)
-            // Grok: its turn's usage, keyed by model ("modelUsage":{"grok-4.7-build":…}).
-            ?? last(#""modelUsage"\s*:\s*\{\s*"([^"<]{2,80})"\s*:"#)
-            ?? last(#""modelAlias"\s*:\s*"([^"<]{2,80})""#)
-            ?? last(#""model"\s*:\s*"([^"<]{2,80})""#)
-    }
-
-    /// Codex: the model of its latest `turn_context` (a mid-session
-    /// `/model` starts a new one) — never a "model" key in a tool's input.
-    nonisolated static func codexModel(_ data: Data) -> String? {
-        let head = String(decoding: data.prefix(65_536), as: UTF8.self)
-        guard ["\"type\":\"session_meta\"", "\"type\":\"turn_context\"", "\"type\":\"response_item\""]
-            .contains(where: head.contains) else { return nil }
-        return CodexTranscriptParser.latestModel(data.suffix(4_000_000))
-    }
-
-    /// Values agents put in a model field that name no model.
-    nonisolated static let placeholderModels: Set<String> = ["agent-loop", "synthetic", "unknown", "default"]
+    nonisolated static func model(in data: Data) -> String? { TranscriptModelSniff.model(in: data) }
+    nonisolated static func codexModel(_ data: Data) -> String? { TranscriptModelSniff.codexModel(data) }
+    nonisolated static var placeholderModels: Set<String> { TranscriptModelSniff.placeholderModels }
 
     /// "claude-opus-4-5-20251101" → "Opus 4.5"; "kimi-code/kimi-for-coding"
     /// → "Kimi for Coding"; anything else as logged (minus a provider prefix).
@@ -283,10 +243,7 @@ final class TranscriptSearchIndex {
         if liveModels[id] != raw { liveModels[id] = raw }
     }
 
-    /// The model `data` (a chat's buffer) last names, as the index reads it.
-    nonisolated static func liveModel(in data: Data) -> String? {
-        codexModel(data) ?? model(in: data)
-    }
+    nonisolated static func liveModel(in data: Data) -> String? { TranscriptModelSniff.liveModel(in: data) }
 
     /// The session's model; before its transcript names one (a session
     /// still starting), the one its agent last used on the same machine —

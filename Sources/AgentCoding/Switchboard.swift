@@ -58,26 +58,9 @@ final class SwitchboardEngine {
 
     /// The Switchboard's folder in the guest; its CLAUDE.md is the brief.
     static let folder = "~/.bromure/switchboard"
-    /// The guest-side MCP config (staged in the meta share by SessionDisk)
-    /// and the allow rule that lets its tools run without a prompt each.
-    static let launchFlags = "--mcp-config \(SessionDisk.switchboardMCPConfigGuestPath) --allowedTools mcp__switchboard"
-    /// What gives `tool` the switchboard MCP at launch: Claude its config
-    /// file, Codex `-c` overrides (it has no project-scope config). Grok,
-    /// Kimi and omp read it from the folder's project file, which the guest
-    /// writes (agentd `_switchboard_mcp_setup`). No spaces inside a flag:
-    /// the launcher word-splits them.
-    static func launchFlags(for tool: Profile.Tool) -> String {
-        switch tool {
-        case .claude: return launchFlags
-        case .codex:
-            // env_vars: Codex filters MCP servers' environment; the shim
-            // names its window from TMUX_PANE (see codexMCPConfig).
-            return "-c mcp_servers.switchboard.command=\"python3\" "
-                + "-c mcp_servers.switchboard.args=[\"\(SessionDisk.switchboardMCPShimGuestPath)\"] "
-                + "-c mcp_servers.switchboard.env_vars=[\"TMUX\",\"TMUX_PANE\"]"
-        default: return ""
-        }
-    }
+    // The launch flags and brief live in SwitchboardLaunch (SessionCommands.swift).
+    static var launchFlags: String { SwitchboardLaunch.launchFlags }
+    static func launchFlags(for tool: Profile.Tool) -> String { SwitchboardLaunch.launchFlags(for: tool) }
 
     /// The agent a new Switchboard runs: a room's, its first member's; the
     /// global one's, that of the first session that's up — else the last
@@ -260,16 +243,8 @@ final class SwitchboardEngine {
         }
     }
 
-    /// The shell line that writes the brief into the Switchboard's folder
-    /// before its agent starts (AgentSessionEngine.launch). A room's
-    /// Switchboard gets the room section on top of the common brief.
     static func briefCommand(guestFolder: String, roomName: String? = nil) -> String {
-        let q = "'" + guestFolder.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let text = roomName.map { SwitchboardBrief.text + SwitchboardBrief.roomSection($0) } ?? SwitchboardBrief.text
-        let b64 = Data(text.utf8).base64EncodedString()
-        // CLAUDE.md for Claude, AGENTS.md for the others (Codex, Kimi, omp):
-        // whichever agent runs finds it again after a resume.
-        return "mkdir -p \(q) && echo \(b64) | base64 -d > \(q)/CLAUDE.md && cp \(q)/CLAUDE.md \(q)/AGENTS.md"
+        SwitchboardLaunch.briefCommand(guestFolder: guestFolder, roomName: roomName)
     }
 
     // MARK: Events

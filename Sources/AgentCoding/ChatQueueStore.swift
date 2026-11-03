@@ -1,4 +1,6 @@
+#if canImport(Combine)
 import Combine
+#endif
 import Foundation
 
 /// The messages a chat holds while its agent is busy (`QueuedMessage`),
@@ -16,7 +18,7 @@ import Foundation
 /// message that can't be typed there stays, marked with why, until the
 /// user edits or drops it. Persisted, so a relaunch doesn't drop it either.
 @MainActor
-final class ChatQueueStore: ObservableObject {
+final class ChatQueueStore {
     /// What one delivery attempt did.
     enum Outcome: Equatable {
         case typed
@@ -90,7 +92,12 @@ final class ChatQueueStore: ObservableObject {
 
     static let shared = ChatQueueStore(fileURL: ChatQueueStore.defaultFileURL())
 
+    #if canImport(Combine)
     @Published private(set) var queues: [String: [QueuedMessage]] = [:]
+    #else
+    // No Combine (the Linux daemon): nothing observes the queues there.
+    private(set) var queues: [String: [QueuedMessage]] = [:]
+    #endif
 
     /// Seconds between status checks while delivering in the background.
     var pollInterval: TimeInterval = 1.0
@@ -452,3 +459,7 @@ final class ChatQueueStore: ObservableObject {
     /// Keys under this prefix are never written to disk.
     nonisolated static let ephemeralPrefix = "ephemeral:"
 }
+
+#if canImport(Combine)
+extension ChatQueueStore: ObservableObject {}
+#endif

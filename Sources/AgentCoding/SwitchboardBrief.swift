@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 /// The Switchboard's standing brief — written as CLAUDE.md into its folder on
@@ -105,4 +104,3 @@ enum SwitchboardBrief {
       self-contained opening message) rather than into a busy one.
     """
 }
-#endif
