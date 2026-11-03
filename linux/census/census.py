@@ -158,6 +158,8 @@ while i < len(cmdline):
         flags += [t, cmdline[i + 1]]; i += 2; continue
     if t.startswith("-I") and len(t) > 2: flags.append(t)
     i += 1
+# As ACLinux compiles the shared files (Package.swift's -D BROMURE_LINUX).
+flags += ["-D", "BROMURE_LINUX"]
 SWIFTC = run(["bash", "-lc", ". ~/.local/share/swiftly/env.sh; command -v swiftc"]).stdout.strip() or "swiftc"
 DEPS_OUT = os.path.join(HERE, ".build/out/Products/Debug-linux-x86_64")
 SHIM_OUT = os.path.join(WORK, "shims")

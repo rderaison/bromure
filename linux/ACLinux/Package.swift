@@ -17,13 +17,23 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         // The shared SSH server (Sources/AgentCoding/RemoteAccessServer.swift), as the app builds it.
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
+        // SandboxEngine's policy parser, as the app builds it.
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     ],
     targets: [
         .target(name: "CACLinuxShims"),
+        // macOS's SandboxEngine module: its portable files (symlinks into
+        // Sources/SandboxEngine) and the Linux stand-ins under Linux/.
+        .target(
+            name: "SandboxEngine",
+            dependencies: [.product(name: "Yams", package: "Yams")],
+            // Swift 5 mode, as the app builds it.
+            swiftSettings: [.define("BROMURE_LINUX"), .swiftLanguageMode(.v5)]),
         .target(
             name: "ACLinux",
             dependencies: [
                 "CACLinuxShims",
+                "SandboxEngine",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
