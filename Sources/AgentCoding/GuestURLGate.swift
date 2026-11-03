@@ -202,3 +202,20 @@ enum GuestURLGate {
         return false   // a normal public DNS name
     }
 }
+
+extension GuestURLGate {
+    /// The port of a guest page's loopback OAuth redirect (`redirect_uri` on
+    /// any host the browser takes to its own loopback: 127.0.0.1, localhost,
+    /// [::1]), or nil. The host's listener on that port must be this
+    /// sign-in's before the page may open (the host's loopbackCallbackRefusal).
+    static func loopbackCallbackPort(from url: URL) -> UInt16? {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let redirect = comps.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
+              let rc = URLComponents(string: redirect),
+              let host = rc.host, reachesLoopback(host),
+              let port = rc.port, port > 0, port <= 65_535 else {
+            return nil
+        }
+        return UInt16(port)
+    }
+}

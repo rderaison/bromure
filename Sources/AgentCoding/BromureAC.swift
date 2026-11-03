@@ -3557,16 +3557,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// code landing on whichever workspace held the port (Finding CWE-441,
     /// "Sign-in refusal ignores a [::1] redirect, so the other workspace
     /// still receives the OAuth code").
-    static func loopbackCallbackPort(from url: URL) -> UInt16? {
-        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let redirect = comps.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
-              let rc = URLComponents(string: redirect),
-              let host = rc.host, reachesLoopback(host),
-              let port = rc.port, port > 0, port <= 65_535 else {
-            return nil
-        }
-        return UInt16(port)
-    }
+    static func loopbackCallbackPort(from url: URL) -> UInt16? { GuestURLGate.loopbackCallbackPort(from: url) }
 
     // The host checks are GuestURLGate's (shared with Bromure Remote, which
     // opens the same guest sign-in URLs); these keep their names here.
