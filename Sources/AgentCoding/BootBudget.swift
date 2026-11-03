@@ -59,10 +59,7 @@ final class BootBudget: @unchecked Sendable {
         self.extendWhile = extendWhile
         cap = start + max(seconds, extendWhile == nil ? seconds : extendUpTo)
         let awake = cap - start
-        activity = holdAwake
-            ? ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
-                                                    reason: reason)
-            : nil
+        activity = holdAwake ? beginAwakeActivity(reason) : nil
         if holdAwake {
             #if canImport(IOKit)
             var id = IOPMAssertionID(0)
@@ -86,7 +83,7 @@ final class BootBudget: @unchecked Sendable {
         activity = nil
         systemSleepAssertion = nil
         lock.unlock()
-        if let a { ProcessInfo.processInfo.endActivity(a) }
+        if let a { endAwakeActivity(a) }
         #if canImport(IOKit)
         if let sys { IOPMAssertionRelease(sys) }
         #else
@@ -131,4 +128,20 @@ extension BootBudget {
         guard let s = GuestSandboxStatusStore.shared.sentryState(for: profileID) else { return false }
         return s == "pending" || s == "waiting"
     }
+}
+
+/// Hold off idle sleep and App Nap (a ProcessInfo activity); a server
+/// without them (Linux) has nothing to hold: nil.
+private func beginAwakeActivity(_ reason: String) -> NSObjectProtocol? {
+#if canImport(ObjectiveC)
+    ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: reason)
+#else
+    nil
+#endif
+}
+
+private func endAwakeActivity(_ activity: NSObjectProtocol) {
+#if canImport(ObjectiveC)
+    ProcessInfo.processInfo.endActivity(activity)
+#endif
 }
