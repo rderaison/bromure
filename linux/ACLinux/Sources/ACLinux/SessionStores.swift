@@ -15,6 +15,9 @@ final class SessionStores {
     let delegations: DelegationStore
     let codingTasks: CodingTaskStore
     let automations: ScheduledAutomationStore
+    /// The repository watches and their findings (macOS: the app
+    /// delegate's findingStore).
+    let findings: FindingStore
     /// The workspaces' instruction presets (macOS: the app delegate's store).
     let instructionPresets: InstructionPresetStore
     /// The engines over them (Daemon.startSessionEngine).
@@ -23,6 +26,9 @@ final class SessionStores {
     var automationEngine: ScheduledAutomationEngine?
     var delegationEngine: DelegationEngine?
     var taskDispatcher: TaskDispatcher?
+    /// The watch engine and its host (DaemonWatches.swift).
+    var watchEngine: RepoWatchEngine?
+    var watchHost: LinuxRepoWatchHost?
 
     // @port-skip linux-only: daemon layout
     init(stateDir: String) {
@@ -32,6 +38,7 @@ final class SessionStores {
         delegations = DelegationStore(fileURL: dir.appendingPathComponent("delegations.json"))
         codingTasks = CodingTaskStore(fileURL: dir.appendingPathComponent("tasks.json"))
         automations = ScheduledAutomationStore(fileURL: dir.appendingPathComponent("automations.json"))
+        findings = FindingStore(fileURL: dir.appendingPathComponent("findings.json"))
         instructionPresets = InstructionPresetStore(fileURL: dir.appendingPathComponent("instruction-presets.json"))
     }
 

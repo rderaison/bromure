@@ -26,9 +26,15 @@ extension Daemon {
         case ("GET", "/automations"): return await reply { $0.automationList() }
         case ("POST", "/automations"): return await okReply { $0.upsertAutomation(doc) }
         case ("POST", "/automation-sources"):
-            // macOS lists a workspace's GitHub / Linear items with its own
-            // credentials; the editor falls back to its free-text field.
-            return .error(400, "This server can't list them yet.")
+            let r = await MainActor.run { () -> SessionStores? in SessionStores.shared }
+            guard let stores = r else { return .error(503, "no session engine") }
+            let out = await stores.automationSources(doc)
+            return ControlResponse(out["error"] == nil ? 200 : 400, JSONValue(foundation: out) ?? .object([:]))
+        case (let m, let p) where p == "/watches" || p.hasPrefix("/watches/") || p.hasPrefix("/findings/"):
+            let r = await MainActor.run { () -> SessionStores? in SessionStores.shared }
+            guard let stores = r else { return .error(503, "no session engine") }
+            let out = await stores.watchesCommand(method: m, path: String(p.dropFirst()), body: doc)
+            return ControlResponse(out["error"] == nil ? 200 : 400, JSONValue(foundation: out) ?? .object([:]))
         case (let m, let p) where p.hasPrefix("/automations/"):
             let parts = p.dropFirst("/automations/".count).split(separator: "/", maxSplits: 1).map(String.init)
             let id = parts.first.map(Self.segment).flatMap(UUID.init(uuidString:))
@@ -247,9 +253,8 @@ extension SessionStores {
 
     // MARK: Scheduled automations
 
-    /// Automations, their runs and next fires (macOS adds its repository
-    /// watches, which a Linux server hasn't; the client leaves them empty).
-    // partial: no repository watches on Linux
+    /// Automations, their runs and next fires, with the repository watches
+    /// and their findings riding along for the fat client.
     // @port ACAppDelegate.automationScheduledList() h=1a1571e3ceb17220 @9936e30c
     func automationList() -> [String: Any] {
         let iso = ISO8601DateFormatter()
@@ -258,6 +263,8 @@ extension SessionStores {
             "runs": automations.runs.compactMap(Self.dict),
             "nextFires": automations.allNextFires().mapValues { iso.string(from: $0) },
             "timeZone": TimeZone.current.identifier,
+            "watches": findings.watches.compactMap(Self.dict),
+            "findings": findings.findings.compactMap(Self.dict),
         ]
     }
 
@@ -322,7 +329,7 @@ extension SessionStores {
 extension Daemon {
     /// The workspace's MCP sockets for its agents (macOS: the board's and the
     /// automations' TaskMCPVsockBridge per VM): the coding board on 5831,
-    /// the workspace's own automations on 5833 (no repository watches here),
+    /// the workspace's own automations and its findings on 5833,
     /// delegations between agents on 5835. `stored`: a restarted
     /// daemon's listeners, by fd-store prefix. One that can't listen is
     /// left out (its tools then fail in the guest), logged.
@@ -343,7 +350,7 @@ extension Daemon {
                 save: { a in SessionStores.shared?.saveAutomation(a) },
                 remove: { id in SessionStores.shared?.automations.remove(id) },
                 runNow: { id in _ = SessionStores.shared?.runAutomationNow(id) },
-                watches: { nil })
+                watches: { SessionStores.shared?.watchEngine })
             let delegation = DelegationMCPServer(profileID: pid,
                                                  sessions: { SessionStores.shared?.sessions },
                                                  engine: { SessionStores.shared?.delegationEngine })

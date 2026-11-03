@@ -18,8 +18,8 @@ extension Daemon {
             LinuxSessionHost.shared = host
             stores.engine = AgentSessionEngine(store: stores.sessions, delegate: host)
             // The coding board and the scheduled automations (macOS: the app
-            // delegate's lazy engines, started at launch). No repository
-            // watches here: no onRunCompleted / prepareWatchRun.
+            // delegate's lazy engines, started at launch); the repository
+            // watches over them once the dispatcher exists.
             let tasks = CodingTaskEngine(store: stores.codingTasks, delegate: host)
             let automations = ScheduledAutomationEngine(store: stores.automations, delegate: host)
             stores.codingTaskEngine = tasks
@@ -39,6 +39,7 @@ extension Daemon {
             stores.taskDispatcher = dispatcher
             delegations.onBoardMessage = { d, m in SessionStores.shared?.taskDispatcher?.handle(d, m) }
             delegations.boardWantsRevival = { d in SessionStores.shared?.taskDispatcher?.wantsRevival(d) ?? true }
+            stores.startWatches(host: host)
             // Their timers are on RunLoop.main, which an async daemon never
             // runs: the same ticks, from here (30 s and 5 min, as macOS's).
             Task { @MainActor in
@@ -46,6 +47,8 @@ extension Daemon {
                 while true {
                     try? await Task.sleep(for: .seconds(30))
                     SessionStores.shared?.automationEngine?.tick()
+                    // The watches follow their fix tasks (macOS: every 15 s).
+                    SessionStores.shared?.watchEngine?.tick()
                     n += 1
                     if n % 10 == 0 { SessionStores.shared?.codingTaskEngine?.sweepIdleReview() }
                 }

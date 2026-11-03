@@ -126,6 +126,7 @@
     "Sources/AgentCoding/RemoteSSHHandlers.swift",
     "Sources/AgentCoding/RepoGitPrograms.swift",
     "Sources/AgentCoding/RepoWatch.swift",
+    "Sources/AgentCoding/RepoWatchEngine.swift",
     "Sources/AgentCoding/ScheduledAutomations.swift",
     "Sources/AgentCoding/SecurityTimeline.swift",
     "Sources/AgentCoding/SessionBranches.swift",
