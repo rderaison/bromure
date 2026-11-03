@@ -1,0 +1,282 @@
+import Foundation
+
+/// The coding board's and the scheduled automations' routes, over the shared
+/// engines with the daemon as their host (LinuxTaskHost). macOS: the
+/// automation server's /tasks, /automations and /automation-runs routes and
+/// the app delegate's callbacks behind them; same paths, same JSON.
+extension Daemon {
+    /// `/tasks…`, `/automations…`, `/automation-runs/…`; nil for any other path.
+    // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
+    func boardRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
+        let doc = (body.foundationObject as? [String: Any]) ?? [:]
+        switch (method, path) {
+        case ("GET", "/tasks"): return await reply { $0.taskList() }
+        case ("POST", "/tasks"): return await okReply { $0.upsertTask(doc) }
+        case ("GET", let p) where p.hasPrefix("/tasks/") && p.hasSuffix("/transcript"):
+            guard let id = UUID(uuidString: Self.segment(p.dropFirst("/tasks/".count).dropLast("/transcript".count)))
+            else { return .error(400, "Bad task id") }
+            return await taskTranscript(id)
+        case (let m, let p) where p.hasPrefix("/tasks/"):
+            let parts = p.dropFirst("/tasks/".count).split(separator: "/", maxSplits: 1).map(String.init)
+            guard let id = parts.first.map(Self.segment).flatMap(UUID.init(uuidString:)) else { return .error(400, "Bad task id") }
+            let action = m == "DELETE" ? "delete" : (parts.count > 1 ? parts[1] : "")
+            let r = await MainActor.run { SessionStores.shared?.taskCommand(id, action, doc) ?? ["error": "no task engine"] }
+            return ControlResponse(r["error"] == nil ? 200 : 400, JSONValue(foundation: r) ?? .object([:]))
+        case ("GET", "/automations"): return await reply { $0.automationList() }
+        case ("POST", "/automations"): return await okReply { $0.upsertAutomation(doc) }
+        case ("POST", "/automation-sources"):
+            // macOS lists a workspace's GitHub / Linear items with its own
+            // credentials; the editor falls back to its free-text field.
+            return .error(400, "This server can't list them yet.")
+        case (let m, let p) where p.hasPrefix("/automations/"):
+            let parts = p.dropFirst("/automations/".count).split(separator: "/", maxSplits: 1).map(String.init)
+            let id = parts.first.map(Self.segment).flatMap(UUID.init(uuidString:))
+            let action = parts.count > 1 ? parts[1] : ""
+            guard ["DELETE": [""], "POST": ["run", "toggle"]][m]?.contains(action) == true else {
+                return .error(404, "Not found", ["path": .string(path)])
+            }
+            let ok = await MainActor.run { () -> Bool in
+                guard let id, let stores = SessionStores.shared else { return false }
+                switch action {
+                case "run": return stores.runAutomationNow(id)
+                case "toggle": return stores.toggleAutomation(id)
+                default: stores.automations.remove(id); return true
+                }
+            }
+            return ControlResponse(ok ? 200 : 400, ["ok": .bool(ok)])
+        case (let m, let p) where p.hasPrefix("/automation-runs/"):
+            let parts = p.dropFirst("/automation-runs/".count).split(separator: "/", maxSplits: 1).map(String.init)
+            guard let runID = parts.first.map(Self.segment).flatMap(UUID.init(uuidString:)) else {
+                return .error(400, "Bad run id")
+            }
+            switch (m, parts.count > 1 ? parts[1] : "") {
+            case ("POST", "acknowledge"):
+                let ok = await MainActor.run { SessionStores.shared?.acknowledgeRun(runID) ?? false }
+                return ControlResponse(ok ? 200 : 404, ["ok": .bool(ok)])
+            case ("GET", "transcript"):
+                guard let data = try? Data(contentsOf: AutomationRunArchive.transcriptURL(for: runID)) else {
+                    return .error(404, "No transcript")
+                }
+                return ControlResponse(200, ["transcript": .string(data.base64EncodedString())])
+            default:
+                return .error(404, "Not found", ["path": .string(path)])
+            }
+        default:
+            return nil
+        }
+    }
+
+    /// `GET /tasks/<id>/transcript`: base64, from the archive or the guest.
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskTranscript h=32bdca5276ead99b @9936e30c
+    private func taskTranscript(_ id: UUID) async -> ControlResponse {
+        let found: (LinuxSessionHost, CodingTask)? = await MainActor.run {
+            guard let host = LinuxSessionHost.shared, let t = SessionStores.shared?.codingTasks.task(id) else { return nil }
+            return (host, t)
+        }
+        guard let (host, task) = found, let raw = await host.fetchTaskTranscriptRaw(task) else {
+            return .error(404, "No transcript")
+        }
+        return ControlResponse(200, ["transcript": .string(Data(raw.utf8).base64EncodedString())])
+    }
+
+    // @port-skip linux-only: daemon route plumbing
+    private func reply(_ body: @MainActor @escaping (SessionStores) -> [String: Any]) async -> ControlResponse {
+        let r = await MainActor.run { SessionStores.shared.map(body) ?? [:] }
+        return ControlResponse(200, JSONValue(foundation: r) ?? .object([:]))
+    }
+
+    // @port-skip linux-only: daemon route plumbing
+    private func okReply(_ body: @MainActor @escaping (SessionStores) -> Bool) async -> ControlResponse {
+        let ok = await MainActor.run { SessionStores.shared.map(body) ?? false }
+        return ControlResponse(ok ? 200 : 400, ["ok": .bool(ok)])
+    }
+
+    // @port-skip linux-only: daemon route plumbing
+    private static func segment<S: StringProtocol>(_ s: S) -> String {
+        String(s).removingPercentEncoding ?? String(s)
+    }
+}
+
+extension SessionStores {
+    // MARK: The coding board
+
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTasks h=72b011428431c370 @9936e30c
+    func taskList() -> [String: Any] {
+        ["tasks": codingTasks.tasks.compactMap(Self.dict)]
+    }
+
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpsertTask h=92a11244437cb76e @9936e30c
+    func upsertTask(_ doc: [String: Any]) -> Bool {
+        guard let task = Self.decode(CodingTask.self, doc) else { return false }
+        codingTasks.upsert(task)
+        return true
+    }
+
+    /// One coding-board verb on one task (`POST /tasks/<id>/<action>`,
+    /// `DELETE /tasks/<id>`): macOS's, less what needs its task dispatcher
+    /// (assign, answer, recall, locate) or its plan-stream bridge.
+    // partial: no task dispatcher (assign, answer, recall, locate) and no plan stream (plan-events, plan-cmd) on Linux
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=09891b7729777755 @9936e30c
+    func taskCommand(_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any] {
+        guard let engine = codingTaskEngine else { return ["error": "no task engine"] }
+        guard codingTasks.task(id) != nil else { return ["error": "unknown task"] }
+        switch action {
+        case "start":
+            engine.start(id)
+        case "assign", "answer", "recall", "locate":
+            return ["ok": false, "error": "This server can't hand board tasks to sessions or rooms yet."]
+        case "plan", "plan-start":   // plan-start: legacy alias
+            engine.plan(id)
+        case "send-back":
+            Task { @MainActor in await engine.sendBack(id) }
+        case "merge", "land":
+            // {mode: merge|squash|pr, target?, keepBranch?, push?}; the
+            // legacy merge body ({squash, cleanup}) still works.
+            let mode = (body["mode"] as? String).flatMap(TaskLanding.Mode.init(rawValue:))
+                ?? ((body["squash"] as? Bool ?? false) ? .squash : .merge)
+            let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
+            engine.land(id, mode: mode, target: body["target"] as? String,
+                        keepBranch: keep, push: body["push"] as? Bool ?? false)
+        case "merge-batch":
+            let others = ((body["with"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+            engine.landBatch([id] + others, keepBranch: body["keepBranch"] as? Bool ?? false,
+                             push: body["push"] as? Bool ?? false)
+        case "open-pr":
+            engine.land(id, mode: .pr, target: body["target"] as? String)
+        case "retry-landing":
+            engine.retryLanding(id)
+        case "cancel-landing":
+            engine.cancelLanding(id)
+        case "mark-merged":
+            engine.markMerged(id)
+        case "stop":
+            if let why = engine.stopToBacklog(id) { return ["ok": false, "error": why] }
+        case "report-landing":
+            let status = body["status"] as? String ?? ""
+            let summary = body["summary"] as? String ?? ""
+            let pr = body["prURL"] as? String
+            Task { @MainActor in _ = await engine.reportLanding(id, status: status, summary: summary, prURL: pr) }
+        case "validate":
+            engine.validate(id)
+        case "to-testing":
+            engine.moveToTesting(id)
+        case "to-in-progress":
+            engine.moveToInProgress(id)
+        case "resume":
+            engine.resumeSession(id)
+        case "start-over":
+            engine.startOver(id)
+        case "close-no-merge":
+            engine.closeWithoutMerge(id)
+        case "mark-done":
+            engine.markDone(id)
+        case "rank":
+            guard let rank = (body["rank"] as? NSNumber)?.doubleValue, rank.isFinite
+            else { return ["error": "rank required"] }
+            codingTasks.mutate(id) { $0.queueRank = rank }
+        case "comment-remove":
+            guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:))
+            else { return ["error": "comment required"] }
+            codingTasks.mutate(id) { t in t.comments.removeAll { $0.id == cid && $0.sentAt == nil } }
+        case "viewed":
+            guard let path = body["path"] as? String else { return ["error": "path required"] }
+            let fp = body["fingerprint"] as? String
+            codingTasks.mutate(id) { t in
+                var v = t.reviewViewed ?? [:]
+                v[path] = fp
+                t.reviewViewed = v.isEmpty ? nil : v
+            }
+        case "comment":
+            guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+            codingTasks.mutate(id) {
+                $0.comments.append(ReviewComment(text: text, file: body["file"] as? String, line: body["line"] as? Int))
+            }
+        case "delete":
+            codingTasks.remove(id)
+            engine.pumpQueue()
+        case "destroy":
+            engine.destroy(id)
+        case "plan-events":
+            // No streamed planning session here: the client shows the tab's.
+            return ["live": false, "items": [], "since": 0]
+        case "plan-cmd":
+            return ["ok": false, "error": "no live plan stream"]
+        default:
+            return ["error": "unknown action", "action": action]
+        }
+        return ["ok": true, "stage": codingTasks.task(id)?.stage.rawValue ?? "deleted"]
+    }
+
+    // MARK: Scheduled automations
+
+    /// Automations, their runs and next fires (macOS adds its repository
+    /// watches, which a Linux server hasn't; the client leaves them empty).
+    // partial: no repository watches on Linux
+    // @port ACAppDelegate.automationScheduledList() h=1a1571e3ceb17220 @9936e30c
+    func automationList() -> [String: Any] {
+        let iso = ISO8601DateFormatter()
+        return [
+            "automations": automations.automations.compactMap(Self.dict),
+            "runs": automations.runs.compactMap(Self.dict),
+            "nextFires": automations.allNextFires().mapValues { iso.string(from: $0) },
+            "timeZone": TimeZone.current.identifier,
+        ]
+    }
+
+    // @port ACAppDelegate.automationUpsertScheduled(_: [String:Any]) h=24dffafecafc02ac @9936e30c
+    func upsertAutomation(_ doc: [String: Any]) -> Bool {
+        guard let automation = Self.decode(ScheduledAutomation.self, doc) else { return false }
+        saveAutomation(automation)
+        return true
+    }
+
+    // @port ACAppDelegate.saveAutomation(_: ScheduledAutomation) h=5dffd494bcb2b4b8 @9936e30c
+    func saveAutomation(_ automation: ScheduledAutomation) {
+        automations.upsert(automation)
+        automationEngine?.tick()
+    }
+
+    // @port ACAppDelegate.runAutomationNow(_: UUID) h=2291ec6040bd9444 @9936e30c
+    func runAutomationNow(_ id: UUID) -> Bool {
+        guard let automation = automations.automation(id), let engine = automationEngine else { return false }
+        engine.runNow(automation)
+        return true
+    }
+
+    // @port ACAppDelegate.toggleAutomation(_: UUID) h=dcbba8fa59b171f2 @9936e30c
+    func toggleAutomation(_ id: UUID) -> Bool {
+        guard var automation = automations.automation(id) else { return false }
+        automation.enabled.toggle()
+        saveAutomation(automation)
+        return true
+    }
+
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAcknowledgeRun h=c536b1d7ceb3979a @9936e30c
+    func acknowledgeRun(_ runID: UUID) -> Bool {
+        guard automations.runs.contains(where: { $0.id == runID }) else { return false }
+        automations.acknowledge(runID)
+        return true
+    }
+
+    /// The /state keys of the board and the automations.
+    // @port-skip linux-only: daemon /state plumbing (macOS: ACAutomationServer's state snapshot)
+    func boardStateEntries() -> [String: JSONValue] {
+        [
+            "automations": JSONValue(foundation: automationList()) ?? .object([:]),
+            "tasks": JSONValue(foundation: taskList()) ?? .object([:]),
+        ]
+    }
+
+    // @port-skip linux-only: ACAppDelegate.codableToDict
+    private static func dict<T: Encodable>(_ value: T) -> [String: Any]? {
+        JSONValue.encoding(value)?.foundationObject as? [String: Any]
+    }
+
+    // @port-skip linux-only: the JSON decoding macOS's callbacks do inline
+    private static func decode<T: Decodable>(_ type: T.Type, _ doc: [String: Any]) -> T? {
+        guard let data = try? JSONSerialization.data(withJSONObject: doc) else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return try? dec.decode(T.self, from: data)
+    }
+}

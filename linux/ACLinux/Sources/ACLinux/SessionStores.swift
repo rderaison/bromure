@@ -13,8 +13,12 @@ final class SessionStores {
     let sessions: AgentSessionStore
     let rooms: AgentRoomStore
     let delegations: DelegationStore
-    /// The session engine over them (Daemon.startSessionEngine).
+    let codingTasks: CodingTaskStore
+    let automations: ScheduledAutomationStore
+    /// The engines over them (Daemon.startSessionEngine).
     var engine: AgentSessionEngine?
+    var codingTaskEngine: CodingTaskEngine?
+    var automationEngine: ScheduledAutomationEngine?
 
     // @port-skip linux-only: daemon layout
     init(stateDir: String) {
@@ -22,6 +26,8 @@ final class SessionStores {
         sessions = AgentSessionStore(fileURL: dir.appendingPathComponent("sessions.json"))
         rooms = AgentRoomStore(fileURL: dir.appendingPathComponent("rooms.json"))
         delegations = DelegationStore(fileURL: dir.appendingPathComponent("delegations.json"))
+        codingTasks = CodingTaskStore(fileURL: dir.appendingPathComponent("tasks.json"))
+        automations = ScheduledAutomationStore(fileURL: dir.appendingPathComponent("automations.json"))
     }
 
     /// The /state keys macOS adds on a server with the sessions-first home.

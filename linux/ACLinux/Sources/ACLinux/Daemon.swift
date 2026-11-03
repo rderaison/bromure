@@ -210,7 +210,9 @@ public actor Daemon {
         case ("DELETE", let p) where p.hasPrefix("/remote/keys/"):
             let raw = String(p.dropFirst("/remote/keys/".count))
             return await remoteRemoveKey(raw.removingPercentEncoding ?? raw)
-        default: return .error(404, "Not found", ["path": .string(req.path)])
+        default:
+            if let r = await boardRoute(req.method, path, req.body) { return r }
+            return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
 
@@ -302,7 +304,7 @@ public actor Daemon {
         }
         let (prompts, sessionEntries, statuses) = await MainActor.run {
             for (id, roster) in rosters { LinuxSessionHost.shared?.updateRoster(id, roster) }
-            return (PendingPromptBroker.shared.pendingList(), SessionStores.shared?.stateEntries() ?? [:],
+            return (PendingPromptBroker.shared.pendingList(), (SessionStores.shared?.stateEntries() ?? [:]).merging(SessionStores.shared?.boardStateEntries() ?? [:]) { a, _ in a },
                     LinuxSessionHost.shared?.tabStatuses() ?? [:])
         }
         // As on macOS, `vms` is the running (and booting) VMs and `workspaces`

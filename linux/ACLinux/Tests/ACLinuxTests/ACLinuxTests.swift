@@ -1321,3 +1321,51 @@ struct BakePostinstallTests {
     }
 }
 
+
+@Suite("Coding board and automations")
+@MainActor
+struct BoardRouteTests {
+    @Test("tasks: upsert, list, rank, comment, unknown action, delete, as macOS's routes answer them")
+    func tasks() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let stores = SessionStores(stateDir: d)
+        stores.codingTaskEngine = CodingTaskEngine(store: stores.codingTasks, delegate: nil)
+        let task = CodingTask(title: "Fix the thing", profileID: UUID())
+        let doc = try #require(JSONValue.encoding(task)?.foundationObject as? [String: Any])
+        #expect(stores.upsertTask(doc))
+        #expect(!stores.upsertTask(["title": 1]), "a body that isn't a task is refused")
+        let listed = (stores.taskList()["tasks"] as? [[String: Any]]) ?? []
+        #expect(listed.count == 1 && listed[0]["title"] as? String == "Fix the thing")
+        #expect(stores.taskCommand(task.id, "rank", ["rank": 2.5])["stage"] as? String == "backlog")
+        #expect(stores.codingTasks.task(task.id)?.queueRank == 2.5)
+        _ = stores.taskCommand(task.id, "comment", ["text": "look at line 3", "line": 3])
+        #expect(stores.codingTasks.task(task.id)?.comments.first?.line == 3)
+        #expect(stores.taskCommand(task.id, "bogus", [:])["error"] as? String == "unknown action")
+        #expect(stores.taskCommand(UUID(), "start", [:])["error"] as? String == "unknown task")
+        #expect(stores.taskCommand(task.id, "assign", ["kind": "none"])["ok"] as? Bool == false, "no dispatcher here")
+        #expect(stores.taskCommand(task.id, "plan-events", [:])["live"] as? Bool == false)
+        #expect(stores.taskCommand(task.id, "delete", [:])["stage"] as? String == "deleted")
+        // Kept in the state dir, next to the sessions.
+        #expect(FileManager.default.fileExists(atPath: d + "/tasks.json"))
+    }
+
+    @Test("automations: upsert, toggle, list with next fires and the zone; an unknown run isn't acknowledged")
+    func automations() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let stores = SessionStores(stateDir: d)
+        let a = ScheduledAutomation(name: "Nightly", profileID: UUID(), enabled: false)
+        let doc = try #require(JSONValue.encoding(a)?.foundationObject as? [String: Any])
+        #expect(stores.upsertAutomation(doc))
+        #expect(stores.toggleAutomation(a.id))
+        #expect(stores.automations.automation(a.id)?.enabled == true)
+        #expect(!stores.toggleAutomation(UUID()))
+        let list = stores.automationList()
+        #expect((list["automations"] as? [[String: Any]])?.first?["name"] as? String == "Nightly")
+        #expect(list["timeZone"] as? String == TimeZone.current.identifier)
+        #expect(list["nextFires"] is [String: String])
+        #expect(!stores.acknowledgeRun(UUID()))
+        #expect(FileManager.default.fileExists(atPath: d + "/automations.json"))
+    }
+}

@@ -14,6 +14,27 @@ extension Daemon {
             let host = LinuxSessionHost(daemon: me, stateDir: state)
             LinuxSessionHost.shared = host
             stores.engine = AgentSessionEngine(store: stores.sessions, delegate: host)
+            // The coding board and the scheduled automations (macOS: the app
+            // delegate's lazy engines, started at launch). No repository
+            // watches here: no onRunCompleted / prepareWatchRun.
+            let tasks = CodingTaskEngine(store: stores.codingTasks, delegate: host)
+            let automations = ScheduledAutomationEngine(store: stores.automations, delegate: host)
+            stores.codingTaskEngine = tasks
+            stores.automationEngine = automations
+            automations.start()
+            tasks.resumePlanningWatchdogs()
+            tasks.startHousekeeping()
+            // Their timers are on RunLoop.main, which an async daemon never
+            // runs: the same ticks, from here (30 s and 5 min, as macOS's).
+            Task { @MainActor in
+                var n = 0
+                while true {
+                    try? await Task.sleep(for: .seconds(30))
+                    SessionStores.shared?.automationEngine?.tick()
+                    n += 1
+                    if n % 10 == 0 { SessionStores.shared?.codingTaskEngine?.sweepIdleReview() }
+                }
+            }
             // The rosters and the sessions bound to them, kept current (macOS:
             // its session list's refresh), with or without a client watching.
             Task { @MainActor in
@@ -89,8 +110,8 @@ extension Daemon {
                 // (SwitchboardEngine.press).
                 guard let s = store.session(sid) else { return ["error": "unknown session"] }
                 let keys = (doc["keys"] as? [String]) ?? []
-                guard !keys.isEmpty, keys.count <= 12, keys.allSatisfy(Self.allowedKeys.contains) else {
-                    return ["error": "keys must be 1–12 of " + Self.allowedKeys.sorted().joined(separator: " ")]
+                guard !keys.isEmpty, keys.count <= 12, keys.allSatisfy(SwitchboardKeys.allowed.contains) else {
+                    return ["error": "keys must be 1–12 of " + SwitchboardKeys.allowed.sorted().joined(separator: " ")]
                 }
                 guard let w = s.windowIndex, !s.hasEnded else { return ["error": "That session has no live tab to type into."] }
                 guard let host = LinuxSessionHost.shared else { return ["error": "no session host"] }
@@ -193,14 +214,6 @@ extension Daemon {
         }
         return ControlResponse(r["error"] == nil ? 200 : 400, JSONValue(foundation: r) ?? .object([:]))
     }
-
-    /// The keys a session may be sent by name (SwitchboardEngine.allowedKeys,
-    /// in a macOS-only file): enough to answer a TUI prompt, nothing that can
-    /// smuggle text or escape sequences.
-    static let allowedKeys: Set<String> = [
-        "Enter", "Escape", "Tab", "BTab", "Space", "BSpace", "Up", "Down", "Left", "Right",
-        "C-c", "y", "n", "a", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    ]
 
     /// `GET /agent-sessions/<id>/transcript`: the readable transcript
     /// (base64, as macOS sends it), 404 when there is none.

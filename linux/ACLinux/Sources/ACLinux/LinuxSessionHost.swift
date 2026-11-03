@@ -15,10 +15,10 @@ final class LinuxSessionHost: AgentSessionHost {
     /// the app's running sessions).
     nonisolated static let running = NIOLockedValueBox<Set<UUID>>([])
 
-    private weak var daemon: Daemon?
+    private(set) weak var daemon: Daemon?
     private let stateDir: String
     /// Running workspaces' rosters (nil: not running, as macOS's "attached").
-    private var tabs: [UUID: TabsModel] = [:]
+    private(set) var tabs: [UUID: TabsModel] = [:]
 
     // @port-skip linux-only: daemon wiring
     init(daemon: Daemon, stateDir: String) {
@@ -94,7 +94,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// A tab's hook status, with what the macOS app delegate does around it:
     /// a turn that ended or a question is a reply (unread on clients), and a
     /// new turn means no dialog waits any more.
-    // partial: no automation or coding-task "agent finished" routing yet
+    // partial: no delegation engine (promptFreed) on Linux yet
     // @port ACAppDelegate.setTabAgentStatus(_: Profile.ID, index: Int, _: AgentStatus) h=7e5b5652a7eb2b64 @9936e30c
     func setTabAgentStatus(_ id: UUID, index: Int, _ status: AgentStatus) {
         guard let store = SessionStores.shared?.sessions else { return }
@@ -103,7 +103,14 @@ final class LinuxSessionHost: AgentSessionHost {
         let s = store.session(profileID: id, windowIndex: index)
         if Self.isReply(from: before, to: status), let s { store.noteReply(s.id) }
         if status == .working, let s, s.awaitingAnswer == true { _ = store.setAwaitingAnswer(s.id, false) }
-        tabs[id]?.tabs.first(where: { $0.index == index })?.agentStatus = status
+        guard let tab = tabsModel(for: id)?.tabs.first(where: { $0.index == index }) else { return }
+        tab.agentStatus = status
+        // A finished tab may be an automation run (its transcript is saved,
+        // its tab closed) or a coding task, which moves to Testing.
+        if status == .done, let stores = SessionStores.shared {
+            stores.automationEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
+            stores.codingTaskEngine?.agentFinished(profileID: id, worktreeBranch: tab.worktreeBranch)
+        }
     }
 
     /// ACAppDelegate.isReply: a turn ended, or the agent started asking.
@@ -227,19 +234,25 @@ final class LinuxSessionHost: AgentSessionHost {
     func startProfileQuietly(_ id: Profile.ID) { boot(id) }
     // @port-skip linux-only: Daemon.startWorkspace
     func startProfileRemotely(_ id: Profile.ID) { boot(id) }
+    /// Boots the workspace; a boot that fails is the workspace's refusal
+    /// (unattendedLaunchRefusal) until the next attempt.
     // @port-skip linux-only: Daemon.startWorkspace
-    private func boot(_ id: UUID) {
-        Task { [weak daemon] in
-            if let why = await daemon?.startWorkspace(id) {
-                FileHandle.standardError.write(Data("bromure-ac daemon: workspace \(id.uuidString.prefix(8)) didn't start: \(why)\n".utf8))
-            }
+    func boot(_ id: UUID) {
+        launchRefusals[id] = nil
+        Task { @MainActor [weak self, weak daemon] in
+            guard let why = await daemon?.startWorkspace(id) else { return }
+            self?.launchRefusals[id] = why
+            FileHandle.standardError.write(Data("bromure-ac daemon: workspace \(id.uuidString.prefix(8)) didn't start: \(why)\n".utf8))
         }
     }
 
-    /// No launch is refused unattended here (macOS: a boot that needed a
-    /// question nobody was there to answer).
-    // @port-skip linux-only: no unattended-launch refusals on a server
-    func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { nil }
+    /// Why a workspace's last start failed, by workspace (macOS: a boot
+    /// that needed a question nobody was there to answer): the engines
+    /// fail at once on it rather than wait out the boot timeout.
+    private var launchRefusals: [Profile.ID: String] = [:]
+
+    // @port-skip linux-only: Linux's refusals are failed boots (macOS: refused prompts)
+    func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { launchRefusals[id] }
 
     /// The running workspace's roster, read now from its outbox (what agentd
     /// wrote last); nil when it isn't running.
@@ -273,10 +286,10 @@ final class LinuxSessionHost: AgentSessionHost {
 
     // @port-skip linux-only: the daemon's room store
     var agentRoomStore: AgentRoomStore { SessionStores.shared!.rooms }
-    /// No coding tasks on Linux yet.
-    // partial: no coding tasks yet
-    // @port-skip linux-only: no coding tasks yet
-    func codingTaskOwnsLiveTab(profileID: Profile.ID, branch: String) -> Bool { false }
+    // @port-skip linux-only: the daemon's coding-task engine (ACAppDelegate.codingTaskOwnsLiveTab)
+    func codingTaskOwnsLiveTab(profileID: Profile.ID, branch: String) -> Bool {
+        SessionStores.shared?.codingTaskEngine?.ownsLiveTab(profileID: profileID, branch: branch) ?? false
+    }
     /// A server has no window following a session.
     // @port-skip linux-only: no window to follow a session on a server
     func followSucceededSession(old: UUID, new: UUID) {}
