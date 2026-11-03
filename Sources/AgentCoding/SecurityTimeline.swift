@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// A live, on-device record of what Bromure's security engines actually did —
 /// every credential swap, firewall verdict, package check, prompt-injection

@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 // The iOS fat client compiles this file without SandboxEngine (macOS-only) —
 // PlatformStubs.swift supplies the EgressPolicy stand-in there.
 #if canImport(SandboxEngine)

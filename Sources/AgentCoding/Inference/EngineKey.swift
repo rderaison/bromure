@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 
 /// Per-VM API keys for the local inference engine — persistent across app runs
 /// and VM suspend/reset, and self-identifying so a call can be traced to the

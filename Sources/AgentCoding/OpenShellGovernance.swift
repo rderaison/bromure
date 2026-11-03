@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import SandboxEngine
 
 /// Organization-level OpenShell governance: a boundary policy (the most any

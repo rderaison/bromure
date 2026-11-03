@@ -1,4 +1,8 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 import Foundation
 
 /// How a credential is named anywhere it's recorded — the app log, the
