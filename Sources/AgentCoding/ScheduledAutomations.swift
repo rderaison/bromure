@@ -1526,7 +1526,7 @@ enum LinearPoller {
 #if os(macOS)
 @MainActor
 final class ScheduledAutomationEngine {
-    private weak var delegate: ACAppDelegate?
+    private weak var delegate: (any AutomationHost)?
     let store: ScheduledAutomationStore
 
     private var timer: Timer?
@@ -1576,7 +1576,7 @@ final class ScheduledAutomationEngine {
     /// latency doesn't need better.
     static let prPollInterval: TimeInterval = 180
 
-    init(store: ScheduledAutomationStore, delegate: ACAppDelegate?) {
+    init(store: ScheduledAutomationStore, delegate: (any AutomationHost)?) {
         self.store = store
         self.delegate = delegate
     }
@@ -1644,7 +1644,7 @@ final class ScheduledAutomationEngine {
         if let delegate {
             let live = { (pid: UUID) in delegate.openWorktreeBranches(profileID: pid) }
             settlePendingRefusals(now: now, liveBranches: live)
-            delegate.codingTaskEngine.settlePendingRefusals(now: now, liveBranches: live)
+            delegate.settleCodingTaskRefusals(now: now, liveBranches: live)
         }
         for a in store.automations where a.enabled {
             switch a.trigger {

@@ -1996,7 +1996,7 @@ final class PendingWork {
 #if os(macOS)
 @MainActor
 final class CodingTaskEngine {
-    weak var delegate: ACAppDelegate?
+    weak var delegate: (any CodingTaskHost)?
     let store: CodingTaskStore
     /// Landings this engine is watching (one watcher per task).
     var landingWatches: Set<UUID> = []
@@ -2019,7 +2019,7 @@ final class CodingTaskEngine {
     private static let bootTimeout: TimeInterval = 180
     private static let bootPollInterval: UInt64 = 5_000_000_000  // 5s
 
-    init(store: CodingTaskStore, delegate: ACAppDelegate?) {
+    init(store: CodingTaskStore, delegate: (any CodingTaskHost)?) {
         self.store = store
         self.delegate = delegate
     }
@@ -2190,7 +2190,7 @@ final class CodingTaskEngine {
     /// The workspace answering, booting it first when it isn't: nil once it
     /// answers, else why it won't — a start the app refused, with its reason
     /// (nobody was there to answer its prompt), or the boot timeout.
-    func ensureWorkspaceUp(_ profileID: UUID, delegate: ACAppDelegate,
+    func ensureWorkspaceUp(_ profileID: UUID, delegate: any CodingTaskHost,
                                    detached: Bool = false) async -> String? {
         if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
             return nil
@@ -2211,7 +2211,7 @@ final class CodingTaskEngine {
         return NSLocalizedString("The workspace did not boot in time", comment: "task start")
     }
 
-    private func runValidation(delegate: ACAppDelegate, profileID: UUID,
+    private func runValidation(delegate: any CodingTaskHost, profileID: UUID,
                                guestPath: String, prompt: String) async -> String {
         // Make sure the workspace is up (same boot courtesy as start()).
         if let why = await ensureWorkspaceUp(profileID, delegate: delegate) {
@@ -2488,7 +2488,7 @@ final class CodingTaskEngine {
                 let sessions = delegate.agentSessionStore
                 var sid: UUID? = t.sessionID.flatMap { id in
                     sessions.session(id).flatMap { ($0.isArchived || $0.isDeleted) ? nil : $0.id } }
-                if sid == nil, let idx = delegate.pane(for: t.profileID)?.model.tabs
+                if sid == nil, let idx = delegate.tabsModel(for: t.profileID)?.tabs
                     .first(where: { $0.worktreeBranch == branch })?.index {
                     sid = sessions.session(profileID: t.profileID, windowIndex: idx)?.id
                 }
@@ -2672,7 +2672,7 @@ final class CodingTaskEngine {
         }
         let knownRoot = task.rootRepo
             ?? task.branch.flatMap { b in
-                delegate?.pane(for: profileID)?.model.tabs.first { $0.worktreeBranch == b }?.rootRepo }
+                delegate?.tabsModel(for: profileID)?.tabs.first { $0.worktreeBranch == b }?.rootRepo }
         store.remove(taskID)
         pumpQueue()
         guard task.branch != nil || task.branchSlug != nil else { return }
@@ -2854,7 +2854,7 @@ final class CodingTaskEngine {
         // branch and checkout this finish looks up.
         guard let task = store.task(taskID),
               task.stage == .inProgress || task.stage == .planning || Self.fillsReview(task) else { return }
-        let tab = delegate?.pane(for: profileID)?.model.tabs
+        let tab = delegate?.tabsModel(for: profileID)?.tabs
             .first { $0.worktreeBranch == branch }
         var dir = tab?.repoRoot?.isEmpty == false ? tab?.repoRoot : tab?.cwd
         var parent = tab?.parentBranch
@@ -2913,7 +2913,7 @@ final class CodingTaskEngine {
     func reviewBranch(_ t: CodingTask) -> String? {
         if let b = t.branch { return b }
         guard let slug = t.branchSlug else { return nil }
-        let tabs = delegate?.pane(for: t.profileID)?.model.tabs.map(\.worktreeBranch) ?? []
+        let tabs = delegate?.tabsModel(for: t.profileID)?.tabs.map(\.worktreeBranch) ?? []
         return Self.onlyBranch(tabs, slug: slug)
     }
 
@@ -3028,7 +3028,7 @@ final class CodingTaskEngine {
         // The MCP response needs the transition NOW; metadata capture and
         // the tab close follow asynchronously (the tab lives until then,
         // so the guest queries still see it).
-        let tab = delegate?.pane(for: profileID)?.model.tabs
+        let tab = delegate?.tabsModel(for: profileID)?.tabs
             .first { $0.worktreeBranch == branch }
         store.mutate(task.id) {
             $0.stage = .testing
@@ -3091,7 +3091,7 @@ final class CodingTaskEngine {
         // Done by someone else's session (a board request): the feedback
         // goes back through the delegation, not into a task tab.
         if task.delegationID != nil {
-            guard await delegate.taskDispatcher.sendBack(taskID, feedback: feedback) else { return }
+            guard await delegate.dispatcherSendBack(taskID, feedback: feedback) else { return }
             store.mutate(taskID) {
                 // The steer awaited: a card that landed, was marked done or
                 // discarded meanwhile stays as it is now (the comments still
@@ -4020,7 +4020,7 @@ final class CodingTaskEngine {
     /// pane's roster when there is one; a DETACHED session (planning boots
     /// the VM headless) has no pane, so ask the guest's tmux directly.
     func tabIndex(profileID: UUID, branch: String) async -> Int? {
-        if let i = delegate?.pane(for: profileID)?.model.tabs
+        if let i = delegate?.tabsModel(for: profileID)?.tabs
             .first(where: { $0.worktreeBranch == branch })?.index {
             return i
         }
@@ -4430,7 +4430,7 @@ final class CodingTaskEngine {
         }
         guard task.stage == .inProgress else { return Self.stopRefusal(task.stage) }
         if task.delegationID != nil {
-            delegate?.taskDispatcher.recall(taskID)
+            delegate?.dispatcherRecall(taskID)
             return nil
         }
         // The branch is remembered (not just left in the workspace): the
@@ -4440,7 +4440,7 @@ final class CodingTaskEngine {
         // new tab with the parent branch.
         let kept = task.branch ?? liveBranch(of: task) ?? task.branchSlug.map { "wt/" + $0 }
         let tab = kept.flatMap { b in
-            delegate?.pane(for: task.profileID)?.model.tabs.first { $0.worktreeBranch == b } }
+            delegate?.tabsModel(for: task.profileID)?.tabs.first { $0.worktreeBranch == b } }
         putSessionAway(task)
         store.mutate(taskID) {
             if let tab {
@@ -4572,7 +4572,7 @@ final class CodingTaskEngine {
     /// The actual wt/ branch of the task's live tab, if any.
     func liveBranch(of task: CodingTask) -> String? {
         guard let slug = task.branchSlug,
-              let tabs = delegate?.pane(for: task.profileID)?.model.tabs else { return nil }
+              let tabs = delegate?.tabsModel(for: task.profileID)?.tabs else { return nil }
         return tabs.first {
             AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
         }?.worktreeBranch
@@ -4588,25 +4588,25 @@ extension CodingTaskEngine {
     /// to `patience`. True once it went in. Never when the tab turns out to
     /// be someone else's or shows a shell (`PaneTypeGuard`).
     @MainActor
-    static func typeWhenFree(_ delegate: ACAppDelegate, profileID: UUID, tabIndex: Int, text: String,
+    static func typeWhenFree(_ delegate: any CodingTaskHost, profileID: UUID, tabIndex: Int, text: String,
                              patience: TimeInterval = 600) async -> Bool {
         await typeWhenFree(delegate, profileID: profileID, target: .index(tabIndex), text: text,
                            patience: patience)
     }
     @MainActor
-    static func typeWhenFree(_ delegate: ACAppDelegate, profileID: UUID, target: PaneTarget, text: String,
+    static func typeWhenFree(_ delegate: any CodingTaskHost, profileID: UUID, target: PaneTarget, text: String,
                              patience: TimeInterval = 600) async -> Bool {
         await typeWhenFreeResult(delegate, profileID: profileID, target: target, text: text,
                                  patience: patience) == .typed
     }
     @MainActor
-    static func typeWhenFreeResult(_ delegate: ACAppDelegate, profileID: UUID, tabIndex: Int, text: String,
+    static func typeWhenFreeResult(_ delegate: any CodingTaskHost, profileID: UUID, tabIndex: Int, text: String,
                                    patience: TimeInterval = 600) async -> TypeResult {
         await typeWhenFreeResult(delegate, profileID: profileID, target: .index(tabIndex), text: text,
                                  patience: patience)
     }
     @MainActor
-    static func typeWhenFreeResult(_ delegate: ACAppDelegate, profileID: UUID, target: PaneTarget, text: String,
+    static func typeWhenFreeResult(_ delegate: any CodingTaskHost, profileID: UUID, target: PaneTarget, text: String,
                                    patience: TimeInterval = 600) async -> TypeResult {
         await typeWhenFreeResult(exec: { cmd in try await delegate.guestExec(profileID: profileID, command: cmd, timeout: 20) },
                                  target: target, text: text, patience: patience)

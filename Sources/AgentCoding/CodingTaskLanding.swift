@@ -869,7 +869,7 @@ extension CodingTaskEngine {
             $0.sessionParkedAt = nil
         }
         if task.delegationID != nil {
-            guard await delegate.taskDispatcher.steerLanding(taskID, text: prompt) else {
+            guard await delegate.dispatcherSteerLanding(taskID, text: prompt) else {
                 let steerError = store.task(taskID)?.lastError
                 // The assignee asked while the steer awaited (the brief did
                 // reach it): its question is on every card — the steer's
