@@ -133,6 +133,7 @@ public actor Daemon {
         let d = Daemon(config: config, passt: passt)
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
+        await MainActor.run { SessionStores.shared = SessionStores(stateDir: config.stateDir) }
         await d.setUpRemoteAccess()
         return d
     }
@@ -277,7 +278,9 @@ public actor Daemon {
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListPendingPrompts h=7f92140cb6125056 @7dd92fdf
     func stateBody() async -> JSONValue {
         // Decision prompts waiting for a fat client's answer (PendingPromptBroker).
-        let prompts = await MainActor.run { PendingPromptBroker.shared.pendingList() }
+        let (prompts, sessionEntries) = await MainActor.run {
+            (PendingPromptBroker.shared.pendingList(), SessionStores.shared?.stateEntries() ?? [:])
+        }
         // As on macOS, `vms` is the running (and booting) VMs and `workspaces`
         // every workspace; with no profiles here each VM is its own workspace,
         // same id, which is what a fat client opens a terminal on.
@@ -292,7 +295,7 @@ public actor Daemon {
             "uplink": ["kind": "passt", "mtu": .number(Double(passt.mtu))],
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
             "pendingPrompts": JSONValue(foundation: prompts) ?? .array([]),
-        ])
+        ].merging(sessionEntries) { a, _ in a })
     }
 
     // partial: entries lack tabs, stats, ports, docker, disk and kube fields (see VMRecord.json)

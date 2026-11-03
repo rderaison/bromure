@@ -342,10 +342,14 @@ struct DaemonTests {
         #expect(try await api.request("POST", "/profiles", ["name": "p2", "tool": "no-such-tool"]).status == 400,
                 "a bad field is refused (ProfileDocument)")
 
-        // Decision prompts: /state lists them (none here); an unknown one can't be answered.
-        guard case .array? = try await api.request("GET", "/state").body?["pendingPrompts"] else {
-            Issue.record("no pendingPrompts in /state"); return
+        // Decision prompts: /state lists them (none here); an unknown one can't
+        // be answered. The session model's lists ride along, as on macOS.
+        let st = try await api.request("GET", "/state").body
+        for key in ["pendingPrompts", "agentSessions", "delegations", "agentRooms"] {
+            guard case .array? = st?[key] else { Issue.record("no \(key) array in /state"); return }
         }
+        #expect(FileManager.default.fileExists(atPath: w.root + "/state/bromure-ac/sessions.json")
+                    || st?["agentSessions"] == .array([]), "the session store is the state dir's")
         #expect(try await api.request("POST", "/prompts/\(UUID().uuidString)/answer", ["choice": 1]).status == 404)
     }
 
