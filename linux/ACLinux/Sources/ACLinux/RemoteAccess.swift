@@ -1,5 +1,6 @@
 import CACLinuxShims
 import Foundation
+import SandboxEngine
 import NIOCore
 import NIOPosix
 
@@ -70,7 +71,7 @@ extension Daemon {
         EnrollmentCodes.file.withLockedValue { $0 = config.stateDir + "/remote/enroll-codes" }
         let g = sw.dhcp.server.map(UInt32.init)
         let gw = g[0] << 24 | g[1] << 16 | g[2] << 8 | g[3]
-        SandboxEngine.VMNetSwitch.shared.subnet = SandboxEngine.Subnet(network: gw & 0xFFFF_FF00, prefix: 24, gateway: gw)
+        VMNetSwitch.shared.subnet = VmnetSubnet(gateway: gw, mask: 0xFFFF_FF00, poolEnd: gw & 0xFFFF_FF00 | 254)
         let resolverBox = WeakDaemon(self)
         await MainActor.run {
             RemoteAccessServer.shared.forwardResolver = { ip, port, completion in
