@@ -168,7 +168,13 @@ public actor Daemon {
         let path = String(req.path.split(separator: "?", maxSplits: 1).first ?? "")
         switch (req.method, path) {
         case ("GET", "/health"): return health()
-        case ("GET", "/state"): return state()
+        case ("GET", "/state"):
+            // Only the fat client stamps its polls: it is connected, and can
+            // show consent prompts (RemoteConsent.route).
+            if req.headers["x-bromure-console-idle-ms"] != nil { PendingPromptBroker.recordFatClientContact() }
+            return await state()
+        case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"):
+            return await answerPrompt(String(p.dropFirst("/prompts/".count).dropLast("/answer".count)), req.body)
         case ("GET", "/state/subscribe"): return stateSubscribe()
         case ("GET", "/profiles"): return listProfiles()
         case ("POST", "/profiles"): return await createProfile(req.body)
@@ -199,7 +205,7 @@ public actor Daemon {
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
     // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, localModels, kubeClusters, generation/epoch, or agent sessions yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
-    func state() -> ControlResponse { ControlResponse(200, stateBody()) }
+    func state() async -> ControlResponse { ControlResponse(200, await stateBody()) }
 
     /// `GET /state/subscribe`: the octet-stream header, then a `/state`
     /// frame `[u32be len][u8 flag][json]` (len counts flag + json; flag 0,
@@ -220,6 +226,8 @@ public actor Daemon {
             var lastSent = ContinuousClock.now - .seconds(60)
             while !Task.isCancelled {
                 guard let d = me.daemon else { return }
+                // A held push stream is a connected fat client.
+                PendingPromptBroker.recordFatClientContact()
                 let body = await d.stateBody()
                 guard let json = try? enc.encode(body), let key = try? enc.encode(Self.withoutUptime(body)) else { return }
                 if key != last || ContinuousClock.now - lastSent >= .seconds(15) {
@@ -262,9 +270,12 @@ public actor Daemon {
         return .object(o)
     }
 
-    /// The `/state` snapshot.
-    // @port-skip linux-only: the body of state(), shared with stateSubscribe()
-    func stateBody() -> JSONValue {
+    /// The `/state` snapshot (state() and stateSubscribe()); its
+    /// pendingPrompts are what macOS's onListPendingPrompts gives.
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListPendingPrompts h=7f92140cb6125056 @7dd92fdf
+    func stateBody() async -> JSONValue {
+        // Decision prompts waiting for a fat client's answer (PendingPromptBroker).
+        let prompts = await MainActor.run { PendingPromptBroker.shared.pendingList() }
         // As on macOS, `vms` is the running (and booting) VMs and `workspaces`
         // every workspace; with no profiles here each VM is its own workspace,
         // same id, which is what a fat client opens a terminal on.
@@ -278,6 +289,7 @@ public actor Daemon {
             "vmnetSubnet": "192.168.64.0/24", "vmnetGateway": "192.168.64.1",
             "uplink": ["kind": "passt", "mtu": .number(Double(passt.mtu))],
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
+            "pendingPrompts": JSONValue(foundation: prompts) ?? .array([]),
         ])
     }
 
@@ -863,4 +875,16 @@ public actor Daemon {
 // @port-skip linux-only: build metadata for /state
 public enum BuildInfo {
     public static let version = "linux-dev"
+}
+
+extension Daemon {
+    /// `POST /prompts/<id>/answer {"choice"}`: a fat client's answer to a
+    /// pending decision prompt (from /state's pendingPrompts). 404 when no
+    /// such prompt is waiting.
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAnswerPrompt h=450bd9135b23e909 @7dd92fdf
+    func answerPrompt(_ id: String, _ body: JSONValue) async -> ControlResponse {
+        let choice = body["choice"]?.numberValue.map { Int($0) } ?? -1
+        let ok = await MainActor.run { PendingPromptBroker.shared.answer(id: id, choice: choice) }
+        return ControlResponse(ok ? 200 : 404, ["ok": .bool(ok)])
+    }
 }

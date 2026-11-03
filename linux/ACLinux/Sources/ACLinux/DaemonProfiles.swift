@@ -34,6 +34,7 @@ extension Daemon {
 
     /// GET /profiles: every workspace, as macOS lists them (ACAutomationProfileInfo).
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListProfiles h=328eda9e2a033d62 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/profiles"): h=5741f93279fa34e4 @7dd92fdf
     func listProfiles() -> ControlResponse {
         let rows: [JSONValue] = registry.records.compactMap { rec in
             guard let p = profile(for: rec) else { return nil }
@@ -60,6 +61,7 @@ extension Daemon {
     /// document or an OpenShell policy that wouldn't validate.
     // partial: no `generateSSH`, no folder shares
     // @port ACAppDelegate.automationUpsertProfile(idOrName: String?, doc: [String:Any]) h=391511fcb8407fd9 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/profiles"): h=ea29b136cb0d8add @7dd92fdf
     func createProfile(_ body: JSONValue) async -> ControlResponse {
         guard case .object = body, var doc = body.foundationObject as? [String: Any] else {
             return .error(400, "Expected a JSON object")

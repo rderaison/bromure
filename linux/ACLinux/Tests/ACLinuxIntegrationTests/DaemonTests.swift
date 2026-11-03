@@ -341,6 +341,12 @@ struct DaemonTests {
         #expect(try await api.request("POST", "/profiles", ["tool": "claude"]).status == 400, "a name is required")
         #expect(try await api.request("POST", "/profiles", ["name": "p2", "tool": "no-such-tool"]).status == 400,
                 "a bad field is refused (ProfileDocument)")
+
+        // Decision prompts: /state lists them (none here); an unknown one can't be answered.
+        guard case .array? = try await api.request("GET", "/state").body?["pendingPrompts"] else {
+            Issue.record("no pendingPrompts in /state"); return
+        }
+        #expect(try await api.request("POST", "/prompts/\(UUID().uuidString)/answer", ["choice": 1]).status == 404)
     }
 }
 

@@ -12,6 +12,8 @@ public struct ControlRequest: Sendable {
     /// Path including any query string (handlers split on `?`, as macOS does).
     public let path: String
     public let body: JSONValue
+    /// Header names lower-cased.
+    public var headers: [String: String] = [:]
 }
 
 // @port-skip linux-only: response value type
@@ -223,11 +225,13 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         let headLen = end.upperBound - buf.readerIndex
         let head = buf.getString(at: buf.readerIndex, length: headLen) ?? ""
         var length = 0
+        var headers: [String: String] = [:]
         for line in head.split(separator: "\r\n").dropFirst() {
             let parts = line.split(separator: ":", maxSplits: 1)
-            if parts.count == 2, parts[0].lowercased() == "content-length" {
-                length = Int(parts[1].trimmingCharacters(in: .whitespaces)) ?? 0
-            }
+            guard parts.count == 2 else { continue }
+            let name = parts[0].lowercased(), value = parts[1].trimmingCharacters(in: .whitespaces)
+            headers[name] = value
+            if name == "content-length" { length = Int(value) ?? 0 }
         }
         guard length <= Self.maxBody else { reply(context, .error(400, "Bad request")); return }
         guard buf.readableBytes >= headLen + length else {
@@ -240,7 +244,8 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         let bodyBytes = buf.getBytes(at: buf.readerIndex + headLen, length: length) ?? []
         let body = (try? JSONDecoder().decode(JSONValue.self, from: Data(bodyBytes))) ?? .object([:])
         let req = ControlRequest(method: String(line[0]), path: String(line[1]),
-                                 body: { if case .object = body { return body }; return .object([:]) }())
+                                 body: { if case .object = body { return body }; return .object([:]) }(),
+                                 headers: headers)
         let handler = self.handler
         let promise = context.eventLoop.makePromise(of: ControlResponse.self)
         promise.completeWithTask { await handler(req) }
