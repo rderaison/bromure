@@ -7,14 +7,15 @@ import FoundationNetworking
 import NIOConcurrencyHelpers
 
 /// STAND-IN for UbuntuImageManager.createBaseImage on Linux: bakes the amd64
-/// guest image under QEMU/KVM with the shared vm-setup scripts. The bake
+/// guest image under Firecracker/KVM with the shared vm-setup scripts. The bake
 /// *logic* (catalog, downloads, the serial dialogue, version stamps) moves to
 /// ACCore against a `ProvisionerVM` protocol in the carve-out; until then this
 /// mirrors its steps:
 ///   1. Alpine netboot (x86_64 here), sha256-checked, cached;
 ///   2. InitrdShim's `/init.bromure` appended (DHCP + MTU before Alpine's /init);
-///   3. the installer VM: the target disk, virtiofs `setup` (vm-setup, read-only),
-///      user-mode NAT, the serial console on a socket;
+///   3. the installer VM (Firecracker): the target disk, virtiofs `setup`
+///      (vm-setup, read-only), passt behind the interim switch, the serial
+///      console on pipes;
 ///   4. runProvisioner's console dialogue, then `setup.sh` until
 ///      SANDBOX_SETUP_DONE (it partitions, debootstraps, trims, e2fscks);
 ///   5. Linux only: the kernel and initrd copied out through a second share
@@ -109,43 +110,53 @@ public enum InterimBake {
         try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
 
         let modloop = "\(o.alpineCDN)/alpine/v\(alpineVersion)/releases/\(alpineArch)/netboot-\(alpineRelease)/modloop-virt"
-        var c = QEMUMachineConfig(
+        var c = MachineConfig(
             name: "bromure-bake", kernel: kernel, initrd: shimmed,
             cmdline: "console=ttyS0 rdinit=/init.bromure alpine_repo=\(o.alpineCDN)/alpine/v\(alpineVersion)/main "
-                + "modloop=\(modloop) modules=loop,squashfs,virtio-net,virtio-blk,virtiofs",
-            baseImage: partial, overlay: "", vsockCID: 0, runDirectory: runDir)
+                + "modloop=\(modloop) modules=loop,squashfs,virtio_mmio,virtio-net,virtio-blk,virtiofs",
+            baseImage: partial, overlay: "", vsockCID: 3, runDirectory: runDir)
         c.writeBaseInPlace = true
         c.vsock = false
+        c.entropy = true
         c.cpus = o.cpus
         c.memoryMiB = o.memoryMiB
-        c.network = .user
         // Root in the installer reads and writes as the bake's user.
         c.shares = [.init(tag: "setup", hostPath: setup, readOnly: true, guestOwner: nil),
                     .init(tag: "out", hostPath: work + "/out", guestOwner: nil)]
-        c.serialSocketPath = runDir + "/serial.sock"
-        c.serialLog = work + "/serial.log"
-        c.extraArguments = ["-device", "virtio-rng-pci"]
-        let vm = QEMUMachine(config: c)
+        c.serialLog = work + "/firecracker-stderr.log"
+        c.macAddress = "52:54:00:ba:4e:01"
+        // The network the daemon's VMs have: passt behind the interim switch
+        // (its DHCP), over a datagram socketpair.
+        let passt = try await PasstUplink.start(PasstUplink.Config(logPath: work + "/passt.log"))
+        let sw = InterimSwitch(uplink: passt, mtu: { [mtu = o.mtu] _ in mtu })
+        let (port, peer) = try DgramPort.pair(name: "bake")
+        sw.attach(port, mac: c.macAddress!)
+        c.network = .datagram(peerFD: peer)
+        defer { sw.detach(mac: c.macAddress!); port.close(); sw.stop() }
+        // The serial console: Firecracker's stdin and stdout, as pipes.
+        var toGuest: [Int32] = [-1, -1], fromGuest: [Int32] = [-1, -1]
+        guard acl_pipe_cloexec(&toGuest) == 0, acl_pipe_cloexec(&fromGuest) == 0 else { throw MachineError.io("pipe", errno) }
+        c.consolePipes = (input: toGuest[0], output: fromGuest[1])
+        let console = SerialConsole(readFD: fromGuest[0], writeFD: toGuest[1], log: work + "/serial.log", output: output)
+        defer { console.close() }
+        let vm = FirecrackerMachine(config: c)
         progress("Starting the installer VM…")
-        try await vm.start()
+        do { try await vm.start() } catch { await passt.close(); throw error }
 
         // 4-5. The console dialogue.
-        let console: SerialConsole
-        do { console = try SerialConsole(path: c.serialSocketPath!, output: output) } catch {
-            await vm.kill(); throw error
-        }
-        defer { console.close() }
         var tSetup = ContinuousClock.now
         do {
             tSetup = try await runInstaller(console, o, progress: progress)
         } catch {
             await vm.kill()
+            await passt.close()
             try? fm.copyItem(atPath: work + "/serial.log", toPath: o.outputDir + "/bake.log.failed")
             throw error
         }
         let setupTime = ContinuousClock.now - tSetup
         progress("Shutting down the installer…")
-        let stopped = await withTaskGroup(of: QEMUMachine.StopInfo?.self) { g in
+        // The dialogue ends with `reboot`: with reboot=k, Firecracker exits.
+        let stopped = await withTaskGroup(of: FirecrackerMachine.StopInfo?.self) { g in
             g.addTask { await vm.waitUntilStopped() }
             g.addTask { try? await Task.sleep(for: .seconds(30)); return nil }
             let first = await g.next() ?? nil
@@ -153,6 +164,7 @@ public enum InterimBake {
             return first
         }
         if stopped == nil { progress("Forcing shutdown…"); await vm.stop(timeout: .seconds(5)) }
+        await passt.close()
 
         // Artefacts.
         let finalImage = o.outputDir + "/base.img"
@@ -222,7 +234,9 @@ public enum InterimBake {
         progress("Installer: copying the kernel and initrd out…")
         con.send("mkdir -p /mnt && mount -o ro /dev/vda2 /mnt && cp -L /mnt/boot/vmlinuz /tmp/out/vmlinuz && cp -L /mnt/boot/initrd.img /tmp/out/initrd.img && ls /mnt/lib/modules > /tmp/out/kernel-release && umount /mnt && sync && echo EXTRACT_\"OK\"")
         try await con.buffer.wait(for: "EXTRACT_OK", timeout: 120, failures: ["No such file", "mount:"])
-        con.send("poweroff")
+        // A reboot, not a poweroff: Firecracker (reboot=k) exits on it; x86
+        // has no ACPI poweroff it would see.
+        con.send("reboot")
         return t
     }
 
@@ -373,44 +387,33 @@ final class ConsoleBuffer: Sendable {
     }
 }
 
-/// The installer's serial console: QEMU's `-chardev socket` (server side),
-/// read by a thread into a ConsoleBuffer; lines typed with `send`.
-// @port-skip linux-only: QEMU serial socket (VZFileHandleSerialPortAttachment's pipes on macOS)
+/// The installer's serial console: Firecracker's stdout read by a thread
+/// into a ConsoleBuffer (and the log), lines typed into its stdin with `send`.
+// @port-skip linux-only: serial console pipes (VZFileHandleSerialPortAttachment's pipes on macOS)
 final class SerialConsole: Sendable {
     let buffer = ConsoleBuffer()
+    private let readFD: Int32
     private let fd: Int32
     private let done = DispatchSemaphore(value: 0)
 
-    // @port-skip linux-only: QEMU serial socket
-    init(path: String, output: @escaping @Sendable (Data) -> Void) throws {
-        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0)
-        guard fd >= 0 else { throw MachineError.io("socket", errno) }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutableBytes(of: &addr.sun_path) { b in
-            for (i, c) in path.utf8.prefix(b.count - 1).enumerated() { b[i] = c }
-        }
-        var connected = false
-        for _ in 0..<200 {
-            let r = withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
-            }
-            if r == 0 { connected = true; break }
-            usleep(50_000)
-        }
-        guard connected else { Glibc.close(fd); throw BakeError.serial("connect \(path): \(String(cString: strerror(errno)))") }
-        self.fd = fd
+    // @port-skip linux-only: serial console pipes
+    init(readFD: Int32, writeFD: Int32, log: String?, output: @escaping @Sendable (Data) -> Void) {
+        self.readFD = readFD
+        self.fd = writeFD
         let buffer = buffer, done = done
+        let logFD = log.map { open($0, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o644) } ?? -1
         let t = Thread {
             var buf = [UInt8](repeating: 0, count: 65_536)
             while true {
-                let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+                let n = buf.withUnsafeMutableBytes { read(readFD, $0.baseAddress, $0.count) }
                 if n > 0 {
                     let d = Data(buf[0..<n])
                     buffer.append(d)
+                    if logFD >= 0 { _ = buf.withUnsafeBytes { write(logFD, $0.baseAddress, n) } }
                     output(d)
                 } else if n < 0 && errno == EINTR { continue } else { break }
             }
+            if logFD >= 0 { Glibc.close(logFD) }
             done.signal()
         }
         t.name = "bake-serial"
@@ -418,7 +421,7 @@ final class SerialConsole: Sendable {
     }
 
     /// Types `line` and Enter.
-    // @port-skip linux-only: QEMU serial socket
+    // @port-skip linux-only: serial console pipes
     func send(_ line: String) {
         let d = Array((line + "\n").utf8)
         var off = 0
@@ -430,11 +433,13 @@ final class SerialConsole: Sendable {
         }
     }
 
-    // @port-skip linux-only: QEMU serial socket
+    /// Closes the typing end; the reader ends when Firecracker's stdout
+    /// does (it exited).
+    // @port-skip linux-only: serial console pipes
     func close() {
-        shutdown(fd, Int32(SHUT_RDWR))
-        done.wait()
         Glibc.close(fd)
+        done.wait()
+        Glibc.close(readFD)
     }
 }
 

@@ -34,14 +34,8 @@ public actor GuestShell {
     public private(set) var isReady = false
     private static let minPoolSize = 1
 
-    /// Starts taking `cid`'s connections from the shared host listener.
+    /// Takes `cid`'s connections to host port 5800 (its HybridVsockListener's).
     // @port ShellBridge.init(socketDevice: VZVirtioSocketDevice) h=2bdb1c18bb9740bc @fd4de5b5
-    public init(cid: UInt32, listener: VsockListener) async {
-        await self.init(cid: cid, connections: await listener.connections(from: cid))
-    }
-
-    /// From any stream of connections (tests feed their own).
-    // @port-skip linux-only: injectable connection source
     init(cid: UInt32, connections stream: AsyncStream<VsockConnection>) async {
         self.cid = cid
         feed = Task { [weak self] in

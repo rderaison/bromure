@@ -271,26 +271,14 @@ extension Daemon {
             FatClientLog.log("forward-resolver: no running VM at \(ip)")
             return -1
         }
-        let fd = await Self.dialGuest(l.config, port: 5010)
+        let fd = await l.config.dialGuest(port: 5010)
         guard fd >= 0 else { FatClientLog.log("forward-resolver: dial \(ip) vsock 5010 failed (\(-fd))"); return -1 }
         let ok = header.utf8CString.withUnsafeBufferPointer { b in write(fd, b.baseAddress, b.count - 1) == b.count - 1 }
         guard ok else { close(fd); return -1 }
         return fd
     }
 
-    /// A connected stream to the guest's vsock `port`, whatever the VM's
-    /// backend: AF_VSOCK to its CID (QEMU's vhost-vsock), or Firecracker's
-    /// hybrid vsock socket with its CONNECT handshake. -errno on failure.
-    // @port-skip linux-only: host -> guest vsock dial (macOS: VZVirtioSocketDevice.connect(toPort:))
-    static func dialGuest(_ c: QEMUMachineConfig, port: UInt32, timeoutMs: Int32 = 3000) async -> Int32 {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global().async {
-                cont.resume(returning: c.machine == .firecracker
-                    ? acl_hybrid_vsock_connect(c.firecrackerVsockPath, port, timeoutMs)
-                    : acl_vsock_connect(c.vsockCID, port, timeoutMs))
-            }
-        }
-    }
+
 
     /// The host's address on its default route (the `connect` hint).
     // @port-skip linux-only: HostNetwork.primaryIPv4 on macOS

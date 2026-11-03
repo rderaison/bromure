@@ -26,12 +26,13 @@ enum NetEnv {
     }
 }
 
-/// One VM on a TestSwitch port: workspace, stream port, VM, its 5800 stream.
+/// One VM on a TestSwitch port: workspace, datagram port, VM, its 5800 listener.
 struct SwitchedVM {
-    var ws: BootTests.Workspace
+    var ws: Workspace
     let mac: String
-    let port: StreamPort
-    let vm: QEMUMachine
+    let port: DgramPort
+    let vm: FirecrackerMachine
+    let listener: HybridVsockListener
     let conns: ConnQueue
     let label: String
 
@@ -39,19 +40,17 @@ struct SwitchedVM {
     /// (/mnt/bromure-meta/mtu; agentd's default is macOS's 1280 VPN clamp).
     /// The daemon's rule (PasstUplink.Config.mtu): 65520 behind passt, except
     /// VPN profiles, which keep the macOS value; UDP isn't re-segmented.
-    static func make(_ machine: QEMUMachineConfig.MachineType, mac: String, on sw: TestSwitch,
-                     listener: VsockListener, tag: String, mtu: Int? = nil,
+    static func make(mac: String, on sw: TestSwitch, tag: String, mtu: Int? = nil,
                      queueFrames: Int = FramePortCore.defaultQueueFrames) async throws -> SwitchedVM {
-        var ws = try BootTests.Workspace(machine: machine)
+        var ws = try await Workspace(ownNetwork: false)
         if let mtu { try "\(mtu)\n".write(toFile: ws.dir + "/meta/mtu", atomically: true, encoding: .utf8) }
-        let sock = ws.dir + "/run/net.sock"
-        ws.config.network = .stream(socketPath: sock)
         ws.config.macAddress = mac
-        let port = try await StreamPort.listen(path: sock, queueFrames: queueFrames)
+        let (port, peer) = try DgramPort.pair(name: "\(tag)-\(ws.cid)")
+        ws.config.network = .datagram(peerFD: peer)
         sw.attach(port, mac: mac)
-        let conns = ConnQueue(await listener.connections(from: ws.cid))
-        return SwitchedVM(ws: ws, mac: mac, port: port, vm: QEMUMachine(config: ws.config), conns: conns,
-                          label: "[\(tag) \(machine.rawValue) cid \(ws.cid)]")
+        let listener = try await HybridVsockListener.listen(udsPath: ws.config.firecrackerVsockPath, port: agentPort, cid: ws.cid)
+        return SwitchedVM(ws: ws, mac: mac, port: port, vm: FirecrackerMachine(config: ws.config), listener: listener,
+                          conns: ConnQueue(listener.connections), label: "[\(tag) cid \(ws.cid)]")
     }
 
     /// Starts the VM; returns the time to agentd's first dial.
@@ -64,8 +63,7 @@ struct SwitchedVM {
                 ((try? String(contentsOfFile: p, encoding: .utf8)) ?? "(none)").split(separator: "\n").suffix(40).joined(separator: "\n")
             }
             print("DIAG \(label) serial:\n\(tail(ws.dir + "/run/serial.log"))\nDIAG agentd.log:\n\(tail(ws.dir + "/outbox/agentd.log"))"
-                  + "\nDIAG qemu.log:\n\(tail(ws.dir + "/run/qemu.log"))\nDIAG stream port connects=\(port.connects)")
-            // The whole serial log (verbose boot, see Workspace) next to the test's, kept.
+                  + "\nDIAG firecracker.log:\n\(tail(ws.dir + "/run/firecracker.log"))")
             let keep = "/tmp/acl-bootfail-\(label.filter { $0.isLetter || $0.isNumber })-\(UUID().uuidString.prefix(6)).log"
             try? FileManager.default.copyItem(atPath: ws.dir + "/run/serial.log", toPath: keep)
             print("DIAG full serial log kept at \(keep); port stats \(port.stats)")
@@ -75,25 +73,23 @@ struct SwitchedVM {
         return ContinuousClock.now - t0
     }
 
-    func tearDown(_ listener: VsockListener) async {
+    func tearDown() async {
         await vm.stop(timeout: .seconds(20))
-        await port.close()
-        await listener.forget(cid: ws.cid)
-        ws.cleanUp()
+        port.close()
+        await listener.close()
+        await ws.cleanUp()
     }
 }
 
 @Suite("Network bridge over a tap (in test-network.sh's netns)", .serialized, .enabled(if: NetEnv.tapReady))
 struct TapBridgeTests {
-    @Test("lease over the stream port, ping from the host side, masqueraded egress, throughput",
-          arguments: [QEMUMachineConfig.MachineType.q35, .microvm])
-    func bridge(machine: QEMUMachineConfig.MachineType) async throws {
+    @Test("lease over the datagram port, ping from the host side, masqueraded egress, throughput")
+    func bridge() async throws {
         let tap = try TapUplink.open(name: NetEnv.tap)
         let sw = TestSwitch(uplink: tap, gateway: "192.168.64.1", dns: NetEnv.dns)
-        let listener = try await VsockListener.shared(port: agentPort)
-        // q35 at the tap's MTU (test-network.sh makes it 65520), microvm at 1500.
-        let mtu = machine == .q35 ? tap.mtu : 1500
-        let v = try await SwitchedVM.make(machine, mac: "52:54:00:b0:00:01", on: sw, listener: listener, tag: "tap",
+        // At the tap's MTU (test-network.sh makes it 65520); 1500 is the passt suites'.
+        let mtu = tap.mtu
+        let v = try await SwitchedVM.make(mac: "52:54:00:b0:00:01", on: sw, tag: "tap",
                                           mtu: mtu)
         let wanBefore = NetEnv.wanLog.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }?.count ?? 0
 
@@ -128,8 +124,8 @@ struct TapBridgeTests {
                 }
                 return "no answer"
             }
-            let control = try await probeFromLAN("\(machine.rawValue).control")
-            let real = try await probeFromLAN(machine.rawValue)
+            let control = try await probeFromLAN("fc.control")
+            let real = try await probeFromLAN("fc")
             print("INBOUND \(v.label) a LAN host pinging \(guestIP) through this host: \(real) (with the drop rule overridden: \(control))")
             #expect(control == "reachable", "\(v.label) the control probe didn't get through: \(control)")
             #expect(real == "unreachable", "\(v.label) LAN -> VM was \(real)")
@@ -160,8 +156,8 @@ struct TapBridgeTests {
             print("PERF \(v.label) tap, guest MTU \(mtu): \(p.output.replacingOccurrences(of: "\n", with: " | ")) "
                   + "| switch-process CPU \(String(format: "%.2f", cpu)) s")
         }
-        #expect(v.port.dropped == 0 && tap.sendErrors == 0)
-        await v.tearDown(listener)
+        #expect(v.port.sendErrors == 0 && tap.sendErrors == 0)
+        await v.tearDown()
         sw.stop()
         tap.close()
     }
@@ -188,9 +184,8 @@ struct PasstBridgeTests {
         let bigMTU = passt.mtu
         let sw = TestSwitch(uplink: passt, gateway: "192.168.64.1", dns: "192.168.64.1",
                             mtu: { $0 == macBytes(macA) ? bigMTU : 1500 })
-        let listener = try await VsockListener.shared(port: agentPort)
-        let a = try await SwitchedVM.make(.q35, mac: macA, on: sw, listener: listener, tag: "passt", mtu: bigMTU)
-        let b = try await SwitchedVM.make(.microvm, mac: macB, on: sw, listener: listener, tag: "passt", mtu: 1500)
+        let a = try await SwitchedVM.make(mac: macA, on: sw, tag: "passt", mtu: bigMTU)
+        let b = try await SwitchedVM.make(mac: macB, on: sw, tag: "passt", mtu: 1500)
 
         async let dialA = a.boot()
         async let dialB = b.boot()
@@ -261,17 +256,17 @@ struct PasstBridgeTests {
                 let serial = ((try? String(contentsOfFile: v.ws.dir + "/run/serial.log", encoding: .utf8)) ?? "")
                 print("DIAG \(v.label) agentd.log tail:\n" + log.split(separator: "\n").suffix(25).joined(separator: "\n")
                       + "\nDIAG serial tail:\n" + serial.split(separator: "\n").suffix(25).joined(separator: "\n")
-                      + "\nDIAG qemu running: \(await v.vm.state)"
+                      + "\nDIAG VM state: \(await v.vm.state)"
                       + "\nDIAG virtiofsd-bromure-meta.log:\n" + (((try? String(contentsOfFile: v.ws.dir + "/run/virtiofsd-bromure-meta.log", encoding: .utf8)) ?? "").split(separator: "\n").suffix(15).joined(separator: "\n"))
-                      + "\nDIAG qemu.log:\n" + ((try? String(contentsOfFile: v.ws.dir + "/run/qemu.log", encoding: .utf8)) ?? ""))
+                      + "\nDIAG firecracker.log:\n" + ((try? String(contentsOfFile: v.ws.dir + "/run/firecracker.log", encoding: .utf8)) ?? ""))
             }
             print("PERF \(v.label) passt, guest MTU \(mtu): \(p.output.replacingOccurrences(of: "\n", with: " | ")) "
                   + "| passt CPU \(String(format: "%.2f", pc)) s, switch-process CPU \(String(format: "%.2f", sc)) s")
         }
         #expect(passt.restarts == 0)
-        #expect(a.port.dropped == 0 && b.port.dropped == 0)
-        await a.tearDown(listener)
-        await b.tearDown(listener)
+        #expect(a.port.sendErrors == 0 && b.port.sendErrors == 0)
+        await a.tearDown()
+        await b.tearDown()
         sw.stop()
         await passt.close()
     }
@@ -307,14 +302,13 @@ struct StallTests {
         let passt = try await PasstUplink.start(pc)
         let macA = "52:54:00:e0:00:01", macB = "52:54:00:e0:00:02"
         let sw = TestSwitch(uplink: passt, gateway: "192.168.64.1", dns: "192.168.64.1", mtu: { _ in 1500 })
-        let listener = try await VsockListener.shared(port: agentPort)
-        let a = try await SwitchedVM.make(.q35, mac: macA, on: sw, listener: listener, tag: "stall", mtu: 1500)
+        let a = try await SwitchedVM.make(mac: macA, on: sw, tag: "stall", mtu: 1500)
         // B on the default port queue. Whether frames still reach B's port
         // after the pause depends on passt's TCP state toward B and on what
-        // QEMU's RX ring and the stream socket absorb (in the release build
+        // the guest's RX ring and the datagram socket absorb (in the release build
         // all of it, often): B's drops are reported, not asserted. That a
         // full port drops at its own limit is FramePortTests' job.
-        let b = try await SwitchedVM.make(.microvm, mac: macB, on: sw, listener: listener, tag: "stall", mtu: 1500)
+        let b = try await SwitchedVM.make(mac: macB, on: sw, tag: "stall", mtu: 1500)
         async let ba = a.boot()
         async let bb = b.boot()
         _ = try await (ba, bb)
@@ -366,15 +360,14 @@ struct StallTests {
             if (sw.portStats(mac: macB)?.sent ?? 0) - sentB0 > 2_000 { flowing = true; break }
         }
         #expect(flowing, "B's download never got going (port sent \(sentB0) -> \(sw.portStats(mac: macB)?.sent ?? -1))")
-        let qmpB = try #require(await b.vm.qmp)
-        try await qmpB.execute("stop")
+        try await b.vm.pause()
         let droppedBefore = sw.portStats(mac: macB)?.dropped ?? 0
         var during: [Double] = []
         for _ in 0..<samples { during.append(try await upload(a, lan, base, mib: mib)) }
         let stalled = median(during)
         let droppedAfter = sw.portStats(mac: macB)?.dropped ?? 0
         let statsB = sw.portStats(mac: macB)
-        try await qmpB.execute("cont")
+        try await b.vm.resume()
         print("STALL A alone: median \(baseline) of \(alone) MB/s; with B paused: median \(stalled) of \(during) MB/s (\(String(format: "%.0f", stalled / baseline * 100))%); "
               + "B's port: dropped \(droppedBefore) -> \(droppedAfter), queued \(statsB?.queued ?? -1); A's port dropped \(sw.portStats(mac: macA)?.dropped ?? -1)")
         // Compared on the lower quartile: in the release build A's transfers are
@@ -393,8 +386,8 @@ struct StallTests {
         #expect(up.inboundPauses == 0, "passt's tap reader paused \(up.inboundPauses) times")
         #expect(up.received > 0)
         #expect((sw.portStats(mac: macA)?.dropped ?? 1) == 0)
-        await a.tearDown(listener)
-        await b.tearDown(listener)
+        await a.tearDown()
+        await b.tearDown()
         sw.stop()
         await passt.close()
     }

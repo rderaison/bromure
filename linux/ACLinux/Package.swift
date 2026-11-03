@@ -2,7 +2,7 @@
 import PackageDescription
 
 // ACLinux: the Linux implementations behind Bromure AC's platform protocols
-// (QEMU/KVM VMs, host AF_VSOCK, guest CIDs). A package of its own until the
+// (Firecracker/KVM VMs, hybrid vsock, guest CIDs). A package of its own until the
 // ACCore carve-out lands, so the root package stays untouched. Linux-only.
 let package = Package(
     name: "ACLinux",

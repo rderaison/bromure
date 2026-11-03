@@ -2,7 +2,7 @@ import Foundation
 
 /// The unit's ExecStopPost=: with KillMode=process, only the daemon is
 /// signalled on stop, so a daemon SIGKILLed past TimeoutStopSec leaves its
-/// QEMUs in the cgroup. This ends them when the stop was asked for (a stop or
+/// Firecrackers in the cgroup. This ends them when the stop was asked for (a stop or
 /// restart job is queued for the unit) or when no automatic restart follows
 /// (`$SERVICE_RESULT` success: Restart=on-failure won't restart); after a
 /// crash, the restart is coming and its daemon re-adopts them.

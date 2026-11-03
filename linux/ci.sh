@@ -3,7 +3,7 @@
 #   1. build the portmap ledger tool (release) and run its tests
 #   2. portmap check --allow-unclaimed
 #   3. linux/ACLinux: build, unit tests, and the KVM integration tests (they boot
-#      linux/bake's image; they skip themselves without /dev/kvm, vhost-vsock or the image)
+#      linux/bake's image under Firecracker; they skip themselves without /dev/kvm, Firecracker or the image)
 #   4. the network: setup-network.sh (install, re-install, uninstall) and the stream-port <-> tap
 #      bridge with a KVM guest, inside throwaway network namespaces (needs passwordless sudo;
 #      the host's own namespace is untouched)
@@ -26,9 +26,9 @@ swift build --package-path "$ROOT/linux/spike/mitm" -c release
 # The KVM integration step drives it from a guest behind passt (needs Internet).
 export BROMURE_MITM_PROXY="$ROOT/linux/spike/mitm/.build/release/mitm-proxy"
 step "ACLinux: KVM integration"
-# Until the vhost udev rule is installed, /dev/vhost-vsock is kvm-group only:
+# Until the kvm udev rule makes /dev/kvm this user's, it is kvm-group only:
 # run as this user with the kvm group added (not as root).
-if [ -w /dev/vhost-vsock ] || ! sudo -n -g kvm true 2>/dev/null; then
+if [ -w /dev/kvm ] || ! sudo -n -g kvm true 2>/dev/null; then
   swift test -c release --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 else
   sudo -n -g kvm env PATH="$PATH" HOME="$HOME" BROMURE_MITM_PROXY="$BROMURE_MITM_PROXY" swift test -c release --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
@@ -63,9 +63,9 @@ else
   echo "skipped: no systemd user manager"
 fi
 step "systemd: the daemon with real VMs under systemd (opt-in: BROMURE_UNIT_KVM=1, ~1 min)"
-# Crash -> passt, QEMU and a flow survive (fd store); hung stop -> stop-post
+# Crash -> passt, Firecracker and a flow survive (fd store); hung stop -> stop-post
 # sweeps; clean stop. A transient system unit as this user with the kvm group
-# (sudo systemd-run), until a user unit can open /dev/vhost-vsock.
+# (sudo systemd-run), until a user unit can open /dev/kvm.
 if [ "${BROMURE_UNIT_KVM:-0}" = 1 ]; then
   "$ROOT/linux/systemd/test-unit-kvm.sh"
 else

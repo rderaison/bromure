@@ -9,7 +9,7 @@ import NIOPosix
 /// nftables, no root step, no FORWARD-chain conflicts (Docker's).
 ///
 /// passt gets one end of a socketpair as its stdin (`--fd 0`) and speaks the
-/// same `u32 length + frame` wire format as QEMU's stream netdev on it: no
+/// same `u32 length + frame` wire format (passt's qemu mode) on it: no
 /// socket file, nothing for another local user to connect to. (Its own
 /// listening socket, `--socket` in `--foreground`, fails to add the accepted
 /// fd to epoll on this build; daemonized it works but ignores `--one-off`.)
@@ -158,7 +158,7 @@ public final class PasstUplink: Uplink {
         let writer = self.writer
         core = FramePortCore(name: "passt") { frames in
             guard let w = writer.withLockedValue({ $0 }) else { throw ChannelError.ioOnClosedChannel }
-            try await w.write(StreamPort.encode(frames))      // suspends while passt isn't reading
+            try await w.write(PasstFraming.encode(frames))      // suspends while passt isn't reading
         }
         inbox = EagerInbox(core: core)
     }
@@ -253,7 +253,7 @@ public final class PasstUplink: Uplink {
             throw ChannelError.alreadyClosed
         }
         // The reader: a thread of its own doing nothing but read passt's
-        // socket and split frames, as QEMU's net backend does. passt's tap
+        // socket and split frames, as a VMM's net backend would. passt's tap
         // writes fail with EAGAIN as soon as ~200 small frames are unread (a
         // Unix stream socket charges each against passt's send buffer), and
         // passt then loses that flow's ACKs for good. With a receiver (the
@@ -325,7 +325,7 @@ public final class PasstUplink: Uplink {
                 let length = Int(buf[at]) << 24 | Int(buf[at + 1]) << 16 | Int(buf[at + 2]) << 8 | Int(buf[at + 3])
                 if syncing, let mac {
                     guard have - at >= 16 else { break }
-                    if length < StreamPort.minFrame || length > StreamPort.maxFrame || !buf[(at + 10)..<(at + 16)].elementsEqual(mac) {
+                    if length < PasstFraming.minFrame || length > PasstFraming.maxFrame || !buf[(at + 10)..<(at + 16)].elementsEqual(mac) {
                         at += 1
                         dropped += 1
                         continue
@@ -333,7 +333,7 @@ public final class PasstUplink: Uplink {
                     syncing = false
                     onSynced?(dropped)
                 }
-                if length < StreamPort.minFrame || length > StreamPort.maxFrame {
+                if length < PasstFraming.minFrame || length > PasstFraming.maxFrame {
                     at += 4
                     skipping = length
                     continue
@@ -380,12 +380,12 @@ public final class PasstUplink: Uplink {
     public var inbound: FrameSequence { core.sequence }
     // @port-skip linux-only: rootless uplink
     @discardableResult public func send(_ frame: Data) -> FrameSendResult {
-        guard frame.count >= StreamPort.minFrame, frame.count <= StreamPort.maxFrame else { return .dropped }
+        guard frame.count >= PasstFraming.minFrame, frame.count <= PasstFraming.maxFrame else { return .dropped }
         return core.send(frame)
     }
     // @port-skip linux-only: rootless uplink
     public func sendWaiting(_ frame: Data) async {
-        guard frame.count >= StreamPort.minFrame, frame.count <= StreamPort.maxFrame else { return }
+        guard frame.count >= PasstFraming.minFrame, frame.count <= PasstFraming.maxFrame else { return }
         await core.sendWaiting(frame)
     }
     // @port-skip linux-only: rootless uplink

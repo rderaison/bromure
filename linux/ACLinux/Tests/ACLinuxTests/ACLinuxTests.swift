@@ -6,190 +6,10 @@ import NIOPosix
 import Testing
 @testable import ACLinux
 
-/// A tiny QMP server: greeting, `id` echo, one error command, one event.
-final class FakeQMPHandler: ChannelInboundHandler, Sendable {
-    typealias InboundIn = ByteBuffer
-    typealias OutboundOut = ByteBuffer
-
-    func channelActive(context: ChannelHandlerContext) {
-        send(context, #"{"QMP": {"version": {"qemu": {"major": 10, "minor": 2, "micro": 1}}, "capabilities": []}}"#)
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let line = unwrapInboundIn(data)
-        let msg = try! JSONDecoder().decode(JSONValue.self, from: Data(line.readableBytesView))
-        let id = msg["id"]?.stringValue.map { #","id":"\#($0)""# } ?? ""
-        switch msg["execute"]?.stringValue {
-        case "query-status":
-            send(context, #"{"return": {"status": "running", "running": true}\#(id)}"#)
-        case "fail-me":
-            send(context, #"{"error": {"class": "GenericError", "desc": "nope"}\#(id)}"#)
-        case "emit":
-            send(context, #"{"event": "STOP", "data": {}, "timestamp": {"seconds": 1700000000, "microseconds": 500000}}"#)
-            send(context, #"{"return": {}\#(id)}"#)
-        case "hang":
-            break
-        case "echo":
-            send(context, #"{"return": \#(String(decoding: try! JSONEncoder().encode(msg["arguments"] ?? .null), as: UTF8.self))\#(id)}"#)
-        default:
-            send(context, #"{"return": {}\#(id)}"#)
-        }
-    }
-
-    private func send(_ context: ChannelHandlerContext, _ s: String) {
-        context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(string: s + "\r\n")), promise: nil)
-    }
-}
-
 func shortTempDir() throws -> String {
     let d = "/tmp/acl-\(UUID().uuidString.prefix(8))"
     try FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
     return d
-}
-
-@Suite("QMP client")
-struct QMPClientTests {
-    func withServer(_ body: (String) async throws -> Void) async throws {
-        let dir = try shortTempDir()
-        defer { try? FileManager.default.removeItem(atPath: dir) }
-        let path = dir + "/qmp.sock"
-        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .childChannelInitializer { ch in
-                ch.eventLoop.makeCompletedFuture {
-                    try ch.pipeline.syncOperations.addHandler(ByteToMessageHandler(LineFrameDecoder()))
-                    try ch.pipeline.syncOperations.addHandler(FakeQMPHandler())
-                }
-            }
-            .bind(unixDomainSocketPath: path).get()
-        do { try await body(path) } catch { try? await server.close(); throw error }
-        try await server.close()
-    }
-
-    @Test("greeting, capabilities, typed replies, errors, events and timeouts")
-    func roundTrip() async throws {
-        try await withServer { path in
-            let qmp = try await QMPClient.connect(socketPath: path)
-            #expect(await qmp.version["qemu"]?["major"] == 10)
-
-            struct Status: Decodable { let status: String; let running: Bool }
-            let st = try await qmp.execute("query-status", as: Status.self)
-            #expect(st.status == "running" && st.running)
-
-            let echoed = try await qmp.execute("echo", arguments: ["a": 1, "b": "x", "c": [true, .null]])
-            #expect(echoed == ["a": 1, "b": "x", "c": [true, .null]])
-
-            await #expect(throws: QMPError.commandFailed(command: "fail-me", errorClass: "GenericError", description: "nope")) {
-                try await qmp.execute("fail-me")
-            }
-
-            try await qmp.execute("emit")
-            var it = qmp.events.makeAsyncIterator()
-            let ev = await it.next()
-            #expect(ev?.name == "STOP")
-            #expect(ev?.timestamp == 1_700_000_000.5)
-
-            await #expect(throws: QMPError.timeout("hang")) {
-                try await qmp.execute("hang", timeout: .milliseconds(100))
-            }
-            // Still usable after a timeout.
-            _ = try await qmp.execute("query-status")
-            await qmp.close()
-            await #expect(throws: QMPError.disconnected) { try await qmp.execute("query-status") }
-        }
-    }
-
-    @Test("connect fails cleanly when nothing listens")
-    func noServer() async throws {
-        await #expect(throws: (any Error).self) {
-            _ = try await QMPClient.connect(socketPath: "/tmp/acl-nonexistent-\(UUID().uuidString.prefix(6)).sock")
-        }
-    }
-}
-
-@Suite("QEMU machine config")
-struct ConfigTests {
-    func config(_ m: QEMUMachineConfig.MachineType) -> QEMUMachineConfig {
-        var c = QEMUMachineConfig(name: "ws1", kernel: "/img/vmlinuz", initrd: "/img/initrd.img",
-                                  cmdline: "console=ttyS0 root=LABEL=root", baseImage: "/img/base.img",
-                                  overlay: "/vm/disk.qcow2", vsockCID: 42, runDirectory: "/run/acl/ws1")
-        c.machine = m
-        c.cpus = 4
-        c.memoryMiB = 4096
-        c.shares = [.init(tag: "bromure-meta", hostPath: "/vm/meta", readOnly: true),
-                    .init(tag: "bromure-outbox", hostPath: "/vm/outbox")]
-        c.network = .stream(socketPath: "/run/acl/ws1/net.sock")
-        c.macAddress = "52:54:00:00:00:2a"
-        return c
-    }
-
-    func pairs(_ a: [String]) -> [String] { zip(a, a.dropFirst()).map { "\($0) \($1)" } }
-
-    @Test("q35 argv: KVM, memfd RAM, direct boot, overlay, virtiofs, stream net, vsock, QMP")
-    func q35() throws {
-        let c = config(.q35)
-        try c.validate()
-        let p = pairs(c.arguments())
-        for expected in [
-            "-machine q35,accel=kvm", "-cpu host", "-smp 4", "-m 4096M",
-            "-object memory-backend-memfd,id=mem,size=4096M,share=on", "-numa node,memdev=mem",
-            "-kernel /img/vmlinuz", "-initrd /img/initrd.img", "-append console=ttyS0 root=LABEL=root",
-            "-drive if=none,id=d0,file=/vm/disk.qcow2,format=qcow2,cache=none,aio=io_uring,discard=unmap",
-            "-device virtio-blk-pci,drive=d0",
-            "-chardev socket,id=fs0,path=/run/acl/ws1/fs0.sock",
-            "-device vhost-user-fs-pci,chardev=fs0,tag=bromure-meta",
-            "-device vhost-user-fs-pci,chardev=fs1,tag=bromure-outbox",
-            "-netdev stream,id=n0,server=off,addr.type=unix,addr.path=/run/acl/ws1/net.sock,reconnect-ms=250",
-            "-device virtio-net-pci,netdev=n0,mac=52:54:00:00:00:2a",
-            "-device vhost-vsock-pci,guest-cid=42",
-            "-chardev socket,id=qmp,path=/run/acl/ws1/qmp.sock,server=on,wait=off",
-            "-mon chardev=qmp,mode=control",
-            "-chardev file,id=ser0,path=/run/acl/ws1/serial.log", "-serial chardev:ser0",
-            "-run-with exit-with-parent=on",
-        ] { #expect(p.contains(expected), "missing: \(expected)") }
-        #expect(!c.arguments().contains("-incoming"))
-        #expect(pairs(c.arguments(incoming: true)).contains("-incoming defer"))
-        #expect(c.virtiofsdArguments(0).contains("--readonly"))
-        #expect(!c.virtiofsdArguments(1).contains("--readonly"))
-    }
-
-    @Test("commas in paths and tags are doubled inside option lists, not in -kernel/-append")
-    func commaEscaping() {
-        var c = QEMUMachineConfig(name: "ws", kernel: "/img,a/vmlinuz", initrd: nil,
-                                  cmdline: "console=ttyS0,115200", baseImage: "/img,a/base.img",
-                                  overlay: "/data,x/disk.qcow2", vsockCID: 3, runDirectory: "/run/a,b")
-        c.shares = [.init(tag: "t,1", hostPath: "/h,p")]
-        c.network = .stream(socketPath: "/run/a,b/net.sock")
-        let p = pairs(c.arguments())
-        for expected in [
-            "-drive if=none,id=d0,file=/data,,x/disk.qcow2,format=qcow2,cache=none,aio=io_uring,discard=unmap",
-            "-chardev socket,id=fs0,path=/run/a,,b/fs0.sock",
-            "-device vhost-user-fs-pci,chardev=fs0,tag=t,,1",
-            "-netdev stream,id=n0,server=off,addr.type=unix,addr.path=/run/a,,b/net.sock,reconnect-ms=250",
-            "-chardev socket,id=qmp,path=/run/a,,b/qmp.sock,server=on,wait=off",
-            "-chardev file,id=ser0,path=/run/a,,b/serial.log",
-            "-kernel /img,a/vmlinuz", "-append console=ttyS0,115200",
-        ] { #expect(p.contains(expected), "missing: \(expected)") }
-        // virtiofsd gets plain argv.
-        #expect(c.virtiofsdArguments(0).contains("/h,p"))
-    }
-
-    @Test("microvm uses virtio-mmio devices")
-    func microvm() {
-        let a = config(.microvm).arguments()
-        #expect(a.contains("virtio-blk-device,drive=d0"))
-        #expect(a.contains("vhost-vsock-device,guest-cid=42"))
-        #expect(!a.joined(separator: " ").contains("-pci"))
-    }
-
-    @Test("socket paths over 107 bytes and duplicate tags are rejected")
-    func validation() {
-        var c = config(.q35)
-        c.qmpSocketPath = "/" + String(repeating: "x", count: 120)
-        #expect(throws: MachineError.self) { try c.validate() }
-        c = config(.q35)
-        c.shares.append(.init(tag: "bromure-meta", hostPath: "/x"))
-        #expect(throws: MachineError.invalidConfig("duplicate share tag")) { try c.validate() }
-    }
 }
 
 @Suite("CID allocation")
@@ -213,11 +33,6 @@ struct CIDTests {
         #expect(try a.allocate() == 4)
     }
 
-    @Test("the vhost probe answers on this host when /dev/vhost-vsock is usable")
-    func vhostProbe() throws {
-        guard access("/dev/vhost-vsock", R_OK | W_OK) == 0 else { return }
-        #expect(CIDAllocator.vhostProbe(0xFFFF_FFF0) == .free)
-    }
 }
 
 @Suite("Snapshot identity")
@@ -239,70 +54,6 @@ struct SnapshotTests {
             try SnapshotIdentity.verify(state: state, overlay: overlay)
         }
         #expect(throws: MachineError.self) { try SnapshotIdentity.verify(state: dir + "/none", overlay: overlay) }
-    }
-}
-
-@Suite("Stream port framing")
-struct StreamPortTests {
-    /// A raw client standing in for QEMU: writes bytes, collects what it reads.
-    final class RawPeer: ChannelInboundHandler, Sendable {
-        typealias InboundIn = ByteBuffer
-        let got = AsyncStream<ByteBuffer>.makeStream()
-        func channelRead(context: ChannelHandlerContext, data: NIOAny) { got.continuation.yield(unwrapInboundIn(data)) }
-    }
-
-    func connect(_ path: String) async throws -> (Channel, RawPeer) {
-        let peer = RawPeer()
-        let ch = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .channelInitializer { c in c.eventLoop.makeCompletedFuture { try c.pipeline.syncOperations.addHandler(peer) } }
-            .connect(unixDomainSocketPath: path).get()
-        return (ch, peer)
-    }
-
-    func frame(_ n: Int, fill: UInt8) -> [UInt8] { [UInt8](repeating: fill, count: n) }
-    func prefixed(_ b: [UInt8]) -> [UInt8] {
-        [UInt8(b.count >> 24 & 0xFF), UInt8(b.count >> 16 & 0xFF), UInt8(b.count >> 8 & 0xFF), UInt8(b.count & 0xFF)] + b
-    }
-
-    @Test("frames split across writes, bad lengths skipped without desync, replies length-prefixed, reconnect replaces")
-    func framing() async throws {
-        let dir = try shortTempDir()
-        defer { try? FileManager.default.removeItem(atPath: dir) }
-        let port = try await StreamPort.listen(path: dir + "/net.sock")
-        var frames = port.inbound.makeAsyncIterator()
-        let (ch, peer) = try await connect(port.path)
-
-        // A good frame in two pieces; then a too-short one (10 bytes) and an
-        // over-long declared length whose bytes do follow; then a good frame.
-        let a = prefixed(frame(60, fill: 0xAA))
-        try await ch.writeAndFlush(ByteBuffer(bytes: a[0..<30])).get()
-        try await ch.writeAndFlush(ByteBuffer(bytes: a[30...])).get()
-        let bad1 = prefixed(frame(10, fill: 0x01))
-        let bad2 = prefixed(frame(StreamPort.maxFrame + 1, fill: 0x02))
-        let b = prefixed(frame(1514, fill: 0xBB))
-        try await ch.writeAndFlush(ByteBuffer(bytes: bad1 + bad2 + b)).get()
-
-        #expect(await frames.next() == Data(frame(60, fill: 0xAA)))
-        #expect(await frames.next() == Data(frame(1514, fill: 0xBB)))
-        #expect(port.dropped == 2)
-
-        // Outbound: the port prepends the length.
-        for _ in 0..<100 where !port.isConnected { try await Task.sleep(for: .milliseconds(10)) }
-        port.send(Data(frame(64, fill: 0xCC)))
-        var acc = ByteBuffer()
-        var it = peer.got.stream.makeAsyncIterator()
-        while acc.readableBytes < 68, var c = await it.next() { acc.writeBuffer(&c) }
-        #expect(acc.readableBytesView.elementsEqual(prefixed(frame(64, fill: 0xCC))))
-
-        // QEMU reconnects (as after a restore): the new connection takes over.
-        let (ch2, _) = try await connect(port.path)
-        try await ch2.writeAndFlush(ByteBuffer(bytes: prefixed(frame(42, fill: 0xDD)))).get()
-        #expect(await frames.next() == Data(frame(42, fill: 0xDD)))
-        #expect(port.connects == 2)
-        for _ in 0..<100 where ch.isActive { try await Task.sleep(for: .milliseconds(10)) }
-        #expect(!ch.isActive, "the replaced connection is closed")
-        try await ch2.close()
-        await port.close()
     }
 }
 
@@ -552,35 +303,6 @@ struct SecretsVaultTests {
     }
 }
 
-extension ChildProcessTests {
-    @Test("a child started from a thread that then exits survives (PDEATHSIG is per-thread)",
-          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/qemu-system-x86_64")))
-    func pdeathsigFollowsThread() async throws {
-        let box = NIOLockedValueBoxShim<ChildProcess?>(nil)
-        let started = DispatchSemaphore(value: 0)
-        // Start QEMU (exit-with-parent = PR_SET_PDEATHSIG) from a thread that
-        // ends right after.
-        let t = Thread {
-            let p = try? ChildProcess(name: "qemu", executable: "/usr/bin/qemu-system-x86_64",
-                                      arguments: ["-machine", "none", "-display", "none", "-nodefaults",
-                                                  "-S", "-run-with", "exit-with-parent=on"], logPath: nil)
-            try? p?.start()
-            box.mutate { $0 = p }
-            // Outlive QEMU's own prctl(PR_SET_PDEATHSIG) (a thread that's
-            // already gone by then has handed its children to another thread).
-            Thread.sleep(forTimeInterval: 0.5)
-            started.signal()
-        }
-        t.start()
-        started.wait()
-        let p = try #require(box.value)
-        try await Task.sleep(for: .milliseconds(500))      // the starter thread has exited
-        #expect(p.isRunning, "QEMU died with the thread that started it (status \\(String(describing: p.exitStatus)))")
-        p.signal(SIGKILL)
-        _ = await p.waitForExit()
-    }
-}
-
 /// A tiny lock box for tests.
 final class NIOLockedValueBoxShim<T>: @unchecked Sendable {
     private let lock = NSLock()
@@ -801,26 +523,15 @@ struct FramePortTests {
     func losslessInbound() async throws {
         let dir = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        let port = try await StreamPort.listen(path: dir + "/net.sock")
+        let (port, fd) = try DgramPort.pair(name: "lossless")
         let total = 20_000
-        // The QEMU side: a blocking writer thread, as fast as the socket takes it.
-        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutableBytes(of: &addr.sun_path) { p in for (i, b) in (port.path.utf8).enumerated() { p[i] = b } }
-        let rc = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
-        #expect(rc == 0)
+        // The VM side: a blocking writer thread, one frame per datagram, as
+        // fast as the socket takes them.
         Thread {
-            var frame = [UInt8](repeating: 0xEE, count: 4 + 1500)
-            frame[0...3] = [0, 0, 0x05, 0xDC]
+            var frame = [UInt8](repeating: 0xEE, count: 1500)
             for i in 0..<total {
-                frame[4] = UInt8(i >> 24 & 0xFF); frame[5] = UInt8(i >> 16 & 0xFF); frame[6] = UInt8(i >> 8 & 0xFF); frame[7] = UInt8(i & 0xFF)
-                var off = 0
-                while off < frame.count {
-                    let n = frame.withUnsafeBytes { write(fd, $0.baseAddress! + off, $0.count - off) }
-                    if n <= 0 { return }
-                    off += n
-                }
+                frame[0] = UInt8(i >> 24 & 0xFF); frame[1] = UInt8(i >> 16 & 0xFF); frame[2] = UInt8(i >> 8 & 0xFF); frame[3] = UInt8(i & 0xFF)
+                if frame.withUnsafeBytes({ send(fd, $0.baseAddress, $0.count, 0) }) != frame.count { return }
             }
         }.start()
         var expected = 0
@@ -834,9 +545,9 @@ struct FramePortTests {
         }
         #expect(expected == total)
         #expect(port.stats.inboundPauses > 0, "the port never had to pause reading")
-        #expect(port.dropped == 0)
+        #expect(port.stats.dropped == 0)
         close(fd)
-        await port.close()
+        port.close()
     }
 
     @Test("a stalled destination fills only its own queue: drops counted there; sendWaiting waits instead")
@@ -930,32 +641,21 @@ final class ManagedAtomicFlag: @unchecked Sendable {
 
 @Suite("Interim bake")
 struct InterimBakeTests {
-    @Test("an extra disk is a second virtio-blk after the system disk, raw, with discard")
-    func extraDisk() throws {
-        var c = QEMUMachineConfig(name: "ws", kernel: "/k", initrd: nil, cmdline: "", baseImage: "/b.img",
-                                  overlay: "/vm/disk.qcow2", vsockCID: 9, runDirectory: "/run/x")
-        c.extraDisks = [.init(path: "/vm/home,1.img")]
-        let a = c.arguments().joined(separator: " ")
-        let sys = try #require(a.range(of: "file=/vm/disk.qcow2"))
-        let home = try #require(a.range(of: "-drive if=none,id=d1,file=/vm/home,,1.img,format=raw,cache=none,aio=io_uring,discard=unmap -device virtio-blk-pci,drive=d1"))
-        #expect(sys.lowerBound < home.lowerBound)
-    }
-
-    @Test("the bake VM's argv: the target disk written in place, no vsock, the serial console on a socket with a log")
-    func bakeArgv() throws {
-        var c = QEMUMachineConfig(name: "bromure-bake", kernel: "/c/vmlinuz", initrd: "/w/initrd", cmdline: "console=ttyS0",
-                                  baseImage: "/o/base.img.partial", overlay: "", vsockCID: 0, runDirectory: "/run/b")
+    @Test("the bake VM's Firecracker config: the target disk written in place, no vsock, entropy, the home after the system disk")
+    func bakeConfig() throws {
+        var c = MachineConfig(name: "bromure-bake", kernel: "/c/vmlinuz", initrd: "/w/initrd", cmdline: "console=ttyS0",
+                              baseImage: "/o/base.img.partial", overlay: "", vsockCID: 3, runDirectory: "/run/b")
         c.writeBaseInPlace = true
         c.vsock = false
-        c.network = .user
-        c.serialSocketPath = "/run/b/serial.sock"
-        c.serialLog = "/w/serial.log"
+        c.entropy = true
+        c.extraDisks = [.init(path: "/vm/home.img")]
         try c.validate()
-        let a = c.arguments().joined(separator: " ")
-        #expect(a.contains("-drive if=none,id=d0,file=/o/base.img.partial,format=raw,cache=none,aio=io_uring,discard=unmap"))
-        #expect(!a.contains("vhost-vsock"))
-        #expect(a.contains("-chardev socket,id=ser0,path=/run/b/serial.sock,server=on,wait=off,logfile=/w/serial.log,logappend=on -serial chardev:ser0"))
-        #expect(a.contains("-netdev user,id=n0"))
+        let j = c.firecrackerConfig(netFD: 3)
+        guard case .array(let drives)? = j["drives"] else { Issue.record("no drives"); return }
+        #expect(drives.first?["path_on_host"] == "/o/base.img.partial")
+        #expect(drives.last?["path_on_host"] == "/vm/home.img")
+        #expect(j["vsock"] == nil)
+        #expect(j["entropy"] == [:])
     }
 
     @Test("a console wait consumes its match: the next wait for the same prompt needs a new one; echoed commands don't match split markers")
@@ -1288,9 +988,8 @@ struct FirecrackerBackendTests {
 
     @Test("config JSON: raw system disk, home, shares by tag, fd:3 network, hybrid vsock, reboot=k")
     func config() throws {
-        var c = QEMUMachineConfig(name: "bromure-abc", kernel: "/k", initrd: "/i", cmdline: "console=ttyS0",
+        var c = MachineConfig(name: "bromure-abc", kernel: "/k", initrd: "/i", cmdline: "console=ttyS0",
                                   baseImage: "/base.img", overlay: "/vm/disk.raw", vsockCID: 7, runDirectory: "/r")
-        c.machine = .firecracker
         c.extraDisks = [.init(path: "/vm/home.img")]
         c.shares = [.init(tag: "bromure-meta", hostPath: "/m", readOnly: true), .init(tag: "bromure-outbox", hostPath: "/o")]
         c.macAddress = "52:54:00:00:00:07"
@@ -1310,17 +1009,10 @@ struct FirecrackerBackendTests {
         // Integers stay integers on the wire (Firecracker's serde wants u32/usize).
         let text = String(decoding: try JSONEncoder().encode(j["machine-config"]!), as: UTF8.self)
         #expect(!text.contains("."), "\(text)")
-        c.network = .stream(socketPath: "/r/net.sock")
-        #expect(throws: MachineError.self) { try c.validate() }
+        c.shares.append(.init(tag: "bromure-meta", hostPath: "/x"))
+        #expect(throws: MachineError.self) { try c.validate() }      // a duplicate tag
     }
 
-    @Test("QEMU refuses a Firecracker config")
-    func qemuRefuses() async throws {
-        var c = QEMUMachineConfig(name: "x", kernel: "/k", initrd: nil, cmdline: "", baseImage: "/b",
-                                  overlay: "/o", vsockCID: 3, runDirectory: try shortTempDir())
-        c.machine = .firecracker
-        await #expect(throws: MachineError.self) { try await QEMUMachine(config: c).start() }
-    }
 
     @Test("hybrid vsock: a connection to <uds>_<port> comes out as from (cid, port), also from a stored listener")
     func hybridVsock() async throws {

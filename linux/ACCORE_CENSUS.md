@@ -117,7 +117,7 @@ URLCredential?)->Void)`, `HTTPMitmConnection.driveTLS(host: String, port: Int, t
 
 ### Image management
 
-UbuntuImageManager mixes the bake *logic* (catalog, downloads, the serial dialogue, version stamps) with VZ (`VZVirtualMachine` provisioner) and CommonCrypto (SHA-256). The carve is: bake logic in ACCore against a `ProvisionerVM` protocol (linux/bake's QEMU dialogue is the Linux side), with hashing on swift-crypto.
+UbuntuImageManager mixes the bake *logic* (catalog, downloads, the serial dialogue, version stamps) with VZ (`VZVirtualMachine` provisioner) and CommonCrypto (SHA-256). The carve is: bake logic in ACCore against a `ProvisionerVM` protocol (linux/bake's Firecracker dialogue is the Linux side), with hashing on swift-crypto.
 
 | file | tier | cause / shims | Apple-only sites (family: count) | functions with them |
 |---|---|---|---|---|

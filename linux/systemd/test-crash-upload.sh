@@ -7,10 +7,8 @@
 #   lost     it failed, and a new connection works (a fresh passt, or flows reset)
 #   wedged   nothing moves and a new connection fails: never acceptable
 # and passt is counted as kept (same pid) or replaced. Exit 1 on any wedged.
-# MACHINE=firecracker runs the guest under Firecracker (default microvm).
 set -u
 N=${1:-30}
-MACHINE=${MACHINE:-microvm}
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
 BIN=$ROOT/linux/ACLinux/.build/release/bromure-ac
 U=bromure-ac-crashup-$$
@@ -43,7 +41,7 @@ sudo -n systemd-run -q --unit="$U" --uid="$(id -u)" --gid="$(id -g)" -p Suppleme
   -p StartLimitBurst=1000 \
   --setenv=HOME="$HOME" --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" --setenv=XDG_STATE_HOME="$XDG_STATE_HOME" \
   --setenv=BROMURE_AGENTD="$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" "$BIN" daemon || exit 1
-cli vm run --name cu --machine "$MACHINE" >/dev/null && cli vm exec cu -- true || { echo "vm run failed"; exit 1; }
+cli vm run --name cu >/dev/null && cli vm exec cu -- true || { echo "vm run failed"; exit 1; }
 # The uploader: one connection at a time, 1 MiB writes; "<conn> <bytes> <time>"
 # every 0.25 s, "err <conn> <exc> <time>" and a reconnect when one fails.
 cli vm exec cu -- sh -c "nohup python3 -c \"
@@ -97,6 +95,6 @@ PY
   case $verdict in resumed*) ;; *) echo "    host kill time $T, guest now $(cli vm exec cu -- date +%s.%N 2>/dev/null)"
     echo "$LOG" | tail -4 | sed 's/^/    /';; esac
 done
-echo "CRASH-UPLOAD ($MACHINE) $N kills: resumed $resumed, lost $lost, wedged $wedged; passt kept $kept, replaced $replaced; resume gaps:$gaps"
+echo "CRASH-UPLOAD $N kills: resumed $resumed, lost $lost, wedged $wedged; passt kept $kept, replaced $replaced; resume gaps:$gaps"
 journalctl -u "$U" --no-pager -o cat | grep -E "passt: adopted pid .* (answers|doesn't answer)" | sed 's/pid [0-9]*/pid N/' | sort | uniq -c
 [ "$wedged" = 0 ]

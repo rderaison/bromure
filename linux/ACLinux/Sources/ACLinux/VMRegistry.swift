@@ -21,7 +21,7 @@ public struct VMRecord: Codable, Sendable, Equatable {
     public var bootedAt: Date?
     /// The suspend state file (with its overlay identity sidecar).
     public var statePath: String?
-    /// The running QEMU, so a restarted daemon can re-adopt it: its pid, its
+    /// The running Firecracker, so a restarted daemon can re-adopt it: its pid, its
     /// start time (/proc/<pid>/stat, against pid reuse), and the address the
     /// switch leased the VM.
     public var pid: Int32?
@@ -76,7 +76,7 @@ public struct VMRegistry: Sendable {
     public private(set) var records: [VMRecord] = []
 
     /// Loads the registry. VMs recorded as running or starting are marked
-    /// stopped unless `isAlive` says their QEMU is still there (the daemon
+    /// stopped unless `isAlive` says their Firecracker is still there (the daemon
     /// re-adopts those). Suspended ones stay suspended (their state file is
     /// still valid).
     // @port-skip linux-only: Linux daemon state persistence

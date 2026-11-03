@@ -1,14 +1,14 @@
 # ACLinux
 
-The Linux implementations behind Bromure AC's platform protocols: QEMU/KVM VMs (`QEMUMachine`), host AF_VSOCK, guest CIDs, the network ports and uplinks, the secrets vault, and the `bromure-ac` daemon and CLI. Every declaration carries `@port` or `@port-skip` (see `tools/portmap`).
+The Linux implementations behind Bromure AC's platform protocols: Firecracker/KVM VMs (`FirecrackerMachine`, with `linux/firecracker`'s patched build), hybrid vsock, the network ports and uplinks, the secrets vault, the shared SSH server (single- and multi-user), and the `bromure-ac` daemon and CLI. Every declaration carries `@port` or `@port-skip` (see `tools/portmap`).
 
 ## Network ports and backpressure (`FramePort`)
 
-`StreamPort` (a VM, through QEMU's `-netdev stream`), `PasstUplink` and `TapUplink` are all `FramePort`s. They mirror VMNetSwitch's frame loop on macOS, plus backpressure:
+`DgramPort` (a VM, a datagram socketpair with Firecracker), `PasstUplink` and `TapUplink` are all `FramePort`s. They mirror VMNetSwitch's frame loop on macOS, plus backpressure:
 
 | VMNetSwitch (macOS) | FramePort (Linux) |
 |---|---|
-| `readVMLoop`: a blocking `read` per VM socketpair | `inbound`: an `NIOAsyncSequenceProducer` (high/low watermark, lossless). The port stops reading QEMU's socket, passt's socketpair or the tap while the consumer lags. |
+| `readVMLoop`: a blocking `read` per VM socketpair | `inbound`: an `NIOAsyncSequenceProducer` (high/low watermark, lossless). The port stops reading the VM's socket, passt's socketpair or the tap while the consumer lags. |
 | `drainVmnetToVMs`: vmnet's packets-available callback | the uplink's `inbound` |
 | `write(fd)` to a VM, dropped by the kernel when its buffer is full | `send(_:)`: never blocks; a bounded per-port queue (1024 frames, 8 MiB) that drops, counted in `stats.dropped`, only when that port's queue is full |
 | `writeToVmnet` | `sendWaiting(_:)`: waits for room (one source, one destination) |
@@ -29,7 +29,7 @@ The Linux implementations behind Bromure AC's platform protocols: QEMU/KVM VMs (
 - passt's `--pcap` hides it (0/32).
 
 **Fix (ours):**
-- A thread of its own reads passt's socket and splits frames, as QEMU's net backend does (`PasstUplink.readLoop`, on a dup of the fd; NIO only writes).
+- A thread of its own reads passt's socket and splits frames, as a VMM's net backend would (`PasstUplink.readLoop`, on a dup of the fd; NIO only writes).
 - A second thread routes those frames: the switch is the uplink's receiver (`Uplink.setReceiver`).
 - Between the two is an inbox that **never drops**. A frame lost from passt is worse than a late one: a lost ACK is never re-sent, and an earlier version that dropped there turned one flow's losses into 117M frames of retransmission in 60 s. Its backlog is bounded by the guests' TCP windows, and at 256Ki frames the reader waits (`routeWaits`, expected 0).
 - A VM that stops draining still drops at its own port.

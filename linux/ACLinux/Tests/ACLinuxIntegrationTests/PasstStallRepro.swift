@@ -17,8 +17,7 @@ struct PasstStallRepro {
         defer { stopHelper(svc) }
         let passt = try await PasstUplink.start(PasstUplink.Config(logPath: "/dev/null"))
         let sw = TestSwitch(uplink: passt, gateway: "192.168.64.1", dns: "192.168.64.1", mtu: { _ in 1500 })
-        let listener = try await VsockListener.shared(port: agentPort)
-        let a = try await SwitchedVM.make(.microvm, mac: "52:54:00:e1:00:01", on: sw, listener: listener, tag: "repro", mtu: 1500)
+        let a = try await SwitchedVM.make(mac: "52:54:00:e1:00:01", on: sw, tag: "repro", mtu: 1500)
         _ = try await a.boot()
         var stalls = 0, mbps: [Double] = []
         for _ in 0..<n {
@@ -38,9 +37,9 @@ struct PasstStallRepro {
         let med = mbps.sorted().isEmpty ? 0 : mbps.sorted()[mbps.count / 2]
         let w = passt.routeBacklogPeak
         print("REPRO passt stall: \(stalls)/\(n) stalled; median \(Int(med)) MB/s; passt pauses \(passt.stats.inboundPauses), "
-              + "route waits \(passt.routeWaits), backlog peak \(w.frames) frames / \(w.bytes) bytes; port dropped \(a.port.dropped)")
+              + "route waits \(passt.routeWaits), backlog peak \(w.frames) frames / \(w.bytes) bytes; port dropped \(a.port.sendErrors)")
         #expect(stalls == 0)
-        await a.tearDown(listener)
+        await a.tearDown()
         sw.stop()
         await passt.close()
     }

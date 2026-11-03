@@ -191,25 +191,10 @@ int acl_get_dumpable(void) { return -ENOSYS; }
 
 #ifdef __linux__
 #include <sys/ioctl.h>
-#include <linux/vhost.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <string.h>
 
-int acl_vhost_vsock_cid_in_use(uint64_t cid) {
-    int fd = open("/dev/vhost-vsock", O_RDWR | O_CLOEXEC);
-    if (fd < 0) return -errno;
-    if (ioctl(fd, VHOST_SET_OWNER, 0) < 0) {
-        int e = errno;
-        close(fd);
-        return -e;
-    }
-    int r = ioctl(fd, VHOST_VSOCK_SET_GUEST_CID, &cid);
-    int e = errno;
-    close(fd);
-    if (r == 0) return 0;
-    return e == EADDRINUSE ? 1 : -e;
-}
 
 int acl_tap_open(const char *name) {
     int fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
@@ -230,11 +215,6 @@ int acl_tap_open(const char *name) {
     (void)name;
     return -ENOSYS;
 }
-
-int acl_vhost_vsock_cid_in_use(uint64_t cid) {
-    (void)cid;
-    return -ENOSYS;
-}
 #endif
 
 int acl_pidfd_open(int pid) {
@@ -247,28 +227,10 @@ int acl_pidfd_send_signal(int pidfd, int sig) {
 }
 
 #ifdef __linux__
-#include <linux/vm_sockets.h>
 #include <poll.h>
 #include <time.h>
 #include <stdio.h>
 #include <sys/time.h>
-int acl_vsock_listen(unsigned int port, int backlog) {
-    int fd = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -errno;
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_vm sa;
-    memset(&sa, 0, sizeof sa);
-    sa.svm_family = AF_VSOCK;
-    sa.svm_cid = VMADDR_CID_ANY;
-    sa.svm_port = port;
-    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(fd, backlog) < 0) {
-        int e = errno;
-        close(fd);
-        return -e;
-    }
-    return fd;
-}
 
 // Connects `fd` to `sa`, giving up after `timeout_ms`; the fd is left blocking.
 static int acl_connect_timeout(int fd, const struct sockaddr *sa, socklen_t len, int timeout_ms) {
@@ -295,24 +257,7 @@ static int acl_connect_timeout(int fd, const struct sockaddr *sa, socklen_t len,
     return r;
 }
 
-int acl_vsock_connect(unsigned int cid, unsigned int port, int timeout_ms) {
-    int fd = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -errno;
-    struct sockaddr_vm sa;
-    memset(&sa, 0, sizeof sa);
-    sa.svm_family = AF_VSOCK;
-    sa.svm_cid = cid;
-    sa.svm_port = port;
-    if (acl_connect_timeout(fd, (struct sockaddr *)&sa, sizeof sa, timeout_ms) < 0) {
-        int e = errno;
-        close(fd);
-        return -e;
-    }
-    return fd;
-}
 #else
-int acl_vsock_listen(unsigned int port, int backlog) { (void)port; (void)backlog; return -ENOSYS; }
-int acl_vsock_connect(unsigned int cid, unsigned int port, int timeout_ms) { (void)cid; (void)port; (void)timeout_ms; return -ENOSYS; }
 #endif
 
 int acl_hybrid_vsock_connect(const char *path, unsigned int port, int timeout_ms) {

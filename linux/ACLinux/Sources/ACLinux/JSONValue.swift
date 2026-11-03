@@ -28,7 +28,7 @@ public enum JSONValue: Codable, Sendable, Equatable {
         case .null: try c.encodeNil()
         case .bool(let b): try c.encode(b)
         case .number(let n):
-            // Integers stay integers on the wire (QEMU rejects 1.0 for an int).
+            // Integers stay integers on the wire (Firecracker's API rejects 1.0 for an int).
             if n.rounded() == n, abs(n) < 9.0e15 { try c.encode(Int64(n)) } else { try c.encode(n) }
         case .string(let s): try c.encode(s)
         case .array(let a): try c.encode(a)

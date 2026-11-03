@@ -33,7 +33,8 @@ struct Daemon: AsyncParsableCommand {
         _ = acl_sd_notify("READY=1\nSTATUS=serving \(config.controlSocketPath)")
         // SIGTERM (systemctl stop) / SIGINT: stop the VMs and passt, then exit.
         // (A parent that spawned us with signals blocked still gets SIGKILL;
-        // QEMU and passt follow us then via PDEATHSIG and the socketpair.)
+        // passt follows us then via the socketpair; the VMs wait for a next
+        // daemon under systemd, or are ended by stop-post.)
         let stop = AsyncStream<Int32> { cont in
             for sig in [SIGTERM, SIGINT] {
                 signal(sig, SIG_IGN)
@@ -95,7 +96,7 @@ extension VM {
     struct Run: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Create and start a VM (detached).")
         @Option(help: "VM name.") var name: String?
-        @Option(help: "q35, microvm or firecracker (linux/firecracker/build.sh).") var machine = "microvm"
+        @Option(help: "firecracker (the only backend; linux/firecracker/build.sh).") var machine = "firecracker"
         @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB = 2.0
         @Option(help: "vCPUs.") var cpus = 2
         @Option(name: .customLong("home-gb"), help: "Home image size in GiB (8-1024; default: the daemon's).") var homeGB: Int?
@@ -183,7 +184,7 @@ extension VM {
         static let configuration = CommandConfiguration(abstract: "Stop a VM (shut down, suspend with --suspend, or --force).")
         @Argument(help: "VM id or name.") var vm: String
         @Flag(help: "Suspend (save RAM to disk) instead of powering off.") var suspend = false
-        @Flag(help: "Kill QEMU at once instead of an ACPI shutdown (Linux).") var force = false
+        @Flag(help: "Kill Firecracker at once instead of a guest shutdown (Linux).") var force = false
 
         // @port VMKill.run() h=f36d4145132d9df1 @94eb37f3
         func run() async throws {
@@ -197,7 +198,7 @@ extension VM {
 
     // @port-skip linux-only: shorthand for `kill --suspend`
     struct Suspend: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Suspend a VM (save its RAM to disk).")
+        static let configuration = CommandConfiguration(abstract: "Suspend a VM (save its RAM to disk; not available yet with Firecracker).")
         @Argument(help: "VM id or name.") var vm: String
         // @port-skip linux-only: shorthand for `kill --suspend`
         func run() async throws {
@@ -255,7 +256,7 @@ struct Image: AsyncParsableCommand {
     // @port-skip linux-only: interim image bake CLI
     struct Bake: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Bake the amd64 guest image under QEMU/KVM from vm-setup (needs /dev/kvm and network).")
+            abstract: "Bake the amd64 guest image under Firecracker/KVM from vm-setup (needs /dev/kvm and network).")
         @Option(help: "Output directory. Default: the daemon's image directory.") var out: String?
         @Option(name: .customLong("vm-setup"), help: "vm-setup directory (setup.sh and the agents).")
         var vmSetup = "Sources/AgentCoding/Resources/vm-setup"

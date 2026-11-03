@@ -73,26 +73,19 @@ public struct DaemonConfig: Sendable {
     }
 }
 
-/// The headless daemon: one passt for the host, the interim switch, the
-/// shared vsock listener, and the VMs. Serves the control socket's routes.
+/// The headless daemon: one passt for the host, the interim switch, and the
+/// Firecracker VMs. Serves the control socket's routes.
 // @port-skip linux-only: the Linux daemon core (macOS: ACAppDelegate + ACAutomationServer)
 public actor Daemon {
     struct Live {
-        var machine: any VMMachine
-        let port: any FramePort
-        let closePort: @Sendable () async -> Void
+        var machine: FirecrackerMachine
+        let port: DgramPort
         let shell: GuestShell
-        let config: QEMUMachineConfig
-        /// Firecracker's guest -> host vsock :5800 (QEMU VMs use the shared listener).
-        var vsock: HybridVsockListener?
-        /// The fd store entry holding this VM's network end (Firecracker).
-        var storedNet: String?
-    }
-
-    /// A QEMU VM's stream port, or a Firecracker VM's datagram port, as Live holds it.
-    // @port-skip linux-only: Linux daemon VM plumbing
-    static func streamLive(_ machine: any VMMachine, stream port: StreamPort, shell: GuestShell, config: QEMUMachineConfig) -> Live {
-        Live(machine: machine, port: port, closePort: { await port.close() }, shell: shell, config: config)
+        let config: MachineConfig
+        /// The guest -> host vsock :5800 listener (agentd's shell pool).
+        let vsock: HybridVsockListener
+        /// The fd store entries holding this VM's network end and listener.
+        let storedNet: String
     }
 
     public nonisolated let config: DaemonConfig
@@ -100,11 +93,8 @@ public actor Daemon {
     var live: [String: Live] = [:]
     private let passt: PasstUplink
     let sw: InterimSwitch
-    private let listener: VsockListener
     /// VMs whose stop is being recorded (vmStopped).
     private var stopping: [String: Task<Void, Never>] = [:]
-    /// CIDs of suspended VMs, leased at load so a new VM can't take them.
-    private var reservedCIDs: Set<UInt32> = []
 
     // @port-skip linux-only: Linux daemon core
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
@@ -118,39 +108,31 @@ public actor Daemon {
         pc.useFDStore = true
         let stored = FDStore.take()
         let passt = try await PasstUplink.start(pc, adopting: PasstUplink.Adopted.fromStore(stored))
-        let storedListener = stored["vsock-5800"]?.count == 1 ? stored["vsock-5800"]?.first : nil
-        // net-<short id>: Firecracker VMs' network ends, for adoptRunning.
-        // control: systemd's socket unit (multi-user), the daemon command's.
-        for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && fds.first != storedListener
-            && !((name.hasPrefix("net-") || (name.hasPrefix("vsock-") && name != "vsock-5800")) && fds.count == 1) {
+        // The VMs' network ends (net-<short id>) and vsock listeners
+        // (vsock-<short id>), for adoptRunning; control: systemd's socket
+        // unit (multi-user), the daemon command's. Anything else is stale.
+        let perVM = { (name: String) in name.hasPrefix("net-") || name.hasPrefix("vsock-") }
+        for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
         if passt.adopted { FileHandle.standardError.write(Data("bromure-ac daemon: took back passt (pid \(passt.pid ?? 0)) from the fd store\n".utf8)) }
-        if storedListener != nil { FileHandle.standardError.write(Data("bromure-ac daemon: took back the vsock :5800 listener from the fd store\n".utf8)) }
-        let listener = try await VsockListener.shared(port: 5800, fdStoreName: "vsock-5800", stored: storedListener)
-        let d = Daemon(config: config, passt: passt, listener: listener)
-        // Firecracker VMs' network ends (net-<short>) and vsock listeners (vsock-<short>).
-        let storedNet = stored.filter {
-            ($0.key.hasPrefix("net-") || ($0.key.hasPrefix("vsock-") && $0.key != "vsock-5800")) && $0.value.count == 1
-        }.mapValues { $0[0] }
+        let d = Daemon(config: config, passt: passt)
+        let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
         await d.setUpRemoteAccess()
         return d
     }
 
     // @port-skip linux-only: Linux daemon core
-    private init(config: DaemonConfig, passt: PasstUplink, listener: VsockListener) {
+    private init(config: DaemonConfig, passt: PasstUplink) {
         self.config = config
         self.passt = passt
-        self.listener = listener
         self.sw = InterimSwitch(uplink: passt)
         if config.multiUser {
             sw.blockedDestination.withLockedValue { $0 = { HostAddresses.shared.contains($0) } }
         }
-        let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurQEMU)
+        let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurVM)
         self.registry = registry
-        // Suspended VMs keep their CID across daemon restarts.
-        self.reservedCIDs = Set(registry.records.filter { $0.state == .suspended && CIDAllocator.shared.claim($0.cid) }.map(\.cid))
     }
 
     // @port-skip linux-only: Linux daemon core
@@ -300,15 +282,12 @@ public actor Daemon {
         if registry.records.contains(where: { $0.name == name || $0.id == name || $0.shortId == name }) {
             return .error(409, "'\(name)' is already a VM's name or id")
         }
-        let machine = body["machine"]?.stringValue ?? "microvm"
-        guard let type = QEMUMachineConfig.MachineType(rawValue: machine) else {
-            return .error(400, "Unknown machine '\(machine)' (q35, microvm or firecracker)")
+        let machine = body["machine"]?.stringValue ?? Self.machineType
+        guard machine == Self.machineType else {
+            return .error(400, "Unknown machine '\(machine)': VMs are Firecracker ('\(Self.machineType)')")
         }
-        if config.multiUser, type != .firecracker {
-            return .error(400, "This is a multi-user server: VMs are Firecracker only (machine 'firecracker'); QEMU's vsock is shared by every user on the host")
-        }
-        if type == .firecracker, !FileManager.default.isExecutableFile(atPath: QEMUMachineConfig.defaultFirecrackerBinary) {
-            return .error(400, "No Firecracker at \(QEMUMachineConfig.defaultFirecrackerBinary) (linux/firecracker/build.sh)")
+        guard FileManager.default.isExecutableFile(atPath: MachineConfig.defaultFirecrackerBinary) else {
+            return .error(503, "No Firecracker at \(MachineConfig.defaultFirecrackerBinary) (linux/firecracker/build.sh)")
         }
         let memMiB = Int((body["memoryGB"]?.numberValue ?? 2) * 1024)
         let cpus = Int(body["cpus"]?.numberValue ?? 2)
@@ -320,7 +299,7 @@ public actor Daemon {
         rec.homeGB = homeGB
         do {
             try registry.upsert(rec)
-            try await launch(&rec, restoreFrom: nil)
+            try await launch(&rec)
             return ControlResponse(201, ["id": .string(id), "shortId": .string(rec.shortId),
                                          "name": .string(name), "tool": .null, "detached": true])
         } catch {
@@ -341,7 +320,7 @@ public actor Daemon {
         case ("GET", ""): return getVM(rec)
         case ("DELETE", ""): return await deleteVM(rec, action: body["action"]?.stringValue ?? "shutdown")
         case ("POST", "exec"): return await exec(rec, body)
-        case ("POST", "resume"): return await resume(rec)
+        case ("POST", "resume"): return Self.noSuspend(rec)
         case ("POST", "start"): return await start(rec, body)
         case ("POST", "remove"): return remove(rec)
         default: return .error(405, "Method not allowed")
@@ -352,29 +331,25 @@ public actor Daemon {
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "GET": h=a05dae914d2f170b @7dd92fdf
     func getVM(_ rec: VMRecord) -> ControlResponse { ControlResponse(200, withIP(rec).json) }
 
+    /// The record's machine type: Firecracker is the only backend.
+    static let machineType = "firecracker"
+
+    /// Suspend/resume: not until Firecracker can snapshot a VM with
+    /// vhost-user-fs shares (device-state migration, in the fork).
+    // @port-skip linux-only: no suspend on Linux yet
+    static func noSuspend(_ rec: VMRecord) -> ControlResponse {
+        .error(409, "Suspend and resume aren't available yet (Firecracker can't snapshot VMs with shared folders yet); stop and start '\(rec.name)' instead",
+               ["state": .string(rec.state.rawValue)])
+    }
+
     /// `DELETE /vms/{id}` with `{"action": "shutdown"|"suspend"|"kill"}`.
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=eaa996c40011d353 @7dd92fdf
     func deleteVM(_ rec: VMRecord, action: String) async -> ControlResponse {
+        if action == "suspend" { return Self.noSuspend(rec) }
         guard let l = live[rec.id] else {
-            return rec.state == .suspended && action != "suspend"
-                ? ControlResponse(200, ["status": "stopped"]) : .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)",
-                                                                         ["state": .string(rec.state.rawValue)])
+            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
         }
         switch action {
-        case "suspend":
-            let statePath = vmDir(rec.id) + "/vm.state"
-            var r = rec
-            r.statePath = statePath
-            r.state = .suspended
-            try? registry.upsert(r)             // before QEMU exits: onStopped sees .suspended
-            do {
-                _ = try await l.machine.suspend(to: statePath)
-                return ControlResponse(200, ["status": "suspended"])
-            } catch {
-                r.state = .running
-                try? registry.upsert(r)
-                return .error(500, "Suspend failed: \(error)")
-            }
         case "kill":
             await vmStopped(rec.id, await l.machine.kill())
         default:
@@ -385,36 +360,15 @@ public actor Daemon {
         return ControlResponse(200, ["status": "stopped"])
     }
 
-    /// `POST /vms/{id}/resume` (Linux): restore a suspended VM.
-    // @port-skip linux-only: macOS resumes by starting the workspace again; the Linux CLI has an explicit resume
-    func resume(_ rec: VMRecord) async -> ControlResponse {
-        guard rec.state == .suspended, let statePath = rec.statePath else {
-            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
-        }
-        var r = rec
-        // Its own CID if we reserved or can claim it; otherwise a new one. A
-        // restore under another CID works: the vhost-vsock transport reset
-        // makes the guest re-read guest_cid (CIDChangeTests).
-        if reservedCIDs.remove(rec.cid) == nil, !CIDAllocator.shared.claim(rec.cid) {
-            guard let fresh = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
-            r.cid = fresh
-        }
-        do {
-            try await launch(&r, restoreFrom: statePath)
-            return ControlResponse(200, ["status": "running"])
-        } catch {
-            CIDAllocator.shared.release(r.cid)
-            return .error(500, "Resume failed: \(error)")
-        }
-    }
-
     /// `POST /vms/{id}/start` (Linux): boot a stopped VM again, on its own
     /// overlay and home image.
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:])) async -> ControlResponse {
-        guard rec.state == .stopped else {
-            let hint = rec.state == .suspended ? " (resume it)" : ""
-            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)\(hint)", ["state": .string(rec.state.rawValue)])
+        guard rec.state == .stopped || rec.state == .suspended else {
+            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
+        }
+        guard rec.machine == Self.machineType else {
+            return .error(409, "'\(rec.name)' was made for QEMU, which is gone: remove it (vm rm) and create a new one")
         }
         var r = rec
         // `homeGB`: a new home size, applied by this cold boot. Images don't shrink.
@@ -430,7 +384,7 @@ public actor Daemon {
             r.cid = fresh
         }
         do {
-            try await launch(&r, restoreFrom: nil)
+            try await launch(&r)
             return ControlResponse(200, ["status": "running"])
         } catch {
             CIDAllocator.shared.release(r.cid)
@@ -445,7 +399,6 @@ public actor Daemon {
         guard rec.state == .stopped || rec.state == .suspended, live[rec.id] == nil else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue); stop it first", ["state": .string(rec.state.rawValue)])
         }
-        if reservedCIDs.remove(rec.cid) != nil { CIDAllocator.shared.release(rec.cid) }
         do {
             try registry.remove(id: rec.id)
         } catch {
@@ -543,9 +496,9 @@ public actor Daemon {
     // @port-skip linux-only: Linux daemon VM layout
     func vmDir(_ id: String) -> String { config.stateDir + "/vms/" + id }
 
-    /// Stages the VM's files, plugs it into the switch, starts (or restores) QEMU.
+    /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // @port-skip linux-only: Linux daemon VM lifecycle
-    private func launch(_ rec: inout VMRecord, restoreFrom statePath: String?) async throws {
+    private func launch(_ rec: inout VMRecord) async throws {
         let dir = vmDir(rec.id)
         let run = config.runtimeDir + "/vms/" + rec.shortId
         let fm = FileManager.default
@@ -554,7 +507,7 @@ public actor Daemon {
         }
         // 0777 as on macOS: every guest uid (the workspace's, a run_as user's)
         // writes there through plain DAC. The VM directory above it stays 0700.
-        try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: statePath != nil)
+        try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: false)
         try? fm.removeItem(atPath: dir + "/meta/bromure-agentd.py")
         try fm.copyItem(atPath: config.agentdPath, toPath: dir + "/meta/bromure-agentd.py")
         for tag in ["bromure-meta", "bromure-outbox"] {
@@ -570,11 +523,8 @@ public actor Daemon {
         let home = dir + "/home.img"
         let target = Self.homeImageTargetBytes(gb: rec.homeGB, defaultGB: config.homeImageGB)
         try Self.ensureHomeImage(atPath: home, bytes: target)
-        // A size change lands at a cold boot (agentd's resize2fs grows the
-        // mounted ext4); a saved state was taken against the old geometry.
-        let homeNote = statePath != nil
-            ? "saved state present — home image kept at its size until a cold boot"
-            : try Self.growHomeImageIfNeeded(atPath: home, target: target, setting: rec.homeGB)
+        // A size change lands at a boot (agentd's resize2fs grows the mounted ext4).
+        let homeNote = try Self.growHomeImageIfNeeded(atPath: home, target: target, setting: rec.homeGB)
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': \(homeNote)\n".utf8))
         // The guest's hostname (agentd's task_apply_hostname), from the VM's name.
         try (Self.sanitizeHostname(rec.name) + "\n").write(toFile: dir + "/meta/hostname.txt", atomically: true, encoding: .utf8)
@@ -591,34 +541,25 @@ public actor Daemon {
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
 
         var qc = try machineConfig(rec)
-        let l: Live
-        if qc.machine == .firecracker {
-            if statePath != nil { throw MachineError.invalidConfig("Firecracker VMs have no saved state to restore") }
-            // The VM's end goes to Firecracker; ours waits in the fd store,
-            // so a restarted daemon takes the same link back.
-            let (port, peer) = try DgramPort.pair(name: "vm-" + rec.shortId)
-            qc.network = .datagram(peerFD: peer)
-            let storeName = "net-" + rec.shortId
-            FDStore.store(storeName, [port.fd])
-            let vsock: HybridVsockListener
-            do {
-                try FileManager.default.createDirectory(atPath: run, withIntermediateDirectories: true)
-                vsock = try await HybridVsockListener.listen(udsPath: qc.firecrackerVsockPath, port: 5800, cid: rec.cid,
-                                                             fdStoreName: "vsock-" + rec.shortId)
-            } catch {
-                close(peer)
-                FDStore.remove(storeName)
-                port.close()
-                throw error
-            }
-            let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
-            l = Live(machine: FirecrackerMachine(config: qc), port: port, closePort: { port.close() },
-                     shell: shell, config: qc, vsock: vsock, storedNet: storeName)
-        } else {
-            let port = try await StreamPort.listen(path: run + "/net.sock")
-            let shell = await GuestShell(cid: rec.cid, listener: listener)
-            l = Self.streamLive(QEMUMachine(config: qc), stream: port, shell: shell, config: qc)
+        // The VM's end goes to Firecracker; ours waits in the fd store, so a
+        // restarted daemon takes the same link back.
+        let (port, peer) = try DgramPort.pair(name: "vm-" + rec.shortId)
+        qc.network = .datagram(peerFD: peer)
+        let storeName = "net-" + rec.shortId
+        FDStore.store(storeName, [port.fd])
+        let vsock: HybridVsockListener
+        do {
+            vsock = try await HybridVsockListener.listen(udsPath: qc.firecrackerVsockPath, port: 5800, cid: rec.cid,
+                                                         fdStoreName: "vsock-" + rec.shortId)
+        } catch {
+            close(peer)
+            FDStore.remove(storeName)
+            port.close()
+            throw error
         }
+        let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
+        let l = Live(machine: FirecrackerMachine(config: qc), port: port, shell: shell, config: qc,
+                     vsock: vsock, storedNet: storeName)
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
         // the same one back (the guest keeps it).
@@ -628,54 +569,42 @@ public actor Daemon {
         await machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
         live[id] = l
         do {
-            if let statePath { _ = try await machine.restore(from: statePath) } else { try await machine.start() }
+            try await machine.start()
         } catch {
             live[id] = nil
             await teardown(l, mac: rec.mac)
             throw error
         }
         rec.state = .running
-        rec.bootedAt = statePath == nil ? Date() : (rec.bootedAt ?? Date())
+        rec.bootedAt = Date()
         if let pid = await machine.pid {
             rec.pid = pid
             rec.pidStart = Self.processStartTime(pid)
         }
-        if statePath != nil {
-            try? fm.removeItem(atPath: statePath!)
-            for p in SnapshotIdentity.sidecars(forState: statePath!, disks: qc.extraDisks.count) { try? fm.removeItem(atPath: p) }
-            rec.statePath = nil
-        }
         try registry.upsert(rec)
     }
 
-    /// A VM's QEMU configuration (launch and re-adoption build the same one).
+    /// A VM's machine configuration (launch and re-adoption build the same one).
     // @port-skip linux-only: Linux daemon VM layout
-    func machineConfig(_ rec: VMRecord) throws -> QEMUMachineConfig {
+    func machineConfig(_ rec: VMRecord) throws -> MachineConfig {
         let dir = vmDir(rec.id), run = config.runtimeDir + "/vms/" + rec.shortId
-        var qc = try QEMUMachineConfig(name: "bromure-\(rec.shortId)", bakedImage: config.imageDir,
-                                       overlay: dir + "/disk.qcow2", vsockCID: rec.cid, runDirectory: run)
-        qc.machine = QEMUMachineConfig.MachineType(rawValue: rec.machine) ?? .microvm
-        // Firecracker has no qcow2: its system disk is a sparse raw copy.
-        if qc.machine == .firecracker { qc.overlay = dir + "/disk.raw" }
+        // The system disk: a sparse raw copy of the base (Firecracker has no qcow2).
+        var qc = try MachineConfig(name: "bromure-\(rec.shortId)", bakedImage: config.imageDir,
+                                   overlay: dir + "/disk.raw", vsockCID: rec.cid, runDirectory: run)
         qc.cpus = rec.cpus
         qc.memoryMiB = rec.memoryMiB
         qc.shares = [.init(tag: "bromure-meta", hostPath: dir + "/meta", readOnly: true),
                      .init(tag: "bromure-outbox", hostPath: dir + "/outbox")]
-        qc.network = .stream(socketPath: run + "/net.sock")
         qc.macAddress = rec.mac
         qc.extraDisks = [.init(path: dir + "/home.img")]
-        // A VM outlives a daemon crash: the next daemon re-adopts it.
-        qc.exitWithParent = false
         return qc
     }
 
-    /// Takes over the VMs a previous daemon left running: same QMP socket,
-    /// the stream port re-listened on the same path (QEMU re-dials,
-    /// reconnect-ms), the same lease, a new shell (agentd re-dials vsock 5800).
-    /// Flows the guest had open carry over only under systemd, where passt's
-    /// socket waits in the fd store (systemd/test-unit-kvm.sh); a daemon
-    /// restarted by hand gets a new passt, and those flows are gone
-    /// (DaemonTests measures it).
+    /// Takes over the VMs a previous daemon left running: Firecracker by pid
+    /// and API socket, its network end and vsock listener back from the fd
+    /// store, the same lease, a new shell (agentd re-dials vsock 5800). Only
+    /// under systemd's fd store: a daemon restarted by hand can't give a VM
+    /// its network back, so it ends such VMs instead.
     // @port-skip linux-only: Linux daemon VM lifecycle (macOS VMs live in the app)
     func adoptRunning(storedNet: [String: Int32] = [:]) async {
         var storedNet = storedNet
@@ -684,59 +613,44 @@ public actor Daemon {
             var r = rec
             do {
                 guard let pid = rec.pid else { throw MachineError.notRunning }
-                // Its own QEMU holds the CID: lease it without probing.
+                // Its own Firecracker holds the CID.
                 guard CIDAllocator.shared.adopt(rec.cid) else { throw MachineError.invalidConfig("CID \(rec.cid) is taken") }
+                guard rec.machine == Self.machineType else { throw MachineError.invalidConfig("a pre-Firecracker VM") }
                 let qc = try machineConfig(rec)
-                let l: Live
-                if qc.machine == .firecracker {
-                    // Its network is the socketpair end the fd store kept;
-                    // without it (no systemd store) the VM has no network back.
-                    let storeName = "net-" + rec.shortId
-                    guard let fd = storedNet.removeValue(forKey: storeName) else {
-                        throw MachineError.invalidConfig("no stored network for Firecracker VM \(rec.shortId)")
-                    }
-                    let port = DgramPort(name: "vm-" + rec.shortId, fd: fd)
-                    let vsock: HybridVsockListener
-                    do {
-                        vsock = try await HybridVsockListener.listen(
-                            udsPath: qc.firecrackerVsockPath, port: 5800, cid: rec.cid, fdStoreName: "vsock-" + rec.shortId,
-                            stored: storedNet.removeValue(forKey: "vsock-" + rec.shortId))
-                    } catch { port.close(); throw error }
-                    let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
-                    let machine: FirecrackerMachine
-                    do { machine = try await FirecrackerMachine.adopt(config: qc, pid: pid) } catch {
-                        await shell.stop()
-                        await vsock.close()
-                        port.close()
-                        throw error
-                    }
-                    l = Live(machine: machine, port: port, closePort: { port.close() }, shell: shell, config: qc,
-                             vsock: vsock, storedNet: storeName)
-                } else {
-                    try? FileManager.default.removeItem(atPath: config.runtimeDir + "/vms/" + rec.shortId + "/net.sock")
-                    let port = try await StreamPort.listen(path: config.runtimeDir + "/vms/" + rec.shortId + "/net.sock")
-                    let shell = await GuestShell(cid: rec.cid, listener: listener)
-                    let machine: QEMUMachine
-                    do { machine = try await QEMUMachine.adopt(config: qc, pid: pid) } catch {
-                        await shell.stop()
-                        await port.close()
-                        throw error
-                    }
-                    l = Self.streamLive(machine, stream: port, shell: shell, config: qc)
+                // Its network is the socketpair end the fd store kept;
+                // without it (no systemd store) the VM has no network back.
+                let storeName = "net-" + rec.shortId
+                guard let fd = storedNet.removeValue(forKey: storeName) else {
+                    throw MachineError.invalidConfig("no stored network for VM \(rec.shortId)")
                 }
+                let port = DgramPort(name: "vm-" + rec.shortId, fd: fd)
+                let vsock: HybridVsockListener
+                do {
+                    vsock = try await HybridVsockListener.listen(
+                        udsPath: qc.firecrackerVsockPath, port: 5800, cid: rec.cid, fdStoreName: "vsock-" + rec.shortId,
+                        stored: storedNet.removeValue(forKey: "vsock-" + rec.shortId))
+                } catch { port.close(); throw error }
+                let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
+                let machine: FirecrackerMachine
+                do { machine = try await FirecrackerMachine.adopt(config: qc, pid: pid) } catch {
+                    await shell.stop()
+                    await vsock.close()
+                    port.close()
+                    throw error
+                }
+                let l = Live(machine: machine, port: port, shell: shell, config: qc, vsock: vsock, storedNet: storeName)
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id
                 await l.machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
                 live[id] = l
                 r.state = .running
+                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': took back its Firecracker (pid \(pid)), network and vsock from the fd store\n".utf8))
             } catch {
-                // QEMU follows its daemon out (-run-with exit-with-parent is
-                // off for re-adoption, but its VM is unusable without its
-                // net.sock peer anyway); a Firecracker left here would keep
-                // running and hold disk.raw and home.img. End it, if it's
-                // still the process we recorded.
-                if rec.machine == QEMUMachineConfig.MachineType.firecracker.rawValue, Self.killIfOurs(rec) {
+                // A Firecracker left here would keep running and hold
+                // disk.raw and home.img. End it, if it's still the process
+                // we recorded.
+                if Self.killIfOurs(rec) {
                     FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': not re-adopted (\(error)); killed its Firecracker (pid \(rec.pid ?? 0))\n".utf8))
                 }
                 CIDAllocator.shared.release(rec.cid)
@@ -748,8 +662,8 @@ public actor Daemon {
         }
     }
 
-    /// SIGKILLs `rec`'s recorded VM process if it is still ours (isOurQEMU:
-    /// same start time, `-name`/`--id bromure-<short>`), through a pidfd so
+    /// SIGKILLs `rec`'s recorded VM process if it is still ours (isOurVM:
+    /// same start time, `--id bromure-<short>`), through a pidfd so
     /// a pid recycled after the check can't be hit. Returns whether it did.
     // @port-skip linux-only: Linux process identity
     @discardableResult
@@ -760,7 +674,7 @@ public actor Daemon {
         defer { close(fd) }
         // Checked after the pidfd is open: it pins this process, so a match
         // now is the process the signal goes to.
-        guard isOurQEMU(rec) else { return false }
+        guard isOurVM(rec) else { return false }
         return acl_pidfd_send_signal(fd, SIGKILL) == 0
     }
 
@@ -773,14 +687,14 @@ public actor Daemon {
         return fields.count > 19 ? UInt64(fields[19]) : nil       // fields[0] is field 3 (state)
     }
 
-    /// Whether `rec`'s recorded QEMU is still the process at that pid: same
-    /// start time, and it runs this VM (`-name bromure-<short id>`).
+    /// Whether `rec`'s recorded Firecracker is still the process at that pid:
+    /// same start time, and it runs this VM (`--id bromure-<short id>`).
     // @port-skip linux-only: Linux process identity
-    static func isOurQEMU(_ rec: VMRecord) -> Bool {
+    static func isOurVM(_ rec: VMRecord) -> Bool {
         guard let pid = rec.pid, let start = rec.pidStart, processStartTime(pid) == start,
               let cmd = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline") else { return false }
         let args = cmd.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
-        return zip(args, args.dropFirst()).contains { ($0 == "-name" || $0 == "--id") && $1 == "bromure-\(rec.shortId)" }
+        return zip(args, args.dropFirst()).contains { $0 == "--id" && $1 == "bromure-\(rec.shortId)" }
     }
 
     /// Creates the sparse home image if missing (ftruncate: all holes). An
@@ -843,9 +757,9 @@ public actor Daemon {
         return s
     }
 
-    /// QEMU went away (any reason): unplug it, and record what it is now.
+    /// Firecracker went away (any reason): unplug it, and record what it is now.
     // @port-skip linux-only: Linux daemon VM lifecycle
-    func vmStopped(_ id: String, _ info: QEMUMachine.StopInfo) async {
+    func vmStopped(_ id: String, _ info: FirecrackerMachine.StopInfo) async {
         // Both onStopped's Task and a stop route call this; the first does
         // the work, and every caller returns only once it is done (the
         // teardown suspends: without this the other caller could reply, and
@@ -859,11 +773,11 @@ public actor Daemon {
     }
 
     // @port-skip linux-only: Linux daemon VM lifecycle
-    private func finishStop(_ id: String, _ l: Live, _ info: QEMUMachine.StopInfo) async {
+    private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
         rec = registry.find(id) ?? rec
-        if case .suspended = info.reason { rec.state = .suspended } else if rec.state != .suspended { rec.state = .stopped }
+        rec.state = .stopped
         rec.ip = nil
         rec.pid = nil
         rec.pidStart = nil
@@ -876,21 +790,18 @@ public actor Daemon {
         sw.detach(mac: mac)
         sw.dhcp.release(mac: mac)
         await l.shell.stop()
-        await l.closePort()
-        await l.vsock?.close()
-        if let s = l.storedNet {
-            FDStore.remove(s)
-            FDStore.remove("vsock-" + s.dropFirst("net-".count))
-        }
-        await listener.forget(cid: l.config.vsockCID)
+        l.port.close()
+        await l.vsock.close()
+        FDStore.remove(l.storedNet)
+        FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
     }
 
     /// Stops every VM (killed: systemd's stop is not a graceful shutdown of
     /// guests yet) and passt.
     // @port-skip linux-only: Linux daemon lifecycle
     public func shutdown() async {
-        // A stopping daemon leaves nothing for a next one to take back.
-        FDStore.remove("vsock-5800")
+        // A stopping daemon leaves nothing for a next one to take back (each
+        // VM's teardown drops its fd store entries).
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }

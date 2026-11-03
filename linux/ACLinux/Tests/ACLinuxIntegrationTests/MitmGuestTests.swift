@@ -35,8 +35,7 @@ struct MitmGuestTests {
 
         let passt = try await PasstUplink.start(.init())
         let sw = TestSwitch(uplink: passt, gateway: "192.168.64.1", dns: "192.168.64.1")
-        let listener = try await VsockListener.shared(port: agentPort)
-        let v = try await SwitchedVM.make(.microvm, mac: "52:54:00:d0:00:01", on: sw, listener: listener,
+        let v = try await SwitchedVM.make(mac: "52:54:00:d0:00:01", on: sw,
                                           tag: "mitm", mtu: passt.mtu)
         _ = try await v.boot()
 
@@ -83,7 +82,7 @@ struct MitmGuestTests {
         #expect(r.output.contains("PYTHON 200"))
         #expect(r.output.contains("101 Switching Protocols"))
 
-        await v.tearDown(listener)
+        await v.tearDown()
         sw.stop()
         await passt.close()
     }

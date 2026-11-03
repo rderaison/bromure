@@ -6,7 +6,7 @@ import Foundation
 /// must agree), so the two are one snapshot: the identity is written next to
 /// the state as `<state>.identity.json` and checked before a restore. Same
 /// intent as the macOS `vm.state.json` drift fingerprint.
-// @port-skip linux-only: QEMU state files pair with qcow2 overlays (VZ save files with APFS clones)
+// @port-skip linux-only: Firecracker snapshots pair with raw system disks (VZ save files with APFS clones)
 public struct SnapshotIdentity: Codable, Sendable, Equatable {
     public var device: UInt64
     public var inode: UInt64

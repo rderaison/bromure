@@ -1,18 +1,15 @@
-import CACLinuxShims
 import NIOConcurrencyHelpers
 
-/// Hands out guest vsock CIDs that are free on this host.
-///
-/// QEMU fails to start on a CID another VM (any process's) already holds, so
-/// besides the CIDs leased in this process, each candidate is probed the
-/// way QEMU claims it: VHOST_VSOCK_SET_GUEST_CID on a fresh /dev/vhost-vsock
-/// fd (EADDRINUSE = taken; closing the fd releases it again).
-// @port-skip linux-only: vhost-vsock needs a host-unique CID per guest; VZ assigns them itself
+/// Hands out guest vsock CIDs unique within this daemon. With Firecracker's
+/// hybrid vsock a CID is private to its VM (its own Unix socket), so nothing
+/// host-wide needs probing by default; the CID also seeds the VM's MAC (and
+/// so its DHCP lease), which must be unique on this daemon's switch.
+// @port-skip linux-only: guest CIDs (VZ assigns them itself)
 public final class CIDAllocator: Sendable {
     // @port-skip linux-only: CID probing
     public enum Probe: Sendable, Equatable {
         case free, inUse
-        /// The probe itself failed (no access to /dev/vhost-vsock, …).
+        /// The probe itself failed.
         case unavailable(errno: Int32)
     }
 
@@ -25,27 +22,16 @@ public final class CIDAllocator: Sendable {
 
     // @port-skip linux-only: CID allocation
     public init(range: ClosedRange<UInt32> = 3...0xFFFF_FFFE,
-                probe: @escaping @Sendable (UInt32) -> Probe = CIDAllocator.vhostProbe) {
+                probe: @escaping @Sendable (UInt32) -> Probe = { _ in .free }) {
         precondition(range.lowerBound >= 3 && range.upperBound < 0xFFFF_FFFF)
         self.range = range
         self.probe = probe
         self.state = NIOLockedValueBox((leased: [], next: range.lowerBound))
     }
 
-    /// Asks the kernel whether `cid` is taken.
-    // @port-skip linux-only: CID probing
-    public static let vhostProbe: @Sendable (UInt32) -> Probe = { cid in
-        let r = acl_vhost_vsock_cid_in_use(UInt64(cid))
-        switch r {
-        case 0: return .free
-        case 1: return .inUse
-        default: return .unavailable(errno: -r)
-        }
-    }
-
     /// The next CID that is neither leased here nor in use on the host.
     /// When the host can't be probed, only this process's leases are
-    /// skipped (QEMU's start then reports a clash).
+    /// skipped (the VM's start then reports a clash).
     // @port-skip linux-only: CID allocation
     public func allocate() throws -> UInt32 {
         try state.withLockedValue { s in
@@ -63,8 +49,8 @@ public final class CIDAllocator: Sendable {
         }
     }
 
-    /// Leases `cid` for a VM whose QEMU already holds it (a re-adopted VM):
-    /// no probe, which would see that QEMU and answer in use.
+    /// Leases `cid` for a VM whose Firecracker already holds it (a re-adopted VM):
+    /// no probe, which would see that VM and answer in use.
     // @port-skip linux-only: CID leasing
     public func adopt(_ cid: UInt32) -> Bool {
         state.withLockedValue { s in

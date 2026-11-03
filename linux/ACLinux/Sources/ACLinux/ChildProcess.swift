@@ -3,10 +3,9 @@ import Foundation
 import NIOConcurrencyHelpers
 
 /// Runs every spawn on one thread that lives as long as the process.
-/// PR_SET_PDEATHSIG (QEMU's `-run-with exit-with-parent=on`) fires when the
-/// *thread* that forked the child exits, not the process: spawned from a
-/// Swift-concurrency or Dispatch worker that's later reaped, QEMU got SIGTERM
-/// mid-run (it showed up as `.virtiofsdExited`, virtiofsd following QEMU).
+/// PR_SET_PDEATHSIG fires when the *thread* that forked the child exits, not
+/// the process: spawned from a Swift-concurrency or Dispatch worker that's
+/// later reaped, a child would get SIGTERM mid-run.
 // @port-skip linux-only: process supervision
 final class Spawner: @unchecked Sendable {
     static let shared = Spawner()
@@ -52,14 +51,14 @@ final class Spawner: @unchecked Sendable {
     }
 }
 
-/// A supervised child process (QEMU, virtiofsd, passt, qemu-img): output to
+/// A supervised child process (Firecracker, virtiofsd, passt): output to
 /// a log file, and an awaitable exit status.
 ///
 /// Spawned with posix_spawn (every inherited descriptor but stdio closed)
 /// and reaped by a thread blocked in waitpid() for that pid. Foundation's
 /// Process lost exits of short-lived children started concurrently (they
 /// stayed zombies and terminationHandler never ran).
-// @port-skip linux-only: QEMU and virtiofsd are separate processes; VZ runs in-process
+// @port-skip linux-only: Firecracker and virtiofsd are separate processes; VZ runs in-process
 final class ChildProcess: Sendable {
     let name: String
     private let executable: String
@@ -128,7 +127,7 @@ final class ChildProcess: Sendable {
         t.start()
     }
 
-    /// A process this one didn't spawn: a VM's QEMU kept running across a
+    /// A process this one didn't spawn: a VM's Firecracker kept running across a
     /// daemon restart. Watched through a pidfd (readable once it exits) and
     /// signalled through it, so never a recycled pid; it isn't our child, so
     /// its exit status is unknown and reads as -1.

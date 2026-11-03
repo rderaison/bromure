@@ -11,7 +11,7 @@
 # This script only reports whether it's on.
 #
 # Prerequisites it doesn't change:
-#   - /dev/kvm, /dev/vhost-vsock and /dev/vhost-net usable by this user (the vhost udev rule,
+#   - /dev/kvm usable by this user (the kvm udev rule,
 #     or kvm group membership). A user unit can't add groups.
 #   - the baked image in ~/.local/share/bromure-ac/image-amd64 (`bromure-ac image bake`) or
 #     --image DIR, and passt.
@@ -53,4 +53,4 @@ echo "installed: $UNIT_DIR/bromure-ac.service -> $BIN"
 [ -d "$IMAGE" ] || echo "note: no image at $IMAGE yet (bromure-ac image bake)"
 [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] \
   || echo "note: lingering is off: the service stops when you log out (root: loginctl enable-linger $(id -un))"
-[ -w /dev/vhost-vsock ] || echo "note: /dev/vhost-vsock isn't writable by $(id -un): VMs won't start until the vhost udev rule is in place"
+[ -w /dev/kvm ] || echo "note: /dev/kvm isn't writable by $(id -un): VMs won't start until it is (kvm group or the udev rule)"

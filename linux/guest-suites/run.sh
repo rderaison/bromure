@@ -4,7 +4,7 @@
 # the baked amd64 image: test_sentry -> test_boot (all configs) -> test_sandbox -> test_net_flow
 # -> test_strict -> test_lockdown --raise (last: raising lockdown is one-way for the boot).
 #
-# The VM is a throwaway: a private daemon (its own XDG dirs), one q35 VM with the ext4 home disk.
+# The VM is a throwaway: a private daemon (its own XDG dirs), one Firecracker VM with the ext4 home disk.
 # The suites expect the repo layout plus the drop's `patched/` copies, so both are staged into the
 # VM's meta share and copied to /opt/repo; the guest gets the kernel headers (test_sentry builds
 # the module), dig and nc (test_net_flow's lineage checks).
@@ -13,10 +13,10 @@
 # unexpected FAIL (or a suite that died without one); 2 when an expected failure now passes
 # (update expected-failures.tsv). Logs: $OUT (default /tmp/acl-gs-out.XXXXXX), kept.
 # Needs: linux/ACLinux built (`swift build -c release --product bromure-ac`), the baked image,
-# KVM + vhost (or passwordless `sudo -g kvm`), and the host's vsock port 5800 free (one VM job at a time).
+# KVM (or passwordless `sudo -g kvm`) and Firecracker (linux/firecracker/build.sh).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
-if [ ! -w /dev/vhost-vsock ] && sudo -n -g kvm true 2>/dev/null && [ -z "${ACL_GS_ELEVATED:-}" ]; then
+if [ ! -w /dev/kvm ] && sudo -n -g kvm true 2>/dev/null && [ -z "${ACL_GS_ELEVATED:-}" ]; then
   exec sudo -n -g kvm env PATH="$PATH" HOME="$HOME" ACL_GS_ELEVATED=1 OUT="${OUT:-}" "$0" "$@"
 fi
 KEEP=0; [ "${1:-}" = --keep ] && { KEEP=1; shift; }
@@ -40,7 +40,7 @@ cleanup() {
 }
 trap cleanup EXIT
 for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/bromure-ac/control.sock" ] && break; sleep 0.1; done
-ID=$(cli vm run --name gs --machine q35 --cpus 8 --memory-gb 8) || { log "vm run failed"; cat "$OUT/daemon.log"; exit 1; }
+ID=$(cli vm run --name gs --cpus 8 --memory-gb 8) || { log "vm run failed"; cat "$OUT/daemon.log"; exit 1; }
 log "VM $ID up"
 
 # Stage: the repo layout, and the drop layout the suites' ROOT expects (vm-setup + tests + sentry

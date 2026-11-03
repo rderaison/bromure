@@ -1,24 +1,9 @@
+import CACLinuxShims
 import Foundation
 
-/// What the daemon needs of a VM backend: QEMUMachine, FirecrackerMachine.
-// @port-skip linux-only: Linux VM backends (macOS: VZVirtualMachine)
-public protocol VMMachine: Actor {
-    var pid: Int32? { get }
-    func setOnStopped(_ handler: @escaping @Sendable (QEMUMachine.StopInfo) -> Void)
-    func start() async throws
-    @discardableResult func stop(timeout: Duration) async -> QEMUMachine.StopInfo
-    @discardableResult func kill() async -> QEMUMachine.StopInfo
-    func waitUntilStopped() async -> QEMUMachine.StopInfo
-    @discardableResult func suspend(to statePath: String) async throws -> QEMUMachine.SuspendTimings
-    @discardableResult func restore(from statePath: String) async throws -> QEMUMachine.RestoreTimings
-}
-
-// @port-skip linux-only: Linux VM backends
-extension QEMUMachine: VMMachine {}
-
 /// One Firecracker VM: the firecracker process, a virtiofsd per share, and
-/// its API socket. The same config as QEMU's (`machine == .firecracker`),
-/// rendered into Firecracker's JSON by `firecrackerConfig()`:
+/// its API socket. MachineConfig, rendered into Firecracker's JSON by
+/// `firecrackerConfig(netFD:)`:
 /// - the system disk is a raw copy of the base image (`overlay`, made
 ///   sparse on first start: Firecracker has no qcow2);
 /// - the network is the VM's end of a DgramPort socketpair, inherited as
@@ -32,21 +17,47 @@ extension QEMUMachine: VMMachine {}
 /// `start()` brings every share's virtiofsd up and waits for its socket
 /// first, and a virtiofsd that dies before then fails the start cleanly
 /// (`virtiofsdNotReady`, or Firecracker's own exit with its log).
-/// No suspend/restore: Firecracker refuses to snapshot a VM with
-/// vhost-user-fs devices.
+/// No suspend/restore yet: Firecracker refuses to snapshot a VM with
+/// vhost-user-fs devices (device-state migration is to come in the fork).
 // @port-skip linux-only: Firecracker backend (macOS: UbuntuSandboxVM on Virtualization.framework)
-public actor FirecrackerMachine: VMMachine {
-    public nonisolated let config: QEMUMachineConfig
+public actor FirecrackerMachine {
+    // @port-skip linux-only: VM backend
+    public enum StopReason: Sendable, Equatable {
+        /// The guest rebooted or powered itself off.
+        case guestShutdown
+        /// `stop()`: Ctrl-Alt-Del, SIGKILL if the guest ignored it.
+        case stopped
+        case killed
+        /// A share's virtiofsd died; the VM was taken down with it.
+        case virtiofsdExited(tag: String)
+        /// Firecracker exited on its own with a failure.
+        case crashed
+    }
+
+    // @port-skip linux-only: VM backend
+    public struct StopInfo: Sendable, Equatable {
+        public let reason: StopReason
+        /// Firecracker's exit status (128 + signal when killed by one; -1 for
+        /// an adopted process, whose status isn't ours to read).
+        public let exitStatus: Int32
+    }
+
+    // @port-skip linux-only: VM backend
+    public enum State: Sendable, Equatable {
+        case idle, starting, running, stopping, stopped(StopInfo)
+    }
+
+    public nonisolated let config: MachineConfig
     public nonisolated let api: FirecrackerAPI
-    public private(set) var state: QEMUMachine.State = .idle
-    private var onStopped: (@Sendable (QEMUMachine.StopInfo) -> Void)?
+    public private(set) var state: State = .idle
+    private var onStopped: (@Sendable (StopInfo) -> Void)?
     private var process: ChildProcess?
     private var daemons: [(tag: String, process: ChildProcess)] = []
-    private var pendingReason: QEMUMachine.StopReason?
-    private var stopWaiters: [CheckedContinuation<QEMUMachine.StopInfo, Never>] = []
+    private var pendingReason: StopReason?
+    private var stopWaiters: [CheckedContinuation<StopInfo, Never>] = []
 
     // @port-skip linux-only: Firecracker backend
-    public init(config: QEMUMachineConfig) {
+    public init(config: MachineConfig) {
         self.config = config
         self.api = FirecrackerAPI(socketPath: config.firecrackerAPISocketPath)
     }
@@ -55,7 +66,7 @@ public actor FirecrackerMachine: VMMachine {
     /// `config`): checks its API answers and watches the process. Its
     /// virtiofsds are not supervised (they exit when it does).
     // @port-skip linux-only: Firecracker backend (daemon restart)
-    public static func adopt(config: QEMUMachineConfig, pid: Int32) async throws -> FirecrackerMachine {
+    public static func adopt(config: MachineConfig, pid: Int32) async throws -> FirecrackerMachine {
         let m = FirecrackerMachine(config: config)
         try await m.attach(pid: pid)
         return m
@@ -75,7 +86,7 @@ public actor FirecrackerMachine: VMMachine {
     }
 
     // @port-skip linux-only: Firecracker backend
-    public func setOnStopped(_ handler: @escaping @Sendable (QEMUMachine.StopInfo) -> Void) {
+    public func setOnStopped(_ handler: @escaping @Sendable (StopInfo) -> Void) {
         onStopped = handler
     }
 
@@ -91,7 +102,11 @@ public actor FirecrackerMachine: VMMachine {
         guard state == .idle else { throw MachineError.alreadyStarted }
         var peerFD: Int32 = -1
         if case .datagram(let fd) = config.network { peerFD = fd }
-        defer { if peerFD >= 0 { close(peerFD) } }
+        let pipes = config.consolePipes
+        defer {
+            if peerFD >= 0 { close(peerFD) }
+            if let pipes { close(pipes.input); close(pipes.output) }
+        }
         try config.validate()
         state = .starting
         let fm = FileManager.default
@@ -115,7 +130,8 @@ public actor FirecrackerMachine: VMMachine {
             let p = try ChildProcess(name: "firecracker", executable: config.firecrackerBinary,
                                      arguments: ["--id", config.name, "--api-sock", config.firecrackerAPISocketPath,
                                                  "--config-file", cfgPath, "--log-path", log, "--level", "Warning"],
-                                     logPath: config.serialLog, inheritedFDs: peerFD >= 0 ? [peerFD] : [])
+                                     logPath: config.serialLog, standardInput: pipes?.input,
+                                     standardOutput: pipes?.output, inheritedFDs: peerFD >= 0 ? [peerFD] : [])
             try p.start()
             process = p
             Task { [weak self] in
@@ -150,7 +166,7 @@ public actor FirecrackerMachine: VMMachine {
     /// Ctrl-Alt-Del, SIGKILL after `timeout`.
     // @port-skip linux-only: Firecracker backend
     @discardableResult
-    public func stop(timeout: Duration = .seconds(30)) async -> QEMUMachine.StopInfo {
+    public func stop(timeout: Duration = .seconds(30)) async -> StopInfo {
         if case .stopped(let info) = state { return info }
         guard let process else { return finishIdle(.stopped) }
         state = .stopping
@@ -162,7 +178,7 @@ public actor FirecrackerMachine: VMMachine {
 
     // @port-skip linux-only: Firecracker backend
     @discardableResult
-    public func kill() async -> QEMUMachine.StopInfo {
+    public func kill() async -> StopInfo {
         if case .stopped(let info) = state { return info }
         guard let process else { return finishIdle(.killed) }
         pendingReason = .killed
@@ -171,22 +187,28 @@ public actor FirecrackerMachine: VMMachine {
     }
 
     // @port-skip linux-only: Firecracker backend
-    public func waitUntilStopped() async -> QEMUMachine.StopInfo {
+    public func waitUntilStopped() async -> StopInfo {
         if case .stopped(let info) = state { return info }
         return await withCheckedContinuation { stopWaiters.append($0) }
     }
 
-    // @port-skip linux-only: Firecracker backend
-    public func suspend(to statePath: String) async throws -> QEMUMachine.SuspendTimings {
-        throw MachineError.invalidConfig("suspend is not available for Firecracker VMs (vhost-user-fs has no snapshot)")
+
+
+    /// Freezes the guest's vCPUs (`PATCH /vm {"state": "Paused"}`): its
+    /// devices stop taking work too (a paused NIC stops draining).
+    // @port-skip linux-only: Firecracker backend (macOS: VZVirtualMachine.pause)
+    public func pause() async throws {
+        let r = try await api.request("PATCH", "/vm", ["state": "Paused"])
+        guard r.ok else { throw MachineError.toolFailed("firecracker pause", Int32(r.status), r.fault) }
     }
 
-    // @port-skip linux-only: Firecracker backend
-    public func restore(from statePath: String) async throws -> QEMUMachine.RestoreTimings {
-        throw MachineError.invalidConfig("restore is not available for Firecracker VMs (vhost-user-fs has no snapshot)")
+    // @port-skip linux-only: Firecracker backend (macOS: VZVirtualMachine.resume)
+    public func resume() async throws {
+        let r = try await api.request("PATCH", "/vm", ["state": "Resumed"])
+        guard r.ok else { throw MachineError.toolFailed("firecracker resume", Int32(r.status), r.fault) }
     }
 
-    // MARK: virtiofsd (as QEMUMachine's)
+    // MARK: virtiofsd
 
     // @port-skip linux-only: virtiofsd supervision
     private func startDaemons() async throws {
@@ -214,7 +236,7 @@ public actor FirecrackerMachine: VMMachine {
     // @port-skip linux-only: virtiofsd supervision
     private func daemonExited(_ tag: String) {
         // The guest lost a filesystem it can't get back (no vhost-user
-        // reconnect): take the VM down, as QEMUMachine does.
+        // reconnect): take the VM down.
         guard state == .running || state == .starting, pendingReason == nil, let process else { return }
         pendingReason = .virtiofsdExited(tag: tag)
         process.signal(SIGKILL)
@@ -233,18 +255,18 @@ public actor FirecrackerMachine: VMMachine {
         stopDaemons()
         // Firecracker exits 0 when the guest reboots or powers off.
         let reason = pendingReason ?? (status == 0 ? .guestShutdown : .crashed)
-        finish(QEMUMachine.StopInfo(reason: reason, exitStatus: status))
+        finish(StopInfo(reason: reason, exitStatus: status))
     }
 
     // @port-skip linux-only: Firecracker backend
-    private func finishIdle(_ reason: QEMUMachine.StopReason) -> QEMUMachine.StopInfo {
-        let info = QEMUMachine.StopInfo(reason: reason, exitStatus: 0)
+    private func finishIdle(_ reason: StopReason) -> StopInfo {
+        let info = StopInfo(reason: reason, exitStatus: 0)
         finish(info)
         return info
     }
 
     // @port-skip linux-only: Firecracker backend
-    private func finish(_ info: QEMUMachine.StopInfo) {
+    private func finish(_ info: StopInfo) {
         if case .stopped = state { return }
         state = .stopped(info)
         for w in stopWaiters { w.resume(returning: info) }
@@ -254,7 +276,7 @@ public actor FirecrackerMachine: VMMachine {
 }
 
 // @port-skip linux-only: Firecracker backend
-extension QEMUMachineConfig {
+extension MachineConfig {
     // @port-skip linux-only: Firecracker backend
     public var firecrackerAPISocketPath: String { (runDirectory as NSString).appendingPathComponent("fc.sock") }
     /// Hybrid vsock's base path: Firecracker listens on it for host-initiated
@@ -298,6 +320,20 @@ extension QEMUMachineConfig {
             o["network-interfaces"] = .array([.object(nic)])
         }
         if vsock { o["vsock"] = ["guest_cid": .number(Double(vsockCID)), "uds_path": .string(firecrackerVsockPath)] }
+        if entropy { o["entropy"] = [:] }
         return .object(o)
+    }
+}
+
+// @port-skip linux-only: host -> guest vsock dial (macOS: VZVirtioSocketDevice.connect(toPort:))
+extension MachineConfig {
+    /// A connected stream to the guest's vsock `port`: Firecracker's hybrid
+    /// vsock socket with its CONNECT handshake. -errno on failure.
+    // @port-skip linux-only: host -> guest vsock dial
+    public func dialGuest(port: UInt32, timeoutMs: Int32 = 3000) async -> Int32 {
+        let path = firecrackerVsockPath
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global().async { cont.resume(returning: acl_hybrid_vsock_connect(path, port, timeoutMs)) }
+        }
     }
 }

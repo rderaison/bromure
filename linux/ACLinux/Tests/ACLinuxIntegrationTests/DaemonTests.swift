@@ -105,12 +105,10 @@ struct DaemonTests {
         return st[st.index(after: close)...].split(separator: " ").first != "Z"
     }
 
-    @Test("run, ls, exec, suspend, resume, exec, kill; a SIGKILLed daemon's VM is re-adopted by the next one (exec works; flows through the old passt break)")
+    @Test("run, ls, exec, exec -i, kill; suspend refused; a SIGKILLed daemon's Firecracker is ended by the next one (no fd store outside systemd); SIGTERM ends everything")
     func lifecycle() async throws {
         let w = try World()
         defer { try? FileManager.default.removeItem(atPath: w.root) }
-        // Earlier suites in this process hold host vsock port 5800; the daemon needs it.
-        await VsockListener.closeShared(port: agentPort)
         var daemon = try await w.startDaemon()
 
         let (rc, id, err) = try w.cli("vm", "run", "--name", "dm1")
@@ -132,19 +130,14 @@ struct DaemonTests {
         #expect(iout.contains("/dev/pts/") && iout.contains("24 80") && iout.contains("in-42"), "exec -i: \(iout)")
         let (lsrc, ls, _) = try w.cli("vm", "ls")
         #expect(lsrc == 0 && ls.contains("dm1") && ls.contains("running"))
-
-        let t1 = ContinuousClock.now
-        #expect(try w.cli("vm", "suspend", "dm1").0 == 0)
-        print("TIMING [daemon] suspend \(ms(ContinuousClock.now - t1))")
-        #expect(try w.state(of: "dm1") == "suspended")
-        #expect(try w.cli("vm", "exec", "dm1", "--", "true").0 != 0, "exec on a suspended VM is refused (409)")
-        let t2 = ContinuousClock.now
-        #expect(try w.cli("vm", "resume", "dm1").0 == 0)
-        let (rc3, up, err3) = try w.cli("vm", "exec", "dm1", "--", "cat", "/proc/uptime")
-        print("TIMING [daemon] resume + exec \(ms(ContinuousClock.now - t2)): uptime \(up.prefix(20))")
-        #expect(rc3 == 0, "exec after resume: \(err3)")
+        // No snapshots yet: suspend is refused with a reason, and the VM runs on.
+        let (src, _, serr) = try w.cli("vm", "suspend", "dm1")
+        #expect(src != 0 && serr.contains("aren't available"), "suspend: \(serr)")
+        #expect(try w.state(of: "dm1") == "running")
         #expect(try w.cli("vm", "kill", "--force", "dm1").0 == 0)
         #expect(try w.state(of: "dm1") == "stopped")
+        // QEMU machine types are gone.
+        #expect(try w.cli("vm", "run", "--name", "q", "--machine", "microvm").0 != 0)
 
         // Unknown routes: 404 with a JSON error; foreign uid is covered by
         // SO_PEERCRED (not testable as the same user).
@@ -152,82 +145,34 @@ struct DaemonTests {
         #expect(r.status == 404 && r.json["error"]?.stringValue == "Not found")
 
         // A running VM, then SIGKILL the daemon: passt goes with it (its
-        // socket hits EOF), the VM doesn't (no exit-with-parent), and the next
-        // daemon re-adopts it.
-        let lan = try #require(hostLANAddress())
-        let base = 47_000 + Int.random(in: 0..<400) * 8
-        let svc = try await startServices(ip: lan, base: base)
-        defer { stopHelper(svc) }
+        // socket hits EOF), Firecracker doesn't. Outside systemd there is no
+        // fd store to keep the VM's network end, so the next daemon can't
+        // re-adopt it: it ends that Firecracker (still ours: start time and
+        // --id) and records the VM stopped. Under systemd it is re-adopted
+        // (systemd/test-unit-kvm.sh, test-crash-upload.sh).
         #expect(try w.cli("vm", "run", "--name", "dm2").0 == 0)
         #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 == 0)
-        // A TCP flow through passt that outlives the restart: one echo a second,
-        // each reply's time in /tmp/flow.log.
-        #expect(try w.cli("vm", "exec", "dm2", "--", "sh", "-c", """
-            nohup python3 -c "
-            import socket, time
-            s = socket.create_connection(('\(lan)', \(base + 1)), timeout=5); s.settimeout(5)
-            while True:
-                try:
-                    s.sendall(b'x'); s.recv(1)
-                    open('/tmp/flow.log', 'a').write('ok %.1f\\n' % time.time())
-                except Exception as e:
-                    open('/tmp/flow.log', 'a').write('err %s %.1f\\n' % (type(e).__name__, time.time()))
-                time.sleep(1)
-            " >/dev/null 2>&1 &
-            sleep 2; tail -1 /tmp/flow.log
-            """).1.contains("ok"), "the flow runs before the restart")
         let kids = Self.children(of: daemon.processIdentifier)
         let names = Set(kids.map { $0.1 })
-        #expect(names.contains { $0.hasPrefix("qemu-system") } && names.contains { $0.hasPrefix("passt") },
-                "expected QEMU and passt under the daemon, saw \(names)")
-        // QEMU outlives a SIGKILLed daemon by design; if the test stops before
-        // `vm kill dm2`, nothing else would end it.
-        defer { for k in kids where k.1.hasPrefix("qemu-system") && Self.alive(k.0) { kill(k.0, SIGKILL) } }
+        #expect(names.contains("firecracker") && names.contains { $0.hasPrefix("passt") },
+                "expected Firecracker and passt under the daemon, saw \(names)")
+        defer { for k in kids where k.1 == "firecracker" && Self.alive(k.0) { kill(k.0, SIGKILL) } }
         kill(daemon.processIdentifier, SIGKILL)
         daemon.waitUntilExit()
-        let tKill = Date().timeIntervalSince1970
         try await Task.sleep(for: .seconds(1))
-        let qemuLeft = kids.filter { $0.1.hasPrefix("qemu-system") && Self.alive($0.0) }
-        let passtLeft = kids.filter { $0.1.hasPrefix("passt") && Self.alive($0.0) }
-        #expect(qemuLeft.count == 1, "the VM outlives the daemon")
-        #expect(passtLeft.isEmpty, "passt ends with the daemon's socket")
-        print("ADOPT [daemon] after SIGKILL: QEMU alive \(qemuLeft.count), passt alive \(passtLeft.count)")
-
-        // Restart: dm2 is re-adopted, not phantom-stopped.
-        let tRestart = ContinuousClock.now
+        let fcLeft = kids.filter { $0.1 == "firecracker" && Self.alive($0.0) }
+        #expect(fcLeft.count == 1, "the VM outlives the daemon")
+        #expect(kids.filter { $0.1.hasPrefix("passt") && Self.alive($0.0) }.isEmpty, "passt ends with the daemon's socket")
         daemon = try await w.startDaemon()
-        #expect(try w.state(of: "dm2") == "running", "re-adopted")
-        var execRC = -1
-        for _ in 0..<30 where execRC != 0 {
-            execRC = Int(try w.cli("vm", "exec", "dm2", "--", "true").0)
-            if execRC != 0 { try await Task.sleep(for: .milliseconds(500)) }
-        }
-        #expect(execRC == 0, "exec after re-adoption")
-        print("ADOPT [daemon] restart -> exec works: \(ms(ContinuousClock.now - tRestart))")
-        // New connections work through the new passt; the old flow is measured.
-        let fresh = try w.cli("vm", "exec", "dm2", "--", "python3", "-c",
-                              "import socket; print(socket.create_connection(('\(lan)', \(base + 2)), timeout=5).recv(64).decode().strip())").1
-        #expect(fresh.contains("hello from"), "a new connection after the restart: \(fresh)")
-        try await Task.sleep(for: .seconds(6))
-        let flow = try w.cli("vm", "exec", "dm2", "--", "cat", "/tmp/flow.log").1
-        let after = flow.split(separator: "\n").filter { l in
-            l.split(separator: " ").last.flatMap { Double($0) }.map { $0 > tKill + 2 } ?? false
-        }
-        print("ADOPT [daemon] the flow opened before the kill, after the restart: \(after.prefix(3)) (\(after.count) lines)")
-        // Expected: dead (passt is a new process with none of the old flow's
-        // state). Recorded, not asserted, so a change in that shows up as data.
-        #expect(try w.cli("vm", "kill", "--force", "dm2").0 == 0)
+        #expect(try w.state(of: "dm2") == "stopped", "not re-adoptable without the fd store")
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(fcLeft.filter { Self.alive($0.0) }.isEmpty, "its Firecracker was ended, not left holding the disks")
+        #expect(try w.cli("vm", "start", "dm2").0 == 0, "and it starts again")
+        #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 == 0)
 
-        // A suspended VM keeps its CID across a graceful restart: SIGTERM
-        // (the systemctl stop path, with signals unblocked even though
+        // SIGTERM (the systemctl stop path, with signals unblocked even though
         // Foundation's Process spawned the daemon with them blocked) kills the
         // running VMs, closes passt and unlinks control.sock.
-        #expect(try w.cli("vm", "run", "--name", "dm3").0 == 0)
-        #expect(try w.cli("vm", "exec", "dm3", "--", "true").0 == 0)
-        #expect(try w.cli("vm", "suspend", "dm3").0 == 0)
-        let dm3cid = try w.vm("dm3")?["cid"]?.numberValue
-        #expect(try w.cli("vm", "run", "--name", "dm4").0 == 0)
-        #expect(try w.cli("vm", "exec", "dm4", "--", "true").0 == 0)
         let termKids = Self.children(of: daemon.processIdentifier)
         kill(daemon.processIdentifier, SIGTERM)
         let tTerm = ContinuousClock.now
@@ -235,30 +180,22 @@ struct DaemonTests {
         print("TIMING [daemon] SIGTERM -> exit \(ms(ContinuousClock.now - tTerm)), status \(daemon.terminationStatus)")
         #expect(daemon.terminationReason == .exit && daemon.terminationStatus == 0, "graceful exit")
         #expect(!FileManager.default.fileExists(atPath: w.socket), "control.sock unlinked")
+        try await Task.sleep(for: .milliseconds(500))
         #expect(termKids.filter { Self.alive($0.0) }.isEmpty, "children left after SIGTERM: \(termKids)")
 
         daemon = try await w.startDaemon()
-        #expect(try w.state(of: "dm3") == "suspended")
-        #expect(try w.state(of: "dm4") == "stopped")
-        #expect(try w.cli("vm", "run", "--name", "dm5").0 == 0)       // must not take dm3's CID
-        #expect(try w.vm("dm5")?["cid"]?.numberValue != dm3cid)
-        #expect(try w.cli("vm", "resume", "dm3").0 == 0)
-        #expect(try w.cli("vm", "exec", "dm3", "--", "true").0 == 0)
-        #expect(try w.vm("dm3")?["cid"]?.numberValue == dm3cid, "dm3 resumed under its own CID")
-
+        #expect(try w.state(of: "dm2") == "stopped")
         // A name that's another VM's id or short id is refused.
-        let dm5short = try #require(try w.vm("dm5")?["shortId"]?.stringValue)
-        #expect(try w.cli("vm", "run", "--name", dm5short).0 != 0)
-
+        let short = try #require(try w.vm("dm2")?["shortId"]?.stringValue)
+        #expect(try w.cli("vm", "run", "--name", short).0 != 0)
         kill(daemon.processIdentifier, SIGTERM)
         daemon.waitUntilExit()
     }
 
-    @Test("the home image: ext4 on vdb at /home/ubuntu; kept across kill/start and suspend/resume; gone with rm")
+    @Test("the home image: ext4 on vdb at /home/ubuntu; kept across kill/start; grows; gone with rm")
     func homeImage() async throws {
         let w = try World()
         defer { try? FileManager.default.removeItem(atPath: w.root) }
-        await VsockListener.closeShared(port: agentPort)
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
 
@@ -327,21 +264,7 @@ struct DaemonTests {
         #expect(try w.cli("vm", "exec", "h1", "--", "cat", "/home/ubuntu/marker").1.contains("kept"), "the marker survived the grow")
         #expect(try w.vm("h1")?["homeGB"]?.numberValue == 20)
 
-        // Suspend and resume: the home is part of the snapshot.
-        #expect(try w.cli("vm", "suspend", "h1").0 == 0)
-        #expect(FileManager.default.fileExists(atPath: dir + "/vm.state.identity.disk0.json"), "home identity saved")
-        #expect(try w.cli("vm", "resume", "h1").0 == 0)
-        #expect(try w.cli("vm", "exec", "h1", "--", "cat", "/home/ubuntu/marker").1.contains("kept"))
-        #expect(try w.cli("vm", "exec", "h1", "--", "sh", "-c", "echo again >> /home/ubuntu/marker && sync").0 == 0)
-
-        // A home changed while suspended is refused at resume.
-        #expect(try w.cli("vm", "suspend", "h1").0 == 0)
-        let fh = try #require(FileHandle(forWritingAtPath: dir + "/home.img"))
-        try fh.seek(toOffset: 8 << 30)
-        try fh.write(contentsOf: Data("x".utf8))
-        try fh.close()
-        #expect(try w.cli("vm", "resume", "h1").0 != 0, "resume refuses a home changed since the save")
-
+        #expect(try w.cli("vm", "kill", "h1").0 == 0)
         // rm: only when not running; then the VM and its files are gone.
         #expect(try w.cli("vm", "rm", "h1").0 == 0)
         #expect(try w.vm("h1") == nil)

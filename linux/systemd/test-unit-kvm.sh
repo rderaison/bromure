@@ -1,20 +1,20 @@
 #!/bin/bash
 # test-unit-kvm.sh: the daemon under real systemd, with real VMs, configured as
 # bromure-ac.service is (Type=notify, KillMode=process, ExecStopPost=stop-post,
-# FileDescriptorStoreMax, Restart=on-failure). A user unit can't open
-# /dev/vhost-vsock until the kvm udev rule is in place, so this runs a
-# transient *system* unit as this user with SupplementaryGroups=kvm (needs
-# passwordless sudo for systemd-run/systemctl), removed at the end.
+# FileDescriptorStoreMax, Restart=on-failure). It runs a transient *system*
+# unit as this user with SupplementaryGroups=kvm (/dev/kvm without the udev
+# rule; needs passwordless sudo for systemd-run/systemctl), removed at the end.
 #
-#   1. crash: SIGKILL the daemon. QEMU, passt and a TCP flow opened before
-#      (one echo a second) all continue; the restarted daemon takes passt back
-#      from the fd store and re-adopts the VM.
+#   1. crash: SIGKILL the daemon. Firecracker, passt and a TCP flow opened
+#      before (one echo a second) all continue; the restarted daemon takes
+#      passt, the VM's network and vsock back from the fd store and re-adopts
+#      the VM.
 #   2. hung stop: SIGSTOP the daemon, then stop. Past TimeoutStopSec it's
-#      SIGKILLed alone and stop-post ends QEMU and passt.
+#      SIGKILLed alone and stop-post ends Firecracker and passt.
 #   3. clean stop: the daemon's own shutdown; the cgroup is empty.
 #
 # Needs: the release bromure-ac (swift build -c release --product bromure-ac),
-# the baked image, vsock port 5800 free. Prints PASS/FAIL lines; exit 1 on a FAIL.
+# the Firecracker build (linux/firecracker/build.sh), the baked image. Prints PASS/FAIL lines; exit 1 on a FAIL.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
 BIN=$ROOT/linux/ACLinux/.build/release/bromure-ac
@@ -73,13 +73,13 @@ trap cleanup EXIT
 start_unit() {
   sudo -n systemd-run -q --unit="$U" --uid="$(id -u)" --gid="$(id -g)" -p SupplementaryGroups=kvm "$@" \
     -p Type=notify -p NotifyAccess=main -p KillMode=process -p TimeoutStopSec=5 \
-    -p Restart=on-failure -p RestartSec=2 -p FileDescriptorStoreMax=4 \
+    -p Restart=on-failure -p RestartSec=2 -p FileDescriptorStoreMax=64 \
     -p ExecStopPost="$BIN stop-post" \
     --setenv=HOME="$HOME" --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" --setenv=XDG_STATE_HOME="$XDG_STATE_HOME" \
     --setenv=BROMURE_AGENTD="$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" \
     "$BIN" daemon
 }
-qemu_pid() { for p in $(procs); do [[ $(comm_of $p) == qemu-system* ]] && echo $p; done | head -1; }
+fc_pid() { for p in $(procs); do [[ $(comm_of $p) == firecracker* ]] && echo $p; done | head -1; }
 passt_pid() { for p in $(procs); do [[ $(comm_of $p) == passt* ]] && echo $p; done | head -1; }   # passt execs passt.avx2
 
 # --- 1. crash
@@ -117,17 +117,17 @@ while True:
         t = time.time(); open('/tmp/bulk.log', 'a').write('%d %.1f\\n' % (n, t))
 \" >/dev/null 2>&1 &" >/dev/null
 sleep 3
-Q=$(qemu_pid); P=$(passt_pid); M=$(prop MainPID)
-log "daemon $M, QEMU $Q, passt $P; fd store: $(sudo -n systemd-analyze fdstore "$U" 2>/dev/null | tail -n +2 | awk '{print $2}' | tr '\n' ' ')"
+Q=$(fc_pid); P=$(passt_pid); M=$(prop MainPID)
+log "daemon $M, Firecracker $Q, passt $P; fd store: $(sudo -n systemd-analyze fdstore "$U" 2>/dev/null | tail -n +2 | awk '{print $2}' | tr '\n' ' ')"
 TKILL=$(date +%s.%N)
 kill -9 "$M"
 for _ in $(seq 100); do [ "$(prop NRestarts)" = 1 ] && [ "$(prop ActiveState)" = active ] && break; sleep 0.1; done
 TBACK=$(date +%s.%N)
 [ "$(prop NRestarts)" = 1 ] && pass "restarted after the crash ($(echo "$TBACK - $TKILL" | bc | cut -c1-4)s)" || fail "no restart"
-alive "$Q" && pass "QEMU $Q survived" || fail "QEMU died"
+alive "$Q" && pass "Firecracker $Q survived" || fail "Firecracker died"
 alive "$P" && [ "$(passt_pid)" = "$P" ] && pass "passt $P survived and is still the uplink" || fail "passt replaced or gone (now $(passt_pid))"
 journalctl -u "$U" --no-pager -o cat | grep -q 'took back passt' && pass "the new daemon took passt back from the fd store" || fail "no 'took back passt' in the journal"
-journalctl -u "$U" --no-pager -o cat | grep -q 'took back the vsock :5800 listener' && pass "and the vsock listener" || fail "the vsock listener wasn't taken back"
+journalctl -u "$U" --no-pager -o cat | grep -q "'uk': took back its Firecracker" && pass "and the VM's network and vsock" || fail "the VM wasn't taken back"
 journalctl -u "$U" --no-pager -o cat | grep -E 'took back|passt: adopted stream|stop-post:' | sed 's/^/    /'
 for _ in $(seq 30); do cli vm exec uk -- true 2>/dev/null && break; sleep 0.5; done
 [ "$(cli vm ls --json | python3 -c 'import json,sys; print([v["state"] for v in json.load(sys.stdin)["vms"] if v["name"]=="uk"][0])')" = running ] \
@@ -160,12 +160,12 @@ print("    BULK before the kill %.0f MB/s; after it (to %.1fs) %.0f MB/s; last 3
 PY2
 
 # --- 2. hung stop
-Q=$(qemu_pid); P=$(passt_pid)
+Q=$(fc_pid); P=$(passt_pid)
 T0=$(date +%s.%N)
 sc stop "$U"
 TS=$(echo "$(date +%s.%N) - $T0" | bc | cut -c1-4)
 sleep 0.5
-! alive "$Q" && ! alive "$P" && pass "hung stop (${TS}s): stop-post ended QEMU and passt" || fail "hung stop left QEMU alive=$(alive $Q && echo y) passt alive=$(alive $P && echo y)"
+! alive "$Q" && ! alive "$P" && pass "hung stop (${TS}s): stop-post ended Firecracker and passt" || fail "hung stop left Firecracker alive=$(alive $Q && echo y) passt alive=$(alive $P && echo y)"
 journalctl -u "$U" --no-pager -o cat | grep 'stop-post:' | tail -1 | sed 's/^/    /'
 journalctl -u "$U" --no-pager -o cat | grep 'stop-post:' | tail -1 | grep -q 'SERVICE_RESULT=timeout job=[0-9]' \
   && pass "the stop timed out (a real hang) and stop-post swept" || fail "the stop didn't time out"
@@ -178,7 +178,7 @@ start_unit || fail "restart for the clean stop"
   && pass "the VM ended by stop-post reads 'stopped'" || fail "registry state after stop-post"
 cli vm start uk >/dev/null && cli vm exec uk -- true && pass "start again" || fail "vm start"
 journalctl -u "$U" --no-pager -o cat | grep -c 'took back passt' | grep -q '^1$' && pass "a fresh start launched a new passt (store released at stop)" || fail "passt taken back after a full stop"
-Q=$(qemu_pid); P=$(passt_pid)
+Q=$(fc_pid); P=$(passt_pid)
 sc stop "$U"
 sleep 0.5
 ! alive "$Q" && ! alive "$P" && [ -z "$(procs)" ] && pass "clean stop: nothing left" || fail "clean stop left: $(procs)"

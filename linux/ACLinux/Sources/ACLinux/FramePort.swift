@@ -10,7 +10,7 @@ import NIOCore
 ///   socketpair) and `drainVmnetToVMs` (vmnet's packets-available callback)
 ///   produce. Here it is a bounded, lossless async sequence: when the consumer
 ///   lags by `highWatermark` frames, the port stops reading its socket or fd
-///   (QEMU / passt / the tap then hold the data, and TCP slows), and resumes
+///   (Firecracker / passt / the tap then hold the data, and TCP slows), and resumes
 ///   below `lowWatermark`.
 /// - **outbound** is what VMNetSwitch's `write(fd)` to a VM socketpair and
 ///   `writeToVmnet` do. Here:

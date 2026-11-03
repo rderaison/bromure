@@ -1,22 +1,21 @@
-# amd64 guest image bake (QEMU/KVM)
+# amd64 guest image bake (Firecracker/KVM)
 
-`bromure-ac image bake` (`linux/ACLinux/Sources/ACLinux/InterimBake.swift`) ports `UbuntuImageManager.createBaseImage` to QEMU for an **amd64** guest. It is an interim stand-in until the bake logic moves to ACCore behind a `ProvisionerVM` protocol. The helpers that port 1:1 carry `@port` lines: `InitrdShim`, `ConsoleBuffer`, `createSparseDisk`, `sha256`, `downloadFile` and `downloadAlpineNetboot`.
+`bromure-ac image bake` (`linux/ACLinux/Sources/ACLinux/InterimBake.swift`) ports `UbuntuImageManager.createBaseImage` to Firecracker for an **amd64** guest. It is an interim stand-in until the bake logic moves to ACCore behind a `ProvisionerVM` protocol. The helpers that port 1:1 carry `@port` lines: `InitrdShim`, `ConsoleBuffer`, `createSparseDisk`, `sha256`, `downloadFile` and `downloadAlpineNetboot`.
 
 | step | macOS (VZ) | here |
 |---|---|---|
-| installer kernel | Alpine 3.22.3 netboot **aarch64**, gzip Image pulled out of the PE (`extractRawKernel`) | Alpine 3.22.3 netboot **x86_64**, sha256-checked; the bzImage goes to `-kernel` as-is |
+| installer kernel | Alpine 3.22.3 netboot **aarch64**, gzip Image pulled out of the PE (`extractRawKernel`) | Alpine 3.22.3 netboot **x86_64**, sha256-checked; Firecracker boots the bzImage as-is; `virtio_mmio` joins the initramfs's `modules=` |
 | DHCP/MTU shim | `InitrdShim` appends `/init.bromure` | the same code (ported unchanged) |
-| VM | `VZVirtualMachine` | `QEMUMachine`: `writeBaseInPlace` (the raw target disk, no overlay), `vsock = false`, user-mode NAT |
-| console | virtio-console `hvc0` on pipes | `ttyS0` on a Unix-socket chardev (`serialSocketPath`, logged with `logfile=`), the same dialogue, markers and timeouts as `runProvisioner` |
+| VM | `VZVirtualMachine` | `FirecrackerMachine`: `writeBaseInPlace` (the raw target disk, no copy), `vsock = false`, the entropy device |
+| console | virtio-console `hvc0` on pipes | `ttyS0` on Firecracker's stdin/stdout pipes (`consolePipes`, teed to `serial.log`), the same dialogue, markers and timeouts as `runProvisioner`; it ends with `reboot` (Firecracker exits on it, `reboot=k`) |
 | files in | virtiofs `setup` | virtiofsd `--readonly`, tag `setup`; plus tag `out` for the kernel/initrd |
-| network | vmnet NAT + `AlpinePackageProxy` | QEMU user-mode NAT; `ALPINE_REPO_BASE` is the CDN over http (apk checks signatures) |
+| network | vmnet NAT + `AlpinePackageProxy` | passt behind the interim switch (its DHCP) on a datagram port, as the daemon's VMs; `ALPINE_REPO_BASE` is the CDN over http (apk checks signatures) |
 | guest script | `setup.sh` | the same `setup.sh`, which now takes the arch from `uname -m`. One staged rewrite: the `BROMURE_PROXY` workaround (see the bug below) |
 | artefacts | `base.img` (GRUB inside, EFI boot), `efivars.bin`, `base.version` | `base.img` (same layout, GRUB x86_64-efi inside, boots under OVMF as well), **`vmlinuz`, `initrd.img`, `cmdline`** for direct kernel boot, `kernel-release`, `base.version`, `bake.log` |
 
 ```bash
-# From the repository root. sudo -g kvm only until the vhost udev rule is in.
+# From the repository root. sudo -g kvm only while /dev/kvm isn't this user's.
 sudo -g kvm env PATH="$PATH" HOME="$HOME" linux/ACLinux/.build/debug/bromure-ac image bake [--out DIR] [--verbose]
-sudo -g kvm linux/bake/boot-direct.sh <out-dir> q35 3       # times exec -> agentd's vsock dial to host :5800
 ```
 
 The default output is the daemon's image directory (`~/.local/share/bromure-ac/image-amd64`, or `$BROMURE_AC_IMAGE`). `base.version` is copied from `UbuntuImageManager.imageVersion`, which is not changed.
@@ -39,12 +38,12 @@ Bake code (`Sources/AgentCoding/UbuntuImageManager.swift`):
 - :384 `GRUB_CMDLINE_LINUX="console=hvc0 … arm64.nosme"`
 - :389-391 `grub-install --target=arm64-efi … --bootloader-id=BOOTAA64`
 - Already portable: :558, :667 (`dpkg --print-architecture`), :576/:589 (glab), :614-615 (kubectl), :628-629 (doctl), :646-647 (awscli)
-- `/dev/vda` hard-coded at :33-35; `postinstall.sh:29-31` too. This holds for virtio-blk on QEMU.
+- `/dev/vda` hard-coded at :33-35; `postinstall.sh:29-31` too. This holds for Firecracker's virtio-blk too.
 
 Guest agents:
 - **`sentry-dist/src/bromure_sentry.c:68-69`: `#ifndef CONFIG_ARM64 #error`**, and arm64 `regs->regs[0..2]` at :1104, :1323, :1375, :1492, :2275-2280, :2347-2355. The x86_64 equivalents are `regs->di/si/dx/r10/r8/r9`. Its build is arm64-only too: `scripts/openshell-guest/sentry/build.sh:5,53-56` (`aarch64-linux-gnu-gcc`) and `Jenkinsfile.sentry:18,77,92,158,162`. **This is the only hard blocker.**
 - `bromure_idmap.py:48-52`, `bromure_openshell.py` (:625-637, :755, :848-891): already handle x86_64.
-- `bromure-agentd.py:107` HOST_CID 2 is the same on QEMU vhost-vsock.
+- `bromure-agentd.py:107` HOST_CID 2 is the same under Firecracker's hybrid vsock (the host side is a Unix socket per VM).
 
 Host-side labels that assume an arm64 guest: `SecurityTimeline.swift:480-483`, `PolicySteering.swift:436-440`, `DockerDashboard.swift:994-1002` (non-arm64 is shown as "emulated").
 
@@ -56,18 +55,11 @@ Host-side labels that assume an arm64 guest: `SecurityTimeline.swift:480-483`, `
 4. **Sentry: per-arch syscall-argument accessors** (`regs_get_kernel_argument()` exists on both arm64 and x86_64 since 5.x). Also an amd64 job in `Jenkinsfile.sentry`.
 5. Host labels: take the guest arch from the image metadata, not assume arm64.
 
-## Results (lnx-ntv, 2026-10-30)
+## Results (lnx-ntv, 2026-10-30, under QEMU, before the move to Firecracker)
 
 - Bake (`bromure-ac image bake`, 4 vCPU and 4 GiB installer, user-mode NAT): 203 s in total, of which `setup.sh` (debootstrap + chroot) takes 185 s. Kernel: `6.8.0-147-generic` (linux-image-virtual).
 - `base.img`: 24 GiB apparent, **3.7 GiB allocated**. setup.sh's `fstrim` reaches the host: `discard=unmap` on virtio-blk punches holes in the raw file ("/: 19.5 GiB trimmed"), so the zero-fill fallback never runs. `pigz -6` makes it 1476 MiB (the size of a `base.img.gz` download).
 - The same image boots both ways: direct kernel boot (below), and UEFI under OVMF through its own GRUB (`BOOTX64.EFI`, removable path) to `bromure-ac login:` on ttyS0.
-- Direct kernel boot, from QEMU exec to bromure-agentd's first vsock connection to host :5800. Each VM has 2 vCPU, 2 GiB memfd RAM, a qcow2 overlay on the raw base, virtiofs `bromure-meta` + `bromure-outbox`, and a user-mode NIC.
-
-| machine | run 1 | run 2 | run 3 | QEMU RSS |
-|---|---|---|---|---|
-| q35 | 3.20 s | 2.82 s | 3.28 s | 513–520 MiB |
-| microvm (virtio-mmio) | 2.50 s | 2.42 s | 2.75 s | 515–539 MiB |
-
-  (The spike's BIOS + GRUB boot of a cloud image took 5.0–6.6 s.)
+- Direct kernel boot to bromure-agentd's first vsock connection to host :5800: 2.4–3.3 s under QEMU then; under Firecracker (2026-11-02, daemon, sparse raw system disk) 2.7–3.2 s, see BootTests' TIMING lines.
 - **Without a NIC, the time to :5800 is 122 s.** agentd's `task_apt_and_docker_proxy` restarts docker synchronously before `shell_agent_service` starts. docker.service waits for network-online, which times out at 120 s with no link. That will bite whenever the guest's link comes up late, for example while the L2 switch is not yet answering DHCP. Proposal: start the shell service before that task, or restart docker with `--no-block`.
 - **setup.sh bug, not arch-specific:** `setup.sh:235` writes `BROMURE_PROXY=$ALPINE_REPO_BASE` for the chroot even when it is the plain CDN default, which `setup.sh:79` deliberately does not treat as a proxy. apt then uses dl-cdn.alpinelinux.org as a forward proxy and every fetch fails (Fastly "500 Domain Not Found"). On the Mac this happens whenever AlpinePackageProxy isn't up. The bake stages the same condition as :79 (`InterimBake.stageSetup`, asserted, and unit-tested against the real setup.sh).

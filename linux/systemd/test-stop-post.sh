@@ -1,6 +1,6 @@
 #!/bin/bash
 # test-stop-post.sh BIN: `bromure-ac stop-post` under a real systemd user manager,
-# with a stand-in main process that leaves a child (as the daemon leaves QEMU)
+# with a stand-in main process that leaves a child (as the daemon leaves Firecracker)
 # and ignores SIGTERM (as a hung daemon would):
 #   1. crash (SIGKILL the main; Restart=on-failure): the child is kept;
 #   2. user stop past TimeoutStopSec: stop-post ends every leftover.
