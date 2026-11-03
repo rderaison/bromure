@@ -108,7 +108,7 @@ struct LongLivedLoopPoolTests {
             ("Sources/AgentCoding/Mitm/WebSocketTransform.swift", "static func upstreamToClient(", "let go = autoreleasepool {"),
             ("Sources/AgentCoding/Mitm/HTTPProxy.swift", "private static func pumpDirection(", "let go = autoreleasepool {"),
             ("Sources/AgentCoding/BrowserCDP.swift", "private func receiveLoop()", "autoreleasepool { handleMessage(payload) }"),
-            ("Sources/AgentCoding/Inference/InferenceRepairProxy.swift", "private func handle(clientFD: Int32, enginePort: Int)", "while autoreleasepool(invoking:"),
+            ("Sources/AgentCoding/Inference/InferenceRepairProxy.swift", "private func handle(clientFD: Int32, enginePort: Int)", "while threadAutoreleasepool("),
             ("Sources/AgentCoding/Inference/MLXServer.swift", "private func handle(clientFD: Int32)", "while autoreleasepool(invoking:"),
             ("Sources/AgentCoding/DelegationRelayClient.swift", "func start()", "let go = autoreleasepool {"),
             ("Sources/AgentCoding/BrowserMCPRelayClient.swift", "func start()", "let go = autoreleasepool {"),

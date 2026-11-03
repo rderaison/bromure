@@ -56,7 +56,7 @@ struct DeletedEphemeralRecreateTests {
         // Updates from an in-memory row never recreate one either.
         for (file, needle) in [("Sources/AgentCoding/BromureAC.swift", "p.squelch.enabled = on\n        do { try store.update(p) }"),
                                ("Sources/AgentCoding/BromureAC.swift", "change(&saved)\n        try? store.update(saved)"),
-                               ("Sources/AgentCoding/FirewallRuleActions.swift", "p.egressRules = text\n        do { try store.update(p) }"),
+                               ("Sources/AgentCoding/FirewallRuleActions+App.swift", "p.egressRules = text\n        do { try store.update(p) }"),
                                ("Sources/AgentCoding/SupplyChainOverrides.swift", "do { try store.update(p) }"),
                                ("Sources/AgentCoding/ScriptCommands.swift", "try d.store.update(incoming)"),
                                ("Sources/AgentCoding/ScriptCommands.swift", "try d.store.update(p)")] {
