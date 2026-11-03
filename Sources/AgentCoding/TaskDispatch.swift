@@ -497,11 +497,7 @@ final class TaskDispatcher {
         return moved
     }
 
-    nonisolated static func noWorktreeText(_ branch: String) -> String {
-        String(format: NSLocalizedString(
-            "Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back.",
-            comment: "task assign"), branch)
-    }
+    nonisolated static func noWorktreeText(_ branch: String) -> String { TaskReviewSummary.noWorktreeText(branch) }
 
     struct FoundDelivery {
         var profileID: UUID

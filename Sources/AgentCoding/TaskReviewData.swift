@@ -297,3 +297,12 @@ struct TaskReviewSummary: Equatable, Sendable {
         return turn.suffix(3).joined(separator: "\n\n")
     }
 }
+
+extension TaskReviewSummary {
+    /// A delivered card's note when no worktree on its branch was found.
+    static func noWorktreeText(_ branch: String) -> String {
+        String(format: NSLocalizedString(
+            "Delivered, but no worktree on branch %@ was found — the diff can't be shown. Read the summary, or send it back.",
+            comment: "task assign"), branch)
+    }
+}

@@ -42,3 +42,17 @@ func cloneFile(_ src: String, _ dst: String) -> Int32 {
     return -1
 #endif
 }
+
+/// State behind a lock, with OSAllocatedUnfairLock's `withLock` shape, for
+/// code that also builds where Apple's `os` module isn't there.
+final class LockedState<State>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: State
+
+    init(initialState: State) { state = initialState }
+
+    func withLock<R>(_ body: (inout State) throws -> R) rethrows -> R {
+        lock.lock(); defer { lock.unlock() }
+        return try body(&state)
+    }
+}

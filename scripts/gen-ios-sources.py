@@ -90,6 +90,7 @@ SHARED = [
     "FileExplorer.swift",
     "FileExplorerViews.swift",
     "AutomationKanbanView.swift",
+    "AutomationBoard.swift",
     "CodingKanbanView.swift",
     "ScheduledAutomationViews.swift",
     "AutomationRunWindow.swift",

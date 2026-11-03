@@ -2951,7 +2951,7 @@ final class CodingTaskEngine {
         // Merge / Send Back's "still being recorded" is moot once it is.
         if t.lastError == branchPendingText { t.lastError = nil }
         // A delivery's "no worktree" error is moot once there is one.
-        if !(t.worktreeDir ?? "").isEmpty, t.lastError == TaskDispatcher.noWorktreeText(branch) { t.lastError = nil }
+        if !(t.worktreeDir ?? "").isEmpty, t.lastError == TaskReviewSummary.noWorktreeText(branch) { t.lastError = nil }
         return t != before
     }
 

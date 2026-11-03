@@ -1144,7 +1144,7 @@ enum GitHubPRPoller {
     /// Whether a commit's change touches a subfolder, by "repo sha folder":
     /// a fact that never changes, asked again on every poll while an older
     /// commit waits.
-    private static let touchCache = OSAllocatedUnfairLock(initialState: [String: Bool]())
+    private static let touchCache = LockedState(initialState: [String: Bool]())
 
     /// The commits that landed on `branch` (or the default branch) since
     /// `since`, oldest first; the tip walked from; and the commit they sit
@@ -1954,11 +1954,12 @@ final class ScheduledAutomationEngine {
     /// is missing isn't a screen at all.
     private func injectionScreen(for item: TriggerItem) async -> String? {
         let text = item.title + "\n" + item.body + "\n" + item.author
-        let findings = RulesFileScanner.scanHiddenUnicode(text)
-            + RulesFileScanner.scanInstructionContent(text)
+        let findings = InstructionHeuristics.scanHiddenUnicode(text)
+            + InstructionHeuristics.scanInstructionContent(text)
         if let hit = findings.first {
             return "\(hit.signal) — \(hit.detail)"
         }
+        #if canImport(OnnxRuntimeBindings)
         guard PromptInjectionModels.isInstalled(.promptGuard) else {
             return NSLocalizedString(
                 "PromptGuard model not installed — event triggers require it (download in Settings)",
@@ -1970,6 +1971,13 @@ final class ScheduledAutomationEngine {
                                      comment: "blocked automation run")
         }
         return nil
+        #else
+        // No PromptGuard on this platform: an event trigger can't be screened,
+        // so it doesn't run (the same answer as a model not installed).
+        return NSLocalizedString(
+            "PromptGuard model not installed — event triggers require it (download in Settings)",
+            comment: "blocked automation run")
+        #endif
     }
 
     /// How long a launched run that never reported done still holds a slot.

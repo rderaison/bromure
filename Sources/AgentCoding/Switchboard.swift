@@ -778,12 +778,8 @@ final class SwitchboardEngine {
         }
     }
 
-    /// Named keys the Switchboard may press: enough to answer a TUI prompt,
-    /// nothing that can smuggle arbitrary text or escape sequences.
-    static let allowedKeys: Set<String> = [
-        "Enter", "Escape", "Tab", "BTab", "Space", "BSpace", "Up", "Down", "Left", "Right",
-        "C-c", "y", "n", "a", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    ]
+    /// Named keys the Switchboard may press (SwitchboardKeys).
+    static let allowedKeys = SwitchboardKeys.allowed
 
     func press(_ s: AgentSession, _ keys: [String]) async throws {
         guard let w = s.windowIndex, !s.hasEnded else {

@@ -89,3 +89,12 @@ enum TranscriptModelSniff {
     /// Values agents put in a model field that name no model.
     static let placeholderModels: Set<String> = ["agent-loop", "synthetic", "unknown", "default"]
 }
+
+enum SwitchboardKeys {
+    /// Named keys a session's tab may be sent: enough to answer a TUI prompt,
+    /// nothing that can smuggle arbitrary text or escape sequences.
+    static let allowed: Set<String> = [
+        "Enter", "Escape", "Tab", "BTab", "Space", "BSpace", "Up", "Down", "Left", "Right",
+        "C-c", "y", "n", "a", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    ]
+}
