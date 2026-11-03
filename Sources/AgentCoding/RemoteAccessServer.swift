@@ -5,7 +5,7 @@ import NIOPosix
 import NIOSSH
 // The agent host (Sources/AgentHost) compiles this file too, with small
 // stand-ins for SandboxEngine / ProfileStore / SupplyChainLog.
-#if !AGENT_HOST && !BROMURE_LINUX
+#if !AGENT_HOST
 import SandboxEngine
 #endif
 
